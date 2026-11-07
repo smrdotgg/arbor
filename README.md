@@ -16,7 +16,7 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
 - **No animation.** Every change lands with `tx.instant()`.
 - **Idle means idle.** No timers and no polling. Nothing redraws until you do something.
 
-The core is about 900 lines in `src/`: `fs.rs` (disk and OS), `app.rs` (state and keys) and
+The core is about 1,100 lines in `src/`: `fs.rs` (disk and OS), `app.rs` (state and keys) and
 `view.rs` (UI).
 
 ## Run
@@ -28,6 +28,7 @@ cargo build --profile dist          # stripped, LTO build: target/dist/arbor
 ```
 
 Builds are fully offline. Dependencies are vendored in `vendor/` (see `.cargo/config.toml`).
+`vendor/` is gitignored because it's about 550 MB, so a fresh clone runs `scripts/vendor.sh` first.
 `scripts/vendor.sh` refreshes them through a fast remote machine (default `smr@tabot-dev`) and
 syncs them back.
 
