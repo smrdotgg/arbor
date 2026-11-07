@@ -242,8 +242,11 @@ pub fn pretty(p: &Path) -> String {
     }
 }
 
-/// Opens a file with its default app.
+/// Opens a file with its default app. Headless runs open nothing, as Rune's `open_url`.
 pub fn open(p: &Path) -> Result<(), String> {
+    if rune::tooling::headless_run().is_some() {
+        return Ok(());
+    }
     #[cfg(target_os = "macos")]
     let cmd = Command::new("open").arg(p).spawn();
     #[cfg(windows)]
@@ -255,6 +258,9 @@ pub fn open(p: &Path) -> Result<(), String> {
 
 /// Shows `p` selected in the platform's own file manager.
 pub fn reveal(p: &Path) -> Result<(), String> {
+    if rune::tooling::headless_run().is_some() {
+        return Ok(());
+    }
     #[cfg(target_os = "macos")]
     let cmd = Command::new("open").arg("-R").arg(p).spawn();
     #[cfg(windows)]

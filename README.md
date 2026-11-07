@@ -16,8 +16,13 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
 - **No animation.** Every change lands with `tx.instant()`.
 - **Idle means idle.** No timers and no polling. Nothing redraws until you do something.
 
-The core is about 1,100 lines in `src/`: `fs.rs` (disk and OS), `app.rs` (state and keys) and
-`view.rs` (UI).
+- **File operations never block and never overwrite.** Copies and moves run on a worker with
+  progress in the status bar (Esc cancels). A name that's taken gets a free one instead:
+  "name copy" in the same folder, "name 2" elsewhere. On APFS, copies are clones (instant).
+
+About 2,300 lines in `src/`: `fs.rs` (reading folders, opening files), `ops.rs` (copy, move,
+trash and undo on a worker), `trash.rs` (each platform's trash), `app.rs` (state, selection,
+keys), `actions.rs` (clipboard, rename, drag and drop, context menu) and `view.rs` (UI).
 
 ## Run
 
@@ -44,14 +49,25 @@ syncs them back.
 | Esc | Clear filter |
 | ⌘L, or type `/` or `~` | Go-to-path mode. Enter navigates (or opens a file) |
 | ⌘. (or ⌘⇧.) | Show/hide hidden files (dotfiles, macOS `UF_HIDDEN`, Windows hidden attr) |
+| ⇧↑ ⇧↓, ⇧-click, ⌘-click, ⌘A | Select several items |
+| ⌘C / ⌘X | Copy / cut the selected files (Finder and Explorer can paste them) |
+| ⌘V / ⌥⌘V | Paste into this folder: copies, or moves if you cut them; ⌥⌘V always moves |
+| ⌘D | Duplicate |
+| F2 or ⇧⌘R | Rename inline (the name before the extension is selected). Enter saves, Esc cancels |
+| ⇧⌘N | New folder (starts renaming it) |
+| ⌘⌫ or Delete | Move to Trash |
+| ⌘Z | Undo the last rename, move, copy, trash or new folder |
 | ⌘R | Reload |
-| ⌘C | Copy the selected path |
+| ⇧⌘C | Copy the selected path as text |
 | ⌘O | Open |
 | ⌘Enter | Reveal in Finder / Explorer / the default file manager |
 | ⌘1…⌘9 | Jump to a sidebar place |
 
 Off macOS, ⌘ is Ctrl. Mouse: click to select, double-click to open, click a breadcrumb or
-place to jump there, click a column header to sort (click again to reverse).
+place to jump there, click a column header to sort (click again to reverse). Right-click opens
+a native context menu (macOS and Windows). Drag rows out to Finder or other apps (macOS).
+Drop files on a folder row or on the list: same disk moves, another disk copies, and ⌥ forces
+a copy.
 
 ## Platform notes
 
@@ -62,8 +78,12 @@ place to jump there, click a column header to sort (click again to reverse).
 - **Windows**: written for it (drive letters, hidden attribute, `explorer /select,`), but not
   compiled yet. Cross-checking from Linux needs a Windows C toolchain for `blake3`.
 
-## Not in v1
+Trash uses NSFileManager on macOS, the freedesktop.org spec on Linux, and the Recycle Bin on
+Windows. Undoing a trash puts the item back on macOS and Linux. Windows doesn't report where
+the item went, so restore it from the Recycle Bin there.
 
-Copy, move, rename, delete/trash and new folder. Also no file watching (use ⌘R), no
-Quick Look-style preview (Space is reserved for it), no tabs, and no Tab-completion in go-to
-mode.
+## Not yet
+
+Permanent delete (on purpose, for now), file watching (use ⌘R), Quick Look-style preview
+(Space is reserved for it), tabs, Tab-completion in go-to mode, redo, more than one operation
+at a time, and a context menu on Linux.

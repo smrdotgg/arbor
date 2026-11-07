@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::path::{Component, PathBuf};
 
 use rune::tok::{self, Theme, TextStyle};
-use rune::{Align, Color, Cursor, Cx, El, GrowthSpec, ScrollSpec, col, el, row, text};
+use rune::{Align, Color, Cursor, Cx, El, GrowthSpec, ScrollSpec, col, el, row, text, text_input};
 
 use crate::app::State;
 use crate::fs::{self, SortKey};
@@ -60,6 +60,13 @@ fn look(dark: bool) -> Look {
 }
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    root(s, cx).on_paste_content(|s: &mut State, content, tx| {
+        tx.instant();
+        s.paste(content);
+    })
+}
+
+fn root(s: &State, cx: &mut Cx<State>) -> El {
     let l = look(cx.system_dark());
     // Reads the laid-out size only; scrolling never re-runs the view.
     let cols = Cols::for_width(cx.layout_size("main").map_or(f32::MAX, |[w, _]| w));
@@ -226,17 +233,27 @@ fn header(s: &State, l: Look, cols: Cols) -> El {
 }
 
 fn list(s: &State, l: Look, cols: Cols) -> El {
+    // The list itself is a drop target for the current folder, and right-clicking empty
+    // space opens the menu with Paste and New Folder.
+    let base = col()
+        .key("list")
+        .grow(1.0)
+        .min_h(0.0)
+        .w_full()
+        .on_drop_files(|s: &mut State, files, tx| {
+            tx.instant();
+            let here = s.cwd.clone();
+            s.drop_files(files, here, tx);
+        })
+        .on_secondary_press(|s: &mut State, press, tx| {
+            tx.instant();
+            s.context_menu(None, press, tx);
+        });
     if s.visible.is_empty() {
         let msg = if s.entries.is_empty() { "Empty folder" } else { "No matches" };
-        return col()
-            .key("list")
-            .grow(1.0)
-            .min_h(0.0)
-            .w_full()
-            .center()
-            .child(text(msg).font(BODY).color(l.t.text_secondary));
+        return base.center().child(text(msg).font(BODY).color(l.t.text_secondary));
     }
-    col().key("list").scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0).w_full().child(
+    base.scroll(ScrollSpec { stick_bottom: false }).child(
         col()
             .key("rows")
             .w_full()
@@ -253,15 +270,40 @@ fn list(s: &State, l: Look, cols: Cols) -> El {
 
 fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
     let e = &s.entries[s.visible[i] as usize];
-    let selected = i == s.sel;
+    let selected = s.is_selected(i);
+    // With several rows selected, the cursor row that isn't selected gets a soft highlight.
+    let cursor = !selected && i == s.sel && !s.marked.is_empty();
+    let drop_here = s.drop_target.as_ref() == Some(&e.os);
     let (fg, dim) = if selected { (l.sel_text, l.sel_text.alpha(0.8)) } else { (l.t.text, l.t.text_secondary) };
     let glyph = if e.is_dir { "▸" } else { " " };
     let name_color = if e.hidden && !selected { fg.alpha(0.55) } else { fg };
-    let mut name = e.name.clone();
-    if e.is_link {
-        name.push_str("  ⤴");
-    }
     let version = s.version;
+    let renaming = s.rename.as_ref().filter(|r| r.os == e.os);
+    let name_el = match renaming {
+        Some(r) => text_input(&r.edit, BODY)
+            .key("rename")
+            .single_line()
+            .color(l.t.text)
+            .caret(l.accent, l.accent.alpha(0.35))
+            .on_edit(|s: &mut State| s.rename_edit())
+            .on_submit(|s: &mut State, tx| {
+                tx.instant();
+                s.commit_rename(tx);
+            })
+            .grow(1.0)
+            .min_w(0.0)
+            .px(4.0)
+            .radius(3.0)
+            .fill(l.t.bg)
+            .border(1.0, l.accent),
+        None => {
+            let mut name = e.name.clone();
+            if e.is_link {
+                name.push_str("  ⤴");
+            }
+            text(name).font(BODY).color(name_color).truncate_middle().grow(1.0).min_w(0.0)
+        }
+    };
     let mut r = row()
         .w_full()
         .h(ROW_H)
@@ -271,15 +313,36 @@ fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
         .radius(4.0)
         .on_press_tx(move |s: &mut State, tx| {
             tx.instant();
-            if s.version == version {
+            if s.version != version {
+                return;
+            }
+            if s.rename.as_ref().is_some_and(|r| s.visible.get(i).is_none_or(|&e| s.entries[e as usize].os != r.os)) {
+                s.commit_rename(tx);
+                return;
+            }
+            let m = tx.mods();
+            if m.shift {
+                s.extend_to(i);
+            } else if m.cmd {
+                s.toggle_mark(i);
+            } else if !(s.is_selected(i) && s.marked.len() > 1) {
+                // A plain click inside a multi-selection keeps it, so it can be dragged.
                 s.select(i);
+            } else {
+                s.sel = i;
             }
         })
         .on_double_press_tx(move |s: &mut State, tx| {
             tx.instant();
-            if s.version == version {
+            if s.version == version && s.rename.is_none() {
                 s.select(i);
                 s.open_selected();
+            }
+        })
+        .on_secondary_press(move |s: &mut State, press, tx| {
+            tx.instant();
+            if s.version == version {
+                s.context_menu(Some(i), press, tx);
             }
         })
         .child(
@@ -289,8 +352,31 @@ fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
                 .gap(6.0)
                 .center_y()
                 .child(text(glyph).font(BODY).color(if selected { fg } else { l.accent }).w(10.0))
-                .child(text(name).font(BODY).color(name_color).truncate_middle().grow(1.0).min_w(0.0)),
+                .child(name_el),
         );
+    if renaming.is_none() {
+        r = r
+            .drag_out(move |s: &State| if s.version == version { s.drag_item(i) } else { None })
+            .on_drag_end(|s: &mut State, outcome, tx| {
+                tx.instant();
+                if outcome == rune::DragOutcome::Moved {
+                    s.reload();
+                }
+            });
+    }
+    if e.is_dir {
+        let target = s.cwd.join(&e.os);
+        let os = e.os.clone();
+        r = r
+            .on_drop_files(move |s: &mut State, files, tx| {
+                tx.instant();
+                s.drop_files(files, target.clone(), tx);
+            })
+            .on_drop_hover(move |s: &mut State, over, tx| {
+                tx.instant();
+                s.drop_target = over.then(|| os.clone());
+            });
+    }
     if cols.kind {
         r = r.child(text(fs::kind(e).to_string()).font(NUM).color(dim).truncate().w(KIND_W));
     }
@@ -304,8 +390,12 @@ fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
     if cols.date {
         r = r.child(text(fs::fmt_time(e.mtime_ms, s.now)).font(NUM).color(dim).w(DATE_W));
     }
-    r = if selected {
+    r = if drop_here {
+        r.fill(l.accent.alpha(0.25)).border(1.5, l.accent)
+    } else if selected {
         r.fill(l.accent)
+    } else if cursor {
+        r.fill(l.accent.alpha(0.18)).hover(l.t.hover)
     } else if i % 2 == 1 {
         r.fill(l.stripe).hover(l.t.hover)
     } else {
@@ -322,7 +412,9 @@ fn status(s: &State, l: Look) -> El {
             .child(text(label).font(SMALL).color(l.accent))
             .child(text(format!("{}▏", s.filter)).font(MONO).color(l.t.text).truncate_head().min_w(0.0).shrink());
     }
-    if let Some(n) = &s.note {
+    if let Some(job) = s.job_status() {
+        bar = bar.child(text(job).font(NUM).color(l.accent).truncate().min_w(0.0).shrink());
+    } else if let Some(n) = &s.note {
         bar = bar.child(text(n.clone()).font(SMALL).color(l.t.text_secondary).truncate().min_w(0.0).shrink());
     }
     bar = bar.child(el().grow(1.0));
@@ -335,7 +427,8 @@ fn status(s: &State, l: Look) -> El {
     } else {
         format!("{} of {} items", s.visible.len(), s.entries.len())
     };
+    let picked = if s.marked.len() > 1 { format!("{} selected · ", s.marked.len()) } else { String::new() };
     let hint = if s.show_hidden { "hidden shown" } else { "" };
     bar.child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)))
-        .child(text(count).font(NUM).color(l.t.text_secondary))
+        .child(text(format!("{picked}{count}")).font(NUM).color(l.t.text_secondary))
 }

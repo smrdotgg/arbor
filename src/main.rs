@@ -3,8 +3,11 @@
 //! Fast by being simple: one folder read per navigation (on a worker, so a slow disk never
 //! blocks the window), only the visible rows are built, and nothing animates or caches.
 
+mod actions;
 mod app;
 mod fs;
+mod ops;
+mod trash;
 mod view;
 
 use rune::{App, AppSpec, Chrome};
