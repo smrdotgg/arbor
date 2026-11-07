@@ -1,0 +1,9 @@
+# Build fully offline from vendor/crates (populated on a fast machine with `cargo vendor`).
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor/crates"
+
+[net]
+offline = true

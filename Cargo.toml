@@ -1,0 +1,31 @@
+[package]
+name = "arbor"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A fast, small, cross-platform file manager"
+
+[dependencies]
+# Pinned via vendor/rune (anomalyco/rune @ 78d22ed). Lean feature set: no audio, no SVG.
+rune = { path = "vendor/rune/crates/rune", default-features = false, features = [
+    "accessibility",
+    "dbus",
+    "embedded-fonts",
+    "metal-backend",
+] }
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.release]
+codegen-units = 16
+incremental = true
+
+# Shipping build: slower to compile, smaller and a bit faster.
+[profile.dist]
+inherits = "release"
+codegen-units = 1
+incremental = false
+lto = "thin"
+strip = true

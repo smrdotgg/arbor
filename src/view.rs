@@ -1,0 +1,341 @@
+//! The window: sidebar of places, a path bar, sortable column headers, the virtualized file
+//! list and a status line that doubles as the filter / go-to field.
+
+use std::borrow::Cow;
+use std::path::{Component, PathBuf};
+
+use rune::tok::{self, Theme, TextStyle};
+use rune::{Align, Color, Cursor, Cx, El, GrowthSpec, ScrollSpec, col, el, row, text};
+
+use crate::app::State;
+use crate::fs::{self, SortKey};
+
+const ROW_H: f32 = 24.0;
+/// Height of the top band (path bar, and the sidebar's traffic-light strip on macOS).
+pub const BAR_H: f32 = 38.0;
+const SIDEBAR_W: f32 = 168.0;
+const KIND_W: f32 = 72.0;
+const SIZE_W: f32 = 80.0;
+const DATE_W: f32 = 132.0;
+
+const BODY: TextStyle = TextStyle::new(13.0, 400.0);
+const SMALL: TextStyle = TextStyle::new(11.5, 500.0);
+const NUM: TextStyle = TextStyle::new(12.0, 400.0).features("\"tnum\"");
+const CRUMB: TextStyle = TextStyle::new(13.0, 500.0);
+const MONO: TextStyle = TextStyle::new(12.0, 400.0).mono();
+
+/// Which optional columns fit the list's width; Name always gets at least ~180 pt.
+#[derive(Clone, Copy)]
+struct Cols {
+    kind: bool,
+    date: bool,
+}
+
+impl Cols {
+    fn for_width(w: f32) -> Cols {
+        let base = 24.0 + 180.0 + 12.0 + SIZE_W;
+        let date = w >= base + 12.0 + DATE_W;
+        Cols { date, kind: date && w >= base + 24.0 + DATE_W + KIND_W }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Look {
+    t: Theme,
+    accent: Color,
+    sel_text: Color,
+    sidebar: Color,
+    stripe: Color,
+}
+
+fn look(dark: bool) -> Look {
+    let t = tok::theme(dark);
+    Look {
+        t,
+        accent: tok::accent(0, dark),
+        sel_text: Color::WHITE,
+        sidebar: if dark { t.card } else { t.control_track },
+        stripe: t.text.alpha(if dark { 0.022 } else { 0.028 }),
+    }
+}
+
+pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    let l = look(cx.system_dark());
+    // Reads the laid-out size only; scrolling never re-runs the view.
+    let cols = Cols::for_width(cx.layout_size("main").map_or(f32::MAX, |[w, _]| w));
+    row()
+        .w_full()
+        .h_full()
+        .fill(l.t.bg)
+        .child(sidebar(s, l, cx.titlebar_inset() > 0.0))
+        .child(el().w(1.0).h_full().fill(l.t.separator))
+        .child(
+            col()
+                .key("main")
+                .grow(1.0)
+                .min_w(0.0)
+                .h_full()
+                .child(pathbar(s, l))
+                .child(hr(l))
+                .child(header(s, l, cols))
+                .child(hr(l))
+                .child(list(s, l, cols))
+                .child(hr(l))
+                .child(status(s, l)),
+        )
+}
+
+fn hr(l: Look) -> El {
+    el().w_full().h(1.0).fill(l.t.separator)
+}
+
+fn sidebar(s: &State, l: Look, under_titlebar: bool) -> El {
+    let mut c = col().key("sidebar").w(SIDEBAR_W).h_full().fill(l.sidebar).pb(10.0).px(8.0).gap(1.0);
+    c = c.child(el().key("sidebar-drag").w_full().h(if under_titlebar { BAR_H } else { 10.0 }).window_drag());
+    c = c.child(text("Places").font(SMALL).color(l.t.text_secondary).px(8.0).pb(4.0));
+    for (i, (name, path)) in s.places.iter().enumerate() {
+        let here = *path == s.cwd;
+        let p = path.clone();
+        let mut item = row()
+            .key(format!("place-{i}"))
+            .h(26.0)
+            .px(8.0)
+            .center_y()
+            .radius(5.0)
+            .cursor(Cursor::Pointer)
+            .on_press_tx(move |s: &mut State, tx| {
+                tx.instant();
+                s.go_to(p.clone());
+            })
+            .child(text(name.clone()).font(BODY).color(l.t.text).truncate().grow(1.0).min_w(0.0));
+        if i < 9 {
+            let hint = if cfg!(target_os = "macos") { format!("⌘{}", i + 1) } else { format!("^{}", i + 1) };
+            item = item.child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.6)));
+        }
+        item = if here { item.fill(l.t.control_off) } else { item.hover(l.t.hover) };
+        c = c.child(item);
+    }
+    c
+}
+
+fn pathbar(s: &State, l: Look) -> El {
+    let nav = |label: &'static str, key: &'static str, on: bool, f: fn(&mut State)| {
+        text(label)
+            .key(key)
+            .font(TextStyle::new(16.0, 500.0))
+            .color(if on { l.t.text } else { l.t.text_secondary.alpha(0.4) })
+            .w(24.0)
+            .h(24.0)
+            .align(Align::Center)
+            .radius(5.0)
+            .hover(l.t.hover)
+            .cursor(Cursor::Pointer)
+            .on_press_tx(move |s: &mut State, tx| {
+                tx.instant();
+                f(s);
+            })
+    };
+    let mut crumbs = row().key("crumbs").grow(1.0).min_w(0.0).center_y().gap(2.0);
+    let mut acc = PathBuf::new();
+    let comps: Vec<Component> = s.cwd.components().collect();
+    let n = comps.len();
+    for (i, comp) in comps.iter().enumerate() {
+        acc.push(comp.as_os_str());
+        if matches!(comp, Component::RootDir) && i > 0 {
+            continue; // Windows: `C:` then `\`
+        }
+        let label = match comp {
+            Component::RootDir => std::path::MAIN_SEPARATOR.to_string(),
+            c => c.as_os_str().to_string_lossy().into_owned(),
+        };
+        let last = i + 1 == n;
+        let target = acc.clone();
+        if i > 0 && !matches!(comps[i - 1], Component::RootDir | Component::Prefix(_)) {
+            crumbs = crumbs.child(text("›").font(CRUMB).color(l.t.text_secondary.alpha(0.5)));
+        }
+        crumbs = crumbs.child(
+            text(label)
+                .key(format!("crumb-{i}"))
+                .font(CRUMB)
+                .color(if last { l.t.text } else { l.t.text_secondary })
+                .px(4.0)
+                .py(2.0)
+                .radius(4.0)
+                .hover(l.t.hover)
+                .cursor(Cursor::Pointer)
+                .truncate()
+                .min_w(if last { 0.0 } else { 12.0 })
+                .on_press_tx(move |s: &mut State, tx| {
+                    tx.instant();
+                    s.go_to(target.clone());
+                }),
+        );
+    }
+    row()
+        .key("pathbar")
+        .w_full()
+        .h(BAR_H)
+        .window_drag()
+        .px(8.0)
+        .gap(2.0)
+        .center_y()
+        .child(nav("‹", "nav-back", !s.back.is_empty(), State::go_back))
+        .child(nav("›", "nav-fwd", !s.fwd.is_empty(), State::go_forward))
+        .child(nav("↑", "nav-up", s.cwd.parent().is_some(), State::parent))
+        .child(el().w(6.0))
+        .child(crumbs)
+}
+
+fn header(s: &State, l: Look, cols: Cols) -> El {
+    let col_head = |label: &'static str, key: SortKey, w: Option<f32>, align: Align| {
+        let on = s.sort.key == key;
+        let arrow = if !on { "" } else if s.sort.desc { " ↓" } else { " ↑" };
+        let mut t = text(format!("{label}{arrow}"))
+            .key(format!("sort-{label}"))
+            .font(SMALL)
+            .color(if on { l.t.text } else { l.t.text_secondary })
+            .align(align)
+            .cursor(Cursor::Pointer)
+            .on_press_tx(move |s: &mut State, tx| {
+                tx.instant();
+                s.set_sort(key);
+                s.reveal(tx);
+            });
+        t = match w {
+            Some(w) => t.w(w),
+            None => t.grow(1.0).min_w(0.0),
+        };
+        t
+    };
+    let mut h = row()
+        .key("header")
+        .w_full()
+        .h(24.0)
+        .px(12.0)
+        .gap(12.0)
+        .center_y()
+        .child(col_head("Name", SortKey::Name, None, Align::Start));
+    if cols.kind {
+        h = h.child(col_head("Kind", SortKey::Kind, Some(KIND_W), Align::Start));
+    }
+    h = h.child(col_head("Size", SortKey::Size, Some(SIZE_W), Align::End));
+    if cols.date {
+        h = h.child(col_head("Modified", SortKey::Modified, Some(DATE_W), Align::Start));
+    }
+    h
+}
+
+fn list(s: &State, l: Look, cols: Cols) -> El {
+    if s.visible.is_empty() {
+        let msg = if s.entries.is_empty() { "Empty folder" } else { "No matches" };
+        return col()
+            .key("list")
+            .grow(1.0)
+            .min_h(0.0)
+            .w_full()
+            .center()
+            .child(text(msg).font(BODY).color(l.t.text_secondary));
+    }
+    col().key("list").scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0).w_full().child(
+        col()
+            .key("rows")
+            .w_full()
+            .growth(GrowthSpec { spring: rune::GROWTH, edge: rune::edge::NO_MASK })
+            .virtual_rows(
+                s.visible.len(),
+                ROW_H,
+                |s: &State, i| Cow::Borrowed(s.entries[s.visible[i] as usize].key.as_str()),
+                move |s: &State, i| file_row(s, i, l, cols),
+            )
+            .virtual_rows_version(s.version),
+    )
+}
+
+fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
+    let e = &s.entries[s.visible[i] as usize];
+    let selected = i == s.sel;
+    let (fg, dim) = if selected { (l.sel_text, l.sel_text.alpha(0.8)) } else { (l.t.text, l.t.text_secondary) };
+    let glyph = if e.is_dir { "▸" } else { " " };
+    let name_color = if e.hidden && !selected { fg.alpha(0.55) } else { fg };
+    let mut name = e.name.clone();
+    if e.is_link {
+        name.push_str("  ⤴");
+    }
+    let version = s.version;
+    let mut r = row()
+        .w_full()
+        .h(ROW_H)
+        .px(12.0)
+        .gap(12.0)
+        .center_y()
+        .radius(4.0)
+        .on_press_tx(move |s: &mut State, tx| {
+            tx.instant();
+            if s.version == version {
+                s.select(i);
+            }
+        })
+        .on_double_press_tx(move |s: &mut State, tx| {
+            tx.instant();
+            if s.version == version {
+                s.select(i);
+                s.open_selected();
+            }
+        })
+        .child(
+            row()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(6.0)
+                .center_y()
+                .child(text(glyph).font(BODY).color(if selected { fg } else { l.accent }).w(10.0))
+                .child(text(name).font(BODY).color(name_color).truncate_middle().grow(1.0).min_w(0.0)),
+        );
+    if cols.kind {
+        r = r.child(text(fs::kind(e).to_string()).font(NUM).color(dim).truncate().w(KIND_W));
+    }
+    r = r.child(
+        text(if e.is_dir { "—".to_string() } else { fs::fmt_size(e.size) })
+            .font(NUM)
+            .color(dim)
+            .align(Align::End)
+            .w(SIZE_W),
+    );
+    if cols.date {
+        r = r.child(text(fs::fmt_time(e.mtime_ms, s.now)).font(NUM).color(dim).w(DATE_W));
+    }
+    r = if selected {
+        r.fill(l.accent)
+    } else if i % 2 == 1 {
+        r.fill(l.stripe).hover(l.t.hover)
+    } else {
+        r.hover(l.t.hover)
+    };
+    r
+}
+
+fn status(s: &State, l: Look) -> El {
+    let mut bar = row().key("status").w_full().h(28.0).px(12.0).gap(10.0).center_y();
+    if !s.filter.is_empty() {
+        let label = if s.path_mode() { "Go to" } else { "Filter" };
+        bar = bar
+            .child(text(label).font(SMALL).color(l.accent))
+            .child(text(format!("{}▏", s.filter)).font(MONO).color(l.t.text).truncate_head().min_w(0.0).shrink());
+    }
+    if let Some(n) = &s.note {
+        bar = bar.child(text(n.clone()).font(SMALL).color(l.t.text_secondary).truncate().min_w(0.0).shrink());
+    }
+    bar = bar.child(el().grow(1.0));
+    if s.is_loading() {
+        bar = bar.child(text("Loading…").font(SMALL).color(l.t.text_secondary));
+    }
+    let hidden = s.entries.len() - s.entries.iter().filter(|e| !e.hidden).count();
+    let count = if s.visible.len() == s.entries.len() || (!s.show_hidden && s.visible.len() + hidden == s.entries.len()) {
+        format!("{} items", s.visible.len())
+    } else {
+        format!("{} of {} items", s.visible.len(), s.entries.len())
+    };
+    let hint = if s.show_hidden { "hidden shown" } else { "" };
+    bar.child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)))
+        .child(text(count).font(NUM).color(l.t.text_secondary))
+}
