@@ -26,6 +26,51 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-08, rich previews through the OS's thumbnailer (milestone 9)
+
+What changed on the measured path: nothing at startup or per key. The preview's worker now waits
+on the OS for formats it doesn't decode, and every request, cancel or close rings one more
+condition variable (`thumb::Bell`, uncontended: a lock and a notify). Closed, the preview still
+costs one `None` check. Before is 110df34, after is 823c237, the same bench (`11 10`) alternating.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+Load average 3.2–5.3. Order: before, after, after, before, before, after.
+
+| Measure (median / p95, submission proxy) | Before (3 passes) | After (3 passes) |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 134.5 / 192.5, 132.6 / 139.5, 134.2 / 194.0 ms | 132.3 / 141.8, 136.8 / 140.0, 127.3 / 143.3 ms |
+| Listing visible (10k) | 44.2 / 58.6, 42.0 / 45.4, 39.4 / 45.2 ms | 40.1 / 45.4, 40.8 / 44.8, 42.1 / 45.1 ms |
+| Key → frame (synthetic ↓) | 6.5 / 9.5, 6.2 / 6.8, 6.2 / 6.8 ms | 6.2 / 6.6, 6.2 / 6.6, 6.2 / 6.6 ms |
+
+No change beyond noise.
+
+### The OS's thumbnailer (`os_thumbnail_speed`, CI runners)
+
+`cargo test --release -- --ignored --nocapture os_thumbnail_speed`, run by CI's "OS thumbnail
+timings" step on GitHub's runners (run 42519157218), panel size 1024 × 1024. Videos made there with
+ffmpeg's test pattern; the PDF is the tests' one-page PDF (619 bytes). One pass each.
+
+**Windows** (windows-latest, Windows Server 2025), `IShellItemImageFactory::GetImage`. "Generate"
+is the full path, which can't be cancelled once it starts (`UNCANCELLABLE_WINDOWS_THUMBNAILS`, off):
+
+| File | Cache only, new file | Generate, new file | Cache only, after | Generate, after |
+| --- | --- | --- | --- | --- |
+| H.264 MP4, 1080p, 10 s, 7.7 MB | 6.0 ms, none | **541 ms**, 1024 × 576 | 8.1 ms, 1024 × 576 | 7.0 ms |
+| H.264 MP4, 4K, 120 s, 906 MB | 1.1 ms, none | **174 ms**, 1024 × 576 | 7.5 ms, 1024 × 576 | 7.1 ms |
+| VP9 WebM, 1080p, 10 s | 3.3 ms, none | 92 ms, none (no handler) | 1.1 ms, none | 19 ms, none |
+| PDF, one page | 47 ms (first call: COM and the shell start), none | 24 ms, none (no PDF handler on the runner) | 1.8 ms | 3.0 ms |
+
+The first video (541 ms) includes Media Foundation starting in the thumbnail handler's process;
+the second, much bigger one took 174 ms. These are a fast runner SSD: the handler reads the file
+itself, so a slow or network disk stretches the uncancellable part, and the preview's one worker
+waits behind it (the next preview can't start until it returns). A machine with a PDF handler
+(Adobe Reader, some Office installs) wasn't available to measure.
+
+**macOS** (macos-latest runner), Quick Look: the one-page PDF in 31.9 ms the first time, 6.3 ms
+again (792 × 1024). Quick Look requests are cancelled (`cancelRequest:`), so none of this goes on
+after the selection moves.
+
 ## 2026-11-08, Batch Rename's frame cost (milestone 7 review)
 
 The review measured 15–16 ms a key typing in Batch Rename over 10,000 items here: update 5.3 ms,
