@@ -213,7 +213,8 @@ impl State {
         if sources.is_empty() {
             return;
         }
-        self.start(if mv { Op::Move { sources, dest } } else { Op::Copy { sources, dest } });
+        let op = if mv { Op::Move { sources, dest } } else { Op::Copy { sources, dest } };
+        self.start(crate::actions::checked(op, self.cur().target_checks()));
     }
 
     /// A row drag from pane `from` (row `i`, drawn at `version`) let go over pane `to`: into
@@ -228,8 +229,8 @@ impl State {
             self.note = Some(crate::app::IN_OTHER_SEARCH.into());
             return;
         }
-        let (files, into) = (src.f.drag_paths(i), dst.f.cwd.clone());
-        self.drop_files(&files, into, tx);
+        let (files, into, expect) = (src.f.drag_paths(i), dst.f.cwd.clone(), src.f.drag_checks(i));
+        self.drop_checked(&files, into, expect, tx);
     }
 }
 

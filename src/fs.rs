@@ -24,6 +24,29 @@ pub struct Entry {
     pub size: u64,
     /// Milliseconds since the Unix epoch; 0 when unknown.
     pub mtime_ms: i64,
+    /// What tells this item from another put at its path since it was read ([`ident`]).
+    pub id: Option<Ident>,
+}
+
+/// An item's identity as its own metadata gives it, at no extra cost (see [`ident`]).
+pub type Ident = (u64, u64);
+
+/// What tells an item from another put at its path later, from the metadata already read for
+/// it (no extra call): device and inode on Unix; on Windows its creation time and whether
+/// it's a folder (the file index needs the file opened, one call per item). Windows gives a
+/// file created under a name within 15 s of deleting one there the old one's creation time
+/// ("tunnelling"), so a replacement that quick reads as the same item there.
+pub fn ident(m: &std::fs::Metadata) -> Option<Ident> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let t = m.created().ok()?.duration_since(UNIX_EPOCH).ok()?;
+        Some((t.as_nanos() as u64, u64::from(m.is_dir())))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,7 +130,8 @@ fn read(path: &Path, stop: &AtomicBool) -> Option<Result<Vec<Entry>, String>> {
         let hidden = is_hidden(&name, meta.as_ref());
         let lower = name.to_lowercase();
         let key = format!("f:{name}");
-        out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size: if is_dir { 0 } else { size }, mtime_ms });
+        let id = meta.as_ref().and_then(ident);
+        out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size: if is_dir { 0 } else { size }, mtime_ms, id });
     }
     #[cfg(test)]
     read_hook::done(path);

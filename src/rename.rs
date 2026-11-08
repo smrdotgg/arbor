@@ -391,8 +391,9 @@ pub struct Item {
     /// It keeps its name whatever the rule says, and why (a name that isn't valid Unicode
     /// can't be edited as text without changing it).
     pub keep: Option<&'static str>,
-    /// It wasn't there when its folder was read for the preview.
-    pub gone: bool,
+    /// Why it can't be renamed, found when its folder was read for the preview: it isn't
+    /// there any more, or isn't the item the search found.
+    pub gone: Option<&'static str>,
 }
 
 /// One of the batch's folders: its name (for `{parent}`), what else is in it, and whether its
@@ -459,8 +460,8 @@ pub fn plan(r: &Compiled, items: &[Item], dirs: &[Dir], p: Platform) -> Plan {
         let dir = &dirs[it.dir as usize];
         let (name, matched) = r.apply(&it.name, it.is_dir, &dir.name, counted);
         counted += usize::from(matched);
-        status.push(if it.gone {
-            Status::Problem("It isn't there any more (moved or deleted)".into())
+        status.push(if let Some(why) = it.gone {
+            Status::Problem(why.into())
         } else if name == it.name {
             Status::Same
         } else {
@@ -529,7 +530,7 @@ mod tests {
     }
 
     fn items(names: &[&str]) -> Vec<Item> {
-        names.iter().map(|n| Item { name: n.to_string(), is_dir: false, dir: 0, keep: None, gone: false }).collect()
+        names.iter().map(|n| Item { name: n.to_string(), is_dir: false, dir: 0, keep: None, gone: None }).collect()
     }
 
     fn dir(others: &[&str], ignores_case: bool) -> Dir {
@@ -752,7 +753,7 @@ mod tests {
     #[ignore = "benchmark"]
     fn plan_speed() {
         let names: Vec<String> = (0..10_000).map(|i| format!("IMG_{i:05} holiday in Rome.JPG")).collect();
-        let its: Vec<Item> = names.iter().map(|n| Item { name: n.clone(), is_dir: false, dir: 0, keep: None, gone: false }).collect();
+        let its: Vec<Item> = names.iter().map(|n| Item { name: n.clone(), is_dir: false, dir: 0, keep: None, gone: None }).collect();
         let others: Vec<String> = (0..10_000).map(|i| format!("other {i}.txt")).collect();
         let d = Dir { name: "Rome".into(), others: others.into_iter().collect(), ignores_case: false, known: true };
         let cases = [

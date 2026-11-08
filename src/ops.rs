@@ -42,6 +42,13 @@ pub enum Op {
     },
     /// Reverse an earlier operation, if the disk still looks the way it left it.
     Undo(Undo),
+    /// `op` on search results: each item in `expect` must still be the one the walk found at
+    /// its path (its [`crate::fs::ident`]); one that isn't (moved or deleted since, and maybe
+    /// something else put there) is left out and said so, and the rest go ahead.
+    Checked {
+        expect: Vec<(PathBuf, crate::fs::Ident)>,
+        op: Box<Op>,
+    },
 }
 
 impl Op {
@@ -53,6 +60,7 @@ impl Op {
             Op::Move { sources, dest } => [vec![dest.clone()], parents(sources)].concat(),
             Op::Trash { sources } => parents(sources),
             Op::Rename { items } => items.iter().filter_map(|r| r.from.parent().map(Path::to_path_buf)).collect(),
+            Op::Checked { op, .. } => return op.folders(),
             Op::Undo(u) => u
                 .steps
                 .iter()
@@ -73,6 +81,35 @@ impl Op {
             Op::Trash { .. } => "Moving to Trash",
             Op::Rename { .. } => "Renaming",
             Op::Undo(_) => "Undoing",
+            Op::Checked { op, .. } => op.verb(),
+        }
+    }
+
+    /// The operation without the items at `left_out`, and whether any are left.
+    fn without(self, left_out: &std::collections::HashSet<&Path>) -> (Op, bool) {
+        let keep = |v: &mut Vec<PathBuf>| v.retain(|p| !left_out.contains(p.as_path()));
+        match self {
+            Op::Copy { mut sources, dest } => {
+                keep(&mut sources);
+                let any = !sources.is_empty();
+                (Op::Copy { sources, dest }, any)
+            }
+            Op::Move { mut sources, dest } => {
+                keep(&mut sources);
+                let any = !sources.is_empty();
+                (Op::Move { sources, dest }, any)
+            }
+            Op::Trash { mut sources } => {
+                keep(&mut sources);
+                let any = !sources.is_empty();
+                (Op::Trash { sources }, any)
+            }
+            Op::Rename { mut items } => {
+                items.retain(|r| !left_out.contains(r.from.as_path()));
+                let any = !items.is_empty();
+                (Op::Rename { items }, any)
+            }
+            op => (op, true),
         }
     }
 }
@@ -93,8 +130,14 @@ pub struct Seen(Print);
 
 impl Seen {
     /// `path` as it is now (not following a link); `None` when it isn't there.
+    #[cfg(test)]
     pub fn of(path: &Path) -> Option<Seen> {
-        Some(Seen(Print::of(path, &path.symlink_metadata().ok()?)))
+        Some(Seen::with(path, &path.symlink_metadata().ok()?))
+    }
+
+    /// From metadata just read for `path`.
+    pub fn with(path: &Path, m: &std::fs::Metadata) -> Seen {
+        Seen(Print::of(path, m))
     }
 }
 
@@ -689,8 +732,43 @@ impl<'a> Worker<'a> {
             Op::Rename { items } => self.batch_rename(items, &mut out),
             Op::Undo(undo) if undo.what == What::BatchRename => self.undo_batch_rename(undo, &mut out),
             Op::Undo(undo) => self.undo(undo, &mut out),
+            Op::Checked { expect, op } => return self.run_checked(&expect, *op),
         }
         out.cancelled = self.cancelled();
+        out
+    }
+
+    /// [`Op::Checked`]: leaves out each item that isn't the one the search found, says why,
+    /// and runs the rest.
+    fn run_checked(&mut self, expect: &[(PathBuf, crate::fs::Ident)], op: Op) -> Outcome {
+        let mut why = Vec::new();
+        let mut left_out = std::collections::HashSet::new();
+        for (path, id) in expect {
+            let name = name_of(path);
+            let problem = match path.symlink_metadata() {
+                Ok(m) if crate::fs::ident(&m) == Some(*id) => continue,
+                Ok(_) => format!("“{name}” isn't the item the search found (something else is at its path now), so it was left alone"),
+                Err(_) => format!("“{name}” isn't where the search found it any more, so it was left alone"),
+            };
+            why.push(problem);
+            left_out.insert(path.as_path());
+        }
+        let (op, any) = op.without(&left_out);
+        if !any {
+            let more = if why.len() > 1 { format!(" (and {} more)", why.len() - 1) } else { String::new() };
+            return Outcome {
+                results: Vec::new(),
+                undo: None,
+                errors: Vec::new(),
+                refused: Some(format!("Nothing was done: {}{more}", why.first().cloned().unwrap_or_default())),
+                cancelled: false,
+                renamed: Vec::new(),
+                folders: Vec::new(),
+            };
+        }
+        let mut out = self.run(op);
+        why.append(&mut out.errors);
+        out.errors = why;
         out
     }
 

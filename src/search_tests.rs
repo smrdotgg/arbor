@@ -694,6 +694,7 @@ fn the_list_grows_only_so_far_while_the_walk_goes_on() {
         hidden: false,
         size: 1,
         mtime_ms: 1,
+        id: None,
     };
     // As poll_search appends batches while the walk is still going.
     for batch in 0..3 {
@@ -874,4 +875,122 @@ fn a_folder_reached_twice_is_walked_once() {
     assert_eq!(found.len(), 2, "{found:?}");
     let tops: HashSet<&str> = found.iter().map(|f| f.split('/').next().unwrap()).collect();
     assert_eq!(tops.len(), 1, "one of the two paths, whole: {found:?}");
+}
+
+/// Replaces the file at `p` with another of the same name (another inode), as another app
+/// saving over it by rename, or deleting it and making a new one, would.
+fn replace(p: &Path) {
+    let aside = p.with_extension("aside");
+    std::fs::rename(p, &aside).unwrap();
+    std::fs::write(p, "SOMEONE ELSE'S FILE").unwrap();
+    std::fs::remove_file(&aside).unwrap();
+}
+
+/// The review's case: results of a folder read while Arbor renamed that folder arrive with the
+/// old path; something is then made at the old path. Trashing that row must not trash the
+/// newcomer: each action on results checks the item is still the one the walk found.
+#[test]
+fn a_stale_result_never_acts_on_what_took_its_path() {
+    let d = tree("stale-trash", &["hit-dir/hit.txt"]);
+    let mut s = state_in(&d);
+    let (started, go, left) = gate(&d.join("hit-dir"));
+    search(&mut s, "hit");
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    frames(&mut s, 3);
+    pick(&mut s, "hit-dir");
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "hit-moved".into();
+    s.commit_rename(&mut tx());
+    frames(&mut s, 4);
+    go.send(()).unwrap();
+    left.recv_timeout(Duration::from_secs(5)).unwrap();
+    finish_walk(&mut s);
+    frames(&mut s, 4);
+    if results(&s).contains(&"hit-dir/hit.txt".into()) {
+        std::fs::create_dir_all(d.join("hit-dir")).unwrap();
+        std::fs::write(d.join("hit-dir/hit.txt"), "replacement").unwrap();
+        pick(&mut s, "hit-dir/hit.txt");
+        s.run(Cmd::Trash, &mut tx());
+        finish_job(&mut s);
+        assert_eq!(std::fs::read_to_string(d.join("hit-dir/hit.txt")).unwrap(), "replacement", "the newcomer stays");
+        assert!(s.note.as_deref().is_some_and(|n| n.contains("isn't the item the search found")), "{:?}", s.note);
+    }
+    assert_eq!(std::fs::read_to_string(d.join("hit-moved/hit.txt")).unwrap(), "contents of hit-dir/hit.txt");
+}
+
+/// A result replaced by another app after the walk found it: every action that moves,
+/// renames or removes it refuses, saying why, and leaves the newcomer alone.
+#[test]
+fn every_action_on_a_replaced_result_refuses() {
+    let d = tree("replaced", &["a/report.txt", "b/other.txt"]);
+    let into = tree("replaced-into", &[]);
+    let mut s = state_in(&d);
+    search(&mut s, "report");
+    finish_walk(&mut s);
+    let target = d.join("a/report.txt");
+    replace(&target);
+    let untouched = |s: &State, what: &str| {
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "SOMEONE ELSE'S FILE", "{what}: the newcomer was touched");
+        assert!(s.note.as_deref().is_some_and(|n| n.contains("isn't the item the search found")), "{what}: {:?}", s.note);
+    };
+    // Trash.
+    pick(&mut s, "a/report.txt");
+    s.run(Cmd::Trash, &mut tx());
+    finish_job(&mut s);
+    untouched(&s, "trash");
+    // Cut and paste elsewhere.
+    s.note = None;
+    pick(&mut s, "a/report.txt");
+    s.run(Cmd::Cut, &mut tx());
+    let clip = s.clip.as_ref().unwrap();
+    let req = crate::app::PasteReq { id: 0, dest: into.clone(), dest_id: None, mv: false };
+    let content = rune::ClipboardContent::new("").with_files(clip.paths.clone());
+    s.paste_reqs.push(req);
+    s.paste_reply(0, &content);
+    finish_job(&mut s);
+    untouched(&s, "cut and paste");
+    assert!(std::fs::read_dir(&into).unwrap().next().is_none());
+    // F6 into the other pane.
+    s.note = None;
+    s.run(Cmd::Split, &mut tx());
+    settle_all(&mut s);
+    s.panes[1].f.cwd = into.clone();
+    s.activate(0, &mut tx());
+    assert!(s.cur().searching());
+    pick(&mut s, "a/report.txt");
+    s.run(Cmd::MoveToOther, &mut tx());
+    finish_job(&mut s);
+    untouched(&s, "F6");
+    // Rename, inline.
+    s.note = None;
+    pick(&mut s, "a/report.txt");
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "renamed.txt".into();
+    s.commit_rename(&mut tx());
+    untouched(&s, "rename");
+    assert!(!d.join("a/renamed.txt").exists());
+    // Batch Rename: a problem, so nothing applies.
+    s.run(Cmd::BatchRename, &mut tx());
+    let b = s.batch.as_ref().unwrap();
+    assert!(b.known());
+    assert!(
+        matches!(&b.plan.status[0], crate::rename::Status::Problem(w) if w.contains("isn't the item the search found")),
+        "{:?}",
+        b.plan.status
+    );
+    s.close_batch(&mut tx());
+    // Dragging it out carries nothing.
+    let i = s.cur().sel;
+    let id = s.cur().id;
+    assert!(s.drag_item(id, i).is_none());
+    // An item that's still the one found goes ahead, beside one that isn't.
+    s.note = None;
+    search(&mut s, "t");
+    finish_walk(&mut s);
+    s.run(Cmd::SelectAll, &mut tx());
+    replace(&target);
+    s.run(Cmd::Trash, &mut tx());
+    finish_job(&mut s);
+    assert!(!d.join("b/other.txt").exists(), "the unchanged one was trashed");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "SOMEONE ELSE'S FILE");
 }

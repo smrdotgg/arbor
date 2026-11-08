@@ -481,6 +481,8 @@ fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
             hidden,
             size: if is_dir { 0 } else { size },
             mtime_ms,
+            // The item the walk saw: actions check it's still the one at this path.
+            id: meta.as_ref().and_then(fs::ident),
             os: t.rel.join(&os).into_os_string(),
         });
         if found.len() >= room.min(CHUNK) {
@@ -980,6 +982,26 @@ impl Folder {
         });
     }
 
+    /// From search results, each selected item's path and the identity the walk saw there,
+    /// for an action to check first (`ops::Op::Checked`). Empty for a folder's listing.
+    pub fn target_checks(&self) -> Vec<(PathBuf, fs::Ident)> {
+        if !self.searching() {
+            return Vec::new();
+        }
+        self.targets().into_iter().filter_map(|e| Some((self.cwd.join(&e.os), e.id?))).collect()
+    }
+
+    /// [`Folder::target_checks`] for what a drag from row `i` carries.
+    pub fn drag_checks(&self, i: usize) -> Vec<(PathBuf, fs::Ident)> {
+        if !self.searching() {
+            return Vec::new();
+        }
+        if self.is_selected(i) {
+            return self.target_checks();
+        }
+        self.visible.get(i).map(|&e| &self.entries[e as usize]).and_then(|e| Some((self.cwd.join(&e.os), e.id?))).into_iter().collect()
+    }
+
     /// The result at `from` was renamed to `to` (both absolute): it shows under its new name at
     /// once, keeping its row, and so do the results inside it when it's a folder, so no row
     /// names a path that's gone (or now another item).
@@ -1038,6 +1060,7 @@ fn entry_at(root: &Path, path: &Path, show_hidden: bool) -> Option<Entry> {
         hidden,
         size: if is_dir { 0 } else { t.len() },
         mtime_ms: fs::mtime(t),
+        id: fs::ident(&m),
     })
 }
 

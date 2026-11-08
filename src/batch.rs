@@ -56,6 +56,8 @@ pub enum Field {
 pub struct Read {
     dirs: Vec<Dir>,
     seen: Vec<Option<Seen>>,
+    /// Why each item can't be renamed, if it can't.
+    gone: Vec<Option<&'static str>>,
 }
 
 pub struct BatchBox {
@@ -147,6 +149,8 @@ impl State {
         // one folder mostly come together, so the last folder is checked first).
         let mut paths = Vec::with_capacity(targets.len());
         let mut items = Vec::with_capacity(targets.len());
+        // Search results: the identity the walk saw, which each must still have.
+        let mut expect: Vec<Option<crate::fs::Ident>> = Vec::new();
         let mut dir_paths: Vec<PathBuf> = Vec::new();
         let mut dir_ix: HashMap<PathBuf, u32> = HashMap::new();
         let keep =
@@ -155,7 +159,7 @@ impl State {
             // A folder: one folder, and each entry's name is its own.
             dir_paths.push(f.cwd.clone());
             for e in &targets {
-                items.push(Item { name: e.name.clone(), is_dir: e.is_dir, dir: 0, keep: keep(&e.os), gone: false });
+                items.push(Item { name: e.name.clone(), is_dir: e.is_dir, dir: 0, keep: keep(&e.os), gone: None });
                 paths.push(f.cwd.join(&e.os));
             }
         }
@@ -170,7 +174,8 @@ impl State {
                 }),
             };
             let os = p.file_name().unwrap_or_default();
-            items.push(Item { name: e.name.clone(), is_dir: e.is_dir, dir, keep: keep(os), gone: false });
+            items.push(Item { name: e.name.clone(), is_dir: e.is_dir, dir, keep: keep(os), gone: None });
+            expect.push(e.id);
             paths.push(p);
         }
         let dirs: Vec<Dir> =
@@ -220,7 +225,7 @@ impl State {
         // the read can't be, so the dialog doesn't wait for it.
         let wait = if items.len() <= SYNC_ITEMS { self.show_wait } else { std::time::Duration::ZERO };
         let names: Vec<String> = b.dirs.iter().map(|d| d.name.clone()).collect();
-        let read = crate::folder::read_waiting(&b.reader, wait, move || read_folders(&dir_paths, &names, &items, &paths, &stop));
+        let read = crate::folder::read_waiting(&b.reader, wait, move || read_folders(&dir_paths, &names, &items, &paths, &expect, &stop));
         if let Some(r) = read {
             land_read(&mut b, r);
         }
@@ -410,8 +415,8 @@ impl State {
 /// Applies what the worker read: each folder's other names and its case rule, and which items
 /// are gone.
 fn land_read(b: &mut BatchBox, r: Read) {
-    if r.seen.iter().any(Option::is_none) {
-        let items: Vec<Item> = b.items.iter().zip(&r.seen).map(|(it, s)| Item { gone: s.is_none(), ..it.clone() }).collect();
+    if r.gone.iter().any(Option::is_some) {
+        let items: Vec<Item> = b.items.iter().zip(&r.gone).map(|(it, &gone)| Item { gone, ..it.clone() }).collect();
         b.items = Arc::new(items);
     }
     b.dirs = Arc::new(r.dirs);
@@ -420,7 +425,14 @@ fn land_read(b: &mut BatchBox, r: Read) {
 
 /// On a worker: each folder's names besides the batch's `items`, whether its disk ignores
 /// case, and each item's fingerprint. `None` when stopped (the dialog closed).
-fn read_folders(dir_paths: &[PathBuf], names: &[String], items: &[Item], paths: &[PathBuf], stop: &AtomicBool) -> Option<Read> {
+fn read_folders(
+    dir_paths: &[PathBuf],
+    names: &[String],
+    items: &[Item],
+    paths: &[PathBuf],
+    expect: &[Option<crate::fs::Ident>],
+    stop: &AtomicBool,
+) -> Option<Read> {
     let mut batch: Vec<HashSet<&str>> = vec![HashSet::new(); dir_paths.len()];
     for it in items {
         batch[it.dir as usize].insert(it.name.as_str());
@@ -445,14 +457,23 @@ fn read_folders(dir_paths: &[PathBuf], names: &[String], items: &[Item], paths: 
             .collect();
         dirs.push(Dir { name: name.clone(), others, ignores_case, known: true });
     }
-    let mut seen = Vec::with_capacity(paths.len());
-    for p in paths {
+    let (mut seen, mut gone) = (Vec::with_capacity(paths.len()), Vec::with_capacity(paths.len()));
+    for (i, p) in paths.iter().enumerate() {
         if stop.load(Relaxed) {
             return None;
         }
-        seen.push(Seen::of(p));
+        let m = p.symlink_metadata().ok();
+        let want = expect.get(i).copied().flatten();
+        gone.push(match &m {
+            None => Some("It isn't there any more (moved or deleted)"),
+            Some(m) if want.is_some() && crate::fs::ident(m) != want => {
+                Some("It isn't the item the search found (something else is at its path now)")
+            }
+            Some(_) => None,
+        });
+        seen.push(m.map(|m| Seen::with(p, &m)));
     }
-    Some(Read { dirs, seen })
+    Some(Read { dirs, seen, gone })
 }
 
 /// Whether the disk holding folder `d` ignores case: one of its names with its case swapped is

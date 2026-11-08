@@ -29,7 +29,8 @@ impl State {
             (true, 1) => format!("Cut {} — paste to move it", name(&paths[0])),
             (true, n) => format!("Cut {n} items — paste to move them"),
         });
-        self.clip = Some(Clip { paths, cut });
+        let expect = self.cur().target_checks();
+        self.clip = Some(Clip { paths, cut, expect });
     }
 
     /// ⌘⇧C: the selected path as text.
@@ -88,8 +89,11 @@ impl State {
             self.note = Some("Nothing to paste: copy some files first".into());
             return;
         }
-        let was_cut = self.clip.as_ref().is_some_and(|c| c.cut && c.paths == files);
+        let ours = self.clip.as_ref().filter(|c| c.paths == files);
+        let was_cut = ours.is_some_and(|c| c.cut);
+        let expect = ours.map(|c| c.expect.clone()).unwrap_or_default();
         let op = if move_requested || was_cut { Op::Move { sources: files, dest } } else { Op::Copy { sources: files, dest } };
+        let op = checked(op, expect);
         if self.start_into(op, dest_id) && was_cut {
             self.clip = None;
         }
@@ -101,14 +105,14 @@ impl State {
         let sources = self.target_paths();
         let Some(dest) = sources.first().and_then(|p| p.parent()).map(Path::to_path_buf) else { return };
         if sources.iter().all(|p| p.parent() == Some(dest.as_path())) {
-            self.start(Op::Copy { sources, dest });
+            self.start(checked(Op::Copy { sources, dest }, self.cur().target_checks()));
         }
     }
 
     pub fn trash_selected(&mut self) {
         let sources = self.target_paths();
         if !sources.is_empty() {
-            self.start(Op::Trash { sources });
+            self.start(checked(Op::Trash { sources }, self.cur().target_checks()));
         }
     }
 
@@ -162,6 +166,18 @@ impl State {
         }
         if new.contains('/') || (cfg!(windows) && new.contains(['\\', ':', '*', '?', '"', '<', '>', '|'])) || new == "." || new == ".." {
             self.note = Some(format!("“{new}” isn't a valid name"));
+            return;
+        }
+        // A search result must still be the item the walk found there (one lstat: the rename
+        // itself is one call here too).
+        let found = self.cur().searching().then(|| self.cur().entries.iter().find(|e| e.os == r.os).and_then(|e| e.id)).flatten();
+        if let Some(id) = found
+            && from.symlink_metadata().ok().and_then(|m| crate::fs::ident(&m)) != Some(id)
+        {
+            self.note = Some(format!(
+                "“{}” isn't the item the search found (it was moved, deleted or replaced since), so it wasn't renamed",
+                old.to_string_lossy()
+            ));
             return;
         }
         // Beside it, in its own folder: never "the folder on screen + the new name".
@@ -325,9 +341,18 @@ impl State {
     // ---- drag and drop ----------------------------------------------------------------------
 
     /// Files to drag out of row `i` of pane `id`: the whole selection if the row is in it,
-    /// else the row.
+    /// else the row. From search results, only the items still the ones the walk found (one
+    /// lstat each, here: the drop happens in another app, too late to check).
     pub fn drag_item(&self, id: u64, i: usize) -> Option<DragItem> {
-        let paths = self.pane(id)?.f.drag_paths(i);
+        let f = &self.pane(id)?.f;
+        let mut paths = f.drag_paths(i);
+        let stale: Vec<PathBuf> = f
+            .drag_checks(i)
+            .into_iter()
+            .filter(|(p, id)| p.symlink_metadata().ok().and_then(|m| crate::fs::ident(&m)) != Some(*id))
+            .map(|(p, _)| p)
+            .collect();
+        paths.retain(|p| !stale.contains(p));
         if paths.is_empty() {
             return None;
         }
@@ -341,6 +366,12 @@ impl State {
     /// Files dropped on a folder (or on the list, for the current folder). Same disk moves,
     /// another disk copies, as in Finder; ⌥ always copies.
     pub fn drop_files(&mut self, files: &[PathBuf], into: PathBuf, tx: &mut Tx) {
+        self.drop_checked(files, into, Vec::new(), tx);
+    }
+
+    /// [`State::drop_files`] for rows dragged from search results, each checked against the
+    /// identity the walk saw.
+    pub(crate) fn drop_checked(&mut self, files: &[PathBuf], into: PathBuf, expect: Vec<(PathBuf, crate::fs::Ident)>, tx: &mut Tx) {
         for p in &mut self.panes {
             p.f.drop_target = None;
         }
@@ -349,7 +380,8 @@ impl State {
             return;
         }
         let copy = tx.mods().alt || !files.iter().all(|f| same_disk(f, &into));
-        self.start(if copy { Op::Copy { sources: files, dest: into } } else { Op::Move { sources: files, dest: into } });
+        let op = if copy { Op::Copy { sources: files, dest: into } } else { Op::Move { sources: files, dest: into } };
+        self.start(checked(op, expect));
     }
 
     // ---- context menu -----------------------------------------------------------------------
@@ -410,6 +442,11 @@ impl State {
             }
         });
     }
+}
+
+/// `op`, checked against `expect` first when there's anything to check (`Op::Checked`).
+pub(crate) fn checked(op: Op, expect: Vec<(PathBuf, crate::fs::Ident)>) -> Op {
+    if expect.is_empty() { op } else { Op::Checked { expect, op: Box::new(op) } }
 }
 
 fn name(p: &Path) -> String {
