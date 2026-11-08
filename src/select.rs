@@ -37,7 +37,9 @@ pub struct PickBox {
     pub edit: TextEdit,
     /// The live count for `counted_for`: matches and rows, or why the pattern can't be used.
     pub count: Result<(usize, usize), String>,
-    counted_for: Option<String>,
+    /// What it was counted for: the pattern, the rows (the folder's `version`, which changes
+    /// whenever they do: a listing landing, hidden files shown, a filter) and the case.
+    counted_for: Option<(String, u64, Case)>,
 }
 
 impl Folder {
@@ -178,18 +180,20 @@ impl State {
         }
     }
 
-    /// Counts again if the pattern changed: never touches the selection.
-    pub fn pick_refresh(&mut self) {
+    /// Counts again if the pattern, the rows or the case changed since: never touches the
+    /// selection. True when it counted.
+    pub fn pick_refresh(&mut self) -> bool {
         let case = self.pick_case();
         let f = &self.panes[self.active].f;
-        let Some(p) = &mut self.pick else { return };
-        if p.counted_for.as_deref() == Some(p.edit.text.as_str()) {
-            return;
+        let Some(p) = &mut self.pick else { return false };
+        if p.counted_for.as_ref().is_some_and(|(t, v, c)| *t == p.edit.text && *v == f.version && *c == case) {
+            return false;
         }
         let q = p.edit.text.trim();
         p.count =
             if q.is_empty() { Ok((0, f.visible.len())) } else { Glob::name(q, case).map(|g| (f.count_matching(&g), f.visible.len())) };
-        p.counted_for = Some(p.edit.text.clone());
+        p.counted_for = Some((p.edit.text.clone(), f.version, case));
+        true
     }
 
     /// The field's keys, before it edits: Enter, ⇧Enter and ⌥Enter apply, Esc closes.
@@ -459,5 +463,25 @@ mod tests {
         s.pick_apply(How::Remove, &mut tx);
         assert!(s.cur().marked.is_empty());
         assert!(!s.cur().selected().unwrap().lower.ends_with(".jpg"));
+    }
+
+    /// The listing refreshes while the box is open (a file operation, a reload): the count
+    /// follows the rows Enter will act on, before Enter.
+    #[test]
+    fn the_count_follows_a_listing_that_refreshes_while_open() {
+        let d = folder("refresh", &["a.jpg", "notes.txt"]);
+        let mut s = crate::app::tests::state_in(&d);
+        let mut tx = Tx::default();
+        s.run(Cmd::SelectPattern, &mut tx);
+        s.pick_edit().insert("*.jpg");
+        s.pick_refresh();
+        assert_eq!(s.pick.as_ref().unwrap().count, Ok((1, 2)));
+        std::fs::write(d.join("b.jpg"), "x").unwrap();
+        s.reload();
+        crate::app::tests::settle_all(&mut s);
+        assert_eq!(s.pick.as_ref().unwrap().count, Ok((2, 3)), "counted again when the listing landed");
+        s.pick_apply(How::Replace, &mut tx);
+        assert_eq!(s.cur().marked.len(), 2);
+        assert_eq!(s.note.as_deref(), Some("Selected 2 items matching *.jpg"));
     }
 }

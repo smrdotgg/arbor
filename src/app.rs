@@ -450,6 +450,8 @@ impl State {
         }
         changed |= self.poll_history();
         changed |= self.poll_search();
+        // Select by Pattern's count follows the rows it counts (a listing that landed).
+        changed |= self.pick_refresh();
         // After everything that can move the selection this frame.
         changed |= self.sync_preview();
         changed |= self.land_preview();
