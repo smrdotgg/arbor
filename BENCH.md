@@ -22,6 +22,53 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-08, quick preview (milestone 4)
+
+What changed on the measured path: nothing runs while the preview is closed (the default), but
+every key, command and listing landing now makes one `None` check (`State::sync_preview`), and
+the binary carries the new decoders. Before is a569066, after is 0a77e11, both driven by the new
+bench, alternating. New rows (`--preview 5`: five more cold starts per pass, 10 rounds each, in a
+folder of a 300 KB text file and a 4000 × 3000 JPEG of 4.3 MB):
+
+- **preview 256 KB text**: Space on the text file to the frame showing it (the read, sniffing,
+  laying out the lines on the worker, then the panel's first frame of visible lines).
+- **preview 12 MP JPEG**: Space on the photo to the frame showing it (read, decode at 1/4 size
+  through the IDCT, box-filter to the panel, upload).
+- **key → frame, preview open**: ↑ and ↓ while it's open, each starting a new read; "while the
+  JPEG decodes" is a ↑ pressed one frame after ↓ started the photo's decode, which it stops.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+Load average 0.2–1.4. Order: before, after, after, before.
+
+| Measure (median / p95, submission proxy) | Before (2 passes) | After (2 passes) |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 130.9 / 144.6, 132.5 / 138.4 ms | 134.4 / 143.4, 136.2 / 140.6 ms |
+| Listing visible (10k) | 40.1 / 45.3, 41.5 / 44.5 ms | 41.8 / 46.0, 42.3 / 45.7 ms |
+| Key → frame (synthetic ↓, preview closed) | 6.3 / 6.8, 6.2 / 6.6 ms | 6.6 / 7.2, 6.3 / 6.9 ms |
+| **Preview 256 KB text** (Space → frame) | — | **15.3 / 28.5, 14.9 / 28.1 ms** |
+| **Preview 12 MP JPEG** (Space → frame) | — | **107.2 / 112.8, 107.1 / 112.7 ms** |
+| **Key → frame, preview open** | — | **5.3 / 7.2, 5.2 / 7.0 ms** |
+| … while the JPEG decodes | — | 5.1 / 6.2, 5.0 / 6.0 ms |
+
+The cold-start medians came out 2–4 ms apart between passes, so they were checked twice more:
+three more alternating pairs of 21 cold starts (before 129.6, 134.1, 131.8 ms; after 133.6,
+134.4, 133.6 ms; p95 139.0–140.7 ms for both), then 12 single launches of each, interleaved one
+by one, reading the first frame's own split: `main` → first frame 136.0 ms before and 136.2 ms
+after, view build 8.96 and 9.11 ms, `State::new` 0.11 and 0.13 ms. No regression: the gap was
+drift between passes. Listing and key times are within noise.
+
+The text preview's p95 is its first showing in each run: that frame loads the system's
+monospaced font (Rune runs `fc-match` on Linux), about 8 ms of view build once per session;
+after it, 2 ms. The photo's time is mostly decoding: jpeg-decoder at 1/4 scale takes about 75 ms
+of it on this machine (a full-size decode with zune-jpeg took 130–180 ms and 36 MB, against
+2.3 MB). With the preview open the list still moves in about 5 ms a key (most of it lavapipe
+encoding the frame; the view build is 0.5–1 ms), including while the photo decodes on its worker.
+
+Binary: release 36.49 → 37.38 MB unstripped, 27.50 → 28.24 MB stripped (+0.74 MB: jpeg-decoder,
+gif, image-webp, image's BMP codec and the preview). The new crates add no startup work: nothing
+of theirs runs until a preview decodes.
+
 ## 2026-11-08, tabs and split view (milestone 3)
 
 What changed on the measured path: the window's folder now lives in a pane (one, unless split),
