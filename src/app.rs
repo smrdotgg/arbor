@@ -38,7 +38,10 @@ pub(crate) struct Clip {
 
 /// ⌘V or ⌥⌘V, waiting for the clipboard: the folder that was on screen in the active pane
 /// when it was asked for, and whether it moves.
+/// Each request has its own, answered by its own clipboard read (`id`), so two pastes asked
+/// before either answer each go where, and as, they were asked.
 pub(crate) struct PasteReq {
+    pub id: u64,
     pub dest: PathBuf,
     pub mv: bool,
 }
@@ -92,8 +95,9 @@ pub struct State {
     /// The running file operation, if any.
     pub job: Option<ops::Running>,
     pub(crate) clip: Option<Clip>,
-    /// A paste asked for whose clipboard read hasn't come back yet.
-    pub(crate) paste_req: Option<PasteReq>,
+    /// Pastes asked for whose clipboard reads haven't come back yet, oldest first.
+    pub(crate) paste_reqs: Vec<PasteReq>,
+    next_paste: u64,
     pub(crate) undo: Vec<ops::Undo>,
     /// Which keys run which command (defaults plus the settings file).
     pub keymap: Keymap,
@@ -165,7 +169,8 @@ impl State {
             rename: None,
             job: None,
             clip: None,
-            paste_req: None,
+            paste_reqs: Vec::new(),
+            next_paste: 0,
             undo: Vec::new(),
             keymap: config.keymap,
             settings: config.settings,
@@ -747,11 +752,16 @@ impl State {
             }
             Copy => self.copy_selected(false, tx),
             Cut => self.copy_selected(true, tx),
-            // The paste lands in the root's paste handler (`view::view`), a frame or more later:
-            // where it goes and whether it moves are fixed now, by the pane it was asked in.
+            // The clipboard answers a frame or more later, to this request alone: where it goes
+            // and whether it moves are fixed now, by the pane it was asked in.
             Paste | PasteMove => {
-                self.paste_req = Some(PasteReq { dest: self.cur().cwd.clone(), mv: cmd == PasteMove });
-                tx.request_paste();
+                self.next_paste += 1;
+                let (id, f) = (self.next_paste, self.cur());
+                self.paste_reqs.push(PasteReq { id, dest: f.cwd.clone(), mv: cmd == PasteMove });
+                tx.read_clipboard(move |s: &mut State, content, tx| {
+                    tx.instant();
+                    s.paste_reply(id, content);
+                });
             }
             CopyPath => self.copy_path(tx),
             Duplicate => self.duplicate(),

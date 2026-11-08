@@ -44,14 +44,26 @@ impl State {
         tx.copy(text);
     }
 
-    /// The root's paste handler: files from the clipboard (or absolute paths in its text) go
-    /// into the folder the paste was asked for in, even if another pane is active by the time
-    /// the clipboard answers (or that folder isn't on screen any more: it's where the user
-    /// said, and the paste is undoable). A paste the OS started goes into the active pane's
-    /// folder. A paste of what Arbor itself cut, or ⌥⌘V, moves.
+    /// The root's paste handler, for a paste the OS started: into the active pane's folder.
     pub fn paste(&mut self, content: &ClipboardContent) {
-        let (dest, move_requested) = match self.paste_req.take() {
-            Some(PasteReq { dest, mv }) => (dest, mv),
+        self.paste_with(None, content);
+    }
+
+    /// The clipboard's answer to paste request `id` (`Cmd::Paste`).
+    pub(crate) fn paste_reply(&mut self, id: u64, content: &ClipboardContent) {
+        if let Some(i) = self.paste_reqs.iter().position(|r| r.id == id) {
+            let req = self.paste_reqs.remove(i);
+            self.paste_with(Some(req), content);
+        }
+    }
+
+    /// Files from the clipboard (or absolute paths in its text) go into the folder the paste
+    /// was asked for in, even if another pane is active by the time the clipboard answers (or
+    /// that folder isn't on screen any more: it's where the user said, and the paste is
+    /// undoable). A paste of what Arbor itself cut, or ⌥⌘V, moves.
+    fn paste_with(&mut self, req: Option<PasteReq>, content: &ClipboardContent) {
+        let (dest, move_requested) = match req {
+            Some(PasteReq { dest, mv, .. }) => (dest, mv),
             None => (self.cur().cwd.clone(), false),
         };
         let mut files: Vec<PathBuf> = content.files().to_vec();

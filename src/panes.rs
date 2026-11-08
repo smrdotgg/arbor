@@ -472,12 +472,37 @@ mod tests {
             assert_eq!(s.cur().cwd, a);
             run(&mut s, cmd);
             run(&mut s, Cmd::OtherPane); // B is active when the clipboard answers
-            s.paste(&rune::ClipboardContent::new("").with_files(vec![src.join("f0")]));
+            let id = s.paste_reqs[0].id;
+            s.paste_reply(id, &rune::ClipboardContent::new("").with_files(vec![src.join("f0")]));
             finish(&mut s);
             assert!(a.join("f0").exists(), "{cmd:?} lands in A");
             assert!(!b.join("f0").exists(), "{cmd:?} not in B");
             assert_eq!(src.join("f0").exists(), cmd == Cmd::Paste, "{cmd:?}: copies or moves as asked");
         }
+    }
+
+    /// Two pastes asked for before either clipboard answer each keep their own folder and
+    /// intent: a move into A, then a copy into B; the first answer moves into A.
+    #[test]
+    fn overlapping_pastes_each_keep_their_own_request() {
+        let (a, b, src) = (folder("paste2-a", &[]), folder("paste2-b", &[]), folder("paste2-src", &["f0", "f1"]));
+        let mut s = state_in(&a);
+        run(&mut s, Cmd::Split);
+        go(&mut s, &b);
+        run(&mut s, Cmd::OtherPane);
+        run(&mut s, Cmd::PasteMove); // into A, moving
+        run(&mut s, Cmd::OtherPane);
+        run(&mut s, Cmd::Paste); // into B, copying
+        let ids: Vec<u64> = s.paste_reqs.iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 2);
+        s.paste_reply(ids[0], &rune::ClipboardContent::new("").with_files(vec![src.join("f0")]));
+        finish(&mut s);
+        assert!(a.join("f0").exists() && !src.join("f0").exists(), "the first answer moves into A");
+        assert!(!b.join("f0").exists());
+        s.paste_reply(ids[1], &rune::ClipboardContent::new("").with_files(vec![src.join("f1")]));
+        finish(&mut s);
+        assert!(b.join("f1").exists() && src.join("f1").exists(), "the second copies into B");
+        assert!(s.paste_reqs.is_empty());
     }
 
     /// An operation that ends while the other pane is on its way to another folder leaves that
