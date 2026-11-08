@@ -135,9 +135,11 @@ impl Backup {
     }
 }
 
-/// Writes `data` to `path` through a temporary file beside it, so a crash never leaves half a
-/// file. Makes the folder if needed.
+/// Writes `data` to `path` through a temporary file beside it, flushed to the disk before it's
+/// renamed into place (and the folder after, on Unix), so a crash never leaves half a file and
+/// a backup is on the disk before anything it records is changed. Makes the folder if needed.
 fn write_file(path: &Path, data: &[u8]) -> Result<(), String> {
+    use std::io::Write;
     let say = |e: std::io::Error| format!("{}: {e}", crate::fs::pretty(path));
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(say)?;
@@ -145,11 +147,19 @@ fn write_file(path: &Path, data: &[u8]) -> Result<(), String> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".arbor-{}", std::process::id()));
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, data).map_err(say)?;
-    std::fs::rename(&tmp, path).map_err(|e| {
+    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+        f.write_all(data)?;
+        f.sync_all()
+    });
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
         let _ = std::fs::remove_file(&tmp);
-        say(e)
-    })
+        return Err(say(e));
+    }
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+    Ok(())
 }
 
 fn remove_backup(path: &Path) -> Result<(), String> {
@@ -379,17 +389,46 @@ pub(crate) mod linux {
             ));
         }
         let mimeapps = d.config_home.join("mimeapps.list");
-        let text = read(&mimeapps)?.unwrap_or_default();
+        let old_text = read(&mimeapps)?;
+        let had_mimeapps = old_text.is_some();
+        let text = old_text.unwrap_or_default();
         let service = service_file(&d.data_home);
         let old_service = read(&service)?;
-        if Backup::read(backup)?.is_none() {
+        // The backup is on the disk before anything changes.
+        let fresh = Backup::read(backup)?.is_none();
+        if fresh {
             let mut b = Backup::default();
             b.put(MIME_KEY, default_app(&text, MIME).as_deref().map(str::as_bytes));
             b.put(SERVICE_KEY, old_service.as_deref().filter(|t| !is_ours(t)).map(str::as_bytes));
             b.write(backup)?;
         }
-        write_file(&mimeapps, set_default_app(&text, MIME, Some(DESKTOP_ID)).as_bytes())?;
-        write_file(&service, service_text(&d.exe).as_bytes())?;
+        let new_text = set_default_app(&text, MIME, Some(DESKTOP_ID));
+        let written = write_file(&mimeapps, new_text.as_bytes()).and_then(|()| write_file(&service, service_text(&d.exe).as_bytes()));
+        if let Err(e) = written {
+            // Halfway: the folder default goes back to what it was (if it's still what Arbor
+            // wrote), and a backup made just now goes too.
+            let back = match read(&mimeapps) {
+                Ok(Some(now)) if now == new_text && now != text => {
+                    if had_mimeapps {
+                        write_file(&mimeapps, text.as_bytes())
+                    } else {
+                        std::fs::remove_file(&mimeapps).map_err(|e| e.to_string())
+                    }
+                }
+                _ => Ok(()),
+            };
+            return Err(match back {
+                Ok(()) => {
+                    if fresh {
+                        let _ = remove_backup(backup);
+                    }
+                    format!("Couldn't make Arbor the default for folders ({e}), so nothing was changed")
+                }
+                Err(e2) => format!(
+                    "Couldn't make Arbor the default for folders ({e}), and putting the folder default back failed too ({e2}): run Restore the System Default for Folders once that's fixed"
+                ),
+            });
+        }
         if d.reload_bus {
             reload_bus();
         }
@@ -486,18 +525,25 @@ pub(crate) mod windows {
     ///
     /// Not `Folder`: it also covers virtual folders (Control Panel, Recycle Bin, libraries,
     /// phones) that Arbor can't show, which would stop opening at all.
+    ///
+    /// In the order it's written: the commands first, then what makes them the default (the
+    /// `shell` keys' default verb, and Win+E's `DelegateExecute`), so a write that fails midway
+    /// never leaves a default pointing at a command that isn't there.
     pub fn plan(root: &str, exe: &str) -> Vec<Set> {
         let set = |key: String, name: &'static str, data: String| Set { key, name, data };
         let mut v = Vec::new();
-        for class in ["Directory", "Drive"] {
+        let classes = ["Directory", "Drive"];
+        for class in classes {
             let shell = format!(r"{root}\{class}\shell");
-            v.push(set(shell.clone(), "", VERB.into()));
             v.push(set(format!(r"{shell}\{VERB}"), "", "Open in Arbor".into()));
             v.push(set(format!(r"{shell}\{VERB}"), "Icon", format!("{exe},0")));
             v.push(set(format!(r"{shell}\{VERB}\command"), "", format!("\"{exe}\" \"%1\"")));
         }
         let win_e = format!(r"{root}\CLSID\{WIN_E}\shell\opennewwindow\command");
         v.push(set(win_e.clone(), "", format!("\"{exe}\"")));
+        for class in classes {
+            v.push(set(format!(r"{root}\{class}\shell"), "", VERB.into()));
+        }
         v.push(set(win_e, "DelegateExecute", String::new()));
         v
     }
@@ -556,9 +602,10 @@ pub(crate) mod windows {
         format!("existed {k}")
     }
 
-    /// Writes `plan`. Records what it replaces first, unless `backup` already has it (Arbor was
-    /// the default already: the first backup stays). Returns the backup to save.
-    pub fn make(store: &mut dyn Store, plan: &[Set], root: &str, backup: Option<Backup>) -> Result<Backup, String> {
+    /// The backup for writing `plan`: what it replaces (unless `backup` already has it: Arbor
+    /// was the default already, and the first backup stays) and what it writes. Changes nothing;
+    /// saved before [`apply`] runs.
+    pub fn snapshot(store: &dyn Store, plan: &[Set], root: &str, backup: Option<Backup>) -> Backup {
         let mut b = match backup {
             Some(b) => b,
             None => {
@@ -574,9 +621,21 @@ pub(crate) mod windows {
             }
         };
         for s in plan {
-            store.set(&s.key, s.name, REG_SZ, &utf16z(&s.data))?;
             b.put(&wrote_key(s), Some(s.data.as_bytes()));
         }
+        b
+    }
+
+    /// Writes `plan`, in order.
+    pub fn apply(store: &mut dyn Store, plan: &[Set]) -> Result<(), String> {
+        plan.iter().try_for_each(|s| store.set(&s.key, s.name, REG_SZ, &utf16z(&s.data)))
+    }
+
+    /// [`snapshot`] then [`apply`] (tests; `run` saves the snapshot in between).
+    #[cfg(test)]
+    pub fn make(store: &mut dyn Store, plan: &[Set], root: &str, backup: Option<Backup>) -> Result<Backup, String> {
+        let b = snapshot(store, plan, root, backup);
+        apply(store, plan)?;
         Ok(b)
     }
 
@@ -621,8 +680,24 @@ pub(crate) mod windows {
         let saved = Backup::read(backup)?;
         match change {
             Change::Make => {
-                let b = make(store, &plan, root, saved)?;
+                // The whole snapshot is on the disk before the registry changes at all.
+                let fresh = saved.is_none();
+                let b = snapshot(store, &plan, root, saved);
                 b.write(backup)?;
+                if let Err(e) = apply(store, &plan) {
+                    // Halfway: what was written goes back, from the snapshot just saved.
+                    return Err(match restore(store, &plan, root, Some(&b)) {
+                        Ok(_) => {
+                            if fresh {
+                                let _ = remove_backup(backup);
+                            }
+                            format!("Couldn't make Arbor the default for folders ({e}), so nothing was changed")
+                        }
+                        Err(e2) => format!(
+                            "Couldn't make Arbor the default for folders ({e}), and putting back what was written failed too ({e2}). The backup is kept: run Restore the System Default for Folders once that's fixed"
+                        ),
+                    });
+                }
                 Ok("Arbor is now the default for folders and drives, and Win+E opens it. Restore the System Default for Folders undoes it."
                     .into())
             }
@@ -798,6 +873,7 @@ pub(crate) mod mac {
                 if bundle != Some(BUNDLE_ID) {
                     return Err("Only Arbor.app can be the default for folders: macOS asks the app bundle (this Arbor runs as a bare program). Open Arbor.app and run it there".into());
                 }
+                // The backup is on the disk before LaunchServices is changed.
                 if Backup::read(backup)?.is_none() {
                     let mut b = Backup::default();
                     b.put(BEFORE, ls.chosen().filter(|c| !c.eq_ignore_ascii_case(BUNDLE_ID)).as_deref().map(str::as_bytes));
@@ -1102,6 +1178,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Linux, a write failing midway (the activation file's folder can't be written): the
+    /// folder default goes back as it was, and the backup made for it goes.
+    #[cfg(unix)]
+    #[test]
+    fn linux_make_puts_the_folder_default_back_when_a_write_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp("linux-midway");
+        let dirs = linux_dirs(&d, true);
+        let mimeapps = dirs.config_home.join("mimeapps.list");
+        std::fs::create_dir_all(&dirs.config_home).unwrap();
+        let before = "[Default Applications]\ninode/directory=old.desktop\n# kept\n";
+        std::fs::write(&mimeapps, before).unwrap();
+        let services = dirs.data_home.join("dbus-1/services");
+        std::fs::create_dir_all(&services).unwrap();
+        std::fs::set_permissions(&services, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let backup = d.join(BACKUP_FILE);
+        let e = linux::run(Change::Make, &dirs, &backup).unwrap_err();
+        assert!(e.ends_with("so nothing was changed"), "{e}");
+        assert_eq!(std::fs::read_to_string(&mimeapps).unwrap(), before);
+        assert!(!backup.exists());
+        // With no mimeapps.list before, none after.
+        std::fs::remove_file(&mimeapps).unwrap();
+        linux::run(Change::Make, &dirs, &backup).unwrap_err();
+        assert!(!mimeapps.exists());
+        std::fs::set_permissions(&services, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn the_service_files_exec_is_quoted_for_the_bus() {
         let s = linux::service_text(Path::new("/opt/my apps/arbor"));
@@ -1162,6 +1266,90 @@ mod tests {
 
     const EXE: &str = r"C:\Users\me\AppData\Local\Arbor\arbor.exe";
 
+    /// A registry whose `n`th write (from 1) fails, as a full or locked hive would.
+    struct Failing {
+        reg: Reg,
+        writes: usize,
+        fail_at: usize,
+    }
+
+    impl windows::Store for Failing {
+        fn get(&self, key: &str, name: &str) -> Option<(u32, Vec<u8>)> {
+            self.reg.get(key, name)
+        }
+        fn set(&mut self, key: &str, name: &str, kind: u32, data: &[u8]) -> Result<(), String> {
+            self.writes += 1;
+            if self.writes == self.fail_at {
+                return Err(format!(r"Couldn't write HKCU\{key}: Access is denied."));
+            }
+            self.reg.set(key, name, kind, data)
+        }
+        fn delete_value(&mut self, key: &str, name: &str) -> Result<(), String> {
+            self.reg.delete_value(key, name)
+        }
+        fn exists(&self, key: &str) -> bool {
+            self.reg.exists(key)
+        }
+        fn delete_key_if_empty(&mut self, key: &str) -> Result<(), String> {
+            self.reg.delete_key_if_empty(key)
+        }
+    }
+
+    /// The review's blocker: a backup that can't be saved used to be found out only after the
+    /// registry had changed, leaving Arbor the default with nothing to restore from. Now the
+    /// whole snapshot is saved first, and a failure there changes nothing.
+    #[test]
+    fn windows_make_saves_the_backup_before_touching_the_registry() {
+        use windows::Store;
+        let root = windows::CLASSES;
+        let mut reg = Reg::default();
+        reg.set(r"Software\Classes\Directory\shell", "", windows::REG_SZ, &windows::utf16z("other")).unwrap();
+        let start = reg.clone();
+        let d = tmp("win-unwritable");
+        std::fs::write(d.join("a file"), "x").unwrap();
+        let backup = d.join("a file").join(BACKUP_FILE); // its folder can't be made
+        let e = windows::run(Change::Make, &mut reg, root, EXE, &backup).unwrap_err();
+        assert!(e.contains(BACKUP_FILE), "{e}");
+        assert_eq!(reg, start, "nothing changed without a saved backup");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A registry write failing midway: everything written is put back from the snapshot, the
+    /// backup made for it goes, and it says nothing was changed. Every write position fails once.
+    #[test]
+    fn windows_make_puts_everything_back_when_a_write_fails_midway() {
+        use windows::Store;
+        let root = windows::CLASSES;
+        let plan = windows::plan(root, EXE);
+        for fail_at in 1..=plan.len() {
+            let mut reg = Reg::default();
+            reg.set(r"Software\Classes\Directory\shell", "", 2, &windows::utf16z("%SystemRoot%\\other")).unwrap();
+            reg.create(r"Software\Classes\CLSID");
+            let start = reg.clone();
+            let d = tmp(&format!("win-midway-{fail_at}"));
+            let backup = d.join(BACKUP_FILE);
+            let mut failing = Failing { reg, writes: 0, fail_at };
+            let e = windows::run(Change::Make, &mut failing, root, EXE, &backup).unwrap_err();
+            assert!(e.ends_with("so nothing was changed"), "write {fail_at}: {e}");
+            assert_eq!(failing.reg, start, "write {fail_at}: everything as it was");
+            assert!(!backup.exists(), "write {fail_at}: the backup made for it is gone");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+        // Arbor already the default, and a second Make failing: the first backup stays.
+        let d = tmp("win-midway-again");
+        let backup = d.join(BACKUP_FILE);
+        let mut reg = Reg::default();
+        windows::run(Change::Make, &mut reg, root, EXE, &backup).unwrap();
+        let first = std::fs::read_to_string(&backup).unwrap();
+        let mut failing = Failing { reg, writes: 0, fail_at: 3 };
+        windows::run(Change::Make, &mut failing, root, r"D:\Arbor\arbor.exe", &backup).unwrap_err();
+        assert!(
+            std::fs::read_to_string(&backup).unwrap().starts_with(&first[..first.find("wrote").unwrap()]),
+            "the first backup's record stays"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn windows_plan_is_the_minimal_hkcu_set() {
         let plan = windows::plan(windows::CLASSES, EXE);
@@ -1169,17 +1357,18 @@ mod tests {
         assert_eq!(
             lines,
             [
-                r"Software\Classes\Directory\shell\[] = arbor",
                 r"Software\Classes\Directory\shell\arbor\[] = Open in Arbor",
                 r"Software\Classes\Directory\shell\arbor\[Icon] = C:\Users\me\AppData\Local\Arbor\arbor.exe,0",
                 r#"Software\Classes\Directory\shell\arbor\command\[] = "C:\Users\me\AppData\Local\Arbor\arbor.exe" "%1""#,
-                r"Software\Classes\Drive\shell\[] = arbor",
                 r"Software\Classes\Drive\shell\arbor\[] = Open in Arbor",
                 r"Software\Classes\Drive\shell\arbor\[Icon] = C:\Users\me\AppData\Local\Arbor\arbor.exe,0",
                 r#"Software\Classes\Drive\shell\arbor\command\[] = "C:\Users\me\AppData\Local\Arbor\arbor.exe" "%1""#,
                 r#"Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow\command\[] = "C:\Users\me\AppData\Local\Arbor\arbor.exe""#,
+                r"Software\Classes\Directory\shell\[] = arbor",
+                r"Software\Classes\Drive\shell\[] = arbor",
                 r"Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow\command\[DelegateExecute] = ",
-            ]
+            ],
+            "the commands first, then what makes them the default"
         );
         assert!(plan.iter().all(|s| !s.key.to_lowercase().contains(r"classes\folder")), "never the Folder class");
         let keys = windows::keys(&plan, windows::CLASSES);
