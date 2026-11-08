@@ -186,7 +186,7 @@ fn pane(s: &State, p: &Pane, c: Ctx) -> El {
         })
         .child(pathbar(f, l, c.w));
     if p.tabs.len() > 1 {
-        col = col.child(hr(l)).child(tabbar(p, l));
+        col = col.child(hr(l)).child(tabbar(p, l, c.w));
     }
     col = col.child(hr(l)).child(header(f, c)).child(hr(l)).child(list(f, c));
     if c.split.is_some() {
@@ -376,12 +376,60 @@ fn measure_crumb(label: &str) -> f32 {
     rune::text::measure(label, &[], CRUMB, None).0
 }
 
+/// The narrowest a tab gets before the strip shows fewer tabs, the gap between tabs, and the
+/// width of a "‹ 3" / "5 ›" marker for the tabs that don't fit.
+const TAB_MIN: f32 = 64.0;
+const TAB_GAP: f32 = 4.0;
+const TAB_MORE: f32 = 34.0;
+/// What the tab bar spends besides tabs: its padding, and "+" with the gap before it.
+const TABBAR_CHROME: f32 = 2.0 * 6.0 + 22.0 + TAB_GAP;
+
+/// Which of `n` tabs the strip shows in `avail` points: all of them while each can be at least
+/// [`TAB_MIN`] wide, else as many as fit beside the two markers, centred on the `active` one
+/// (which is always shown).
+fn tab_window(n: usize, active: usize, avail: f32) -> std::ops::Range<usize> {
+    let fit = |w: f32| ((w + TAB_GAP) / (TAB_MIN + TAB_GAP)).floor().max(1.0) as usize;
+    if n <= fit(avail) {
+        return 0..n;
+    }
+    let slots = fit(avail - 2.0 * (TAB_MORE + TAB_GAP)).min(n);
+    let start = active.saturating_sub((slots - 1) / 2).min(n - slots);
+    start..start + slots
+}
+
 /// The pane's tabs, only when it has two or more: each shows its folder's name (the whole
-/// path in a tooltip). A click shows it, a middle click closes it, "+" opens a new one.
-fn tabbar(p: &Pane, l: Look) -> El {
+/// path in a tooltip). A click shows it, a middle click closes it, "+" opens a new one. When
+/// they don't all fit, the strip shows the ones around the active tab, with "‹ 3" and "5 ›"
+/// for how many are hidden on each side (a click shows the nearest of them); "+" stays.
+fn tabbar(p: &Pane, l: Look, width: f32) -> El {
     let id = p.id();
-    let mut bar = row().key("tabs").w_full().h(TABS_H).px(6.0).gap(4.0).center_y();
-    for j in 0..p.tabs.len() {
+    let mut bar = row().key("tabs").w_full().h(TABS_H).px(6.0).gap(TAB_GAP).center_y();
+    let n = p.tabs.len();
+    let shown = tab_window(n, p.tab, width - TABBAR_CHROME);
+    let more = |label: String, key: &'static str, to: usize, hidden: usize| {
+        text(label)
+            .key(key)
+            .font(TAB)
+            .color(l.t.text_secondary)
+            .w(TAB_MORE)
+            .h(22.0)
+            .align(Align::Center)
+            .radius(5.0)
+            .hover(l.t.hover)
+            .cursor(Cursor::Pointer)
+            .help(format!("{hidden} more tab{}", if hidden == 1 { "" } else { "s" }))
+            .on_press_tx(move |s: &mut State, tx| {
+                tx.instant();
+                let Some(ix) = s.pane_ix(id) else { return };
+                s.activate(ix, tx);
+                s.show_tab(ix, to, tx);
+            })
+    };
+    if shown.start > 0 {
+        bar = bar.child(more(format!("‹ {}", shown.start), "tabs-before", shown.start - 1, shown.start));
+    }
+    let after = n - shown.end;
+    for j in shown.clone() {
         let path = p.tab_path(j);
         let on = j == p.tab;
         let t = row()
@@ -408,6 +456,9 @@ fn tabbar(p: &Pane, l: Look) -> El {
             })
             .child(text(tab_label(path)).font(TAB).color(if on { l.t.text } else { l.t.text_secondary }).truncate().min_w(0.0));
         bar = bar.child(if on { t.fill(l.t.control_off) } else { t.hover(l.t.hover) });
+    }
+    if after > 0 {
+        bar = bar.child(more(format!("{after} ›"), "tabs-after", shown.end, after));
     }
     bar.child(
         text("+")
@@ -848,6 +899,28 @@ mod tests {
         for outside in [[1200.0, 210.0], [700.0, 900.0], [700.0, -5.0], [100.0, 210.0], [700.0, 600.0], [980.0, 210.0]] {
             assert_eq!(panes.at(outside), None, "{outside:?}");
         }
+    }
+
+    /// Many tabs, or a narrow pane: the active tab is always in the strip, with markers for
+    /// the rest; few tabs all show.
+    #[test]
+    fn the_active_tab_always_shows() {
+        let narrow = 235.0 - TABBAR_CHROME; // a pane of a split 640 pt window
+        let normal = 811.0 - TABBAR_CHROME; // an unsplit 980 pt window
+        assert_eq!(tab_window(3, 2, normal), 0..3);
+        assert_eq!(tab_window(8, 0, normal), 0..8);
+        for (n, avail) in [(8, narrow), (28, normal), (100, normal), (5, 40.0)] {
+            for active in 0..n {
+                let w = tab_window(n, active, avail);
+                assert!(w.contains(&active), "{n} tabs, {active} active in {avail}: {w:?}");
+                assert!(w.len() < n, "{n} in {avail} don't all fit");
+                let markers = (w.start > 0) as usize + (w.end < n) as usize;
+                let used = w.len() as f32 * (TAB_MIN + TAB_GAP) + markers as f32 * (TAB_MORE + TAB_GAP) - TAB_GAP;
+                assert!(used <= avail || w.len() == 1, "{n} tabs, {active} active: {used} of {avail}");
+            }
+        }
+        assert_eq!(tab_window(28, 27, normal).end, 28);
+        assert_eq!(tab_window(28, 0, normal).start, 0);
     }
 
     /// With Rune's own measurement: in that same pane, the crumbs shown fit whole.

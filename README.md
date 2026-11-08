@@ -119,6 +119,8 @@ current folder, **⌘W** closes it, **⌃Tab** / **⌃⇧Tab** (or ⇧⌘] / ⇧
 **⇧⌘T** reopens the last closed one. Each tab has its own folder, back and forward history,
 selection, scroll, filter and sort. The tab bar appears only when a pane has two or more tabs:
 click a tab to show it, middle-click to close it, hover for its full path, "+" for a new one.
+When they don't all fit, the bar shows the tabs around the active one, with "‹ 3" and "5 ›"
+for how many are hidden on each side (click one to show the nearest).
 
 One pane is **active**: it gets the keys, the palette's commands and the status bar, and in a
 split window it has a thin accent line along its top and the accent-coloured selection (the
