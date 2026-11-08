@@ -162,6 +162,11 @@ pub struct State {
     /// A go-to's look at what's at its path (on a worker), and which go-to is waited for.
     path_check: Latest<(u64, PathBuf, PathKind)>,
     pub(crate) going_to: Option<u64>,
+    /// Go-to's Tab completion (`complete.rs`): the one whose card shows, the field's text a
+    /// completion still on its worker was asked for, and that worker.
+    pub(crate) complete: Option<crate::complete::Completion>,
+    pub(crate) completing: Option<String>,
+    pub(crate) completer: crate::complete::Loader,
     /// "Make Arbor the Default for Folders" or its restore, running on a worker (`handler.rs`).
     handler_job: Latest<Result<String, String>>,
     /// Requests from other apps shown so far (`incoming.rs`).
@@ -274,6 +279,9 @@ impl State {
             search_pool: None,
             path_check: Latest::default(),
             going_to: None,
+            complete: None,
+            completing: None,
+            completer: Latest::default(),
             handler_job: Latest::default(),
             external_shows: 0,
         };
@@ -313,6 +321,7 @@ impl State {
         self.settings_loader.set_waker(waker.clone());
         self.history.waker = Some(waker.clone());
         self.path_check.set_waker(waker.clone());
+        self.completer.set_waker(waker.clone());
         self.handler_job.set_waker(waker.clone());
         if let Some(b) = &self.boot
             && let Ok(mut w) = b.waker.lock()
@@ -485,6 +494,7 @@ impl State {
             self.note = Some(r.unwrap_or_else(|e| e));
             changed = true;
         }
+        changed |= self.poll_completion();
         changed |= self.poll_history();
         changed |= self.poll_search();
         changed |= self.poll_batch();
@@ -812,8 +822,8 @@ impl State {
         }
     }
 
-    /// While the filter has text, typing, ⌫ and ⌥⌫ edit it, and in go-to mode Enter goes,
-    /// before any command sees those keys. Tab in go-to mode is reserved (path completion).
+    /// While the filter has text, typing, ⌫ and ⌥⌫ edit it, and in go-to mode Enter goes and
+    /// Tab completes (`complete.rs`), before any command sees those keys.
     fn edit_filter(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         let f = self.cur_mut();
         if f.filter.is_empty() {
@@ -831,7 +841,7 @@ impl State {
                 f.refilter(keep.as_deref());
                 f.reveal(tx);
             }
-            Key::Tab if !m.cmd && !m.ctrl && !m.alt && f.path_mode() => {}
+            Key::Tab if !m.cmd && !m.ctrl && !m.alt && f.path_mode() => self.complete_tab(m.shift, tx),
             Key::Enter if !m.cmd && !m.ctrl && !m.alt && f.path_mode() => self.submit_path(),
             Key::Text(t) if !m.cmd && !m.ctrl => {
                 f.type_filter(t);

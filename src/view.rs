@@ -164,7 +164,9 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         .fill(l.t.bg)
         .child(sidebar(s, l, cx.titlebar_inset() > 0.0))
         .child(el().w(1.0).h_full().fill(l.t.separator))
-        .child(col().key("main").grow(1.0).min_w(0.0).h_full().child(panes).child(hr(l)).child(status(s, l)));
+        .child(
+            col().key("main").grow(1.0).min_w(0.0).h_full().child(panes).child(hr(l)).child(status(s, l)).children(completion_view(s, l)),
+        );
     if let Some(a) = &s.asking {
         window.child(confirm_view(a, l))
     } else if let Some(m) = &s.menu {
@@ -941,6 +943,55 @@ fn status(s: &State, l: Look) -> El {
     let hint = if s.show_hidden { "hidden shown" } else { "" };
     bar.child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)))
         .child(text(format!("{picked}{count}")).font(NUM).color(l.t.text_secondary))
+}
+
+/// Candidates the completion card lists at most; the rest are counted.
+const COMPLETE_ROWS: usize = 8;
+const COMPLETE_ROW_H: f32 = 22.0;
+
+/// Go-to's Tab completion (`complete.rs`): the candidates in a small card over the status bar,
+/// the one in the field highlighted. Not modal: typing goes on in the field, and any other key
+/// ends it. Lists the eight around the current one.
+fn completion_view(s: &State, l: Look) -> Option<El> {
+    let c = s.completion()?;
+    let n = c.cands.len();
+    let at = c.at.unwrap_or(0);
+    let start = at.saturating_sub(COMPLETE_ROWS / 2).min(n.saturating_sub(COMPLETE_ROWS));
+    let mut card = col()
+        .key("complete")
+        .role("listbox")
+        .label("Completions")
+        .pin(Some(12.0), None, None, Some(28.0 + 4.0))
+        .min_w(220.0)
+        .max_w(520.0)
+        .py(4.0)
+        .px(4.0)
+        .fill(l.t.card)
+        .border(1.0, l.t.card_border)
+        .radius(7.0)
+        .shadow(OVERLAY_SHADOW.0, OVERLAY_SHADOW.1, l.t.shadow);
+    for (i, name) in c.cands.iter().enumerate().skip(start).take(COMPLETE_ROWS) {
+        let on = c.at == Some(i);
+        let r = row()
+            .key(format!("complete-{i}"))
+            .role("option")
+            .focus_selected(on)
+            .h(COMPLETE_ROW_H)
+            .px(8.0)
+            .center_y()
+            .radius(4.0)
+            .child(text(name.clone()).font(MONO).color(if on { l.sel_text } else { l.t.text }).truncate_middle().min_w(0.0));
+        card = card.child(if on { r.fill(l.accent) } else { r });
+    }
+    let more = n - (start + COMPLETE_ROWS).min(n);
+    let tab = |spec: &str| crate::commands::parse_chord(spec).map(|c| c.label()).unwrap_or_default();
+    let foot = if more > 0 {
+        format!("{more} more · {} next, {} back", tab("tab"), tab("shift+tab"))
+    } else {
+        format!("{} next, {} back", tab("tab"), tab("shift+tab"))
+    };
+    card = card.child(text(foot).font(SMALL).color(l.t.text_secondary).px(8.0).pt(3.0).pb(1.0));
+    Some(card)
 }
 
 /// The docked preview's width bounds (one pane).

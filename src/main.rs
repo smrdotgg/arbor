@@ -11,6 +11,7 @@ mod actions;
 mod app;
 mod batch;
 mod commands;
+mod complete;
 mod config;
 mod confirm;
 mod delete;
