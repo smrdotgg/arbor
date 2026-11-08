@@ -45,8 +45,8 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 17,200 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
-`ops.rs` (copy, move, trash and undo on a worker), `noclobber.rs` (moves, copies and file ids
+About 19,700 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
+`ops.rs` (copy, move, trash, batch rename and undo on a worker), `noclobber.rs` (moves, copies and file ids
 that never replace anything), `trash.rs` (each platform's trash), `app.rs`
 (state, startup, key dispatch, what each command does), `folder.rs` (one folder on screen: its
 listing, selection, filter, sort and history, and what a hidden tab keeps), `panes.rs` (tabs and
@@ -55,7 +55,8 @@ split view), `commands.rs` (the command table and keymap), `palette.rs` (the com
 `preview.rs` (quick preview: reading, sniffing and decoding on a worker), `jump.rs` (Jump to
 Folder: the history's writer thread, frecency and ranking), `search.rs` (Search in This Folder:
 the walk, its threads and the results), `pattern.rs` (globs), `select.rs`
-(Select by Pattern and the other selection commands), `view.rs` (UI) and `timing.rs` (opt-in
+(Select by Pattern and the other selection commands), `rename.rs` (Batch Rename's rules: tokens,
+case, and what's wrong with a name on each platform), `batch.rs` (the Batch Rename dialog), `view.rs` (UI) and `timing.rs` (opt-in
 speed measurement).
 
 ## Run
@@ -243,10 +244,71 @@ the selection, **⌥Enter** takes them out. `*` is any run of characters, `?` on
 whole (`IMG_*`, `*.jpg`, `*.{png,jpg}`). It matches the rows on screen: hidden files only while
 they're shown, and only what the filter lets through. Capitals count on Linux and don't on macOS
 and Windows, as their usual file systems do; `[select] case_sensitive` changes that (the box
-shows "Aa" or "aA"). Glob only: regular expressions would need a new crate.
+shows "Aa" or "aA"). Glob only for now: regular expressions (regex-lite, which Batch Rename
+uses) take 20–40 ms to test 50,000 names here against about 1 ms for a glob, over a frame a
+key, so `re:` waits until the count runs off the UI thread.
 **⇧⌘I** inverts the selection, and "Select All of This Kind" (palette) selects every row with
 the cursor row's extension (or every folder). The selection is a set of names, so a listing that
 refreshes keeps it.
+
+### Batch Rename
+
+With two or more items selected, **F2** (or ⇧⌘R) opens Batch Rename instead of renaming inline,
+as Finder does; "Batch Rename…" in the palette opens it for any selection. It works on search
+results too: each item is renamed in its own folder.
+
+- **Find**: plain text, every occurrence. **.\*** (⌥R) makes it a regular expression
+  (regex-lite: Perl syntax; `\d`, `\w` and case folding are ASCII only). Capitals don't count
+  unless **Aa** (⌥C) is on. An empty Find makes Replace the whole new name.
+- **Replace with**: text and tokens. `{n}` is the counter (`{n:3}` pads it to 3 digits),
+  `{name}` the original name without its extension, `{ext}` the extension without its dot, and
+  `{parent}` the item's folder's name. In regex mode `$1`, `${1}` and `${name}` are what a group
+  matched (`$$` is a dollar sign; write `${1}x`, since `$1x` names a group "1x"). Anything else
+  in braces stays as typed.
+- **Number**: the counter starts at Start and goes up by Step (which can be negative) for each
+  item Find matches, in the order the items are listed; one it leaves alone takes no number.
+- **Case**: Keep, lower, UPPER or Title, applied last.
+- **Include extension** (⌥E): off by default, so the extension stays as it is. Folders have no
+  extension, and neither has a name like `.bashrc`.
+
+The preview lists every item, old name → new name, updating as you type; rows that don't change
+are dim. Problems are red, with why: two items given one name; a name already in the item's
+folder (the batch's own old names don't count: those items move); what the platform doesn't
+allow (everywhere `/`, NUL, an empty name, `.` and `..`; on Windows also `<>:"\|?*`, control
+characters, a trailing dot or space, and CON, PRN, AUX, NUL, COM1–9 and LPT1–9 with or without
+an extension); a name over 255 bytes (255 UTF-16 units on Windows); and names that differ only
+in case on a disk that ignores case (each folder's disk is asked, by looking up one of its names
+with the case swapped). A summary says "12 will change · 2 problems". Rename is disabled while
+there are problems; Enter renames (every field is one line), Esc or a click outside closes, and
+the rule is kept for the next time this session.
+
+Renaming is one file operation on the worker, with progress, and Esc cancels it:
+
+- Before anything moves, every item is checked against the fingerprint taken when the dialog
+  opened (identity, type, size, modified time), and every new name must be free or be the old
+  name of another item in the batch. Otherwise nothing is renamed, and the status bar says
+  which item and why.
+- Swaps and chains (a → b and b → a; a → b and b → c) work: an item whose new name is another
+  item's old one (or its own in another case) first steps aside to a temporary `.arbor-…` name
+  in its folder, the others take their new names, then it takes its own. Every step is a
+  no-replace rename (`src/noclobber.rs`).
+- A failure or a cancel midway puts every item back, last step first, again never over
+  anything. If another app took an old name meanwhile, that item stays where it is and the
+  message says exactly where ("“a.txt” is now “b.txt” in …").
+- It's one undo entry: ⌘Z puts every item back through the same plan, and changes nothing if
+  any of them changed since.
+
+Afterwards the renamed items are selected under their new names.
+
+It costs nothing until it opens. Opening reads each item's folder once, on a worker (what else
+is in it, its case rule, the fingerprints), and waits at most a frame for it with a few items;
+with many, Rename waits until it lands. Up to 500 items are previewed on the spot (well under a
+millisecond); more on a worker, which each key waits at most 3 ms for: a plain-text change to
+10,000 names lands with the key, and a regex over 10,000 names (about 20 ms here) shows the last
+preview until the new one lands (Enter then renames once it has). Only the rows in view are
+built. Not checked: two names that are the same to APFS only after Unicode normalization (é as
+one character or as e and an accent); the no-replace rename still refuses the second, and the
+batch is put back.
 
 ### Search in This Folder
 
@@ -366,7 +428,7 @@ was asked for in, each paste on its own (two asked before the clipboard answers 
 folders), and is refused if that folder was moved or replaced before the clipboard answered.
 Two panes on one folder by different paths (a symlink to it) are known to be the same folder.
 The palette names ⌘\ "Split View" or "Close Split View", and Space "Quick Preview" or "Close
-Preview", whichever it will do. Undo refuses if any item changed since. Rename selects the name before the extension; Enter saves, Esc cancels. Esc also cancels
+Preview", whichever it will do. Undo refuses if any item changed since. Rename selects the name before the extension; Enter saves, Esc cancels. With two or more items selected, Rename opens Batch Rename. Esc also cancels
 a running copy or move.
 
 ## Settings

@@ -7,6 +7,7 @@ scripts/bench.sh 11 10                         # 11 cold starts, 10 rounds each 
 scripts/bench.sh 11 10 --tabs 5                # plus 5 cold starts timing a tab switch to the 10k folder
 scripts/bench.sh 11 10 --jump 5                # plus 5 cold starts opening Jump with a 5k-folder history
 scripts/bench.sh 11 10 --search 5              # plus 5 cold starts searching a 120k-file tree
+scripts/bench.sh 11 10 --rename 5              # plus 5 cold starts typing in Batch Rename over 10k items
 cargo test --release -- --ignored --nocapture search_speed   # walk speed by thread count (vendor/, or ARBOR_SEARCH_TREE)
 xvfb-run -a scripts/bench.sh 11 10             # Linux without a display
 cargo test --release -- --ignored --nocapture list_10k   # read + sort only, no window
@@ -24,6 +25,71 @@ runs two to three frames behind submission (`frame/present_time.rs`). Rune doesn
 frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below means the
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
+
+## 2026-11-08, Batch Rename (milestone 7)
+
+What changed on the measured path: nothing runs until Batch Rename opens. Each key and frame
+makes one more `None` check (`State::batch`), and the binary carries regex-lite and the dialog.
+Before is 6cd7541, after is 931177e, both driven by the new bench, alternating. New rows
+(`--rename 5`: five more cold starts in the 10k folder, 10 rounds each; each round selects all
+10,000 entries, opens Batch Rename, waits for its folder read, types `e` (plain text: every name
+loses its e's), turns on regex and types `$` (`e$`), each waiting for its preview, and closes it):
+
+- **rename 10k: key → preview**: the key to the frame showing the whole preview for it, plain
+  (`e`) and regex (⌥R, then `$`).
+- **key → frame, typing in rename**: those three keys' own frames (the preview may land later).
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+Busy: load average 2.3–4.3 (other agents compiling on its 4 cores), so every number is well
+above the earlier tables, both builds alike. Order: before, after, after, before.
+
+| Measure (median / p95, submission proxy) | Before (2 passes) | After (2 passes) |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 192.1 / 226.9, 191.9 / 231.4 ms | 190.1 / 218.3, 204.0 / 219.6 ms |
+| Listing visible (10k) | 59.6 / 79.9, 57.1 / 81.4 ms | 57.3 / 82.0, 56.0 / 81.2 ms |
+| Key → frame (synthetic ↓) | 10.7 / 12.8, 10.7 / 12.8 ms | 10.6 / 12.3, 8.8 / 12.6 ms |
+| **Rename 10k: key → preview, plain** | — | **37.3 / 62.4, 25.6 / 62.9 ms** |
+| **Rename 10k: key → preview, regex** | — | **44.8 / 60.8, 44.4 / 63.9 ms** |
+| **Key → frame, typing in rename (10k)** | — | **8.1 / 29.1, 8.1 / 31.1 ms** |
+
+No regression in cold start, listing or keys beyond this machine's noise (the after pass at
+204 ms ran at load 4.1, the other three at 2.3–4.3 and 190–192 ms; a quieter re-check is below if
+it could be had). Nothing of regex-lite or the dialog runs at startup.
+
+The previews over 10,000 names land a frame or two after the key, here. `ARBOR_TIMING` splits
+them: a key typed in the dialog takes 4–5 ms of update (the view with its visible preview rows;
+the handler itself is under 0.1 ms plus the wait below), and lavapipe's encoding of the frame is
+0.2 ms, or 12–24 ms on frames whose preview rows change (new glyphs, drawn on the CPU). Up to
+500 items are previewed inside the key (well under a millisecond); more go to a worker, which
+the key waits at most 3 ms for. On a quiet machine a plain-text change to 10,000 names makes
+that (about 2.5 ms; the key's own frame shows it), but not under this load, nor a regex (about
+20 ms on a quiet machine, twice that here), which shows the last preview until the new one
+lands, a frame or two later. The Mac hasn't been measured (no GUI runs there this milestone).
+
+Measured directly (`cargo test --release -- --ignored --nocapture plan_speed batch_speed
+match_speed`):
+
+| Work | Quiet (load 0.9) | Busy (load 3.5) | Where it runs |
+| --- | --- | --- | --- |
+| Plan 10,000 names: nothing typed / plain `Rome` → `Paris` | 2.4 / 3.5 ms | 4.0 / 5.3 ms | the key (≤ 500 items), else a worker |
+| … a regex with two groups and `{n:4}` | 20.5 ms | 38–40 ms | a worker |
+| … a template `{parent} {n:3}`, Title case | 3.9 ms | 7.5 ms | a worker |
+| Open Batch Rename on 10,000 selected items | 2.3–3.3 ms (load 3.1) | 4.3–8.4 ms | the key; the folder read (one `read_dir`, 10,000 `lstat`s) lands 17–33 ms later from a worker |
+| A regex over 50,000 names (regex-lite), against a glob | 20–39 ms against 0.8–1.9 ms | | not used: why Select by Pattern has no `re:` |
+
+The plain-text Find doesn't use the regex engine (a byte search, ASCII case folding as
+regex-lite's), which is 3–4 times faster over 10,000 names (12.3 → 3.5 ms).
+
+**Regex crate:** regex-lite 0.1.9, one crate with no dependencies. `regex` would add
+regex-automata, regex-syntax with its Unicode tables, aho-corasick and memchr (not measured
+here). What Batch Rename needs is Perl syntax and captures over short names, which regex-lite
+has; it lacks Unicode classes and Unicode case folding (`\w`, `\d` and case-insensitive
+matching are ASCII only), which the README says.
+
+Binary: release 37.92 → 38.23 MB unstripped, 28.66 → 28.93 MB stripped (+0.27 MB). Of that,
+regex-lite's own symbols are 64 KB and `rename.rs` and `batch.rs` 47 KB; the rest is the dialog's
+view, the operation and the generic code they instantiate.
 
 ## 2026-11-08, WebP previews up to 12 MP (NORTHSTAR exception)
 
