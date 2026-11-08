@@ -728,6 +728,9 @@ fn batch_rename_renames_results_in_their_own_folders() {
     b.find = rune::TextEdit::new("report");
     b.replace = rune::TextEdit::new("{parent}");
     s.batch_replan();
+    // The items' folders are read on a worker, waited for at most a frame: under load they
+    // land in a later poll.
+    crate::batch::tests::settle_batch(&mut s);
     let b = s.batch.as_ref().unwrap();
     assert!(b.known());
     let mut planned: Vec<(String, String)> = b.items.iter().map(|i| i.name.clone()).zip(b.plan.new.iter().cloned()).collect();
@@ -782,6 +785,9 @@ fn batch_rename_refuses_a_folder_and_something_inside_it() {
     b.find = rune::TextEdit::new("");
     b.replace = rune::TextEdit::new("new-{name}");
     s.batch_replan();
+    // The items' folders are read on a worker, waited for at most a frame: under load they
+    // land in a later poll.
+    crate::batch::tests::settle_batch(&mut s);
     let b = s.batch.as_ref().unwrap();
     assert!(b.known());
     let inner = b.items.iter().position(|i| i.name == "hit-a").unwrap();
@@ -1044,6 +1050,7 @@ fn every_action_on_a_replaced_result_refuses() {
     assert!(!d.join("a/renamed.txt").exists());
     // Batch Rename: a problem, so nothing applies.
     s.run(Cmd::BatchRename, &mut tx());
+    crate::batch::tests::settle_batch(&mut s);
     let b = s.batch.as_ref().unwrap();
     assert!(b.known());
     assert!(

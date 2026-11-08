@@ -511,7 +511,7 @@ fn ignores_case(d: &std::path::Path, names: &[OsString]) -> Option<bool> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::app::tests::{settle_all, state_in};
     use crate::commands::Cmd;
