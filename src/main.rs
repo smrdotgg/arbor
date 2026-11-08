@@ -13,6 +13,7 @@ mod noclobber;
 mod ops;
 mod palette;
 mod panes;
+mod preview;
 mod timing;
 mod trash;
 mod view;

@@ -16,6 +16,7 @@ use crate::folder::{Answer, Folder, TabMemo};
 use crate::fs::{self, Entry, Listing, Sort, SortKey};
 use crate::ops;
 use crate::palette::Palette;
+use crate::preview::{self, Preview};
 
 /// Rows a Page Up / Page Down moves.
 const PAGE: usize = 20;
@@ -113,6 +114,13 @@ pub struct State {
     /// The first folder's read request, while it's the one its pane waits for: the startup
     /// listing lands only for it, and late settings retarget only it.
     boot_req: Option<u64>,
+    /// Quick preview, while it's open (`preview.rs`). Closed, it costs nothing.
+    pub preview: Option<Preview>,
+    /// The preview panel's laid-out size in device pixels, written by the view.
+    pub preview_fit: preview::Fit,
+    /// Preview reads started and answers landed, for tests and timing.
+    pub preview_reads: u64,
+    pub preview_lands: u64,
 }
 
 impl State {
@@ -169,6 +177,10 @@ impl State {
             settings_loader: Latest::default(),
             boot: None,
             boot_req: None,
+            preview: None,
+            preview_fit: std::rc::Rc::new(std::cell::Cell::new(preview::DEFAULT_FIT)),
+            preview_reads: 0,
+            preview_lands: 0,
         };
         let f = &mut s.panes[0].f;
         match listing {
@@ -353,6 +365,9 @@ impl State {
             self.apply_settings(c, tx);
             changed = true;
         }
+        // After everything that can move the selection this frame.
+        changed |= self.sync_preview();
+        changed |= self.land_preview();
         changed
     }
 
@@ -486,6 +501,7 @@ impl State {
                 }
             }
         }
+        self.sync_preview();
         true
     }
 
@@ -524,6 +540,14 @@ impl State {
     // ---- keys and commands -----------------------------------------------------------------
 
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        let handled = self.key(ev, tx);
+        if handled {
+            self.sync_preview();
+        }
+        handled
+    }
+
+    fn key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         tx.instant();
         // While renaming, the field has the keys; only Escape (which it passes on) gets here.
         if self.rename.is_some() {
@@ -539,7 +563,12 @@ impl State {
         if self.edit_filter(ev, tx) {
             return true;
         }
-        if let Some(cmd) = self.keymap.find(|c| c.matches_tx(ev, tx)) {
+        if let Some(mut cmd) = self.keymap.find(|c| c.matches_tx(ev, tx)) {
+            // Esc closes the preview before it clears anything (the palette and a rename have
+            // had it first, above).
+            if cmd == Cmd::Clear && self.preview.is_some() {
+                cmd = Cmd::ClosePreview;
+            }
             if let Some(why) = self.unavailable(cmd) {
                 // Closing the last tab does nothing, the same on every platform: passed on, ⌘W
                 // would close the window on macOS (Rune's standard Close item).
@@ -555,7 +584,8 @@ impl State {
         }
         let f = self.cur_mut();
         match &ev.key {
-            // Space with nothing typed is free (reserved for preview later).
+            // Space with nothing typed (and Toggle Preview unbound from it) types nothing: a
+            // filter never starts with a space.
             Key::Text(t) if t == " " && f.filter.is_empty() => false,
             Key::Text(t) if !ev.mods.cmd && !ev.mods.ctrl => {
                 f.type_filter(t);
@@ -636,6 +666,9 @@ impl State {
             NextTab | PrevTab => when(pane.tabs.len() == 1, "There's only one tab here"),
             ReopenTab => when(self.closed.is_empty(), "No closed tabs to reopen"),
             OtherPane => when(!self.split(), NOT_SPLIT),
+            // Closing always works; opening needs something to show.
+            TogglePreview => when(self.preview.is_none() && nothing, "Select an item first"),
+            ClosePreview => when(self.preview.is_none(), "The preview isn't open"),
             Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
                 when(cmd.place().is_some_and(|i| i >= self.places.len()), "No sidebar place there")
             }
@@ -652,6 +685,8 @@ impl State {
             Cmd::Hidden => "Show Hidden Files".into(),
             Cmd::Split if self.split() => "Close Split View".into(),
             Cmd::Split => "Split View".into(),
+            Cmd::TogglePreview if self.preview.is_some() => "Close Preview".into(),
+            Cmd::TogglePreview => "Quick Preview".into(),
             _ => match cmd.place().and_then(|i| self.places.get(i)) {
                 Some((name, _)) => format!("Go to {name}").into(),
                 None => cmd.title().into(),
@@ -661,6 +696,11 @@ impl State {
 
     /// Runs `cmd`, from a key, the palette or the context menu. Check `unavailable` first.
     pub fn run(&mut self, cmd: Cmd, tx: &mut Tx) {
+        self.run_cmd(cmd, tx);
+        self.sync_preview();
+    }
+
+    fn run_cmd(&mut self, cmd: Cmd, tx: &mut Tx) {
         use Cmd::*;
         let page = PAGE as isize;
         match cmd {
@@ -755,6 +795,8 @@ impl State {
             ReopenTab => self.reopen_tab(tx),
             Split => self.toggle_split(tx),
             OtherPane => self.activate(1 - self.active, tx),
+            TogglePreview => self.toggle_preview(),
+            ClosePreview => self.close_preview(),
             Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
                 if let Some((_, p)) = cmd.place().and_then(|i| self.places.get(i)).cloned() {
                     self.go_to(p);
@@ -1046,6 +1088,16 @@ pub(crate) mod tests {
         assert!(s.show_hidden && s.cur().cwd == d);
         assert_eq!(s.cur().visible.len(), 4);
         assert!(s.cur().back.is_empty(), "the first folder isn't a navigation");
+    }
+
+    /// Polls as frames would until no pane is loading (or 10 s pass).
+    pub(crate) fn settle_all(s: &mut State) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while s.panes.iter().any(|p| p.f.is_loading()) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            s.poll(&mut Tx::default());
+        }
+        assert!(!s.panes.iter().any(|p| p.f.is_loading()), "never landed");
     }
 
     pub(crate) fn state_in(d: &Path) -> State {

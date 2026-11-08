@@ -16,6 +16,44 @@ Newest first.
 
 ---
 
+## Quick preview: no hook that runs after every input
+
+- **Feature:** quick preview (NORTHSTAR Core). While it's open it follows the active pane's
+  selection, however the selection moved: a key, a click on a row, a click in the other pane, a
+  listing landing, a tab shown.
+- **What Rune is missing:** a callback that's guaranteed to run after a frame's input handlers.
+  `AppSpec::poll` is documented as "called at the start of every frame", and in a frame with
+  input it does run after the handlers, except when an earlier wake's `poll` already ran for that
+  frame (`timer_wake.rs`, `frame_polled`; `frame.rs` skips `poll` when it's set). Seen under
+  Xvfb: a ↓ that arrived right after a preview landed moved the list, and the preview stayed on
+  the old file until the next event.
+- **What we did instead:** `State::sync_preview` (`src/preview.rs`) is called wherever the
+  selection can move: after every key (`State::on_key`) and command (`State::run`), when a
+  listing lands (`State::land`), when a pane is made active, closed or shows a tab
+  (`src/panes.rs`), and after a click on a row (`file_row` in `src/view.rs`). `poll` calls it too,
+  as a catch-all. Closed, each call is one `None` check.
+- **What users lose:** nothing today. The cost is fragility: a new way to move the selection
+  that forgets the call leaves the preview showing the old item until the next key, click or wake.
+- **Suggested Rune change:** run `poll` (or a new `AppSpec::after_input`) after the input
+  handlers of every frame that had input, even when a wake already polled for it; or document
+  that `poll` may not follow input, so apps know not to rely on it.
+
+## Text preview: `Family::Mono` isn't monospaced in native builds
+
+- **Feature:** quick preview of text files, shown in a monospaced font so columns and
+  indentation line up.
+- **What Rune is missing:** a monospaced font behind `TextStyle::mono()` on native platforms.
+  The `Mono` slot defaults to "IBM Plex Mono" (`text.rs`), which only web builds bundle
+  (`embedded-fonts`); natively, unless the user installed it, text falls back to Inter.
+- **What we did instead:** the preview uses `Family::SystemMono` (SF Mono or Menlo on macOS,
+  Cascadia Mono or Consolas on Windows, fontconfig's monospace on Linux), loaded the first time
+  a text preview shows (`CODE` in `src/view.rs`). The status bar's filter field still uses
+  `mono()`, and so isn't actually monospaced.
+- **What users lose:** nothing in the preview. Opening the first text preview of a session
+  spends about 8 ms more building that frame (Linux: Rune runs `fc-match` and loads the font).
+- **Suggested Rune change:** point the native `Mono` slot at the system monospaced families
+  (as `SystemMono` does) when no mono font was supplied, or bundle a mono font natively too.
+
 ## Breadcrumbs: no way to say which children shrink first
 
 - **Feature:** the path bar's breadcrumbs, in split view and narrow windows (NORTHSTAR: the

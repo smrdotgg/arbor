@@ -13,6 +13,7 @@ use crate::commands::Cmd;
 use crate::folder::{Folder, tab_label};
 use crate::fs::{self, SortKey};
 use crate::palette;
+use crate::preview::{Body, Preview};
 
 const ROW_H: f32 = 24.0;
 /// Height of the top band (path bar, and the sidebar's traffic-light strip on macOS).
@@ -31,6 +32,9 @@ const NUM: TextStyle = TextStyle::new(12.0, 400.0).features("\"tnum\"");
 const CRUMB: TextStyle = TextStyle::new(13.0, 500.0);
 const MONO: TextStyle = TextStyle::new(12.0, 400.0).mono();
 const TAB: TextStyle = TextStyle::new(12.0, 500.0);
+/// The text preview: the platform's own monospaced font (Rune's `Mono` slot is IBM Plex Mono,
+/// which native builds don't bundle). Loaded the first time a text preview shows.
+const CODE: TextStyle = TextStyle::new(12.0, 400.0).family(tok::Family::SystemMono);
 
 /// Which optional columns fit the list's width; Name always gets at least ~180 pt.
 #[derive(Clone, Copy)]
@@ -107,6 +111,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 fn root(s: &State, cx: &mut Cx<State>) -> El {
     let l = look(cx.system_dark());
     // Reads laid-out positions and sizes only; scrolling never re-runs the view.
+    // With the preview open in a split window, it takes the other pane's place (as a
+    // two-panel commander's quick view does).
+    let hidden = |ix: usize| s.preview.is_some() && ix != s.active;
     let split = match s.panes.as_slice() {
         [a, b] => {
             // Before the first layout, an empty rect: no pane to drop on yet.
@@ -120,9 +127,22 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         if ix > 0 {
             panes = panes.child(el().w(1.0).h_full().fill(l.t.separator));
         }
+        if let Some(pv) = s.preview.as_ref().filter(|_| split.is_some() && hidden(ix)) {
+            panes = panes.child(preview_panel(s, pv, l, cx, None));
+            continue;
+        }
         let w = cx.layout_size(&format!("pane-{}", p.id())).map_or(f32::MAX, |[w, _]| w);
+        // With the other pane covered by the preview, this one draws as if alone (its rows
+        // drag out to other apps; there's no pane to drop on).
+        let split = split.filter(|_| s.preview.is_none());
         let c = Ctx { id: p.id(), l, cols: Cols::for_width(w), focused: ix == s.active || split.is_none(), split, w };
         panes = panes.child(pane(s, p, c));
+    }
+    // One pane: the preview docks on its right, and the list stays usable beside it.
+    if let Some(pv) = s.preview.as_ref().filter(|_| split.is_none()) {
+        let main = cx.layout_size("panes").map_or(980.0 - SIDEBAR_W, |[w, _]| w);
+        let w = (main * 0.42).clamp(PREVIEW_MIN_W, PREVIEW_MAX_W).min(main - PREVIEW_MIN_W).round();
+        panes = panes.child(el().w(1.0).h_full().fill(l.t.separator)).child(preview_panel(s, pv, l, cx, Some(w)));
     }
     let window = row()
         .w_full()
@@ -641,6 +661,7 @@ fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
             } else {
                 f.sel = i;
             }
+            s.sync_preview();
         })
         .on_double_press_tx(move |s: &mut State, tx| {
             if in_pane(s, id, tx) && s.cur().version == version && s.rename.is_none() {
@@ -762,6 +783,115 @@ fn status(s: &State, l: Look) -> El {
     let hint = if s.show_hidden { "hidden shown" } else { "" };
     bar.child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)))
         .child(text(format!("{picked}{count}")).font(NUM).color(l.t.text_secondary))
+}
+
+/// The docked preview's width bounds (one pane).
+const PREVIEW_MIN_W: f32 = 240.0;
+const PREVIEW_MAX_W: f32 = 640.0;
+/// A text preview's line height and side padding.
+const LINE_H: f32 = 17.0;
+const LINE_PAD: f32 = 12.0;
+
+/// The quick preview panel: the item's name and what the listing knows about it at once, then
+/// its contents when the worker has them (see `preview.rs`). `width`: docked beside one pane;
+/// `None` takes the other pane's place.
+fn preview_panel(s: &State, p: &Preview, l: Look, cx: &mut Cx<State>, width: Option<f32>) -> El {
+    let mut panel = col().key("preview").h_full().min_w(0.0).fill(l.t.bg);
+    panel = match width {
+        Some(w) => panel.w(w),
+        None => panel.grow(1.0),
+    };
+    // The next image decodes to fit what's laid out now (device pixels).
+    let scale = cx.env().scale.max(1.0);
+    let body_size = cx.layout_size("preview-body");
+    if let Some([w, h]) = body_size {
+        s.preview_fit.set([(w * scale).round().max(1.0) as u32, (h * scale).round().max(1.0) as u32]);
+    }
+    let Some(t) = &p.target else {
+        return panel.center().child(text("Nothing selected").font(BODY).color(l.t.text_secondary));
+    };
+    let mut meta = vec![if t.is_dir { "Folder".to_string() } else { fs::kind_of(&t.name).to_string() }];
+    match &p.body {
+        Body::Card(c) if c.items.is_some() => {
+            let n = c.items.unwrap_or(0);
+            meta.push(format!("{n} item{}", if n == 1 { "" } else { "s" }));
+        }
+        Body::Image(img) => meta.push(format!("{} × {} {}", img.width, img.height, img.format.name())),
+        _ => {}
+    }
+    if !t.is_dir {
+        meta.push(fs::fmt_size(t.size));
+    }
+    meta.push(fs::fmt_time(t.mtime_ms, s.cur().now));
+    let mut title = row()
+        .gap(8.0)
+        .center_y()
+        .child(text(t.name.clone()).font(TextStyle::new(13.0, 600.0)).color(l.t.text).truncate_middle().grow(1.0).min_w(0.0));
+    if p.is_loading() {
+        title = title.child(text("Loading…").font(SMALL).color(l.t.text_secondary));
+    }
+    let mut head = col()
+        .key("preview-head")
+        .w_full()
+        .px(14.0)
+        .py(9.0)
+        .gap(3.0)
+        .child(title)
+        .child(text(meta.join(" · ")).font(SMALL).color(l.t.text_secondary).truncate());
+    if let Some(link) = &p.link {
+        head = head.child(text(format!("↗ {link}")).font(SMALL).color(l.t.text_secondary).truncate_middle());
+    }
+    let body = col().key("preview-body").w_full().grow(1.0).min_h(0.0);
+    let body = match &p.body {
+        Body::Empty | Body::Loading => body,
+        Body::Error(why) => body.center().px(20.0).child(text(why.clone()).font(BODY).color(l.t.text_secondary).wrap()),
+        Body::Card(c) => {
+            let mut card = body.px(14.0).py(12.0).gap(10.0);
+            if let Some(note) = &c.note {
+                card = card.child(text(note.clone()).font(BODY).color(l.t.text_secondary).wrap());
+            }
+            card
+        }
+        Body::Image(img) => {
+            // At most its own size, fitted into the body with a margin.
+            let [bw, bh] = body_size.unwrap_or([400.0, 400.0]).map(|v| (v - 24.0).max(1.0));
+            let (iw, ih) = (img.shown[0] as f32 / scale, img.shown[1] as f32 / scale);
+            let own = (img.width as f32 / scale).max(iw);
+            let k = (bw / iw).min(bh / ih).min(own / iw);
+            body.center().child(el().key("preview-image").w((iw * k).floor().max(1.0)).h((ih * k).floor().max(1.0)).pixels(&p.pixels))
+        }
+        Body::Text(t) => {
+            let mut b = body;
+            if let Some(note) = &t.note {
+                b = b
+                    .child(text(note.clone()).font(SMALL).color(l.t.text_secondary).px(LINE_PAD).py(5.0).w_full().fill(l.stripe))
+                    .child(hr(l));
+            }
+            if t.lines.is_empty() {
+                return panel.child(head).child(hr(l)).child(b);
+            }
+            let char_w = rune::text::measure("0", &[], CODE, None).0;
+            let rows = col()
+                .key("preview-lines")
+                .w_full()
+                .min_w(t.cols as f32 * char_w + 2.0 * LINE_PAD)
+                .py(6.0)
+                .growth(GrowthSpec { spring: rune::GROWTH, edge: rune::edge::NO_MASK })
+                .virtual_rows(
+                    t.lines.len(),
+                    LINE_H,
+                    |_: &State, i| Cow::Owned(format!("l{i}")),
+                    move |s: &State, i| match s.preview.as_ref().map(|p| &p.body) {
+                        Some(Body::Text(t)) => text(t.line(i).to_string()).font(CODE).color(l.t.text).h(LINE_H).px(LINE_PAD),
+                        _ => el(),
+                    },
+                )
+                .virtual_rows_version(s.preview_lands);
+            // A new file starts at the top.
+            b.child(col().key(format!("preview-text-{}", s.preview_lands)).grow(1.0).min_h(0.0).w_full().scroll_xy().child(rows))
+        }
+    };
+    panel.child(head).child(hr(l)).child(body)
 }
 
 /// Rows the palette shows before it scrolls.

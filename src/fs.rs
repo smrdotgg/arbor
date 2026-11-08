@@ -404,6 +404,14 @@ pub fn kind(e: &Entry) -> &str {
     }
 }
 
+/// A file's kind from its name, as the Kind column shows it.
+pub fn kind_of(name: &str) -> String {
+    match ext(&name.to_lowercase()) {
+        "" => "File".into(),
+        x => x.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

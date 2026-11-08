@@ -34,6 +34,7 @@ impl State {
         }
         self.active = ix;
         tx.set_title(title(&self.cur().cwd));
+        self.sync_preview();
     }
 
     /// A click in the pane with this id. False when it has closed since the frame drawn.
@@ -93,6 +94,7 @@ impl State {
         if let Some(listing) = f.request_now(wait) {
             self.land(ix, listing, tx);
         }
+        self.sync_preview();
     }
 
     /// ⌃Tab / ⌃⇧Tab: the next or previous tab of the active pane, wrapping around.
@@ -150,6 +152,7 @@ impl State {
         self.pane_drop = None;
         self.active = 0;
         tx.set_title(title(&self.cur().cwd));
+        self.sync_preview();
     }
 
     fn remember_closed(&mut self, m: TabMemo) {

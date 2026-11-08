@@ -97,6 +97,8 @@ commands! {
     SortSize "view.sort_size" "Sort by Size", [];
     SortModified "view.sort_modified" "Sort by Date Modified", [];
     SortReverse "view.sort_reverse" "Reverse Sort Order", [];
+    TogglePreview "view.preview" "Quick Preview (Toggle)", ["space"];
+    ClosePreview "view.close_preview" "Close Preview", [];
 
     NewTab "tab.new" "New Tab", ["cmd+t"];
     CloseTab "tab.close" "Close Tab", ["cmd+w"];
