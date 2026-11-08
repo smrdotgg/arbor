@@ -2,7 +2,7 @@
 //! Run through `scripts/bench.sh`, which builds first:
 //!
 //! ```text
-//! bench [RUNS] [ROUNDS] [--bin PATH] [--keep]
+//! bench [RUNS] [ROUNDS] [--bin PATH] [--keep] [--tabs N]
 //! ```
 //!
 //! Makes a folder of 10,000 entries in the temp dir, then cold-starts Arbor on it RUNS times
@@ -25,6 +25,11 @@
 //! A run counts only if Arbor exits successfully and logs its first frame and exactly ROUNDS
 //! listings and ROUNDS key presses. Otherwise the run is reported INVALID, and the bench exits
 //! non-zero after printing what it has.
+//!
+//! `--tabs N` adds N more cold starts with `ARBOR_BENCH_TABS=1`: each opens a second tab on the
+//! parent folder, then ROUNDS times shows the first tab again (a fresh read of the 10k folder,
+//! timed from the key to the frame showing it) and goes back to the second. Such a run counts
+//! only with exactly ROUNDS tab switches to the 10k folder logged.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -37,11 +42,13 @@ fn main() {
     let mut nums = Vec::new();
     let mut bin = PathBuf::from(format!("target/release/arbor{}", std::env::consts::EXE_SUFFIX));
     let mut keep = false;
+    let mut tab_runs = 0;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--bin" => bin = args.next().map(PathBuf::from).expect("--bin PATH"),
             "--keep" => keep = true,
+            "--tabs" => tab_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--tabs N"),
             n => nums.push(n.parse::<u32>().unwrap_or_else(|_| panic!("not a number: {n}"))),
         }
     }
@@ -57,7 +64,7 @@ fn main() {
     let (mut each, mut late, mut invalid) = (Vec::new(), Vec::new(), Vec::new());
     let mut first = None;
     for run in 0..runs {
-        match run_once(&bin, &big, rounds) {
+        match run_once(&bin, &big, rounds, false) {
             Ok(r) => {
                 each.push(format!("{:.0}/{:.0}", r.cold, r.main));
                 if let Some(ms) = r.first_listing {
@@ -78,19 +85,37 @@ fn main() {
             }
         }
     }
+    let (mut tab, mut same) = (Vec::new(), 0);
+    for run in 0..tab_runs {
+        match run_once(&bin, &big, rounds, true) {
+            Ok(r) => {
+                same += r.same_frame;
+                tab.extend(r.tab);
+            }
+            Err(e) => {
+                eprintln!("tab run {run}: INVALID: {e}");
+                invalid.push(runs + run);
+            }
+        }
+    }
     if !keep {
         let _ = std::fs::remove_dir_all(&root);
     }
 
     println!("{} {} · {runs} runs × {rounds} rounds · {ENTRIES} entries", std::env::consts::OS, std::env::consts::ARCH);
     println!("{:<34} {:>5} {:>9} {:>9} {:>8}  result (submission proxy)", "measure", "n", "median", "p95", "budget");
-    let rows: [(&str, &mut Vec<f64>, Option<f64>); 4] = [
+    let tabs = tab_runs > 0;
+    let rows: [(&str, &mut Vec<f64>, Option<f64>); 5] = [
         ("cold start (spawn → first frame)*", &mut cold, Some(100.0)),
         ("  of which main → first frame", &mut main, None),
         ("listing visible (10k, nav → frame)", &mut nav, Some(50.0)),
         ("key → frame (synthetic ↓)", &mut key, Some(8.0)),
+        ("tab switch to 10k (key → frame)", &mut tab, Some(50.0)),
     ];
     for (name, v, budget) in rows {
+        if v.is_empty() && name.starts_with("tab") && !tabs {
+            continue;
+        }
         if v.is_empty() {
             println!("{name:<34} {:>5}", 0);
             continue;
@@ -111,6 +136,9 @@ fn main() {
             None => (String::new(), ""),
         };
         println!("{name:<34} {:>5} {med:>6.1} ms {p95:>6.1} ms {b:>8}  {verdict}", v.len());
+    }
+    if tabs {
+        println!("tab switches whose listing was in the key's own frame: {same} of {}", tab.len());
     }
     if let Some((c, m)) = first {
         println!("* first run left out: {c:.0} ms cold, {m:.0} ms of it from main");
@@ -136,11 +164,20 @@ struct Run {
     key: Vec<f64>,
     /// When the first listing showed, if it missed the first frame (from `main`).
     first_listing: Option<f64>,
+    /// Tab switches to the 10k folder, and how many landed in the key's own frame.
+    tab: Vec<f64>,
+    same_frame: usize,
 }
 
-fn run_once(bin: &Path, dir: &Path, rounds: u32) -> Result<Run, String> {
+fn run_once(bin: &Path, dir: &Path, rounds: u32, tabs: bool) -> Result<Run, String> {
     let spawned = SystemTime::now();
-    let mut child = Command::new(bin)
+    let mut cmd = Command::new(bin);
+    if tabs {
+        cmd.env("ARBOR_BENCH_TABS", "1");
+    } else {
+        cmd.env_remove("ARBOR_BENCH_TABS");
+    }
+    let mut child = cmd
         .arg(dir)
         .env("ARBOR_BENCH", rounds.to_string())
         .env_remove("ARBOR_TIMING")
@@ -167,7 +204,8 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32) -> Result<Run, String> {
         return Err(format!("arbor exited with {status}:\n{}", lines.join("\n")));
     }
     let spawn_us = spawned.duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_micros() as f64;
-    let mut run = Run { cold: f64::NAN, main: f64::NAN, nav: Vec::new(), key: Vec::new(), first_listing: None };
+    let mut run =
+        Run { cold: f64::NAN, main: f64::NAN, nav: Vec::new(), key: Vec::new(), first_listing: None, tab: Vec::new(), same_frame: 0 };
     for line in &lines {
         let Some(rest) = line.strip_prefix("arbor-timing ") else { continue };
         let field = |k: &str| rest.split_whitespace().find_map(|f| f.strip_prefix(k)?.strip_prefix('=')?.parse::<f64>().ok());
@@ -179,6 +217,10 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32) -> Result<Run, String> {
             Some("first-listing") => run.first_listing = field("main_ms"),
             Some("nav") if field("entries").is_some_and(|n| n as usize >= ENTRIES) => run.nav.extend(field("ms")),
             Some("key") => run.key.extend(field("ms")),
+            Some("tab") if field("entries").is_some_and(|n| n as usize >= ENTRIES) => {
+                run.tab.extend(field("ms"));
+                run.same_frame += usize::from(field("same_frame") == Some(1.0));
+            }
             _ => {}
         }
     }
@@ -186,6 +228,12 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32) -> Result<Run, String> {
         return Err(format!("no first frame logged:\n{}", lines.join("\n")));
     }
     let want = rounds as usize;
+    if tabs {
+        if run.tab.len() != want {
+            return Err(format!("expected {want} tab switches to {ENTRIES} entries, got {}:\n{}", run.tab.len(), lines.join("\n")));
+        }
+        return Ok(run);
+    }
     if run.nav.len() != want || run.key.len() != want {
         return Err(format!(
             "expected {want} listings of {ENTRIES} and {want} key presses, got {} and {}:\n{}",
