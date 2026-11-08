@@ -35,18 +35,17 @@ thread (one at a time; a newer request replaces any waiting one; the result is d
 
 `ARBOR_WEBP_DIR=… cargo test --release -- --ignored --nocapture webp_decode_speed` on 4000 × 3000
 images made with Pillow 10.2 (libwebp), median of 5 whole decodes, which is the work that goes on
-after a cancel. tabot-dev was busy (load average 4–5: other agents compiling on its 4 cores), so
-two passes are given; the quieter earlier measurements below put random-pixel lossy at 63–67 ms a
-megapixel, about half of these. Peak RSS: the whole preview path (decode, then shrink to the
-panel) for one file, `/usr/bin/time -v`, against 4.8 MB for the test binary with no file.
+after a cancel. Two passes on a busy tabot-dev (load average 4–5: other agents compiling on its 4
+cores) and one on a quiet one (load 1.0). Peak RSS: the whole preview path (decode, then shrink to
+the panel) for one file, `/usr/bin/time -v`, against 4.8 MB for the test binary with no file.
 
-| 12 MP WebP | File | Decode (2 passes) | Peak RSS |
-| --- | --- | --- | --- |
-| Lossy, random pixels with alpha (worst) | 22.2 MB | 1,835 / 2,005 ms | 92 MB |
-| Lossy, random pixels | 10.1 MB | 1,519 / 1,538 ms | 78 MB |
-| Lossy, photo-like (gradients) | 57 KB | 305 / 480 ms | 60 MB |
-| Lossless, random pixels with alpha | 48.0 MB | 349 / 579 ms | 55 MB |
-| Lossless, photo-like | 4.5 KB | 84 / 121 ms | 88 MB |
+| 12 MP WebP | File | Decode, busy (2 passes) | Decode, quiet | Peak RSS |
+| --- | --- | --- | --- | --- |
+| Lossy, random pixels with alpha (worst) | 22.2 MB | 1,835 / 2,005 ms | 1,012 ms | 92 MB |
+| Lossy, random pixels | 10.1 MB | 1,519 / 1,538 ms | 956 ms | 78 MB |
+| Lossy, photo-like (gradients) | 57 KB | 305 / 480 ms | 200 ms | 60 MB |
+| Lossless, random pixels with alpha | 48.0 MB | 349 / 579 ms | 352 ms | 55 MB |
+| Lossless, photo-like | 4.5 KB | 84 / 121 ms | 82 ms | 88 MB |
 
 ## 2026-11-08, milestone 5 review fixes and Jump ranking
 

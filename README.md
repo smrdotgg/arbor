@@ -178,8 +178,8 @@ clears the filter or cancels a file operation.
   taller than 65,535 pixels, is refused with a "Too large to preview" card, so a huge image
   never takes gigabytes. WebP can't be stopped once it starts decoding (its decoder has no way
   to), so it's held to 12 megapixels (lossy, lossless and animated): a decode you've moved on
-  from still runs to the end on the preview's thread, up to about 2 s for the worst 12 MP image
-  here (random pixels; a photo-like one 0.3–0.5 s), and its result is dropped. That's an
+  from still runs to the end on the preview's thread, up to about 1 s for the worst 12 MP image
+  here (random pixels; 2 s on a loaded machine; a photo-like one 0.2 s), and its result is dropped. That's an
   exception to the "cancels it immediately" rule, signed off by the owner (NORTHSTAR.md). Larger
   ones say "Too large to preview", and so does a JPEG with over 16 MB of metadata (its markers
   are walked before it's decoded); a WebP's bitstreams are checked against its canvas before
