@@ -395,6 +395,9 @@ fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
         }
     };
     let (mut found, mut subdirs, mut seen) = (Vec::new(), Vec::new(), 0u64);
+    // Room left under the cap: a big folder hands its matches over in chunks as it's read, so
+    // they stream in, and the cap stops the read where it's reached rather than after it.
+    let mut room = walk.room();
     for de in rd {
         #[cfg(test)]
         hook::entry(&t.dir, walk.serial);
@@ -466,6 +469,13 @@ fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
             mtime_ms,
             os: t.rel.join(&os).into_os_string(),
         });
+        if found.len() >= room.min(CHUNK) {
+            walk.deliver(std::mem::take(&mut found), std::mem::take(&mut seen), false);
+            if walk.stop.load(Relaxed) {
+                break;
+            }
+            room = walk.room();
+        }
     }
     if !subdirs.is_empty() && !walk.stop.load(Relaxed) {
         walk.pending.fetch_add(subdirs.len(), Relaxed);
@@ -498,7 +508,16 @@ fn on_devices(m: Option<&std::fs::Metadata>, devices: &[u64]) -> bool {
     }
 }
 
+/// The most matches one walking thread holds before handing them over (see `read_dir`).
+const CHUNK: usize = 256;
+
 impl Walk {
+    /// How many more results fit under the cap.
+    fn room(&self) -> usize {
+        let out = self.out.lock().unwrap_or_else(|e| e.into_inner());
+        if out.d.capped { 0 } else { self.spec.max.saturating_sub(out.d.found) }
+    }
+
     /// Adds one folder's matches and count to the shared batch, and wakes the window if it has
     /// taken the last batch (and there's something to show, or progress is due).
     fn deliver(&self, mut found: Vec<Entry>, seen: u64, done: bool) {

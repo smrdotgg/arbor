@@ -846,3 +846,18 @@ fn a_recheck_stops_when_the_query_changes() {
     s.stop_background();
     assert!(!s.cur().search.as_ref().unwrap().walking());
 }
+
+/// One folder with far more matches than the cap: the walk stops reading it once the cap is
+/// reached (it used to read the whole folder, holding every match, before capping).
+#[test]
+fn the_cap_holds_inside_one_big_folder() {
+    let names: Vec<String> = (0..2500).map(|i| format!("hit-{i}")).collect();
+    let d = tree("cap-big-folder", &names.iter().map(String::as_str).collect::<Vec<_>>());
+    let (found, out) = walk_all(&d, "hit", false, false, 7);
+    assert_eq!(found.len(), 7);
+    assert!(out.capped);
+    assert!(out.visited < 100, "read {} entries for 7 results", out.visited);
+    // Under the cap, everything still comes, in chunks.
+    let (found, out) = walk_all(&d, "hit", false, false, 100_000);
+    assert_eq!((found.len(), out.visited, out.capped), (2500, 2500, false));
+}
