@@ -81,6 +81,9 @@ pub struct State {
     /// The pane a row drag between panes is over.
     pub pane_drop: Option<u64>,
     pub show_hidden: bool,
+    /// The user toggled hidden files (even back to where it was), so settings that land late
+    /// at startup leave it alone.
+    hidden_set: bool,
     pub places: Vec<(String, PathBuf)>,
     /// The last error or note, shown in the status bar until the next action.
     pub note: Option<String>,
@@ -148,6 +151,7 @@ impl State {
             lands: 0,
             pane_drop: None,
             show_hidden: config.settings.show_hidden,
+            hidden_set: false,
             places,
             note: config.summary().or(note),
             rename: None,
@@ -382,8 +386,9 @@ impl State {
     /// The settings, arriving after the window opened (a slow disk under the config folder).
     /// A folder only ever changes together with its listing: the provisional first folder is
     /// retargeted to the start folder only while its first read is still the one it waits for
-    /// (nothing shown, nobody navigated). A preference applies only where the user hasn't
-    /// changed it since the window opened on the defaults.
+    /// (nothing shown, nobody navigated). A preference applies only where the user hasn't set
+    /// it since the window opened on the defaults (even back to the default: a flag says so,
+    /// not a comparison).
     fn land_start(&mut self, start: Start) {
         let Start { config, start, places, note } = start;
         if let Some(req) = self.boot_req
@@ -395,18 +400,18 @@ impl State {
             f.cwd = start;
         }
         let (old, new) = (&self.settings, &config.settings);
-        if self.show_hidden == old.show_hidden {
+        if !self.hidden_set {
             self.show_hidden = new.show_hidden;
             for p in &mut self.panes {
                 p.f.set_hidden(new.show_hidden);
             }
         }
         for p in &mut self.panes {
-            if p.f.sort == old.sort && new.sort != old.sort {
+            if !p.f.sort_set && new.sort != old.sort {
                 p.f.sort = new.sort;
                 p.f.resort();
             }
-            for m in p.tabs.iter_mut().flatten().filter(|m| m.sort == old.sort) {
+            for m in p.tabs.iter_mut().flatten().filter(|m| !m.sort_set) {
                 m.sort = new.sort;
             }
         }
@@ -491,6 +496,7 @@ impl State {
     }
 
     pub fn toggle_hidden(&mut self) {
+        self.hidden_set = true;
         self.show_hidden = !self.show_hidden;
         let on = self.show_hidden;
         for p in &mut self.panes {
@@ -1153,6 +1159,25 @@ pub(crate) mod tests {
         s.poll(&mut Tx::default());
         assert!(s.show_hidden, "the user's ⌘. stays");
         assert_eq!(s.cur().sort, sort, "and so does their sort");
+    }
+
+    /// Toggled on and off again (or a sort changed and changed back) before the settings land:
+    /// still the user's choice, though it equals the default.
+    #[test]
+    fn late_settings_keep_a_toggle_the_user_set_back_to_the_default() {
+        let a = folder("toggle-back", 1);
+        let (send, mut s) = manual_boot();
+        let start = s.cur().sort;
+        s.toggle_hidden();
+        s.toggle_hidden();
+        s.set_sort(SortKey::Size);
+        s.set_sort(SortKey::Name); // back to name, ascending: the default
+        assert_eq!((s.show_hidden, s.cur().sort), (false, start));
+        let file = Settings { show_hidden: true, sort: Sort { key: SortKey::Kind, desc: false }, ..Settings::default() };
+        send.send(Boot::Start(Box::new(settings_for(a, file)))).unwrap();
+        s.poll(&mut Tx::default());
+        assert!(!s.show_hidden, "the user's explicit off stays");
+        assert_eq!(s.cur().sort, start, "and so does their sort");
     }
 
     #[test]

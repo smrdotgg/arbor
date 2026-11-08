@@ -52,6 +52,8 @@ pub struct TabMemo {
     pub scroll: f32,
     pub filter: String,
     pub sort: Sort,
+    /// The user chose this tab's sort (see [`Folder::sort_set`]).
+    pub sort_set: bool,
 }
 
 /// A finished read, tagged with the request that asked for it and the sort it was sorted by.
@@ -95,6 +97,9 @@ pub struct Folder {
     pub filter: String,
     pub show_hidden: bool,
     pub sort: Sort,
+    /// The user chose the sort (a header click or a sort command), even if back to the default,
+    /// so settings that land late at startup leave it alone.
+    pub sort_set: bool,
     pub back: Vec<PathBuf>,
     pub fwd: Vec<PathBuf>,
     /// Changes whenever `visible` changes, so virtual rows know their keys moved.
@@ -135,6 +140,7 @@ impl Folder {
             filter: String::new(),
             show_hidden,
             sort,
+            sort_set: false,
             back: Vec::new(),
             fwd: Vec::new(),
             version: next_version(),
@@ -233,6 +239,7 @@ impl Folder {
                 scroll: p.scroll,
                 filter: self.filter.clone(),
                 sort: self.sort,
+                sort_set: self.sort_set,
             };
         }
         let cursor = self.cursor_name();
@@ -249,6 +256,7 @@ impl Folder {
             scroll: self.scroll.get(),
             filter: self.filter.clone(),
             sort: self.sort,
+            sort_set: self.sort_set,
         }
     }
 
@@ -269,6 +277,7 @@ impl Folder {
         self.fwd = m.fwd;
         self.filter = m.filter;
         self.sort = m.sort;
+        self.sort_set = m.sort_set;
         self.scroll.set(m.scroll);
         self.pending = Some(Pending {
             req: next_request(),
@@ -284,6 +293,7 @@ impl Folder {
     /// the cursor on the same name, no history or filter.
     pub fn same_as(id: u64, other: &Folder, waker: Option<rune::Waker>) -> Folder {
         let mut f = Folder::new(id, other.cwd.clone(), other.sort, other.show_hidden, waker);
+        f.sort_set = other.sort_set;
         if other.is_loading() {
             f.request(other.cwd.clone(), Nav::Reload, Vec::new(), false);
         } else {
@@ -323,6 +333,7 @@ impl Folder {
     }
 
     pub fn set_sort(&mut self, key: SortKey) {
+        self.sort_set = true;
         self.sort = if self.sort.key == key {
             Sort { key, desc: !self.sort.desc }
         } else {
