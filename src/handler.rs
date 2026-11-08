@@ -1316,5 +1316,6 @@ mod tests {
     fn mac_reads_the_current_folder_viewer() {
         use mac::Handlers;
         eprintln!("public.folder viewer: {:?}, chosen: {:?}", mac::LaunchServices.current(), mac::LaunchServices.chosen());
+        assert_eq!(mac::bundle_id(), None, "the test binary isn't an app bundle, so Make would explain instead");
     }
 }

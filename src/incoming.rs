@@ -336,7 +336,6 @@ pub(crate) mod linux {
 mod tests {
     use super::*;
     use crate::app::tests::{settle_all, state_in};
-    use std::path::Path;
 
     #[test]
     fn file_uris_become_paths() {
@@ -412,6 +411,7 @@ mod tests {
     #[test]
     fn file_manager1_on_a_private_bus() {
         use std::io::BufRead;
+        use std::path::Path;
         let Ok(mut daemon) = std::process::Command::new("dbus-daemon")
             .args(["--session", "--nofork", "--print-address=1"])
             .stdout(std::process::Stdio::piped())
