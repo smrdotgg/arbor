@@ -5,7 +5,9 @@
 //! - Moves and renames are atomic "rename unless the target exists": `renameat2` with
 //!   `RENAME_NOREPLACE` on Linux, `renamex_np` with `RENAME_EXCL` on macOS, `MoveFileExW`
 //!   without `MOVEFILE_REPLACE_EXISTING` on Windows. A disk that doesn't support the no-replace
-//!   flag gets a fallback that still can't replace anything (see [`rename_fallback`]).
+//!   flag gets a fallback that still can't replace anything, or refuses (see
+//!   `rename_fallback`). A case-only rename takes two of these steps through a temporary name
+//!   (see [`rename`]). No plain, replacing `rename` is ever called.
 //! - File copies create the destination exclusively: `clonefile` on macOS (fails if it exists),
 //!   `CopyFileW` with "fail if exists" on Windows, `O_CREAT | O_EXCL` elsewhere.
 //!   Folders are made with `create_dir` and links with `symlink`, which fail if the name is taken.
@@ -14,17 +16,66 @@ use std::io::{self, ErrorKind};
 use std::path::Path;
 
 /// Moves `from` to `to` on the same disk, failing with `AlreadyExists` if anything is at `to`
-/// (and with the platform's cross-device error across disks).
+/// (and with the platform's cross-device error across disks). Nothing here ever calls a rename
+/// that can replace.
 ///
-/// One exception: when `to` names `from` itself (a case-only rename on a case-insensitive
-/// disk), it renames, since there's nothing else there to replace.
+/// When `to` names `from` itself (a case-only rename like `a.txt` → `A.txt` on a
+/// case-insensitive disk such as APFS or NTFS, where the no-replace rename may see `to` as
+/// taken), it goes in two no-replace steps through a temporary sibling ([`via_temp`]).
 pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    match rename_noreplace(from, to) {
+        Err(e) if e.kind() == ErrorKind::AlreadyExists && same_item(from, to) => via_temp(from, to),
+        r => r,
+    }
+}
+
+/// The no-replace rename, or on a disk without one the fallback that still can't replace.
+#[cfg(unix)]
+fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     match rename_excl(from, to) {
-        Err(e) if e.kind() == ErrorKind::AlreadyExists && same_item(from, to) => std::fs::rename(from, to),
-        #[cfg(unix)]
         Err(e) if unsupported(&e) => rename_fallback(from, to),
         r => r,
     }
+}
+
+#[cfg(not(unix))]
+fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    rename_excl(from, to)
+}
+
+/// A rename where `to` already finds `from` (another spelling of its name, or another hard
+/// link to it), in two no-replace steps: `from` → `.arbor-<random>-<name>` beside it → `to`.
+/// Neither step can replace anything. Once `from` has its temporary name, a case-insensitive
+/// disk sees `to` as free; a hard link at `to` (or anything that took `to` in between) still
+/// makes the second step fail. Then the item goes back to `from`, again without replacing; if
+/// even that name was taken meanwhile, it stays under the temporary name and the error says so.
+///
+/// Not crash-atomic: a crash between the two steps leaves the item under the temporary name in
+/// the same folder (hidden on Unix). It's out of sight, but nothing is lost or replaced.
+fn via_temp(from: &Path, to: &Path) -> io::Result<()> {
+    let tmp = temp_sibling(from)?;
+    rename_noreplace(from, &tmp)?;
+    #[cfg(test)]
+    tests::between();
+    let Err(e) = rename_noreplace(&tmp, to) else { return Ok(()) };
+    match rename_noreplace(&tmp, from) {
+        Ok(()) => Err(e),
+        Err(back) => Err(io::Error::other(format!(
+            "couldn't rename it ({e}), nor give back its old name ({back}), so it's now named “{}” in the same folder",
+            tmp.file_name().unwrap_or_default().to_string_lossy()
+        ))),
+    }
+}
+
+/// An unused-looking name beside `p` for [`via_temp`]: `.arbor-<64 random bits>-<start of its
+/// name>`, kept short so a long name can't push it past the disk's name limit.
+fn temp_sibling(p: &Path) -> io::Result<std::path::PathBuf> {
+    use std::hash::BuildHasher;
+    let name = p.file_name().ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "no file name"))?;
+    // `RandomState` is seeded randomly per process; the clock varies it per call.
+    let r = std::collections::hash_map::RandomState::new().hash_one((std::process::id(), std::time::SystemTime::now()));
+    let start: String = name.to_string_lossy().chars().take(40).collect();
+    Ok(p.with_file_name(format!(".arbor-{r:016x}-{start}")))
 }
 
 /// Whether `a` and `b` are the same item on disk (both exist and share an identity).
@@ -77,23 +128,32 @@ fn unsupported(e: &io::Error) -> bool {
 ///
 /// - Files and links: `link` (fails if `to` exists, and never follows a link), then remove the
 ///   old name. A disk without hard links can't move this way safely, so the move fails.
-/// - Folders: reserve `to` with `create_dir` (fails if it exists), then rename over that empty
-///   folder, which `rename` only replaces while it's still empty. If something lands inside it
-///   first, the rename fails and the folder is left.
+///   Not crash-atomic: a crash between the two leaves both names on the one file, a duplicate
+///   name rather than lost data.
+/// - Folders: refused. A folder can't be hard-linked, and every other way through ends in a
+///   plain `rename`, which replaces an empty folder at `to` (reserving `to` first doesn't help:
+///   another app can swap the reservation for its own empty folder in between).
 #[cfg(unix)]
 fn rename_fallback(from: &Path, to: &Path) -> io::Result<()> {
     let m = from.symlink_metadata()?;
     if m.is_dir() {
-        std::fs::create_dir(to)?;
-        return std::fs::rename(from, to).inspect_err(|_| drop(std::fs::remove_dir(to)));
+        return Err(io::Error::new(
+            ErrorKind::Unsupported,
+            "this disk can't move or rename a folder without risking replacing another one, so Arbor won't",
+        ));
     }
     match std::fs::hard_link(from, to) {
         Ok(()) => {}
         Err(e) if e.kind() == ErrorKind::AlreadyExists || is_cross_device(&e) => return Err(e),
         Err(e) => return Err(io::Error::new(e.kind(), format!("this disk can't move it without risking an overwrite ({e})"))),
     }
-    // Both names are the same file now; taking `to` away again restores where it started.
-    std::fs::remove_file(from).inspect_err(|_| drop(std::fs::remove_file(to)))
+    // Both names are the same file now; taking `to` away again (while it's still that file)
+    // restores where it started.
+    std::fs::remove_file(from).inspect_err(|_| {
+        if same_item(from, to) {
+            let _ = std::fs::remove_file(to);
+        }
+    })
 }
 
 /// Whether `e` means "that's on another disk".
@@ -143,8 +203,13 @@ fn copy_bytes(from: &Path, to: &Path) -> io::Result<()> {
     let mut dst = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(to)?;
     let done = io::copy(&mut src, &mut dst).and_then(|_| dst.set_permissions(perm));
     if done.is_err() {
+        // Only the file this made: if another app replaced it at `to` meanwhile, that stays.
+        use std::os::unix::fs::MetadataExt;
+        let ours = dst.metadata().ok().map(|m| (m.dev(), m.ino()));
         drop(dst);
-        let _ = std::fs::remove_file(to);
+        if ours.is_some() && to.symlink_metadata().ok().map(|m| (m.dev(), m.ino())) == ours {
+            let _ = std::fs::remove_file(to);
+        }
     }
     done
 }
@@ -235,13 +300,105 @@ mod tests {
         fs::write(d.join("f/x"), "x").unwrap();
         fs::create_dir(d.join("g")).unwrap();
         assert_eq!(rename_fallback(&d.join("a"), &d.join("b")).unwrap_err().kind(), ErrorKind::AlreadyExists);
-        assert_eq!(rename_fallback(&d.join("f"), &d.join("g")).unwrap_err().kind(), ErrorKind::AlreadyExists);
-        assert_eq!(rename_fallback(&d.join("f"), &d.join("b")).unwrap_err().kind(), ErrorKind::AlreadyExists);
         assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "b");
         rename_fallback(&d.join("a"), &d.join("c")).unwrap();
-        rename_fallback(&d.join("f"), &d.join("h")).unwrap();
-        assert!(!d.join("a").exists() && !d.join("f").exists());
-        assert_eq!(fs::read_to_string(d.join("h/x")).unwrap(), "x");
+        assert!(!d.join("a").exists());
+        assert_eq!(fs::read_to_string(d.join("c")).unwrap(), "a");
+        // Folders are refused, taken name or not: the only way through ends in a plain rename,
+        // which replaces an empty folder (another app's, swapped in for a reservation).
+        for to in ["g", "b", "h"] {
+            assert_eq!(rename_fallback(&d.join("f"), &d.join(to)).unwrap_err().kind(), ErrorKind::Unsupported);
+        }
+        assert_eq!(fs::read_to_string(d.join("f/x")).unwrap(), "x");
+        assert!(d.join("g").is_dir() && fs::read_dir(d.join("g")).unwrap().next().is_none());
+        assert!(!d.join("h").exists());
+    }
+
+    /// Runs `f` between the two steps of the next [`via_temp`] on this thread.
+    fn when_between(f: impl FnOnce() + 'static) {
+        BETWEEN.with_borrow_mut(|b| *b = Some(Box::new(f)));
+    }
+
+    thread_local! {
+        static BETWEEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn between() {
+        if let Some(f) = BETWEEN.with_borrow_mut(Option::take) {
+            f();
+        }
+    }
+
+    fn names(d: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    /// A case-only rename lands under the new spelling, on a case-insensitive disk (macOS and
+    /// Windows CI) as on a case-sensitive one, and leaves no temporary name behind.
+    #[test]
+    fn case_only_rename() {
+        let d = tmp("case");
+        fs::write(d.join("a.txt"), "mine").unwrap();
+        fs::create_dir(d.join("f")).unwrap();
+        rename(&d.join("a.txt"), &d.join("A.txt")).unwrap();
+        rename(&d.join("f"), &d.join("F")).unwrap();
+        assert_eq!(names(&d), ["A.txt", "F"]);
+        assert_eq!(fs::read_to_string(d.join("A.txt")).unwrap(), "mine");
+    }
+
+    /// Two hard links are one item under two names, the same escape a case-only rename takes.
+    /// Renaming one onto the other is refused and both stay (a plain rename there either did
+    /// nothing and claimed success, on Unix, or replaced the other name, on Windows).
+    #[test]
+    fn rename_onto_another_hard_link_is_refused() {
+        let d = tmp("alias");
+        fs::write(d.join("a"), "mine").unwrap();
+        fs::hard_link(d.join("a"), d.join("b")).unwrap();
+        assert_eq!(rename(&d.join("a"), &d.join("b")).unwrap_err().kind(), ErrorKind::AlreadyExists);
+        assert_eq!(names(&d), ["a", "b"]);
+        assert!(same_item(&d.join("a"), &d.join("b")));
+    }
+
+    /// Another app takes the new name between the two steps: the second step refuses, the item
+    /// goes back to its old name, and the newcomer is untouched.
+    #[test]
+    fn same_item_rename_never_replaces_what_takes_the_name_in_between() {
+        let d = tmp("alias-race");
+        fs::write(d.join("a"), "mine").unwrap();
+        fs::hard_link(d.join("a"), d.join("b")).unwrap();
+        let dd = d.clone();
+        when_between(move || {
+            fs::rename(dd.join("b"), dd.join("saved")).unwrap();
+            fs::write(dd.join("b"), "OTHER APP DATA").unwrap();
+        });
+        assert_eq!(rename(&d.join("a"), &d.join("b")).unwrap_err().kind(), ErrorKind::AlreadyExists);
+        assert_eq!(names(&d), ["a", "b", "saved"]);
+        assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "OTHER APP DATA");
+        assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "mine");
+    }
+
+    /// Both names taken between the steps: the item keeps its temporary name, and the error
+    /// says what it is.
+    #[test]
+    fn same_item_rename_says_where_it_left_the_item() {
+        let d = tmp("alias-stuck");
+        fs::write(d.join("a"), "mine").unwrap();
+        fs::hard_link(d.join("a"), d.join("b")).unwrap();
+        let dd = d.clone();
+        when_between(move || {
+            fs::remove_file(dd.join("b")).unwrap();
+            fs::write(dd.join("b"), "OTHER b").unwrap();
+            fs::write(dd.join("a"), "OTHER a").unwrap();
+        });
+        let e = rename(&d.join("a"), &d.join("b")).unwrap_err();
+        let tmp = names(&d).into_iter().find(|n| n.starts_with(".arbor-")).expect("left under its temporary name");
+        assert!(tmp.ends_with("-a"), "{tmp}");
+        assert!(e.to_string().contains(&format!("it's now named “{tmp}” in the same folder")), "{e}");
+        assert_eq!(fs::read_to_string(d.join(&tmp)).unwrap(), "mine");
+        assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "OTHER a");
+        assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "OTHER b");
     }
 
     #[test]
