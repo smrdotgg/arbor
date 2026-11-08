@@ -67,24 +67,20 @@ fn look(dark: bool) -> Look {
     }
 }
 
-/// Where the two panes start (window points), for a row dragged from one to the other. Only
-/// when split.
+/// Where the two panes are (window points: x, y, width, height), for a row dragged from one to
+/// the other. Only when split.
 #[derive(Clone, Copy)]
 struct Panes {
-    left: (f32, u64),
-    right: (f32, u64),
+    left: ([f32; 4], u64),
+    right: ([f32; 4], u64),
 }
 
 impl Panes {
-    /// The pane under window x `x`.
-    fn at(self, x: f32) -> Option<u64> {
-        if x >= self.right.0 {
-            Some(self.right.1)
-        } else if x >= self.left.0 {
-            Some(self.left.1)
-        } else {
-            None
-        }
+    /// The pane under window point `p`: inside its rect, so a release outside the window (or
+    /// over the sidebar or status bar) is over no pane.
+    fn at(self, [x, y]: [f32; 2]) -> Option<u64> {
+        let inside = |[px, py, w, h]: [f32; 4]| x >= px && x < px + w && y >= py && y < py + h;
+        [self.left, self.right].into_iter().find(|&(r, _)| inside(r)).map(|(_, id)| id)
     }
 }
 
@@ -113,8 +109,9 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
     // Reads laid-out positions and sizes only; scrolling never re-runs the view.
     let split = match s.panes.as_slice() {
         [a, b] => {
-            let x = |p: &Pane| cx.layout_with(&format!("pane-{}", p.id()), |r| r[0].round()).unwrap_or(f32::MAX);
-            Some(Panes { left: (x(a), a.id()), right: (x(b), b.id()) })
+            // Before the first layout, an empty rect: no pane to drop on yet.
+            let rect = |p: &Pane| cx.layout_with(&format!("pane-{}", p.id()), |r| r.map(f32::round)).unwrap_or_default();
+            Some(Panes { left: (rect(a), a.id()), right: (rect(b), b.id()) })
         }
         _ => None,
     };
@@ -633,7 +630,7 @@ fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
                 r = r.on_drag(move |s: &mut State, d: &mut Drag, tx| {
                     tx.instant();
                     let far = d.dx.hypot(d.dy) > DRAG_START;
-                    let over = panes.at(d.window_point()[0]).filter(|&p| p != id && far);
+                    let over = panes.at(d.window_point()).filter(|&p| p != id && far);
                     if d.phase == Phase::Up {
                         match over {
                             Some(to) if !d.cancelled() => s.drop_on_pane(id, i, version, to, tx),
@@ -838,6 +835,19 @@ mod tests {
         assert_eq!(shown(100.0), Shown::From { first: 5, ellipsis: true });
         // Not even "…" and the current folder: just the folder, which truncates.
         assert_eq!(shown(60.0), Shown::From { first: 5, ellipsis: false });
+    }
+
+    /// A release over the other pane drops there; one outside the window (past its right
+    /// edge, below it, above it) or over the sidebar drops nowhere.
+    #[test]
+    fn a_drag_lands_only_inside_a_pane() {
+        // A 980 × 620 window: sidebar to 169, panes side by side above a 28 pt status bar.
+        let panes = Panes { left: ([169.0, 0.0, 405.0, 591.0], 1), right: ([575.0, 0.0, 405.0, 591.0], 2) };
+        assert_eq!(panes.at([310.0, 77.0]), Some(1));
+        assert_eq!(panes.at([700.0, 210.0]), Some(2));
+        for outside in [[1200.0, 210.0], [700.0, 900.0], [700.0, -5.0], [100.0, 210.0], [700.0, 600.0], [980.0, 210.0]] {
+            assert_eq!(panes.at(outside), None, "{outside:?}");
+        }
     }
 
     /// With Rune's own measurement: in that same pane, the crumbs shown fit whole.
