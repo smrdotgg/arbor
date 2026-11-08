@@ -182,12 +182,17 @@ fn key_table(
             continue;
         };
         let mut chords: Vec<Chord> = Vec::new();
-        for spec in specs {
+        for &spec in &specs {
             match commands::parse_chord(spec) {
                 Ok(c) if !chords.contains(&c) => chords.push(c),
                 Ok(_) => {}
                 Err(e) => errors.push(format!("line {at}: {e}")),
             }
+        }
+        // Only `[]` unbinds: a list whose every key is a typo keeps the defaults (the typos are
+        // reported above), so a mistake never silently takes a command's keys away.
+        if chords.is_empty() && !specs.is_empty() {
+            continue;
         }
         out.push((cmd, chords, at));
     }
@@ -359,6 +364,17 @@ mod tests {
         assert_eq!(chords(&c, Cmd::Palette), ["ctrl+space"]);
         assert!(c.keymap.chords(Cmd::Palette).next().unwrap().same_keys(&commands::parse_chord("cmd+space").unwrap(), LINUX));
         assert_eq!(chords(&c, Cmd::Copy), ["cmd+c"], "unbound commands keep their defaults");
+    }
+
+    /// Only `[]` unbinds. A list whose every key is a typo is reported and keeps the defaults.
+    #[test]
+    fn a_list_of_only_typos_keeps_the_defaults() {
+        let c = Config::parse("[keys]\n\"file.trash\" = [\"cmd+nope\"]\n\"file.copy\" = []\n\"file.cut\" = [\"cmd+nah\", \"f9\"]\n", LINUX);
+        assert_eq!(chords(&c, Cmd::Trash), ["cmd+backspace", "delete"]);
+        assert!(chords(&c, Cmd::Copy).is_empty());
+        assert_eq!(chords(&c, Cmd::Cut), ["f9"]);
+        assert_eq!(c.errors.len(), 2, "{:?}", c.errors);
+        assert!(c.errors[0].starts_with("line 2: 'cmd+nope'") && c.errors[1].starts_with("line 4: 'cmd+nah'"), "{:?}", c.errors);
     }
 
     #[test]
