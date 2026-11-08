@@ -316,7 +316,8 @@ impl Compiled {
             }
         };
         let mut out = if self.case == CaseMode::Keep { changed } else { self.case.apply(&changed) };
-        if !self.include_ext && !ext.is_empty() {
+        // Its dot goes back even when nothing follows it ("a." stays "a.").
+        if !self.include_ext && stem.len() < name.len() {
             out.push('.');
             out.push_str(ext);
         }
@@ -783,6 +784,23 @@ mod tests {
 
     /// Every key while the dialog is open runs the whole plan: `cargo test --release --
     /// --ignored --nocapture plan_speed`.
+    /// A name ending in a dot keeps it: one Find doesn't match comes out byte for byte the
+    /// same, and one it does match keeps its dot.
+    #[test]
+    fn a_trailing_dot_is_kept() {
+        for name in ["a.", "a.b.", "a..", "x.tar."] {
+            assert_eq!(one(&rule("zzzz", "x"), name), name);
+        }
+        assert_eq!(one(&rule("a", "b"), "a."), "b.");
+        assert_eq!(one(&rule("", "{name}-{n}"), "a."), "a-1.");
+        let r = Rule { find: "zzzz".into(), replace: "x".into(), include_ext: true, ..Rule::default() };
+        assert_eq!(one(&r, "a."), "a.");
+        let c = rule("zzzz", "x").compile().unwrap();
+        assert_eq!(c.apply("a.", false, "Photos", 0), ("a.".to_string(), false));
+        assert_eq!(c.apply(".bashrc", false, "Photos", 0).0, ".bashrc");
+        assert_eq!(c.apply("folder.", true, "Photos", 0).0, "folder.");
+    }
+
     /// In regex mode a named group's reference is the group, before any token: `${name}`,
     /// `${ext}` and `${parent}` are what those groups matched, and tokens beside them still work.
     #[test]
