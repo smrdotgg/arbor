@@ -821,7 +821,7 @@ fn a_recheck_stops_when_the_query_changes() {
     let after = Arc::new(AtomicUsize::new(0));
     hook::RECHECK.lock().unwrap().push(hook::RecheckGate { dir: d.clone(), started, go: Some(go_rx), after: after.clone() });
     // As a finished operation in the root does.
-    s.refresh(&[(d.clone(), None)], &[]);
+    s.refresh(&[(d.clone(), None)], &[], &[]);
     started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     search(&mut s, "other");
     go.send(()).unwrap();
@@ -835,7 +835,7 @@ fn a_recheck_stops_when_the_query_changes() {
     let (go, go_rx) = channel();
     let after = Arc::new(AtomicUsize::new(0));
     hook::RECHECK.lock().unwrap().push(hook::RecheckGate { dir: d.clone(), started, go: Some(go_rx), after: after.clone() });
-    s.refresh(&[(d.clone(), None)], &[]);
+    s.refresh(&[(d.clone(), None)], &[], &[]);
     started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     s.leave_search(s.active, &mut tx());
     go.send(()).unwrap();
@@ -993,4 +993,94 @@ fn every_action_on_a_replaced_result_refuses() {
     finish_job(&mut s);
     assert!(!d.join("b/other.txt").exists(), "the unchanged one was trashed");
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "SOMEONE ELSE'S FILE");
+}
+
+/// Results of a folder read while Arbor renamed it arrive after the rename, under the old path:
+/// they're found by identity where the rename put them. A newcomer made at the old path
+/// afterwards is its own result, never mistaken for the moved one.
+#[test]
+fn results_read_before_a_rename_land_under_the_new_path() {
+    let d = tree("late-rename", &["hit-dir/hit.txt"]);
+    let mut s = state_in(&d);
+    let (started, go, left) = gate(&d.join("hit-dir"));
+    search(&mut s, "hit");
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    frames(&mut s, 3);
+    pick(&mut s, "hit-dir");
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "hit-moved".into();
+    s.commit_rename(&mut tx());
+    go.send(()).unwrap();
+    left.recv_timeout(Duration::from_secs(5)).unwrap();
+    finish_walk(&mut s);
+    frames(&mut s, 10);
+    let mut r = results(&s);
+    r.sort();
+    assert_eq!(r, ["hit-moved", "hit-moved/hit.txt"], "no row under the old path");
+    pick(&mut s, "hit-moved/hit.txt");
+    assert!(s.target_paths()[0].exists());
+}
+
+/// A trash that finishes while a newer query's walk is still reading: a result of that walk
+/// read before the trash doesn't come back as a row for an item that's gone.
+#[test]
+fn an_operation_finishing_during_a_new_walk_keeps_gone_items_out() {
+    let d = tree("op-new-walk", &["sub/hit.txt", "keep.txt"]);
+    let mut s = state_in(&d);
+    search(&mut s, "hit");
+    finish_walk(&mut s);
+    let sources = s.target_paths();
+    assert_eq!(sources, [d.join("sub/hit.txt")]);
+    let (started, go, left) = gate(&d.join("sub"));
+    search(&mut s, "*.txt");
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    s.start(crate::ops::Op::Trash { sources });
+    finish_job(&mut s);
+    frames(&mut s, 4);
+    go.send(()).unwrap();
+    left.recv_timeout(Duration::from_secs(5)).unwrap();
+    finish_walk(&mut s);
+    frames(&mut s, 10);
+    assert!(!d.join("sub/hit.txt").exists());
+    assert_eq!(results(&s), ["keep.txt"]);
+}
+
+/// A search through a symlink to a folder, and a rename made through the folder's real path
+/// (another pane): the results follow it, matched by the folders' canonical paths.
+#[cfg(unix)]
+#[test]
+fn a_change_made_through_another_path_reaches_the_search() {
+    let d = tree("alias-real", &["hit-dir/hit.txt", "other.txt"]);
+    let alias = d.with_extension("alias");
+    let _ = std::fs::remove_file(&alias);
+    std::os::unix::fs::symlink(&d, &alias).unwrap();
+    let mut s = state_in(&alias);
+    search(&mut s, "hit");
+    finish_walk(&mut s);
+    // The other pane, on the real folder, renames hit-dir.
+    s.run(Cmd::Split, &mut tx());
+    s.go(d.clone(), crate::app::Nav::New, None);
+    settle_all(&mut s);
+    let other = s.active;
+    let i = s.panes[other].f.visible.iter().position(|&i| s.panes[other].f.entries[i as usize].name == "hit-dir").unwrap();
+    s.cur_mut().select(i);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "hit-moved".into();
+    s.commit_rename(&mut tx());
+    assert!(d.join("hit-moved/hit.txt").exists());
+    s.activate(1 - other, &mut tx());
+    frames(&mut s, 10);
+    let mut r = results(&s);
+    r.sort();
+    assert_eq!(r, ["hit-moved", "hit-moved/hit.txt"]);
+    // And a trash through the real path: its row goes.
+    s.activate(other, &mut tx());
+    settle_all(&mut s);
+    let i = s.cur().visible.iter().position(|&i| s.cur().entries[i as usize].name == "hit-moved").unwrap();
+    s.cur_mut().select(i);
+    s.run(Cmd::Trash, &mut tx());
+    finish_job(&mut s);
+    s.activate(1 - other, &mut tx());
+    frames(&mut s, 10);
+    assert!(results(&s).is_empty(), "{:?}", results(&s));
 }

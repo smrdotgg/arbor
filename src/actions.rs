@@ -126,7 +126,7 @@ impl State {
             Ok(path) => {
                 self.undo.extend(Undo::new_folder(path.clone()));
                 self.rename = None;
-                self.refresh(&[(dir.clone(), self.cur().dir_id)], std::slice::from_ref(&path));
+                self.refresh(&[(dir.clone(), self.cur().dir_id)], std::slice::from_ref(&path), &[]);
                 if let Some(p) = self.cur_mut().pending.as_mut().filter(|p| p.path == dir && p.nav == Nav::Reload) {
                     p.rename = true;
                 }
@@ -193,16 +193,20 @@ impl State {
                 let f = self.cur();
                 let id = if dir == f.cwd && !f.searching() { f.dir_id } else { crate::noclobber::dir_id(&dir) };
                 // Every pane on this folder, by whatever path (a symlink to it too), and every
-                // search showing the item.
+                // search showing the item (through a symlink to its folder too: one more call
+                // here, only then, to know the folder's canonical path).
                 let new = OsString::from(new);
+                let aliased = self.panes.iter().any(|p| p.f.searching() && !from.starts_with(&p.f.cwd));
+                let canon: Vec<(PathBuf, PathBuf)> =
+                    if aliased { std::fs::canonicalize(&dir).ok().map(|c| (dir.clone(), c)).into_iter().collect() } else { Vec::new() };
                 for p in &mut self.panes {
                     if p.f.searching() {
-                        p.f.renamed_result(&from, &to);
+                        p.f.note_moves(&[(from.clone(), to.clone())], &[], &canon);
                     } else if p.f.shows(&dir, id) {
                         p.f.renamed(&old, &new);
                     }
                 }
-                self.refresh(&[(dir, id)], &[]);
+                self.refresh(&[(dir, id)], &[], &canon);
             }
             Err(e) => self.note = Some(e),
         }
@@ -257,10 +261,16 @@ impl State {
         let verb = job.verb;
         self.job = None;
         self.undo.extend(out.undo);
-        // Renamed items show under their new names at once (a fresh read follows).
-        if !out.renamed.is_empty() {
+        // Renamed and moved items show where they are now at once (a fresh read or a recheck
+        // follows); a search still walking remembers them for the batches still to come.
+        if !out.moved.is_empty() || !out.removed.is_empty() {
+            let renamed: Vec<(PathBuf, PathBuf)> = out.moved.iter().filter(|(a, b)| a.parent() == b.parent()).cloned().collect();
             for p in &mut self.panes {
-                p.f.renamed_paths(&out.renamed);
+                if p.f.searching() {
+                    p.f.note_moves(&out.moved, &out.removed, &out.canon);
+                } else {
+                    p.f.renamed_paths(&renamed);
+                }
             }
         }
         let n = out.results.len();
@@ -282,7 +292,7 @@ impl State {
             format!("{done} {n} item{}", plural(n))
         });
         self.rename = None;
-        self.refresh(&out.folders, &out.results);
+        self.refresh(&out.folders, &out.results, &out.canon);
         true
     }
 
@@ -293,13 +303,21 @@ impl State {
     /// folder; elsewhere the selection stays. A pane on its way to another folder keeps going
     /// there: its read is asked again only when that folder changed too, since it may have been
     /// read before the change.
-    pub(crate) fn refresh(&mut self, folders: &[(PathBuf, Option<crate::noclobber::FileId>)], select: &[PathBuf]) {
+    pub(crate) fn refresh(
+        &mut self,
+        folders: &[(PathBuf, Option<crate::noclobber::FileId>)],
+        select: &[PathBuf],
+        canon: &[(PathBuf, PathBuf)],
+    ) {
         for p in &mut self.panes {
             let f = &mut p.f;
-            // A search re-checks the results the change could touch, and doesn't walk again.
+            // A search re-checks the results the change could touch (through `canon`, the
+            // folders' canonical paths, also when it reached them another way), and doesn't
+            // walk again.
             if f.searching() {
-                let changed: Vec<PathBuf> = folders.iter().map(|(p, _)| p.clone()).collect();
-                f.recheck_results(&changed, select);
+                let changed: Vec<PathBuf> = folders.iter().filter_map(|(p, _)| f.root_based(p, canon)).collect();
+                let landed: Vec<PathBuf> = select.iter().filter_map(|p| f.root_based(p, canon)).collect();
+                f.recheck_results(&changed, &landed);
                 continue;
             }
             let going = f.pending.as_ref().is_some_and(|p| matches!(p.nav, Nav::New | Nav::Back | Nav::Forward));

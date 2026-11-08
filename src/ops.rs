@@ -371,9 +371,14 @@ pub struct Outcome {
     /// An undo that changed nothing because the disk changed since the operation: why.
     pub refused: Option<String>,
     pub cancelled: bool,
-    /// Items that got a new name in their own folder (a batch rename or its undo): `(from, to)`,
-    /// so panes can show them under their new names at once.
-    pub renamed: Vec<(PathBuf, PathBuf)>,
+    /// Items that moved or got a new name: `(from, to)`, so panes and searches can show them
+    /// where they are now at once.
+    pub moved: Vec<(PathBuf, PathBuf)>,
+    /// Items that went to the Trash (or are gone from where they were).
+    pub removed: Vec<PathBuf>,
+    /// Each of `folders` and its canonical path (links resolved), so a search through a
+    /// symlink to one of them knows them by its own paths.
+    pub canon: Vec<(PathBuf, PathBuf)>,
     /// The folders the operation may have changed, with their identities (links followed), so
     /// the panes showing them, by any path, read them again.
     pub folders: Vec<(PathBuf, Option<noclobber::FileId>)>,
@@ -647,7 +652,9 @@ impl<'a> Worker<'a> {
                 errors: Vec::new(),
                 refused: Some(format!("Nothing was pasted: “{}” {why}", name_of(dest))),
                 cancelled: false,
-                renamed: Vec::new(),
+                moved: Vec::new(),
+                removed: Vec::new(),
+                canon: Vec::new(),
                 folders: Vec::new(),
             };
         }
@@ -656,7 +663,7 @@ impl<'a> Worker<'a> {
 
     fn run(&mut self, op: Op) -> Outcome {
         // Identities from before: an operation never replaces the folders it works in.
-        let folders = op
+        let folders: Vec<(PathBuf, Option<noclobber::FileId>)> = op
             .folders()
             .into_iter()
             .map(|p| {
@@ -664,8 +671,18 @@ impl<'a> Worker<'a> {
                 (p, id)
             })
             .collect();
-        let mut out =
-            Outcome { results: Vec::new(), undo: None, errors: Vec::new(), refused: None, cancelled: false, renamed: Vec::new(), folders };
+        let canon = folders.iter().filter_map(|(p, _)| Some((p.clone(), std::fs::canonicalize(p).ok()?))).collect();
+        let mut out = Outcome {
+            results: Vec::new(),
+            undo: None,
+            errors: Vec::new(),
+            refused: None,
+            cancelled: false,
+            moved: Vec::new(),
+            removed: Vec::new(),
+            canon,
+            folders,
+        };
         match op {
             Op::Copy { sources, dest } => {
                 self.p.items_total.store(sources.len(), Relaxed);
@@ -700,6 +717,7 @@ impl<'a> Worker<'a> {
                         Ok(to) => {
                             if &to != src {
                                 pairs.push((to.clone(), Some(src.clone())));
+                                out.moved.push((src.clone(), to.clone()));
                             }
                             out.results.push(to);
                         }
@@ -718,8 +736,14 @@ impl<'a> Worker<'a> {
                         break;
                     }
                     match (self.trash)(src) {
-                        Ok(Some(at)) => pairs.push((at, Some(src.clone()))),
-                        Ok(None) => restorable = false,
+                        Ok(Some(at)) => {
+                            pairs.push((at, Some(src.clone())));
+                            out.removed.push(src.clone());
+                        }
+                        Ok(None) => {
+                            restorable = false;
+                            out.removed.push(src.clone());
+                        }
                         Err(e) => out.errors.push(format!("{}: {e}", name_of(src))),
                     }
                     self.p.items_done.fetch_add(1, Relaxed);
@@ -762,7 +786,9 @@ impl<'a> Worker<'a> {
                 errors: Vec::new(),
                 refused: Some(format!("Nothing was done: {}{more}", why.first().cloned().unwrap_or_default())),
                 cancelled: false,
-                renamed: Vec::new(),
+                moved: Vec::new(),
+                removed: Vec::new(),
+                canon: Vec::new(),
                 folders: Vec::new(),
             };
         }
@@ -821,6 +847,7 @@ impl<'a> Worker<'a> {
             self.before_act(&step.at);
             return match (self.trash)(&step.at) {
                 Ok(_) => {
+                    out.removed.push(step.at.clone());
                     out.results.push(step.at);
                     None
                 }
@@ -841,6 +868,7 @@ impl<'a> Worker<'a> {
                 if what == What::Trash {
                     crate::trash::forget(&step.at);
                 }
+                out.moved.push((step.at.clone(), back.clone()));
                 out.results.push(back);
                 None
             }
@@ -1241,7 +1269,7 @@ impl Worker<'_> {
         if self.rename_all(&moves, out) {
             out.results = moves.iter().map(|(_, to)| to.clone()).collect();
             out.undo = Undo::record(What::BatchRename, moves.iter().map(|(from, to)| (to.clone(), Some(from.clone()))));
-            out.renamed = moves;
+            out.moved = moves;
         }
     }
 
@@ -1259,7 +1287,7 @@ impl Worker<'_> {
         }
         if self.rename_all(&moves, out) {
             out.results = moves.iter().map(|(_, back)| back.clone()).collect();
-            out.renamed = moves;
+            out.moved = moves;
         } else {
             out.undo = Some(undo);
         }
@@ -2398,7 +2426,7 @@ mod tests {
         assert!(o.errors.is_empty() && o.refused.is_none(), "{:?} {:?}", o.errors, o.refused);
         assert_eq!(contents(&d), was(&[("a", "b"), ("b", "a"), ("y", "x"), ("z", "y"), ("n2", "c"), ("c", "n")]));
         assert_eq!(o.results.len(), 6);
-        assert_eq!(o.renamed.len(), 6);
+        assert_eq!(o.moved.len(), 6);
         // A three-way cycle.
         let d = tmp("batch-cycle");
         files(&d, &["1", "2", "3"]);
@@ -2483,7 +2511,7 @@ mod tests {
         let stop = d.join("d2");
         let hooks = Hooks { fail_rename: Some(Box::new(move |p: &Path| p == stop)), ..Hooks::default() };
         let o = run_hooked(batch(&d, &[("a", "b"), ("b", "a"), ("c", "c2"), ("d", "d2")]), fake_trash, hooks);
-        assert!(o.undo.is_none() && o.results.is_empty() && o.renamed.is_empty());
+        assert!(o.undo.is_none() && o.results.is_empty() && o.moved.is_empty());
         assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
         assert_eq!(o.errors[0], "Couldn't rename “d” to “d2”: permission denied. Nothing was renamed: every item has its old name again");
         assert_eq!(contents(&d), was(&[("a", "a"), ("b", "b"), ("c", "c"), ("d", "d")]));

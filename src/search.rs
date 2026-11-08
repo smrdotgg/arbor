@@ -164,6 +164,9 @@ struct Walk {
     /// The folders it has entered, by identity (device and inode), so one reached by two paths
     /// (a bind mount of a folder on the same disk, or one of its ancestors) is walked once.
     entered: Mutex<HashSet<crate::noclobber::FileId>>,
+    /// The root's canonical path (links resolved), found with its devices: a change made
+    /// through another path to the same folders (a symlink) is matched by it.
+    root_canon: std::sync::OnceLock<Option<PathBuf>>,
     /// Folders never entered: pseudo file systems, and on macOS the data volume's second path.
     skip: Vec<PathBuf>,
     stop: AtomicBool,
@@ -232,6 +235,7 @@ impl Pool {
             spec,
             devices: std::sync::OnceLock::new(),
             entered: Mutex::new(HashSet::new()),
+            root_canon: std::sync::OnceLock::new(),
             skip,
             stop: AtomicBool::new(false),
             pending: AtomicUsize::new(1),
@@ -285,6 +289,11 @@ impl Running {
 
     pub fn stop(&self) {
         self.walk.stop.store(true, Relaxed);
+    }
+
+    /// The root's canonical path, once the walk has looked it up.
+    pub fn root_canon(&self) -> Option<PathBuf> {
+        self.walk.root_canon.get().cloned().flatten()
     }
 
     /// How long it has been going.
@@ -386,6 +395,7 @@ fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
     let spec = &walk.spec;
     // The root's task comes first, and nothing else is queued until it has read the root.
     let devices = walk.devices.get_or_init(|| {
+        let _ = walk.root_canon.set(std::fs::canonicalize(&spec.root).ok());
         if let Some(id) = std::fs::metadata(&spec.root).ok().and_then(|m| folder_id(&spec.root, &m)) {
             walk.entered.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
         }
@@ -724,13 +734,37 @@ pub struct Search {
     /// in flight: set when a newer one replaces it, the query changes, or the search ends.
     recheck: Latest<Recheck>,
     recheck_stop: Arc<AtomicBool>,
+    /// What's waiting to be rechecked: everything since the last recheck that landed (a newer
+    /// one replaces the one in flight, so it takes over its work too).
+    pending: Pending,
+    /// Rechecks asked for: only the latest one's answer clears `pending`.
+    asked: u64,
+    /// The root's canonical path, from the walk (see [`Folder::root_based`]).
+    pub root_canon: Option<PathBuf>,
+    /// What file operations moved or removed while the walk went on (`from`, and `to` when it
+    /// stayed inside the root; paths below the root as this search spells them). A folder read
+    /// before the change can deliver its results after it, under the old paths.
+    changes: Vec<(PathBuf, Option<PathBuf>)>,
+}
+
+/// What a recheck has to look at.
+#[derive(Default)]
+struct Pending {
+    /// Folders that changed: the results in them are looked at.
+    folders: Vec<PathBuf>,
+    /// Items that landed inside the root: they join if they match.
+    landed: Vec<PathBuf>,
+    /// Results (keys) that arrived after a change and may be under an old path.
+    verify: HashSet<String>,
 }
 
 impl Search {
-    /// Stops the walk and any recheck where they are.
+    /// Stops the walk and any recheck where they are, and forgets what was waiting for one.
     pub fn stop_all(&mut self) {
         self.walk = None;
         self.recheck_stop.store(true, Relaxed);
+        self.pending = Pending::default();
+        self.changes.clear();
     }
 }
 
@@ -766,6 +800,10 @@ impl Search {
             upto: 0,
             recheck,
             recheck_stop: Arc::new(AtomicBool::new(false)),
+            pending: Pending::default(),
+            asked: 0,
+            root_canon: None,
+            changes: Vec::new(),
         }
     }
 
@@ -778,9 +816,22 @@ impl Search {
 /// put inside the root that match).
 struct Recheck {
     generation: u64,
+    /// Which recheck this answers.
+    asked: u64,
     gone: HashSet<String>,
     changed: Vec<(String, bool, u64, i64)>,
     added: Vec<Entry>,
+    /// Results found under the path a change moved them to: their new path below the root.
+    moved: Vec<(String, OsString)>,
+}
+
+/// One result a recheck looks at.
+enum Look {
+    /// The result itself: still there and still the item the walk found, or under `alt` (where
+    /// a change moved it), or gone.
+    Own { key: String, path: PathBuf, id: Option<fs::Ident>, alt: Option<PathBuf> },
+    /// A result inside a changed folder's child: gone if that child is.
+    Under { key: String, path: PathBuf },
 }
 
 /// "1,234".
@@ -825,6 +876,9 @@ impl Folder {
         }
         let Some(s) = self.search.as_mut() else { return changed };
         let Some(walk) = &s.walk else { return changed };
+        if s.root_canon.is_none() {
+            s.root_canon = walk.root_canon();
+        }
         let d = walk.take();
         let moved = !d.batch.is_empty() || d.visited != s.visited || d.done || d.error != s.error;
         s.visited = d.visited;
@@ -836,8 +890,25 @@ impl Folder {
             s.walk = None;
         }
         let resort = d.done && s.sorted;
+        // A batch after a change may hold results read before it, under old paths: those under
+        // a changed path are checked (by identity) before they can be trusted.
+        let root = self.cwd.clone();
+        let late: Vec<String> = d
+            .batch
+            .iter()
+            .filter(|e| {
+                let abs = root.join(&e.os);
+                s.changes.iter().any(|(from, to)| abs.starts_with(from) || to.as_ref().is_some_and(|t| abs.starts_with(t)))
+            })
+            .map(|e| e.key.clone())
+            .collect();
+        let verify = !late.is_empty();
+        s.pending.verify.extend(late);
         self.entries.extend(d.batch);
         self.take_in();
+        if verify {
+            self.request_recheck();
+        }
         if resort {
             // Sorted by a header click while it was walking: what came after joins the order.
             self.resort();
@@ -862,11 +933,37 @@ impl Folder {
     }
 
     /// Applies a recheck's findings, if it's for the walk on screen.
-    fn apply_recheck(&mut self, r: Recheck) -> bool {
-        if self.search.as_ref().is_none_or(|s| s.generation != r.generation) {
-            return false;
+    fn apply_recheck(&mut self, mut r: Recheck) -> bool {
+        let Some(s) = self.search.as_mut().filter(|s| s.generation == r.generation) else { return false };
+        // The latest answer covers everything that was waiting; once the walk is over too, no
+        // batch is still to come from before a change.
+        if r.asked == s.asked {
+            s.pending = Pending::default();
+            if !s.walking() {
+                s.changes.clear();
+            }
         }
         let keep = self.cursor_name();
+        // Results found where a change moved them: under their new path, unless a row for that
+        // path is already there (read after the change), when this one goes.
+        if !r.moved.is_empty() {
+            let mut have: HashSet<OsString> = self.entries.iter().map(|e| e.os.clone()).collect();
+            let moved: HashMap<String, OsString> = r.moved.drain(..).collect();
+            for e in &mut self.entries {
+                let Some(to) = moved.get(&e.key) else { continue };
+                if !have.insert(to.clone()) {
+                    r.gone.insert(e.key.clone());
+                    continue;
+                }
+                let was = std::mem::replace(&mut e.os, to.clone());
+                let name = Path::new(to).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                e.lower = name.to_lowercase();
+                e.name = name;
+                if self.marked.remove(&was) {
+                    self.marked.insert(e.os.clone());
+                }
+            }
+        }
         let changed: HashMap<&str, (bool, u64, i64)> = r.changed.iter().map(|(k, d, s, m)| (k.as_str(), (*d, *s, *m))).collect();
         let before = self.entries.len();
         let mut touched = !r.added.is_empty();
@@ -903,35 +1000,51 @@ impl Folder {
         true
     }
 
-    /// After `folders` changed on disk (each absolute) and items landed at `landed`: re-checks,
-    /// on a worker, the results the change may have touched (the root's whole walk isn't run
-    /// again). A result directly in a changed folder is looked at itself; deeper ones by their
-    /// ancestor just below it (gone means they're gone too). Landed items inside the root that
-    /// match the query join the results. The UI thread only picks the candidates.
+    /// After `folders` changed on disk and items landed at `landed` (each spelled from this
+    /// search's root, see [`Folder::root_based`]): re-checks, on a worker, the results the
+    /// change may have touched (the root's whole walk isn't run again). A result directly in a
+    /// changed folder is looked at itself, and must still be the item the walk found; deeper
+    /// ones by their ancestor just below it (gone means they're gone too). Landed items inside
+    /// the root that match the query join the results.
     pub fn recheck_results(&mut self, folders: &[PathBuf], landed: &[PathBuf]) {
+        let Some(s) = self.search.as_mut() else { return };
+        s.pending.folders.extend_from_slice(folders);
+        s.pending.landed.extend_from_slice(landed);
+        self.request_recheck();
+    }
+
+    /// Asks for a recheck of everything waiting (`Search::pending`), replacing (and stopping)
+    /// the one in flight. The UI thread only picks the candidates.
+    fn request_recheck(&mut self) {
         let root = self.cwd.clone();
         let Some(s) = self.search.as_ref() else { return };
         let Some(query) = s.parsed.clone() else { return };
         let generation = s.generation;
-        // (key, absolute path to look at, whether that's the result itself)
-        let mut look: Vec<(String, PathBuf, bool)> = Vec::new();
+        let p = &s.pending;
+        // Where a change moved `abs` to, if it did.
+        let alt = |abs: &Path| s.changes.iter().rev().find_map(|(from, to)| Some(to.as_ref()?.join(abs.strip_prefix(from).ok()?)));
+        let mut look: Vec<Look> = Vec::new();
         for e in &self.entries {
-            let rel = Path::new(&e.os);
-            let abs = root.join(rel);
-            for f in folders {
+            let abs = root.join(Path::new(&e.os));
+            if p.verify.contains(&e.key) {
+                look.push(Look::Own { key: e.key.clone(), alt: alt(&abs), path: abs, id: e.id });
+                continue;
+            }
+            for f in &p.folders {
                 let Ok(below) = abs.strip_prefix(f) else { continue };
                 let mut parts = below.components();
                 let first = parts.next();
                 match (first, parts.next()) {
-                    (Some(_), None) => look.push((e.key.clone(), abs.clone(), true)),
-                    (Some(c), Some(_)) => look.push((e.key.clone(), f.join(c), false)),
+                    (Some(_), None) => look.push(Look::Own { key: e.key.clone(), alt: None, path: abs.clone(), id: e.id }),
+                    (Some(c), Some(_)) => look.push(Look::Under { key: e.key.clone(), path: f.join(c) }),
                     _ => {}
                 }
                 break;
             }
         }
         let show_hidden = self.show_hidden;
-        let new: Vec<PathBuf> = landed
+        let new: Vec<PathBuf> = p
+            .landed
             .iter()
             .filter(|p| p.strip_prefix(&root).is_ok_and(|r| !r.as_os_str().is_empty()))
             .filter(|p| p.file_name().is_some_and(|n| query.matches_name(&n.to_string_lossy())))
@@ -945,29 +1058,49 @@ impl Folder {
         s.recheck_stop.store(true, Relaxed);
         let stop = Arc::new(AtomicBool::new(false));
         s.recheck_stop = stop.clone();
+        s.asked += 1;
+        let asked = s.asked;
         s.recheck.request_opt((look, new), move |(look, new)| {
-            let mut out = Recheck { generation, gone: HashSet::new(), changed: Vec::new(), added: Vec::new() };
+            let mut out = Recheck { generation, asked, gone: HashSet::new(), changed: Vec::new(), added: Vec::new(), moved: Vec::new() };
             let mut seen: HashMap<PathBuf, bool> = HashMap::new();
-            for (key, path, own) in look {
-                #[cfg(test)]
-                hook::recheck(&path);
+            // What's at `path`, if it's the item `id` (any item, when not known).
+            let found = |path: &Path, id: Option<fs::Ident>| path.symlink_metadata().ok().filter(|m| id.is_none() || fs::ident(m) == id);
+            let info = |key: String, path: &Path, m: &std::fs::Metadata| {
+                let target = if m.file_type().is_symlink() { std::fs::metadata(path).ok() } else { None };
+                let t = target.as_ref().unwrap_or(m);
+                let is_dir = t.is_dir();
+                (key, is_dir, if is_dir { 0 } else { t.len() }, fs::mtime(t))
+            };
+            for l in look {
                 if stop.load(Relaxed) {
                     return None;
                 }
-                if own {
-                    match path.symlink_metadata() {
-                        Ok(m) => {
-                            let target = if m.file_type().is_symlink() { std::fs::metadata(&path).ok() } else { None };
-                            let t = target.as_ref().unwrap_or(&m);
-                            let is_dir = t.is_dir();
-                            out.changed.push((key, is_dir, if is_dir { 0 } else { t.len() }, fs::mtime(t)));
+                match l {
+                    Look::Own { key, path, id, alt } => {
+                        #[cfg(test)]
+                        hook::recheck(&path);
+                        if stop.load(Relaxed) {
+                            return None;
                         }
-                        Err(_) => {
+                        if let Some(m) = found(&path, id) {
+                            out.changed.push(info(key, &path, &m));
+                        } else if let Some(alt) = alt
+                            && let Some(m) = found(&alt, id)
+                            && let Ok(rel) = alt.strip_prefix(&root)
+                        {
+                            out.moved.push((key.clone(), rel.as_os_str().to_os_string()));
+                            out.changed.push(info(key, &alt, &m));
+                        } else {
                             out.gone.insert(key);
                         }
                     }
-                } else if !*seen.entry(path.clone()).or_insert_with(|| path.symlink_metadata().is_ok()) {
-                    out.gone.insert(key);
+                    Look::Under { key, path } => {
+                        #[cfg(test)]
+                        hook::recheck(&path);
+                        if !*seen.entry(path.clone()).or_insert_with(|| path.symlink_metadata().is_ok()) {
+                            out.gone.insert(key);
+                        }
+                    }
                 }
             }
             for p in new {
@@ -980,6 +1113,46 @@ impl Folder {
             }
             Some(out)
         });
+    }
+
+    /// `p` (absolute, from a file operation or another pane) as this search spells it: under
+    /// its root as typed, or, through the canonical paths of the folders it's in (`canon`,
+    /// from the operation) and of the root, under the same folders reached another way (a
+    /// symlink to them). `None` when it's outside the root, or that can't be told.
+    pub fn root_based(&self, p: &Path, canon: &[(PathBuf, PathBuf)]) -> Option<PathBuf> {
+        if p.starts_with(&self.cwd) {
+            return Some(p.to_path_buf());
+        }
+        let root = self.search.as_ref()?.root_canon.as_ref()?;
+        let (given, c) = canon.iter().filter(|(g, _)| p.starts_with(g)).max_by_key(|(g, _)| g.as_os_str().len())?;
+        let full = c.join(p.strip_prefix(given).ok()?);
+        Some(self.cwd.join(full.strip_prefix(root).ok()?))
+    }
+
+    /// Items a file operation moved (`(from, to)`) or removed, with the canonical paths of
+    /// the folders it worked in: the results among them show where they are now at once (a
+    /// recheck follows), and a walk still going remembers them for the batches still to come.
+    pub fn note_moves(&mut self, moved: &[(PathBuf, PathBuf)], removed: &[PathBuf], canon: &[(PathBuf, PathBuf)]) {
+        if !self.searching() {
+            return;
+        }
+        let mut pairs = Vec::new();
+        let mut changes = Vec::new();
+        for (from, to) in moved {
+            let Some(from) = self.root_based(from, canon) else { continue };
+            let to = self.root_based(to, canon);
+            if let Some(to) = &to {
+                pairs.push((from.clone(), to.clone()));
+            }
+            changes.push((from, to));
+        }
+        changes.extend(removed.iter().filter_map(|r| Some((self.root_based(r, canon)?, None))));
+        if let Some(s) = self.search.as_mut()
+            && s.walking()
+        {
+            s.changes.extend(changes);
+        }
+        self.renamed_paths(&pairs);
     }
 
     /// From search results, each selected item's path and the identity the walk saw there,
@@ -1000,36 +1173,6 @@ impl Folder {
             return self.target_checks();
         }
         self.visible.get(i).map(|&e| &self.entries[e as usize]).and_then(|e| Some((self.cwd.join(&e.os), e.id?))).into_iter().collect()
-    }
-
-    /// The result at `from` was renamed to `to` (both absolute): it shows under its new name at
-    /// once, keeping its row, and so do the results inside it when it's a folder, so no row
-    /// names a path that's gone (or now another item).
-    pub fn renamed_result(&mut self, from: &Path, to: &Path) {
-        let (Ok(old), Ok(new)) = (from.strip_prefix(&self.cwd), to.strip_prefix(&self.cwd)) else { return };
-        let (old, new) = (old.to_path_buf(), new.to_path_buf());
-        let mut marked = std::mem::take(&mut self.marked);
-        for e in &mut self.entries {
-            let rel = Path::new(&e.os);
-            let moved = if rel == old {
-                let name = new.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                e.hidden = name.starts_with('.') || (e.hidden && !e.name.starts_with('.'));
-                e.lower = name.to_lowercase();
-                e.name = name;
-                new.clone()
-            } else if let Ok(below) = rel.strip_prefix(&old) {
-                new.join(below)
-            } else {
-                continue;
-            };
-            let was = std::mem::replace(&mut e.os, moved.into_os_string());
-            if marked.remove(&was) {
-                marked.insert(e.os.clone());
-            }
-        }
-        self.marked = marked;
-        let keep = self.cursor_name();
-        self.refilter(keep.as_deref());
     }
 }
 
