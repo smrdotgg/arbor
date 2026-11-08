@@ -69,7 +69,10 @@ instead of `vendor/`.
 ## Measuring speed
 
 `ARBOR_TIMING=1 arbor` logs to stderr how long the first frame took from `main`, each key press
-to its frame, and each navigation to the frame showing the new listing (`src/timing.rs`). Off,
+to its frame, and each navigation to the frame showing the new listing (`src/timing.rs`). The
+window waits at most 8 ms for the first folder; when it's slower, the listing's own frame is
+logged as `first-listing`, and `ARBOR_SLOW_FIRST_READ_MS=N` (timing only) slows that read to try
+it. All times end at frame submission, a proxy: pixels reach the screen at least a refresh later. Off,
 it costs nothing: `main` reads the variable once and Rune gets the plain callbacks and no frame
 hook. `scripts/bench.sh` cold-starts Arbor on a 10,000-entry folder several times and reports
 median and p95 against each budget. It opens and closes windows, so leave the machine alone

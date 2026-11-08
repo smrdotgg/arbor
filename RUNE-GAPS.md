@@ -65,10 +65,14 @@ Newest first.
 - **What Rune is missing:** when a frame actually reached the screen. `FrameEncoded::at()` is
   when the commands were submitted, and `presents_at()` is the display link's target, known only
   for display-paced macOS frames. It's `None` for the first frame after a key press, which is
-  exactly the one that matters. Rune reads Metal's `presentedTime` only under `--trace`
-  (`frame/present_time.rs`) and doesn't pass it to apps. Other platforms have no source at all.
+  exactly the one that matters. Rune keeps Metal's `presentedTime` timestamps for timing only
+  while tracing (`--trace`, `frame/present_time.rs`; untraced, it reads them only to keep a
+  transparent window's shadow in step, `window/create.rs`) and doesn't pass them to apps. Other
+  platforms have no source at all.
 - **What we did instead:** time to `FrameEncoded::at()` (submission) with `Tx::input_time()` as
-  the start (`src/timing.rs`). The docs and `BENCH.md` say the pixels land at the next refresh.
+  the start (`src/timing.rs`), labelled a "submission proxy" in `BENCH.md` and the bench output,
+  which claim no pass against the pixel budgets. Presentation runs two to three frames behind
+  submission (`frame/present_time.rs`).
 - **What users lose:** nothing directly, but the budget can't be verified. Measured numbers
   undercount by up to one refresh (8.3 ms at 120 Hz, 16.7 ms at 60 Hz) plus compositor latency,
   so a key press that measures 1 ms could still miss the 8 ms budget on screen.
