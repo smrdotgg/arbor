@@ -16,6 +16,32 @@ Newest first.
 
 ---
 
+## Drag between panes: a system drag can't land in the window it came from
+
+- **Feature:** split view (NORTHSTAR Core): dragging rows from one pane onto the other copies or
+  moves them, as a drop from Finder or Explorer does.
+- **What Rune is missing:** a drag that can end inside its own window. On macOS a `drag_out`
+  session offers nothing to the app's own windows (`drag_out/macos.rs`: `mask_in` answers
+  `None` for `WithinApplication`, and `mute` unregisters the app's windows' drag types for the
+  session), so the other pane's `on_drop_files` never hears it. An element with `drag_out`
+  never runs its `on_drag` on macOS, and which of the two a press becomes is fixed per element,
+  so one gesture can't be "inside the window, then out to Finder". Off macOS, `drag_out` starts
+  no system drag at all, so there's nothing to drop either.
+- **What we did instead:** while the window is split, rows drop `drag_out` and use `on_drag`,
+  Arbor's own drag inside the window: the pane under the pointer comes from the panes' laid-out
+  x (`Panes::at` and `file_row` in `src/view.rs`), the target pane gets a drop highlight, and the
+  release goes through the same code as a file drop (`State::drop_on_pane` in `src/panes.rs`:
+  same disk moves, another copies, ⌥ copies). Unsplit, rows keep `drag_out` as before. Checked
+  under X11 (Xvfb, XTest pointer).
+- **What users lose:** on macOS, while split, a row can't be dragged out to Finder or another
+  app; closing the split (⌘\\) brings that back. The in-window drag shows no drag image under the
+  pointer, only the target pane's highlight, and can't drop on a folder row in the other pane
+  (only into its folder).
+- **Suggested Rune change:** either an opt-in for a `drag_out` session to drop in its own app
+  (`DragItem::allow_in_app()`, routed to `on_drop_files` and `on_drop_hover` like any drop), or
+  let an element have both: run `on_drag` while the pointer stays in the window and start the
+  system session only when it leaves.
+
 ## Command availability: no cheap "what's on the clipboard?" check
 
 - **Feature:** the command palette and context menu dim commands that can't run right now
