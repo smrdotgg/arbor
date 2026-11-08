@@ -3025,7 +3025,7 @@ mod tests {
         let o =
             run_hooked(Op::Delete { items: doomed(&[d.join("doomed")]) }, fake_trash, Hooks { mounts: Some(mounts), ..Hooks::default() });
         assert!(o.removed.is_empty());
-        assert_eq!(o.errors, ["Skipped “doomed/mnt”: another disk is mounted there"]);
+        assert_eq!(o.errors, [format!("Skipped “{}”: another disk is mounted there", Path::new("doomed").join("mnt").display())]);
         assert_eq!(fs::read_to_string(d.join("doomed/mnt/precious")).unwrap(), "keep");
     }
 
