@@ -1,5 +1,7 @@
 //! The one kind of dialog Arbor shows (NORTHSTAR Safety #2): before anything that can't be
-//! undone, it asks, and says plainly that it can't be undone.
+//! undone, it asks, and says plainly that it can't be undone. It also asks before the two
+//! commands that change how the system opens folders (`handler.rs`), saying what changes and
+//! which command undoes it.
 //!
 //! A command that can't be undone is marked in the command table ([`Cmd::permanent`]). Running
 //! it from a key, the palette or the context menu opens this dialog instead (`State::run`), and
@@ -33,9 +35,10 @@ pub enum Button {
 pub struct Ask {
     pub cmd: Cmd,
     pub title: String,
-    /// One or two sentences, ending "This can't be undone."
+    /// One or two sentences: for what can't be undone, ending "This can't be undone."; for a
+    /// system change, what changes and how to undo it.
     pub body: String,
-    /// The destructive button's label.
+    /// The action button's label.
     pub action: &'static str,
     pub focus: Button,
     /// For a permanent delete, what it deletes (and nothing else).
@@ -55,6 +58,8 @@ impl Ask {
                 ("Clear Jump History?".to_string(), format!("Jump to Folder forgets {what}. This can't be undone."), "Clear History")
             }
             Cmd::Delete => return Ask::delete(s.cur().doomed(), None),
+            Cmd::MakeDefault => ("Make Arbor the Default for Folders?".into(), MAKE_DEFAULT.into(), "Make Default"),
+            Cmd::RestoreDefault => ("Restore the System Default for Folders?".into(), RESTORE_DEFAULT.into(), "Restore"),
             // Not permanent: never asked (see `Cmd::permanent`).
             _ => (format!("{}?", cmd.title().trim_end_matches('…')), "This can't be undone.".to_string(), "Continue"),
         };
@@ -92,6 +97,24 @@ impl Ask {
         Ask { cmd: Cmd::Delete, title, body, action: "Delete Permanently", focus: Button::Cancel, items }
     }
 }
+
+/// What "Make Arbor the Default for Folders" changes on this platform, and how to undo it.
+const MAKE_DEFAULT: &str = if cfg!(target_os = "macos") {
+    "Folders that other apps open (Open With, `open`, a download's folder) will open in Arbor. Finder still opens the desktop, the Dock's folders and \"Show in Finder\" from other apps: macOS doesn't let another app take those. To undo it, run \"Restore the System Default for Folders\"."
+} else if cfg!(windows) {
+    "Opening a folder or a drive (in Explorer, on the desktop, from other apps) and Win+E will open Arbor instead of Explorer. Only your account's settings change (a few keys under HKEY_CURRENT_USER), and what they held is saved. To undo it, run \"Restore the System Default for Folders\"."
+} else {
+    "Folders that other apps open, and \"Show in folder\" in browsers and other apps, will open in Arbor. It sets your folder default in ~/.config/mimeapps.list and adds a D-Bus file, saving what was there. To undo it, run \"Restore the System Default for Folders\"."
+};
+
+/// What "Restore the System Default for Folders" does.
+const RESTORE_DEFAULT: &str = if cfg!(target_os = "macos") {
+    "Folders will open in the app that opened them before Arbor (Finder unless you'd chosen another). You can make Arbor the default again at any time."
+} else if cfg!(windows) {
+    "Folders, drives and Win+E will open in Explorer again: your account's settings go back to what they were before Arbor changed them. You can make Arbor the default again at any time."
+} else {
+    "Folders will open in the file manager you had before Arbor, and \"Show in folder\" will stop opening Arbor. You can make Arbor the default again at any time."
+};
 
 /// The first few items' names and how many more: "“a”", "“a” and “b”", "“a”, “b”, “c” and 4 more".
 fn names(items: &[Doomed]) -> String {
@@ -247,7 +270,39 @@ mod tests {
         assert!(s.history.agg.as_ref().unwrap().is_empty());
         let permanent: Vec<Cmd> = Cmd::ALL.iter().copied().filter(|c| c.permanent()).collect();
         assert_eq!(permanent, [Cmd::ClearJump, Cmd::Delete]);
+        let asking: Vec<Cmd> = Cmd::ALL.iter().copied().filter(|c| c.asks()).collect();
+        assert_eq!(asking, [Cmd::ClearJump, Cmd::MakeDefault, Cmd::RestoreDefault, Cmd::Delete]);
+        assert!(asking.iter().all(|c| c.title().ends_with('…')), "a command that asks says so in its title");
         assert!(Cmd::ClearJump.title().ends_with('…'), "a command that asks says so in its title");
+    }
+
+    /// Changing the folder default is never silent: it asks, says what changes and how to undo
+    /// it (not "can't be undone"), and Enter on Cancel changes nothing.
+    #[test]
+    fn the_folder_default_commands_ask_and_say_how_to_undo() {
+        let (d, mut s) = folder_of("default", &["a"]);
+        let mut tx = Tx::default();
+        s.run(Cmd::MakeDefault, &mut tx);
+        let a = s.asking.as_ref().expect("it asks");
+        assert_eq!((a.title.as_str(), a.action, a.focus), ("Make Arbor the Default for Folders?", "Make Default", Button::Cancel));
+        assert!(
+            a.body.contains("To undo it, run \"Restore the System Default for Folders\"") && !a.body.contains("can't be undone"),
+            "{}",
+            a.body
+        );
+        assert!(s.on_key(&key(Key::Enter), &mut tx));
+        assert!(s.asking.is_none() && s.note.is_none(), "Cancel changed nothing");
+        s.run(Cmd::RestoreDefault, &mut tx);
+        assert_eq!(s.asking.as_ref().unwrap().title, "Restore the System Default for Folders?");
+        // The button runs it on a worker; tests never touch the real system.
+        s.answer(true, &mut tx);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while s.note.as_deref() == Some("Restoring the system default for folders…") && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            s.poll(&mut tx);
+        }
+        assert_eq!(s.note.as_deref(), Some("The default for folders isn't changed in tests or headless runs"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn settle_job(s: &mut State) {

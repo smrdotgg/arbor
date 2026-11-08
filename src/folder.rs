@@ -25,6 +25,8 @@ pub enum Nav {
     Reload,
     /// A hidden tab becoming visible: no history change, its filter kept, its scroll restored.
     Show,
+    /// Opened for another app (`incoming.rs`): like `New`, but the tab's history starts here.
+    Fresh,
 }
 
 pub(crate) struct Pending {

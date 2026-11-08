@@ -46,6 +46,12 @@ impl Cmd {
         matches!(self, Cmd::ClearJump | Cmd::Delete)
     }
 
+    /// Commands that ask first: the permanent ones, and those that change how the system
+    /// behaves (undone by their counterpart, which the dialog names).
+    pub fn asks(self) -> bool {
+        self.permanent() || matches!(self, Cmd::MakeDefault | Cmd::RestoreDefault)
+    }
+
     /// The keys it has on `platform` when the settings file doesn't bind it, in settings
     /// syntax. Most keys are the same everywhere; a few follow each platform's convention
     /// (Delete Permanently is ⌥⌘⌫ on macOS, as in Finder, and Shift+Delete elsewhere, as in
@@ -92,6 +98,8 @@ commands! {
     Palette "app.palette" "Command Palette", ["cmd+k", "cmd+shift+p"];
     OpenSettings "app.settings" "Open Settings File", ["cmd+comma"];
     ReloadSettings "app.reload_settings" "Reload Settings", [];
+    MakeDefault "app.make_default" "Make Arbor the Default for Folders…", [];
+    RestoreDefault "app.restore_default" "Restore the System Default for Folders…", [];
     Clear "app.clear" "Clear Filter and Selection", ["escape"];
 
     Copy "file.copy" "Copy", ["cmd+c"];

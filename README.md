@@ -492,6 +492,8 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Command Palette | ⌘K, ⇧⌘P | Ctrl+K, Ctrl+Shift+P | `app.palette` |
 | Open Settings File | ⌘, | Ctrl+, | `app.settings` |
 | Reload Settings |  |  | `app.reload_settings` |
+| Make Arbor the Default for Folders… |  |  | `app.make_default` |
+| Restore the System Default for Folders… |  |  | `app.restore_default` |
 | Clear Filter and Selection | ⎋ | Esc | `app.clear` |
 | Copy | ⌘C | Ctrl+C | `file.copy` |
 | Cut | ⌘X | Ctrl+X | `file.cut` |

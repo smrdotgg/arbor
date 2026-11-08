@@ -179,8 +179,10 @@ dependencies = [
  "png",
  "regex-lite",
  "rune",
+ "tokio",
  "toml_edit",
  "windows-sys 0.59.0",
+ "zbus 6.1.0",
 ]
 
 [[package]]

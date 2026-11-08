@@ -160,6 +160,10 @@ pub struct State {
     /// A go-to's look at what's at its path (on a worker), and which go-to is waited for.
     path_check: Latest<(u64, PathBuf, PathKind)>,
     pub(crate) going_to: Option<u64>,
+    /// "Make Arbor the Default for Folders" or its restore, running on a worker (`handler.rs`).
+    handler_job: Latest<Result<String, String>>,
+    /// Requests from other apps shown so far (`incoming.rs`).
+    pub(crate) external_shows: u64,
 }
 
 /// What's at a typed path.
@@ -267,6 +271,8 @@ impl State {
             search_pool: None,
             path_check: Latest::default(),
             going_to: None,
+            handler_job: Latest::default(),
+            external_shows: 0,
         };
         let f = &mut s.panes[0].f;
         match listing {
@@ -304,6 +310,7 @@ impl State {
         self.settings_loader.set_waker(waker.clone());
         self.history.waker = Some(waker.clone());
         self.path_check.set_waker(waker.clone());
+        self.handler_job.set_waker(waker.clone());
         if let Some(b) = &self.boot
             && let Ok(mut w) = b.waker.lock()
         {
@@ -471,6 +478,10 @@ impl State {
             self.went_path(a);
             changed = true;
         }
+        if let Some(r) = self.handler_job.take() {
+            self.note = Some(r.unwrap_or_else(|e| e));
+            changed = true;
+        }
         changed |= self.poll_history();
         changed |= self.poll_search();
         changed |= self.poll_batch();
@@ -588,11 +599,15 @@ impl State {
                         f.fwd.pop();
                         f.back.push(old);
                     }
+                    Nav::Fresh => {
+                        f.back.clear();
+                        f.fwd.clear();
+                    }
                     Nav::Reload | Nav::Show => {}
                 }
                 f.entries = entries;
                 f.now = crate::folder::now();
-                let navigated = matches!(p.nav, Nav::New | Nav::Back | Nav::Forward);
+                let navigated = matches!(p.nav, Nav::New | Nav::Back | Nav::Forward | Nav::Fresh);
                 if navigated {
                     f.filter.clear();
                     // For Jump: one message to the history's writer, no disk I/O here.
@@ -882,6 +897,7 @@ impl State {
             }
             // Always available.
             NewFolder => when(searching, "Leave the search (Esc) to make a folder here"),
+            MakeDefault | RestoreDefault => when(self.handler_job.is_pending(), "Already changing the default for folders"),
             GoTo | Reload | Reveal | Palette | OpenSettings | ReloadSettings | CopyPath | Hidden | SortReverse | NewTab | Split
             | ClearJump | Search => None,
         }
@@ -906,8 +922,9 @@ impl State {
 
     /// Runs `cmd`, from a key, the palette or the context menu. Check `unavailable` first.
     pub fn run(&mut self, cmd: Cmd, tx: &mut Tx) {
-        // What can't be undone asks first; only the dialog's button runs it (`run_permanent`).
-        if cmd.permanent() {
+        // What can't be undone, or changes the system, asks first; only the dialog's button runs
+        // it (`run_permanent`).
+        if cmd.asks() {
             self.ask(cmd, tx);
             return;
         }
@@ -960,6 +977,8 @@ impl State {
             SelectKind => self.select_kind(tx),
             OpenSettings => self.open_settings(),
             ReloadSettings => self.reload_settings(),
+            MakeDefault => self.change_default(crate::handler::Change::Make),
+            RestoreDefault => self.change_default(crate::handler::Change::Restore),
             Clear => {
                 if let Some(job) = &self.job {
                     job.cancel();
@@ -1075,6 +1094,16 @@ impl State {
                 Ok(()) => format!("Opened {} · run Reload Settings after saving", fs::pretty(&p)),
                 Err(e) => format!("Settings are in {} (couldn't open it: {e})", fs::pretty(&p)),
             },
+        });
+    }
+
+    /// Makes Arbor the default for folders, or puts the old default back, on a worker: it
+    /// writes files, the registry or LaunchServices. Confirmed in the dialog first.
+    pub fn change_default(&mut self, change: crate::handler::Change) {
+        self.handler_job.request(change, crate::handler::run);
+        self.note = Some(match change {
+            crate::handler::Change::Make => "Making Arbor the default for folders…".into(),
+            crate::handler::Change::Restore => "Restoring the system default for folders…".into(),
         });
     }
 

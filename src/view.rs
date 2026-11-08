@@ -1379,8 +1379,16 @@ fn confirm_view(a: &crate::confirm::Ask, l: Look) -> El {
             .cursor(Cursor::Pointer)
             .on_press_tx(move |s: &mut State, tx| s.answer(yes, tx))
             .child(text(label).font(TextStyle::new(13.0, 500.0)).color(if yes { Color::WHITE } else { l.t.text }));
-        let b = if yes { b.fill(red()) } else { b.fill(l.t.control_off).hover(l.t.hover) };
-        if focused { b.border(2.0, l.accent) } else { b }
+        // Red only for what can't be undone; a system change that can be (the folder default)
+        // gets the accent, and its focus ring the text colour so it still shows.
+        let permanent = a.cmd.permanent();
+        let b = match (yes, permanent) {
+            (true, true) => b.fill(red()),
+            (true, false) => b.fill(l.accent),
+            _ => b.fill(l.t.control_off).hover(l.t.hover),
+        };
+        let ring = if yes && !permanent { l.t.text } else { l.accent };
+        if focused { b.border(2.0, ring) } else { b }
     };
     // A focusable card that owns its keys: Rune focuses it when the modal opens, and its keys
     // come before Rune's focus navigation, so Tab, ← → and Enter are the dialog's

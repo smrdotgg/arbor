@@ -3,6 +3,10 @@
 //! Fast by being simple: one folder read per navigation (on a worker, so a slow disk never
 //! blocks the window), only the visible rows are built, and nothing animates or caches.
 
+// Windows: a window, not a console, when started from Explorer (release builds; debug builds
+// keep the console for logs).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod actions;
 mod app;
 mod batch;
@@ -12,6 +16,8 @@ mod confirm;
 mod delete;
 mod folder;
 mod fs;
+mod handler;
+mod incoming;
 mod jump;
 mod menu;
 mod noclobber;
@@ -33,12 +39,25 @@ use rune::{App, AppSpec, Chrome};
 use app::State;
 
 fn main() {
+    // For uninstallers: put back the folder default Arbor replaced, without opening a window.
+    if std::env::args_os().nth(1).is_some_and(|a| a == "--restore-folder-default") {
+        match handler::run(handler::Change::Restore) {
+            Ok(m) => println!("{m}"),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // ARBOR_TIMING / ARBOR_BENCH, read once. Off, Rune gets the plain callbacks and no frame hook.
     let timed = timing::init();
     // Both overlap the platform's app launch (about 80 ms on macOS before the window is made):
     // the GPU device and shaders, and the first folder's read.
     rune::prewarm_gpu();
     app::read_first_folder();
+    // Linux: the window's app id (Wayland) and WM_CLASS (X11), matching arbor.desktop.
+    rune::set_app_id("arbor");
     let mut spec = AppSpec::<State> {
         min_size: Some((520.0, 320.0)),
         setup: Some(|s, waker| s.setup(waker)),
@@ -63,6 +82,9 @@ fn main() {
     });
     if timing::benching() {
         app = app.open_inactive(); // the bench never takes focus from what the user is doing
+    } else if rune::tooling::headless_run().is_none() {
+        // Folders other apps ask for while Arbor runs (or that launched it).
+        incoming::listen(app.handle());
     }
     if timed {
         app.on_frame_encoded(timing::frame).run()
