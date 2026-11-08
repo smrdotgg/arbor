@@ -38,6 +38,9 @@ fn main() {
     // macOS: content runs under a transparent titlebar; the traffic lights sit in the sidebar's
     // top band and the path bar is the drag region. Other platforms keep their native frame.
     let chrome = Chrome { full_size_content: true, traffic_lights: Some((14.0, view::BAR_H / 2.0 - 7.0)), drag_regions: true };
-    let app = App::new(spec).chrome(chrome);
+    let mut app = App::new(spec).chrome(chrome);
+    if timing::benching() {
+        app = app.open_inactive(); // the bench never takes focus from what the user is doing
+    }
     if timed { app.on_frame_encoded(timing::frame).run() } else { app.run() }
 }

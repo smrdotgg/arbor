@@ -22,7 +22,8 @@
 //! `ARBOR_BENCH=N` (implies timing) drives the app itself: after the first frame it does N
 //! rounds of "go to the parent, come back, press ↓", each step started by the previous step's
 //! frame (no timers), then quits. The ↓ is synthetic, so its `key` time starts when the handler
-//! is called rather than at an OS event.
+//! is called rather than at an OS event. The window opens without taking focus and ignores real
+//! keys, so typing in another app while it runs can't reach it (and its ⌘⌫ can't trash anything).
 //!
 //! Off, nothing here runs: `main` reads the two variables once and, unless one is set, hands
 //! Rune the plain callbacks and registers no frame hook. No flag is checked per frame or per key.
@@ -60,6 +61,11 @@ thread_local! {
     static BENCH: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
 }
 
+/// Whether `ARBOR_BENCH` is driving the app (after `init`).
+pub fn benching() -> bool {
+    BENCH.get() != (0, 0)
+}
+
 /// Reads `ARBOR_TIMING` and `ARBOR_BENCH` once. True when timing is on.
 pub fn init() -> bool {
     let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty() && v != "0");
@@ -88,6 +94,9 @@ pub fn setup(s: &mut State, waker: rune::Waker) {
 }
 
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if benching() {
+        return true; // only the bench's own keys
+    }
     let t = tx.input_time().unwrap_or_else(Instant::now);
     keyed(s, ev, tx, t)
 }
@@ -187,7 +196,7 @@ pub fn frame(f: &FrameEncoded) {
             eprintln!("arbor-timing nav ms={:.2} entries={n} {split}", ms(t));
         }
     }
-    if BENCH.get() != (0, 0)
+    if benching()
         && let Some(w) = WAKER.get()
     {
         w();

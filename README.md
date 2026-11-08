@@ -19,10 +19,18 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
 - **File operations never block and never overwrite.** Copies and moves run on a worker with
   progress in the status bar (Esc cancels). A name that's taken gets a free one instead:
   "name copy" in the same folder, "name 2" elsewhere. On APFS, copies are clones (instant).
+- **Undo refuses rather than guesses.** When an operation finishes, each result gets a
+  fingerprint: identity (device and inode; creation time on Windows), type, size and modified
+  time. For copies and new folders, which undo sends to the Trash, it also covers everything
+  inside. Before undoing, the worker re-checks every item. If anything was moved, deleted,
+  replaced or edited, or its spot is taken, nothing is undone and the status bar says which
+  item changed and how. A refused or failed undo stays on the stack. A partly failed one keeps
+  only what didn't go back.
 
-About 2,300 lines in `src/`: `fs.rs` (reading folders, opening files), `ops.rs` (copy, move,
-trash and undo on a worker), `trash.rs` (each platform's trash), `app.rs` (state, selection,
-keys), `actions.rs` (clipboard, rename, drag and drop, context menu) and `view.rs` (UI).
+About 3,200 lines in `src/` (a third of it tests): `fs.rs` (reading folders, opening files),
+`ops.rs` (copy, move, trash and undo on a worker), `trash.rs` (each platform's trash), `app.rs`
+(state, selection, keys), `actions.rs` (clipboard, rename, drag and drop, context menu),
+`view.rs` (UI) and `timing.rs` (opt-in speed measurement).
 
 ## Run
 
@@ -43,6 +51,16 @@ CI (`.github/workflows/ci.yml`) runs on every push and pull request on macOS, Li
 plus `cargo fmt --check` on Linux. It clones Rune at `RUNE_REV` and gets crates from crates.io
 instead of `vendor/`.
 
+## Measuring speed
+
+`ARBOR_TIMING=1 arbor` logs to stderr how long the first frame took from `main`, each key press
+to its frame, and each navigation to the frame showing the new listing (`src/timing.rs`). Off,
+it costs nothing: `main` reads the variable once and Rune gets the plain callbacks and no frame
+hook. `scripts/bench.sh` cold-starts Arbor on a 10,000-entry folder several times and reports
+median and p95 against each budget. It opens and closes windows, so leave the machine alone
+while it runs. `cargo test --release -- --ignored --nocapture list_10k` times reading and
+sorting alone. Results are in [`BENCH.md`](BENCH.md).
+
 ## Keys
 
 | Key | Action |
@@ -62,7 +80,7 @@ instead of `vendor/`.
 | F2 or ⇧⌘R | Rename inline (the name before the extension is selected). Enter saves, Esc cancels |
 | ⇧⌘N | New folder (starts renaming it) |
 | ⌘⌫ or Delete | Move to Trash |
-| ⌘Z | Undo the last rename, move, copy, trash or new folder |
+| ⌘Z | Undo the last rename, move, copy, trash or new folder (refuses if any item changed since) |
 | ⌘R | Reload |
 | ⇧⌘C | Copy the selected path as text |
 | ⌘O | Open |
@@ -90,7 +108,8 @@ All three build, pass tests and pass clippy in CI. How much has been run for rea
   passes tests in CI but **has never been run**: everything at runtime is unchecked.
 
 Trash uses NSFileManager on macOS, the freedesktop.org spec on Linux, and the Recycle Bin on
-Windows. Undoing a trash puts the item back on macOS and Linux. Windows doesn't report where
+Windows. Undoing a trash puts the item back on macOS and Linux (on Linux its `.trashinfo` is
+removed too). Windows doesn't report where
 the item went, so restore it from the Recycle Bin there.
 
 ## Not yet
