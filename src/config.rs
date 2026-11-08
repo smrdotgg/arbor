@@ -5,14 +5,19 @@
 //!   elsewhere `$XDG_CONFIG_HOME/arbor/config.toml` (default `~/.config/arbor/config.toml`).
 //!   `RUNE_DIRS_ROOT` moves it under `<root>/config/` for tests (Rune's `dirs`).
 //! - Read once at startup, on the thread that reads the first folder (`app::read_first_folder`),
-//!   so it overlaps the platform's launch. Nothing watches it: "Reload Settings" reads it again.
+//!   so it overlaps the platform's launch; the window waits for it only briefly
+//!   (`app::FIRST_PAINT_WAIT`) and applies it when it lands. Nothing watches it: "Reload
+//!   Settings" reads it again, on a worker. Only a regular file up to [`MAX_BYTES`] is read,
+//!   without ever blocking on the open (`read_text`).
 //! - Errors never stop Arbor: each is reported with its line, everything valid applies, and the
 //!   rest keeps its default. A line that doesn't parse as TOML is skipped and the rest re-read.
 //! - Keybindings: `[keys]` maps a command id to its chords, which replace the defaults (`[]`
-//!   unbinds). A chord bound to two commands goes to the one bound later: a binding in the file
-//!   takes the chord from another command's defaults, and a later line takes it from an earlier
-//!   line, which is reported. Later wins everywhere (as in VS Code and Vim), so adding a line at
-//!   the bottom always does what it says.
+//!   unbinds; a list whose every chord is a typo keeps the defaults). A chord bound to two
+//!   commands goes to the one bound later: a binding in the file takes the chord from another
+//!   command's defaults, and a later line takes it from an earlier line, which is reported.
+//!   Chords are compared as they'll be pressed here, so off macOS `cmd+g` and `ctrl+g` are one
+//!   chord. Later wins everywhere (as in VS Code and Vim), so adding a line at the bottom always
+//!   does what it says.
 
 use std::path::{Path, PathBuf};
 
@@ -69,11 +74,13 @@ impl Config {
         }
     }
 
+    /// Reads and parses the file at `path`; anything wrong with it is an error in the result
+    /// and the defaults apply. Never blocks on something that isn't a file (see [`read_text`]).
     pub fn read(path: &Path) -> Config {
-        match std::fs::read_to_string(path) {
-            Ok(text) => Config::parse(&text, KeyPlatform::current()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
-            Err(e) => Config { errors: vec![format!("can't read {}: {e}", fs::pretty(path))], ..Config::default() },
+        match read_text(path) {
+            Ok(Some(text)) => Config::parse(&text, KeyPlatform::current()),
+            Ok(None) => Config::default(),
+            Err(e) => Config { errors: vec![e], ..Config::default() },
         }
     }
 
@@ -111,6 +118,48 @@ impl Config {
         errors.sort_by_key(|e| e.strip_prefix("line ").and_then(|r| r.split(':').next()).and_then(|n| n.parse::<usize>().ok()));
         Config { settings, keymap, errors }
     }
+}
+
+/// The largest settings file Arbor reads. The template is about 6 KB, and one binding every
+/// command many times over is still far under this; a bigger file is a mistake, and reading
+/// and parsing it would hold up startup or Reload.
+pub const MAX_BYTES: u64 = 1 << 20;
+
+/// The settings file's text, `None` when there's none. Only a regular file (or a link to one)
+/// up to [`MAX_BYTES`] is read: a FIFO or device there could block forever and a huge file would
+/// take long, so both are refused with a message. The open doesn't block either (`O_NONBLOCK`,
+/// in case the file is swapped for a FIFO after the check), and what it opened is checked again.
+fn read_text(path: &Path) -> Result<Option<String>, String> {
+    use std::io::Read;
+    let name = fs::pretty(path);
+    let not_a_file = || format!("{name} isn't a regular file, so it was ignored");
+    let too_big =
+        |n: u64| format!("{name} is {} KB, more than the {} KB a settings file can be, so it was ignored", n / 1024, MAX_BYTES / 1024);
+    let m = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("can't read {name}: {e}")),
+    };
+    if !m.is_file() {
+        return Err(not_a_file());
+    }
+    if m.len() > MAX_BYTES {
+        return Err(too_big(m.len()));
+    }
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NONBLOCK);
+    let f = open.open(path).map_err(|e| format!("can't read {name}: {e}"))?;
+    if !f.metadata().is_ok_and(|m| m.is_file()) {
+        return Err(not_a_file());
+    }
+    let mut bytes = Vec::new();
+    f.take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|e| format!("can't read {name}: {e}"))?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(too_big(bytes.len() as u64));
+    }
+    String::from_utf8(bytes).map(Some).map_err(|_| format!("{name} isn't text (UTF-8), so it was ignored"))
 }
 
 const GENERAL: [&str; 5] = ["show_hidden", "sort", "sort_descending", "start_folder", "places"];
@@ -409,6 +458,58 @@ mod tests {
         assert_eq!(chords(&c, Cmd::Cut), ["f9"]);
         assert_eq!(c.errors.len(), 2, "{:?}", c.errors);
         assert!(c.errors[0].starts_with("line 2: 'cmd+nope'") && c.errors[1].starts_with("line 4: 'cmd+nah'"), "{:?}", c.errors);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("arbor-cfg-io-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Reads `path` on another thread; panics if that takes over 2 s (it would hang on a FIFO).
+    fn read_soon(path: PathBuf) -> Config {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(Config::read(&path)));
+        rx.recv_timeout(std::time::Duration::from_secs(2)).expect("reading the settings blocked")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_settings_path_is_refused_without_blocking() {
+        let p = scratch("fifo").join("config.toml");
+        let c = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let cfg = read_soon(p);
+        assert!(cfg.errors[0].ends_with("isn't a regular file, so it was ignored"), "{:?}", cfg.errors);
+        assert!(!cfg.settings.show_hidden);
+    }
+
+    #[test]
+    fn a_folder_or_huge_file_is_refused() {
+        let d = scratch("big");
+        let cfg = read_soon(d.clone());
+        assert!(cfg.errors[0].contains("isn't a regular file"), "{:?}", cfg.errors);
+        let p = d.join("config.toml");
+        let mut text = String::from("[general]\nshow_hidden = true\n");
+        text.push_str(&"#".repeat(MAX_BYTES as usize));
+        std::fs::write(&p, &text).unwrap();
+        let cfg = read_soon(p.clone());
+        assert!(cfg.errors[0].contains("more than the 1024 KB a settings file can be"), "{:?}", cfg.errors);
+        assert!(!cfg.settings.show_hidden, "nothing in it applies");
+        // Up to the limit is read.
+        text.truncate(MAX_BYTES as usize);
+        std::fs::write(&p, &text).unwrap();
+        let cfg = read_soon(p);
+        assert!(cfg.errors.is_empty() && cfg.settings.show_hidden, "{:?}", cfg.errors);
+    }
+
+    #[test]
+    fn a_binary_file_is_refused() {
+        let p = scratch("bin").join("config.toml");
+        std::fs::write(&p, b"\x80\xff").unwrap();
+        let cfg = read_soon(p);
+        assert!(cfg.errors[0].ends_with("isn't text (UTF-8), so it was ignored"), "{:?}", cfg.errors);
     }
 
     #[test]

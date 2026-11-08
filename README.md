@@ -183,11 +183,14 @@ places = ["~", "~/Projects", "/"]   # sidebar places, replacing the automatic li
 
 In a key, `cmd` is ⌘ on macOS and Ctrl elsewhere; `ctrl`, `alt` (`option`), `shift` and
 `super` name those keys. A binding takes its key from any command that had it by default, and if
-two lines bind the same key the later one gets it (and the status bar says so). Mistakes never
-stop Arbor: the status bar shows the first one ("Settings: line 12: unknown command
-'file.trahs' (did you mean 'file.trash'?)"), everything valid still applies, and the rest keeps
-its default. A line that isn't valid TOML is skipped. The file is read once at startup, on the
-thread that reads the first folder, so it costs nothing on the way to the first frame.
+two lines bind the same key the later one gets it (and the status bar says so). Off macOS
+`cmd+g` and `ctrl+g` are the same key. Only `[]` unbinds: a list whose keys are all typos keeps
+the defaults. Mistakes never stop Arbor: the status bar shows the first one ("Settings: line 12:
+unknown command 'file.trahs' (did you mean 'file.trash'?)"), everything valid still applies, and
+the rest keeps its default. A line that isn't valid TOML is skipped. The file is read at
+startup on the thread that reads the first folder, and by Reload Settings on a worker, so it
+never holds up the window. Only a regular file up to 1 MB is read; anything else (a folder, a
+pipe, a huge file) is reported and ignored.
 
 
 ## Platform notes

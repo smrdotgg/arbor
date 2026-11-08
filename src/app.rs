@@ -94,6 +94,8 @@ pub struct State {
     pub(crate) job_seen: (u64, usize),
     pub(crate) waker: Option<rune::Waker>,
     loader: Latest<Listing>,
+    /// "Reload Settings", reading the file on a worker.
+    settings_loader: Latest<Config>,
     pending: Option<Pending>,
     /// The startup read, while the settings or first listing haven't landed yet.
     boot: Option<Booting>,
@@ -155,6 +157,7 @@ impl State {
             job_seen: (0, 0),
             waker: None,
             loader: Latest::default(),
+            settings_loader: Latest::default(),
             pending: None,
             boot: None,
         };
@@ -175,6 +178,7 @@ impl State {
 
     pub fn setup(&mut self, waker: rune::Waker) {
         self.loader.set_waker(waker.clone());
+        self.settings_loader.set_waker(waker.clone());
         if let Some(b) = &self.boot
             && let Ok(mut w) = b.waker.lock()
         {
@@ -315,6 +319,10 @@ impl State {
         }
         if let Some(listing) = self.loader.take() {
             changed |= self.land(listing, tx);
+        }
+        if let Some(c) = self.settings_loader.take() {
+            self.apply_settings(c, tx);
+            changed = true;
         }
         changed
     }
@@ -672,7 +680,7 @@ impl State {
             Reveal => self.reveal_selected(),
             Palette => self.open_palette(),
             OpenSettings => self.open_settings(),
-            ReloadSettings => self.reload_settings(tx),
+            ReloadSettings => self.reload_settings(),
             Clear => {
                 if let Some(job) = &self.job {
                     job.cancel();
@@ -754,10 +762,19 @@ impl State {
         });
     }
 
-    /// Reads the settings file again. Keys apply at once; a preference applies only if the file
+    /// Reads the settings file again, on a worker: it's on disk, which may be slow or not a
+    /// file at all, and the UI never waits on a disk. The result applies in `poll`.
+    pub fn reload_settings(&mut self) {
+        self.reload_settings_from(config::path());
+    }
+
+    fn reload_settings_from(&mut self, path: Option<PathBuf>) {
+        self.settings_loader.request(path, |p| p.map_or_else(Config::default, |p| Config::read(&p)));
+    }
+
+    /// A reloaded settings file. Keys apply at once; a preference applies only if the file
     /// changed it, so reloading doesn't undo ⌘. or a header click made since.
-    pub fn reload_settings(&mut self, tx: &mut Tx) {
-        let c = Config::load();
+    fn apply_settings(&mut self, c: Config, tx: &mut Tx) {
         let (old, new) = (&self.settings, &c.settings);
         let keep = self.cursor_name();
         if new.sort != old.sort {
@@ -1007,6 +1024,27 @@ pub(crate) mod tests {
         for cmd in [Cmd::Cancel, Cmd::Clear, Cmd::Copy, Cmd::Rename, Cmd::Down] {
             assert_eq!(s.unavailable(cmd), None, "{cmd:?}");
         }
+    }
+
+    /// Reload reads on a worker: nothing changes until the result lands in `poll`.
+    #[test]
+    fn reload_settings_reads_off_the_ui_thread() {
+        let d = folder("reload", 1);
+        std::fs::write(d.join(".h"), "x").unwrap();
+        let p = d.join("config.toml");
+        std::fs::write(&p, "[general]\nshow_hidden = true\n").unwrap();
+        let mut s = state_in(&d);
+        assert!(!s.show_hidden);
+        s.reload_settings_from(Some(p));
+        assert!(!s.show_hidden, "applied only when it lands");
+        let until = Instant::now() + Duration::from_secs(10);
+        while !s.show_hidden && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+            s.poll(&mut Tx::default());
+        }
+        assert!(s.show_hidden);
+        assert_eq!(s.note.as_deref(), Some("Settings reloaded"));
+        assert_eq!(s.visible.len(), 3);
     }
 
     /// Going somewhere before the first listing lands: the newer request wins.
