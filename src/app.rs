@@ -18,6 +18,9 @@ use crate::palette::Palette;
 /// Rows a Page Up / Page Down moves.
 const PAGE: usize = 20;
 
+/// Why a command that starts a file operation can't run while another one does.
+const BUSY: &str = "Another file operation is running";
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Nav {
     New,
@@ -595,36 +598,41 @@ impl State {
     }
 
     /// Why `cmd` can't run right now, or `None` when it can. Keys for an unavailable command
-    /// pass through; the palette shows it dimmed and says this when it's chosen.
+    /// pass through; the palette shows it dimmed and says this when it's chosen. Every command
+    /// is listed, so a new one has to decide.
     pub fn unavailable(&self, cmd: Cmd) -> Option<&'static str> {
         use Cmd::*;
         let nothing = self.selected().is_none();
         let empty = self.visible.is_empty();
-        let why = match cmd {
-            Open | Copy | Cut | Duplicate | Trash | Rename if nothing => "Select an item first",
-            Into if !self.selected().is_some_and(|e| e.is_dir) => "Select a folder first",
-            Parent if self.cwd.parent().is_none() => "Already at the top",
-            Back if self.back.is_empty() => "Nothing to go back to",
-            Forward if self.fwd.is_empty() => "Nothing to go forward to",
-            Undo if self.undo.is_empty() => "Nothing to undo",
-            Cancel if self.job.is_none() => "No file operation is running",
-            Clear if self.job.is_none() && self.filter.is_empty() && self.note.is_none() && self.marked.is_empty() => "Nothing to clear",
+        // File operations run one at a time (`State::start`).
+        let busy = self.job.is_some();
+        let when = |cond: bool, why: &'static str| cond.then_some(why);
+        match cmd {
+            // Start a file operation.
+            Duplicate | Trash => when(busy, BUSY).or(when(nothing, "Select an item first")),
+            // Paste always shows as available otherwise: Rune can't ask the clipboard what it
+            // holds without reading it (RUNE-GAPS.md). Pasting nothing says so.
+            Paste | PasteMove => when(busy, BUSY),
+            Undo => when(busy, BUSY).or(when(self.undo.is_empty(), "Nothing to undo")),
+            Cancel => when(!busy, "No file operation is running"),
+            Open | Copy | Cut | Rename => when(nothing, "Select an item first"),
+            Into => when(!self.selected().is_some_and(|e| e.is_dir), "Select a folder first"),
+            Parent => when(self.cwd.parent().is_none(), "Already at the top"),
+            Back => when(self.back.is_empty(), "Nothing to go back to"),
+            Forward => when(self.fwd.is_empty(), "Nothing to go forward to"),
+            Clear => when(!busy && self.filter.is_empty() && self.note.is_none() && self.marked.is_empty(), "Nothing to clear"),
             Up | Down | PageUp | PageDown | First | Last | ExtendUp | ExtendDown | ExtendPageUp | ExtendPageDown | ExtendFirst
-            | ExtendLast | SelectAll
-                if empty =>
-            {
-                "Nothing to select"
+            | ExtendLast | SelectAll => when(empty, "Nothing to select"),
+            SortName => when(self.sort.key == SortKey::Name, "Already sorted by name"),
+            SortKind => when(self.sort.key == SortKey::Kind, "Already sorted by kind"),
+            SortSize => when(self.sort.key == SortKey::Size, "Already sorted by size"),
+            SortModified => when(self.sort.key == SortKey::Modified, "Already sorted by date modified"),
+            Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
+                when(cmd.place().is_some_and(|i| i >= self.places.len()), "No sidebar place there")
             }
-            SortName if self.sort.key == SortKey::Name => "Already sorted by name",
-            SortKind if self.sort.key == SortKey::Kind => "Already sorted by kind",
-            SortSize if self.sort.key == SortKey::Size => "Already sorted by size",
-            SortModified if self.sort.key == SortKey::Modified => "Already sorted by date modified",
-            _ if cmd.place().is_some_and(|i| i >= self.places.len()) => "No sidebar place there",
-            // Paste always shows as available: Rune can't ask the clipboard what it holds
-            // without reading it (RUNE-GAPS.md). Pasting nothing says so.
-            _ => return None,
-        };
-        Some(why)
+            // Always available.
+            GoTo | Reload | Reveal | Palette | OpenSettings | ReloadSettings | CopyPath | NewFolder | Hidden | SortReverse => None,
+        }
     }
 
     /// The title the palette shows, with what's here filled in.
@@ -979,6 +987,26 @@ mod tests {
         assert!(s.show_hidden && s.cwd == d);
         assert_eq!(s.visible.len(), 4);
         assert!(s.back.is_empty(), "the first folder isn't a navigation");
+    }
+
+    fn state_in(d: &Path) -> State {
+        let dir = d.to_path_buf();
+        State::boot(Booting::spawn(Duration::ZERO, move || settings_for(dir, Settings::default())), Duration::from_secs(5))
+    }
+
+    #[test]
+    fn file_operations_are_unavailable_while_one_runs() {
+        let d = folder("busy", 2);
+        let mut s = state_in(&d);
+        assert_eq!(s.unavailable(Cmd::Duplicate), None);
+        assert_eq!(s.unavailable(Cmd::Cancel), Some("No file operation is running"));
+        s.job = Some(ops::start(ops::Op::Copy { sources: Vec::new(), dest: d.clone() }, None));
+        for cmd in [Cmd::Duplicate, Cmd::Trash, Cmd::Paste, Cmd::PasteMove, Cmd::Undo] {
+            assert_eq!(s.unavailable(cmd), Some(BUSY), "{cmd:?}");
+        }
+        for cmd in [Cmd::Cancel, Cmd::Clear, Cmd::Copy, Cmd::Rename, Cmd::Down] {
+            assert_eq!(s.unavailable(cmd), None, "{cmd:?}");
+        }
     }
 
     /// Going somewhere before the first listing lands: the newer request wins.
