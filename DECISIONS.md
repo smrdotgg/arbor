@@ -9,6 +9,12 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-09 · Windows trash: residual race accepted (Review).** A file that grows past the
+  Recycle Bin's capacity, or a bin setting changed, between the pre-check and the shell's delete
+  could still be deleted permanently. The pre-check plus the sink's `PostDeleteItem` check cover
+  the realistic cases; full protection would need staging every trashed item. The reviewer
+  flagged it; the agent accepted it. Undo: stage items before recycling (`src/trash.rs`).
+
 - **2026-11-09 · Packages are unsigned (Review).** `Arbor.app` is signed ad hoc and not
   notarized, and `arbor.exe` isn't signed: notarizing needs an Apple Developer account and
   signing on Windows a code-signing certificate, both yours to get. The README tells users how
@@ -82,6 +88,17 @@ Format: date · decision · why · how to undo.
   12 MP led to 4 MP.
 
 ## Made by the agent (owner said "I trust your judgment")
+
+- **2026-11-09 · A reload puts back exactly what was selected; a cursor the user deselected
+  (⌘-click) isn't reselected.** The first selected item takes the cursor instead, so what an
+  action acts on doesn't change (from the review). Undo: `Folder::picked`.
+- **2026-11-09 · Windows' `RecycleBinSize` policy is a percentage of the drive** (it was read as
+  megabytes); the drive's size comes from `GetDiskFreeSpaceExW`, and an unknown size means the
+  permanent-delete question. Undo: `bin_verdict`.
+- **2026-11-09 · macOS deletes stop at volume boundaries, not only devices** (`statfs`'s mount
+  point per folder: the review found a walk entering `/System/Volumes/Data` and the `/Users`
+  firmlink, which share `/`'s device number). For permanent delete, cancelled-copy cleanup,
+  cross-disk move cleanup and the count of what's left. Undo: `delete::volume`.
 
 - **2026-11-09 · Linux: the folder default is written into `~/.config/mimeapps.list` by Arbor,
   not with `xdg-mime`.** It's the freedesktop.org file `xdg-mime` and `gio` write; editing it

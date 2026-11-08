@@ -450,7 +450,7 @@ Cancel has the focus, and Esc keeps them.
   without the shell being asked. On a local disk, before the shell is asked, the worker reads the
   Recycle Bin's settings for the item's volume from the registry (`HKCU\…\Explorer\BitBucket\
   Volume\{GUID}`: `NukeOnDelete` and `MaxCapacity`; the parent key's `NukeOnDelete`; the
-  `NoRecycleFiles` and `RecycleBinSize` policies) and adds up the item's size (never following
+  `NoRecycleFiles` and `RecycleBinSize` policies, the latter a percentage of the drive) and adds up the item's size (never following
   links, junctions or mounted volumes; Esc stops it). An item the bin wouldn't keep (turned off,
   bigger than the bin, or any of it unknown, as on most removable drives, which have no bin) gets
   the question instead; a removable drive with a bin of its own is used. Then the shell's
@@ -468,12 +468,14 @@ the worker, with progress, and Esc cancels it: what's already deleted stays dele
 status bar says how many went and which folder was left partly deleted. A folder it can't
 finish (an item it can't remove, a mount, a folder moved meanwhile) stops there and says so
 truthfully: "Partly deleted “x”: stopped at “x/y” (permission denied); 12 items deleted, 3 left"
-(what's left is counted on the worker). There's no undo entry.
+(what's left is counted on the worker; when part of it can't be read, it says "some items left
+(count unknown: couldn't read “x/z”)" rather than a number that's too low). There's no undo entry.
 Each item is deleted only while it's still the item you chose (its identity from the listing, or
 the walk's for search results, checked right before it goes); one replaced or removed since is
 left alone and named. It never crosses into another disk: a folder something is mounted on
 (a USB disk, a FUSE or network mount, a bind mount; on Linux the mount table is read once per
-operation, elsewhere a different device gives it away; on Windows a volume mounted in a folder)
+operation, elsewhere a different device gives it away; on macOS also a different volume, since the
+APFS volumes of one group share a device and firmlinks such as `/Users` lead to the Data volume; on Windows a volume mounted in a folder)
 is neither entered nor removed, the delete stops there and says "Skipped “x”: another disk is
 mounted there", and so does deleting a mount point itself. A move to another disk leaves the
 originals of anything mounted inside the moved folder where they are, and says so. Folders go with everything inside, and links are removed, never followed
