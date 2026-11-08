@@ -340,7 +340,8 @@ pub(crate) mod win {
     /// One `GetImage` call: the thumbnail fitted to `fit`, or `None` when the shell has none.
     pub(crate) fn get(path: &Path, fit: [u32; 2], ask: Ask) -> Option<Rgba> {
         COM.with(|_| ());
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        // The shell's parser takes only backslashes, and a path typed or joined with `/` has some.
+        let wide: Vec<u16> = path.as_os_str().encode_wide().map(|c| if c == '/' as u16 { '\\' as u16 } else { c }).chain([0]).collect();
         let mut factory: *mut c_void = std::ptr::null_mut();
         // SAFETY: `wide` is NUL-terminated; a valid IID and out-pointer.
         let hr = unsafe { SHCreateItemFromParsingName(wide.as_ptr(), std::ptr::null_mut(), &IID_ISHELLITEMIMAGEFACTORY, &mut factory) };
@@ -663,6 +664,9 @@ mod tests {
         assert!(tw <= 256 && th <= 256 && tw > 0 && th > 0, "{tw} × {th}");
         assert_eq!(tpx.len(), (tw * th * 4) as usize);
         assert!(tpx[3] == 255, "opaque");
+        // A path with forward slashes (typed in go-to, or joined) works as well.
+        let slashed = std::path::PathBuf::from(png.to_string_lossy().replace('\\', "/"));
+        assert!(win::get(&slashed, [256, 256], win::Ask::Generate).is_some(), "{}", slashed.display());
         let warm = win::get(&png, [256, 256], win::Ask::CacheOnly);
         eprintln!("cache only after generating: {:?}", warm.as_ref().map(|t| (t.0, t.1)));
         // Off by default: the preview's own path asks the cache only.
