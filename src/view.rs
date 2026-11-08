@@ -13,7 +13,7 @@ use crate::commands::Cmd;
 use crate::folder::{Folder, tab_label};
 use crate::fs::{self, SortKey};
 use crate::palette;
-use crate::preview::{Body, Preview};
+use crate::preview::{Body, Format, Preview};
 use crate::search::Search;
 
 const ROW_H: f32 = 24.0;
@@ -950,7 +950,8 @@ fn preview_panel(s: &State, p: &Preview, l: Look, cx: &mut Cx<State>, width: Opt
             let n = c.items.unwrap_or(0);
             meta.push(format!("{n} item{}", if n == 1 { "" } else { "s" }));
         }
-        Body::Image(img) => meta.push(format!("{} × {} {}", img.width, img.height, img.format.name())),
+        // An OS thumbnail's size is the thumbnail's, not the file's: the kind says enough.
+        Body::Image(img) if img.format != Format::Thumbnail => meta.push(format!("{} × {} {}", img.width, img.height, img.format.name())),
         _ => {}
     }
     if !t.is_dir {

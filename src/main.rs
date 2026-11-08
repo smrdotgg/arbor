@@ -23,6 +23,7 @@ mod preview;
 mod rename;
 mod search;
 mod select;
+mod thumb;
 mod timing;
 mod trash;
 mod view;

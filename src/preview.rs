@@ -1,7 +1,8 @@
 //! Quick preview (NORTHSTAR Core: "on demand, no cache"). Space opens a panel showing the
-//! active pane's selected item: the head of a text file, an image shrunk to the panel, or a
-//! card of what Arbor knows about anything else (a folder's item count, which formats need
-//! the platform's own preview API).
+//! active pane's selected item: the head of a text file, an image shrunk to the panel, the OS's
+//! own thumbnail of anything else it can show (PDF, video, office documents, fonts: Quick Look
+//! on macOS, the shell's thumbnail cache on Windows; see `thumb.rs`), or a card of what Arbor
+//! knows about it (a folder's item count).
 //!
 //! It's view-triggered background work, so it follows every NORTHSTAR rule for that:
 //!
@@ -11,7 +12,8 @@
 //!   listing) shows in the key's own frame; the body lands from a worker when it's ready.
 //! - **Scoped to what's on screen.** A selection change or closing the panel sets the read's
 //!   stop flag, which every read call and every decoded row checks, and an older answer
-//!   never lands (each request has its own number).
+//!   never lands (each request has its own number). A request to the OS's thumbnailer is
+//!   waited on with a [`Bell`] the UI rings with the stop, so it's cancelled at once.
 //! - **Finishes and stops.** One read of one file (or one listing of a folder, to count it),
 //!   then nothing: no watching.
 //! - **Nothing stored.** Moving away and back reads the file again. The decoded pixels go
@@ -44,6 +46,7 @@ use rune::Pixels;
 
 use crate::app::State;
 use crate::fs::{self, Entry};
+use crate::thumb::{self, Bell, Thumb};
 
 /// How much of a text file is shown at most: 256 KB (decimal, as sizes show everywhere).
 pub const TEXT_MAX: usize = 256_000;
@@ -113,6 +116,9 @@ pub struct Worker {
 struct Shared {
     slots: Mutex<Slots>,
     wake: Condvar,
+    /// Rung with every stop (a new request, a cancel, the state going), so a read waiting for
+    /// the OS's thumbnailer stops waiting at once.
+    bell: Arc<Bell>,
 }
 
 #[derive(Default)]
@@ -130,7 +136,8 @@ struct Slots {
 
 impl Worker {
     fn spawn(waker: Option<rune::Waker>) -> Worker {
-        let shared = Arc::new(Shared { slots: Mutex::new(Slots { waker, ..Slots::default() }), wake: Condvar::new() });
+        let shared =
+            Arc::new(Shared { slots: Mutex::new(Slots { waker, ..Slots::default() }), wake: Condvar::new(), bell: Arc::default() });
         let s = shared.clone();
         std::thread::Builder::new().name("arbor-preview".into()).spawn(move || s.run()).expect("can't start the preview thread");
         Worker { shared }
@@ -148,6 +155,9 @@ impl Worker {
         s.next = Some((req, job, stop));
         s.done = None;
         self.shared.wake.notify_one();
+        drop(s);
+        // The caller set the old read's stop flag first.
+        self.shared.bell.ring();
         req
     }
 
@@ -157,6 +167,8 @@ impl Worker {
         let mut s = self.slots();
         s.next = None;
         s.done = None;
+        drop(s);
+        self.shared.bell.ring();
     }
 
     fn take(&self) -> Option<Answer> {
@@ -170,6 +182,8 @@ impl Drop for Worker {
         s.closed = true;
         s.next = None;
         self.shared.wake.notify_one();
+        drop(s);
+        self.shared.bell.ring();
     }
 }
 
@@ -190,7 +204,7 @@ impl Shared {
             };
             // A decoder that panics on a corrupt file still ends in an answer, never in
             // "Loading…" for good, and the thread lives on for the next preview.
-            let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load(&job, &stop)))
+            let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_with(&job, &stop, &self.bell)))
                 .unwrap_or_else(|_| Some(Loaded::body(Body::Error("Couldn't preview it: reading it failed unexpectedly".into()))));
             let mut s = self.slots.lock().unwrap_or_else(|e| e.into_inner());
             // Only the newest request's answer is kept (a stopped read gives none).
@@ -457,8 +471,15 @@ pub type Fit = Rc<Cell<[u32; 2]>>;
 
 // ---- the worker ---------------------------------------------------------------------------
 
-/// What one preview reads: `None` when stopped (the selection moved or the panel closed).
+/// [`load_with`], for tests that don't stop an OS request midway.
+#[cfg(test)]
 pub(crate) fn load(job: &Job, stop: &AtomicBool) -> Option<Loaded> {
+    load_with(job, stop, &Arc::default())
+}
+
+/// What one preview reads: `None` when stopped (the selection moved or the panel closed).
+/// `bell` is rung with every stop, for a wait on the OS's thumbnailer.
+pub(crate) fn load_with(job: &Job, stop: &AtomicBool, bell: &Arc<Bell>) -> Option<Loaded> {
     #[cfg(test)]
     let _running = hook::Running::enter(&job.path);
     #[cfg(test)]
@@ -476,9 +497,17 @@ pub(crate) fn load(job: &Job, stop: &AtomicBool) -> Option<Loaded> {
     let mut out = if job.is_dir {
         Loaded::body(count(&job.path, stop)?)
     } else if let Some(what) = platform_kind(&job.ext) {
-        Loaded::body(Body::Card(Card { items: None, note: Some(needs_platform(what)) }))
+        // Straight to the OS: these are never text or an image Arbor decodes (and a PDF's first
+        // bytes can pass for text).
+        match os_preview(job, stop, bell) {
+            Some(Thumb::Image(px)) => thumbnail(px),
+            Some(Thumb::Stopped) => return None,
+            // The OS has nothing to show: the header says what it is, with no error.
+            Some(Thumb::Nothing) => Loaded::body(Body::Card(Card::default())),
+            None => Loaded::body(Body::Card(Card { items: None, note: Some(no_preview_here(what)) })),
+        }
     } else {
-        file(job, stop)?
+        file(job, stop, bell)?
     };
     if stop.load(Relaxed) {
         return None;
@@ -505,16 +534,19 @@ fn count(path: &Path, stop: &AtomicBool) -> Option<Body> {
     Some(Body::Card(Card { items: Some(n), note: None }))
 }
 
-/// Formats only the platform's own preview API can show (Quick Look, Windows' preview
-/// handlers), by extension, and what to call them.
-fn platform_kind(ext: &str) -> Option<&'static str> {
+/// Formats that go straight to the OS's thumbnailer, by extension, and what to call them.
+/// Anything else that isn't text or an image Arbor decodes (found by its bytes) goes to it too,
+/// after Arbor's own look at its first bytes; this list is for what that look could take for
+/// text (PDF, RTF) and for the card's note where the OS has no thumbnailer. Extensions that are
+/// also common text files (`.key` for Keynote and for keys, `.ts` for video and TypeScript)
+/// aren't here: their bytes decide.
+pub(crate) fn platform_kind(ext: &str) -> Option<&'static str> {
     Some(match ext {
         "pdf" => "PDF",
         "mp4" | "m4v" | "mov" | "avi" | "mkv" | "webm" | "wmv" | "flv" | "mpg" | "mpeg" | "3gp" => "Video",
         "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "opus" | "aif" | "aiff" | "wma" => "Audio",
-        "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "pages" | "numbers" | "key" | "rtf" => {
-            "An office document"
-        }
+        "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "pages" | "numbers" | "rtf" | "epub" => "A document",
+        "ttf" | "otf" | "ttc" | "woff" | "woff2" => "A font",
         "heic" | "heif" | "avif" | "tif" | "tiff" | "psd" | "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf" | "ico" | "icns" => {
             "This image format"
         }
@@ -522,10 +554,30 @@ fn platform_kind(ext: &str) -> Option<&'static str> {
     })
 }
 
-fn needs_platform(what: &str) -> String {
-    format!(
-        "{what}: a full preview needs the platform's own preview API (Quick Look, Windows preview handlers), which Arbor doesn't use yet."
-    )
+/// The card's note where the OS has no thumbnailer Arbor uses (Linux).
+fn no_preview_here(what: &str) -> String {
+    format!("{what}: no preview on this system. Its thumbnailers keep a thumbnail cache, and Arbor keeps no caches.")
+}
+
+/// The OS's thumbnail for the job's file: `None` where the OS has no thumbnailer Arbor uses.
+fn os_preview(job: &Job, stop: &AtomicBool, bell: &Arc<Bell>) -> Option<Thumb> {
+    #[cfg(test)]
+    {
+        hook::at(&job.path, "os");
+        if let Some(t) = thumb::fake::answer(&job.path, stop, bell) {
+            return Some(t);
+        }
+    }
+    thumb::thumbnail(&job.path, job.fit, stop, bell)
+}
+
+/// An OS thumbnail, shown as an image at its own size (the OS fitted it to the panel).
+fn thumbnail((w, h, px): thumb::Rgba) -> Loaded {
+    Loaded {
+        body: Body::Image(Picture { width: w, height: h, format: Format::Thumbnail, shown: [w, h] }),
+        link: None,
+        rgba: Some((w, h, px)),
+    }
 }
 
 /// A reader that fails as soon as the stop flag is set, so every decoder reading through it
@@ -591,8 +643,9 @@ fn open_regular(p: &Path) -> std::io::Result<Option<std::fs::File>> {
     Ok(Some(f))
 }
 
-/// A file: an image by its first bytes, else text if it looks like text, else a card.
-fn file(job: &Job, stop: &AtomicBool) -> Option<Loaded> {
+/// A file: an image by its first bytes, else text if it looks like text, else the OS's
+/// thumbnail, else a card.
+fn file(job: &Job, stop: &AtomicBool, bell: &Arc<Bell>) -> Option<Loaded> {
     // A pipe would block the read until something writes to it; a device may never end.
     let not_regular = || {
         Loaded::body(Body::Card(Card { items: None, note: Some("Not a regular file (a pipe, socket or device): it isn't opened.".into()) }))
@@ -635,10 +688,14 @@ fn file(job: &Job, stop: &AtomicBool) -> Option<Loaded> {
         return Some(Loaded::body(Body::Card(Card { items: None, note: Some("Empty file".into()) })));
     }
     if sniff_text(&head).is_none() {
-        return Some(Loaded::body(Body::Card(Card {
-            items: None,
-            note: Some("Binary file: there's no preview for its contents.".into()),
-        })));
+        drop(r);
+        return match os_preview(job, stop, bell) {
+            Some(Thumb::Image(px)) => Some(thumbnail(px)),
+            Some(Thumb::Stopped) => None,
+            Some(Thumb::Nothing) | None => {
+                Some(Loaded::body(Body::Card(Card { items: None, note: Some("Binary file: there's no preview for its contents.".into()) })))
+            }
+        };
     }
     let mut bytes = head;
     if bytes.len() == HEAD {
@@ -792,6 +849,8 @@ pub enum Format {
     Gif,
     Webp,
     Bmp,
+    /// The OS's thumbnail of a file Arbor doesn't decode itself (its size is the thumbnail's).
+    Thumbnail,
 }
 
 impl Format {
@@ -802,6 +861,7 @@ impl Format {
             Format::Gif => "GIF",
             Format::Webp => "WebP",
             Format::Bmp => "BMP",
+            Format::Thumbnail => "preview",
         }
     }
 }
@@ -873,6 +933,8 @@ fn image<R: BufRead + Seek>(format: Format, r: R, fit: [u32; 2], stop: &AtomicBo
         Format::Gif => gif(r, fit, stop).map_err(|e| bad(&e)),
         Format::Webp => webp(r, fit, stop).map_err(|e| bad(&e)),
         Format::Bmp => bmp(r, fit, stop).map_err(|e| bad(&e)),
+        // Never sniffed: only the OS makes these.
+        Format::Thumbnail => Err("not an image format".into()),
     }
 }
 
@@ -2292,7 +2354,13 @@ mod tests {
         space(&mut s);
         settle(&mut s);
         let Body::Card(c) = &s.preview.as_ref().unwrap().body else { panic!() };
-        assert!(c.note.as_deref().unwrap().starts_with("PDF: a full preview needs the platform's own preview API"));
+        // Linux has no thumbnailer Arbor uses, and says so; elsewhere the OS has nothing for an
+        // eight-byte PDF, and the card says nothing more than the header.
+        if cfg!(any(target_os = "macos", windows)) {
+            assert_eq!(c.note, None);
+        } else {
+            assert!(c.note.as_deref().unwrap().starts_with("PDF: no preview on this system"), "{:?}", c.note);
+        }
         assert!(hook::seen(&d.join("a.pdf")).contains(&"open".to_string()));
         key(&mut s, Key::Down);
         settle(&mut s);
@@ -2301,6 +2369,130 @@ mod tests {
         key(&mut s, Key::Down);
         settle(&mut s);
         assert!(matches!(&s.preview.as_ref().unwrap().body, Body::Error(e) if e.starts_with("Couldn't read it")));
+    }
+
+    // ---- the OS's thumbnails --------------------------------------------------------------
+
+    /// Which files go to the OS's thumbnailer: formats Arbor doesn't decode, by extension, and
+    /// anything else whose bytes are neither text nor an image Arbor decodes. Text and Arbor's
+    /// own image formats never do.
+    #[test]
+    fn what_goes_to_the_os_thumbnailer() {
+        for ext in
+            ["pdf", "mp4", "mov", "mkv", "mp3", "m4a", "flac", "docx", "xlsx", "pages", "rtf", "epub", "ttf", "otf", "heic", "tiff", "dng"]
+        {
+            assert!(platform_kind(ext).is_some(), "{ext}");
+        }
+        // Their bytes decide: these are often text.
+        for ext in ["png", "jpg", "gif", "webp", "bmp", "txt", "rs", "svg", "key", "ts", "json", ""] {
+            assert!(platform_kind(ext).is_none(), "{ext}");
+        }
+        let d = folder("os-route");
+        let imgs = write_images(&d, 64, 48); // a.png, b.jpg, c.bmp, d.webp, e.gif
+        std::fs::write(d.join("f.pdf"), "%PDF-1.4 looks like text").unwrap();
+        std::fs::write(d.join("g.blob"), [0u8, 159, 146, 150, 0, 0, 7, 1].repeat(64)).unwrap();
+        std::fs::write(d.join("h.txt"), "plain text").unwrap();
+        // Fakes everywhere, so a file that went to the OS can't hide.
+        let all: Vec<PathBuf> = imgs.iter().map(|(p, _)| p.clone()).chain(["f.pdf", "g.blob", "h.txt"].map(|n| d.join(n))).collect();
+        for p in &all {
+            thumb::fake::set(p, thumb::fake::Fake::Image(30, 20));
+        }
+        let mut s = state_in(&d);
+        space(&mut s);
+        let mut got = Vec::new();
+        for i in 0..all.len() {
+            if i > 0 {
+                key(&mut s, Key::Down);
+            }
+            settle(&mut s);
+            let p = s.preview.as_ref().unwrap();
+            let kind = match &p.body {
+                Body::Image(i) if i.format == Format::Thumbnail => "os",
+                Body::Image(_) => "decoded",
+                Body::Text(_) => "text",
+                b => panic!("{b:?}"),
+            };
+            got.push((p.target.as_ref().unwrap().name.clone(), kind));
+        }
+        let want = [("a.png", "decoded"), ("b.jpg", "decoded"), ("c.bmp", "decoded"), ("d.webp", "decoded"), ("e.gif", "decoded")]
+            .into_iter()
+            .chain([("f.pdf", "os"), ("g.blob", "os"), ("h.txt", "text")]);
+        assert_eq!(got, want.map(|(n, k)| (n.to_string(), k)).collect::<Vec<_>>());
+        for p in &all[..5] {
+            assert!(!hook::seen(p).contains(&"os".to_string()), "{} went to the OS", p.display());
+        }
+        // The thumbnail lands as an image of its own size, with its pixels.
+        key(&mut s, Key::Up);
+        key(&mut s, Key::Up);
+        settle(&mut s);
+        let p = s.preview.as_ref().unwrap();
+        assert_eq!(p.body, Body::Image(Picture { width: 30, height: 20, format: Format::Thumbnail, shown: [30, 20] }));
+        assert_eq!(p.pixels.size(), (30, 20));
+    }
+
+    /// When the OS has nothing, the panel shows the card: no error for a format it should know
+    /// (the header says what it is), and "Binary file" for anything else.
+    #[test]
+    fn the_card_shows_when_the_os_has_nothing() {
+        let d = folder("os-nothing");
+        std::fs::write(d.join("a.pdf"), "%PDF-1.4").unwrap();
+        std::fs::write(d.join("b.blob"), [0u8, 1, 2, 3, 0, 0, 0, 9]).unwrap();
+        thumb::fake::set(&d.join("a.pdf"), thumb::fake::Fake::Nothing);
+        thumb::fake::set(&d.join("b.blob"), thumb::fake::Fake::Nothing);
+        let mut s = state_in(&d);
+        space(&mut s);
+        settle(&mut s);
+        assert_eq!(s.preview.as_ref().unwrap().body, Body::Card(Card { items: None, note: None }));
+        key(&mut s, Key::Down);
+        settle(&mut s);
+        let body = &s.preview.as_ref().unwrap().body;
+        assert!(matches!(body, Body::Card(c) if c.note.as_deref().unwrap().starts_with("Binary file")), "{body:?}");
+        assert!(hook::seen(&d.join("b.blob")).contains(&"os".to_string()));
+    }
+
+    /// The selection moves (or the panel closes) while the OS works on a thumbnail: the request
+    /// is cancelled at once, the next file's preview lands without waiting for it, and the OS's
+    /// late answer is dropped.
+    #[test]
+    fn moving_on_cancels_the_os_request() {
+        let d = folder("os-cancel");
+        std::fs::write(d.join("a.pdf"), "%PDF-1.4").unwrap();
+        std::fs::write(d.join("b.txt"), "next").unwrap();
+        let os = Arc::new(thumb::fake::Os::default());
+        thumb::fake::set(&d.join("a.pdf"), thumb::fake::Fake::Hang(os.clone()));
+        let mut s = state_in(&d);
+        space(&mut s);
+        let until = Instant::now() + Duration::from_secs(5);
+        while os.started.load(Relaxed) == 0 {
+            assert!(Instant::now() < until, "the OS request never started");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(s.preview.as_ref().unwrap().is_loading());
+        key(&mut s, Key::Down);
+        settle(&mut s);
+        assert!(matches!(&s.preview.as_ref().unwrap().body, Body::Text(t) if t.line(0) == "next"));
+        assert_eq!(os.cancelled.load(Relaxed), 1, "the OS request was cancelled");
+        // The OS answers late: nothing lands.
+        let done = os.done.lock().unwrap().take().unwrap();
+        done(Some((2, 2, vec![255; 16])));
+        std::thread::sleep(Duration::from_millis(20));
+        s.poll(&mut Tx::default());
+        assert!(matches!(&s.preview.as_ref().unwrap().body, Body::Text(_)));
+        assert_eq!(s.preview_lands, 1, "only the text landed");
+        // Closing cancels too.
+        key(&mut s, Key::Up);
+        let until = Instant::now() + Duration::from_secs(5);
+        while os.started.load(Relaxed) < 2 {
+            assert!(Instant::now() < until, "the second OS request never started");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        key(&mut s, Key::Escape);
+        assert!(s.preview.is_none());
+        let until = Instant::now() + Duration::from_secs(5);
+        while os.cancelled.load(Relaxed) < 2 {
+            assert!(Instant::now() < until, "closing didn't cancel the OS request");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     /// The panel follows the active pane: switching panes previews the other pane's selection.

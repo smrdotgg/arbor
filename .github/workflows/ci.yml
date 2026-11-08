@@ -54,3 +54,23 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --release --locked --all-targets -- -D warnings
+
+      # Numbers for the owner's decision on full Windows thumbnail generation, which can't be
+      # cancelled (src/thumb.rs, UNCANCELLABLE_WINDOWS_THUMBNAILS): how long the shell takes for
+      # a PDF and for videos, cache-only and full. A measurement, not a check.
+      - name: OS thumbnail timings
+        if: runner.os != 'Linux'
+        continue-on-error: true
+        run: |
+          dir="$RUNNER_TEMP/thumbs" && mkdir -p "$dir"
+          if [ "$RUNNER_OS" = Windows ]; then
+            command -v ffmpeg || choco install ffmpeg -y --no-progress >/dev/null || true
+            export PATH="$PATH:/c/ProgramData/chocolatey/bin"
+          fi
+          if command -v ffmpeg; then
+            ffmpeg -loglevel error -f lavfi -i testsrc2=duration=10:size=1920x1080:rate=30 -c:v libx264 -pix_fmt yuv420p "$dir/video-1080p-10s.mp4"
+            ffmpeg -loglevel error -f lavfi -i testsrc2=duration=120:size=3840x2160:rate=30 -c:v libx264 -preset ultrafast -pix_fmt yuv420p "$dir/video-4k-120s.mp4"
+            ffmpeg -loglevel error -f lavfi -i testsrc2=duration=10:size=1920x1080:rate=30 -c:v libvpx-vp9 -deadline realtime "$dir/video-1080p-10s.webm"
+          fi
+          ls -l "$dir"
+          ARBOR_THUMB_DIR="$dir" cargo test --release --locked -- --ignored --nocapture os_thumbnail_speed

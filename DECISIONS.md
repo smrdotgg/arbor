@@ -9,6 +9,12 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-08 · Windows previews show only thumbnails the shell already cached (Review).** Full
+  generation (`IShellItemImageFactory::GetImage` without `SIIGBF_INCACHEONLY`) can't be
+  cancelled once it starts, so it's behind `UNCANCELLABLE_WINDOWS_THUMBNAILS` in `src/thumb.rs`,
+  `false`. The timings for the owner's call are in BENCH.md (milestone 9). Undo: set it to `true`,
+  after an Exceptions-log entry in NORTHSTAR.md.
+
 - **2026-11-08 · NORTHSTAR cold-start budget changed (Review).** The speed-budget row now reads
   "under 100 ms on Windows and Linux; on macOS, within 25 ms of a bare native window (macOS's own
   launch is about 110 ms)". The owner asked for this to be drafted, then said to proceed with
@@ -26,6 +32,19 @@ Format: date · decision · why · how to undo.
   12 MP led to 4 MP.
 
 ## Made by the agent (owner said "I trust your judgment")
+
+- **2026-11-08 · Quick Look is asked for a thumbnail, never an icon** (representation types
+  Thumbnail and LowQualityThumbnail). A generic file-type icon says less than the card. Undo: add
+  `Types::Icon` in `src/thumb.rs`.
+- **2026-11-08 · When the OS has no thumbnail, the card shows with no note**, for formats it
+  should know (PDF, video…): the header already says what it is, and the task asked for no error
+  noise. Binary files of other types keep "Binary file: there's no preview for its contents."
+  Undo: give the `Thumb::Nothing` arm in `preview::load_with` a note.
+- **2026-11-08 · Every binary file Arbor can't show goes to the OS's thumbnailer**, not just a
+  list of extensions, so fonts, `.usdz`, `.sketch`, Keynote and so on preview where the OS can.
+  Only extensions that are never text go straight to it (PDF, video, audio, documents, fonts,
+  HEIC…); `.key` and `.ts` (also keys and TypeScript) are left to their bytes. Undo:
+  `preview::file`'s binary branch back to the card.
 
 - **⌘W on the last tab of the last pane does nothing.** Passing it on would make macOS close the
   window and quit, losing every tab's history.

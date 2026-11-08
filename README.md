@@ -48,7 +48,7 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 22,600 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
+About 23,900 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
 `ops.rs` (copy, move, trash, permanent delete, batch rename and undo on a worker), `noclobber.rs` (moves, copies and file ids
 that never replace anything), `trash.rs` (each platform's trash, and telling a disk with none),
 `delete.rs` (deleting permanently without following links), `confirm.rs` (Arbor's one dialog), `app.rs`
@@ -57,7 +57,8 @@ listing, selection, filter, sort and history, and what a hidden tab keeps), `pan
 split view), `commands.rs` (the command table and keymap), `palette.rs` (the command palette),
 `config.rs` (the settings file), `actions.rs` (clipboard, rename, drag and drop, context menu),
 `menu.rs` (the context menu in the window, on Linux),
-`preview.rs` (quick preview: reading, sniffing and decoding on a worker), `jump.rs` (Jump to
+`preview.rs` (quick preview: reading, sniffing and decoding on a worker), `thumb.rs` (the OS's
+thumbnails for the preview: Quick Look, the Windows shell), `jump.rs` (Jump to
 Folder: the history's writer thread, frecency and ranking), `search.rs` (Search in This Folder:
 the walk, its threads and the results), `pattern.rs` (globs), `select.rs`
 (Select by Pattern and the other selection commands), `rename.rs` (Batch Rename's rules: tokens,
@@ -193,9 +194,24 @@ clears the filter or cancels a file operation.
   ones say "Too large to preview", and so does a JPEG with over 16 MB of metadata (its markers
   are walked before it's decoded); a WebP's bitstreams are checked against its canvas before
   decoding.
+- **PDF, video, audio, office and iWork documents, fonts, HEIC, TIFF, RAW, and any other file
+  that isn't text or one of the images above**: the OS's own thumbnail, sized to the panel in
+  device pixels, shown like an image under the same header (`src/thumb.rs`). Video shows a still
+  frame and audio its artwork, whatever the OS's thumbnailer gives; nothing plays. Arbor stores
+  nothing; the OS may keep what it makes in its own thumbnail cache, the one Finder and Explorer
+  fill. When the OS has nothing, the card shows (no error).
+  - **macOS:** Quick Look (`QLThumbnailGenerator`), asked for its best thumbnail (never a
+    generic icon). Moving on or closing calls `cancelRequest:` at once, and a late answer is
+    dropped.
+  - **Windows:** the shell's thumbnails (`IShellItemImageFactory`), **only those the shell has
+    already cached** (what Explorer made when it showed the folder), which come back at once.
+    Making a new one can't be cancelled once it starts, so it's off until the owner decides on a
+    NORTHSTAR exception: `UNCANCELLABLE_WINDOWS_THUMBNAILS` in `src/thumb.rs` (a build-time
+    flag, `false`) turns it on, after the cache is asked.
+  - **Linux:** none. Its thumbnailers keep a thumbnail cache, and Arbor keeps no caches, so the
+    card says there's no preview for these formats.
 - **Everything else**, and folders: name, kind, size and date, and for a folder how many items
-  it has (one read of it). PDF, video, audio, office documents and other image formats (HEIC,
-  TIFF, RAW) say they need the platform's own preview API, which Arbor doesn't use yet.
+  it has (one read of it).
 - A link previews what it points to and says where; a broken link, an unreadable file, or a
   pipe or device (never opened: reading a pipe would wait forever) says so. A file swapped for a
   pipe after that check is still never waited on: the open doesn't block, and the opened
@@ -205,7 +221,9 @@ It costs nothing while closed: no reads, no decoding, nothing per key. Open, it'
 work that follows the rules for it: the list moves at once and the header (from the listing)
 changes in the same frame, then the contents land when they're read. Moving on or closing stops
 the read in flight (every read call and decoded row checks) and its result is dropped. One read
-per item, no watching, nothing kept: coming back to a file reads it again. All of it runs on one
+per item, no watching, nothing kept: coming back to a file reads it again. A Quick Look request
+is waited on by that thread, which the stop wakes at once (no polling), so it's cancelled the
+moment you move on. All of it runs on one
 thread of its own, started by the first preview and kept across opens, one read or decode at a
 time: tapping Space quickly queues at most one more (each new request replaces the one
 waiting), so decodes never pile up, and a slow or hung disk slows previews, never the list or
@@ -600,8 +618,8 @@ one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine
 
 ## Not yet
 
-Emptying the Trash, file watching (use ⌘R), previews of PDF, video, audio
-and office documents (they need each platform's preview API), syntax highlighting in the text
+Emptying the Trash, file watching (use ⌘R), rich previews (PDF, video, documents) on Linux and
+new (uncached) thumbnails on Windows (see Quick preview), syntax highlighting in the text
 preview, regular expressions in Select by Pattern, Tab-completion in go-to mode, redo, more than one operation
 at a time, reordering tabs or dragging them between panes, and
 dragging rows out to Finder while the window is split on macOS (see `RUNE-GAPS.md`).
