@@ -212,16 +212,26 @@ fn build_keymap(user: &[(Cmd, Vec<Chord>, usize)], platform: KeyPlatform, errors
     }
     for (cmd, chords, at) in user {
         for c in chords {
-            if let Some(i) = binds.iter().position(|b| b.1 != *cmd && b.0.same_keys(c, platform)) {
-                let (_, other, was) = binds.remove(i);
-                if was > 0 {
-                    errors.push(format!(
-                        "line {at}: {} is also bound to {} on line {was}; {} gets it",
-                        commands::chord_spec(c),
-                        other.id(),
-                        cmd.id()
-                    ));
+            // The same keys on this platform ("cmd+g" and "ctrl+g" off macOS): bound once.
+            if binds.iter().any(|b| b.1 == *cmd && b.0.same_keys(c, platform)) {
+                continue;
+            }
+            // Every other command's binding of these keys goes, so the later line really wins.
+            let mut told = Vec::new();
+            binds.retain(|&(b, other, was)| {
+                let clash = other != *cmd && b.same_keys(c, platform);
+                if clash && was > 0 && !told.contains(&(other, was)) {
+                    told.push((other, was));
                 }
+                !clash
+            });
+            for (other, was) in told {
+                errors.push(format!(
+                    "line {at}: {} is also bound to {} on line {was}; {} gets it",
+                    commands::chord_spec(c),
+                    other.id(),
+                    cmd.id()
+                ));
             }
             binds.push((*c, *cmd, *at));
         }
@@ -364,6 +374,30 @@ mod tests {
         assert_eq!(chords(&c, Cmd::Palette), ["ctrl+space"]);
         assert!(c.keymap.chords(Cmd::Palette).next().unwrap().same_keys(&commands::parse_chord("cmd+space").unwrap(), LINUX));
         assert_eq!(chords(&c, Cmd::Copy), ["cmd+c"], "unbound commands keep their defaults");
+    }
+
+    /// `cmd` is Ctrl off macOS, so "cmd+g" and "ctrl+g" are one key there: a later line binding
+    /// either takes it from every earlier binding, under both spellings.
+    #[test]
+    fn a_later_binding_takes_every_alias_of_its_keys() {
+        let text = "[keys]\n\"nav.goto\" = [\"cmd+g\", \"ctrl+g\"]\n\"nav.reload\" = [\"cmd+g\"]\n";
+        let (cmd_g, ctrl_g) = (commands::parse_chord("cmd+g").unwrap(), commands::parse_chord("ctrl+g").unwrap());
+        for platform in [KeyPlatform::Linux, KeyPlatform::Windows] {
+            let c = Config::parse(text, platform);
+            assert_eq!(c.keymap.find(|b| b.same_keys(&ctrl_g, platform)), Some(Cmd::Reload), "{platform:?}");
+            assert_eq!(c.keymap.find(|b| b.same_keys(&cmd_g, platform)), Some(Cmd::Reload), "{platform:?}");
+            assert!(chords(&c, Cmd::GoTo).is_empty(), "{platform:?}");
+            assert_eq!(c.errors, ["line 3: cmd+g is also bound to nav.goto on line 2; nav.reload gets it"], "{platform:?}");
+            // And one command listing both spellings has the key once.
+            let c = Config::parse("[keys]\n\"nav.goto\" = [\"cmd+g\", \"ctrl+g\"]\n", platform);
+            assert_eq!(chords(&c, Cmd::GoTo), ["cmd+g"], "{platform:?}");
+        }
+        // On macOS ⌘G and ⌃G are different keys: Go to Path keeps ⌃G.
+        let mac = KeyPlatform::Mac;
+        let c = Config::parse(text, mac);
+        assert_eq!(c.keymap.find(|b| b.same_keys(&cmd_g, mac)), Some(Cmd::Reload));
+        assert_eq!(c.keymap.find(|b| b.same_keys(&ctrl_g, mac)), Some(Cmd::GoTo));
+        assert_eq!(chords(&c, Cmd::GoTo), ["ctrl+g"]);
     }
 
     /// Only `[]` unbinds. A list whose every key is a typo is reported and keeps the defaults.
