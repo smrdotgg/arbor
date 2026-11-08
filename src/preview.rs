@@ -691,7 +691,8 @@ fn file(job: &Job, stop: &AtomicBool, bell: &Arc<Bell>) -> Option<Loaded> {
     if job.size == 0 && head.is_empty() {
         return Some(Loaded::body(Body::Card(Card { items: None, note: Some("Empty file".into()) })));
     }
-    if sniff_text(&head).is_none() {
+    // The head was cut at its limit if it filled it (the file may go on).
+    if sniff_text(&head, head.len() == HEAD).is_none() {
         drop(r);
         return match os_preview(job, stop, bell) {
             Some(Thumb::Image(px)) => Some(thumbnail(px)),
@@ -735,14 +736,15 @@ pub enum Encoding {
     Windows1252,
 }
 
-/// Whether `b` (a file's first bytes, possibly cut mid-character) is text, and how to read
-/// it. Not text: NUL bytes (beyond one in a thousand), or control characters (over 2%,
+/// Whether `b` (a file's first bytes) is text, and how to read it. `cut` says the read stopped
+/// at its limit before the end of the file, so its last character may be cut short; at the real
+/// end of a file, trailing bytes that aren't UTF-8 count against it like any others. Not text: NUL bytes (beyond one in a thousand), or control characters (over 2%,
 /// counting the five bytes Windows-1252 leaves undefined when it isn't UTF-8). Valid UTF-8 is
 /// UTF-8; UTF-8 with a few invalid bytes (up to 10%) is shown with U+FFFD, but only if it has
 /// real multi-byte characters too; anything else 8-bit is Windows-1252 (Latin-1 text has no
 /// valid multi-byte sequences: "Café" is `43 61 66 E9`). A UTF-16 byte order mark reads as
 /// UTF-16 (it's full of NULs).
-pub fn sniff_text(b: &[u8]) -> Option<Encoding> {
+pub fn sniff_text(b: &[u8], cut: bool) -> Option<Encoding> {
     if b.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return Some(Encoding::Utf8Bom);
     }
@@ -764,9 +766,10 @@ pub fn sniff_text(b: &[u8]) -> Option<Encoding> {
     let (mut bad, mut multi) = (0, 0);
     for chunk in b.utf8_chunks() {
         multi += chunk.valid().chars().filter(|c| c.len_utf8() > 1).count();
-        // An incomplete sequence at the very end is a character cut by the bounded read.
-        let cut = chunk.invalid().len() < 4 && chunk.invalid().as_ptr_range().end == b.as_ptr_range().end;
-        if !chunk.invalid().is_empty() && !cut {
+        // An incomplete sequence at the very end of a read that stopped at its limit is a
+        // character cut short, not a bad byte. ("Caf\xE9" at the end of a file is Latin-1.)
+        let cut_short = cut && chunk.invalid().len() < 4 && chunk.invalid().as_ptr_range().end == b.as_ptr_range().end;
+        if !chunk.invalid().is_empty() && !cut_short {
             bad += chunk.invalid().len();
         }
     }
@@ -798,7 +801,7 @@ fn cp1252(b: u8) -> char {
 /// characters shown as U+FFFD, lines over [`MAX_COLS`] cut. `total` is the file's size, for the
 /// note when `truncated`.
 pub fn text(bytes: &[u8], truncated: bool, total: u64) -> Option<Text> {
-    let enc = sniff_text(bytes)?;
+    let enc = sniff_text(bytes, truncated)?;
     let decoded: std::borrow::Cow<str> = match enc {
         Encoding::Utf8 => String::from_utf8_lossy(bytes),
         Encoding::Utf8Bom => String::from_utf8_lossy(&bytes[3..]),
@@ -1651,29 +1654,29 @@ mod tests {
 
     #[test]
     fn text_is_told_from_binary_by_its_bytes() {
-        assert_eq!(sniff_text(b"fn main() {}\n\tok\r\n"), Some(Encoding::Utf8));
-        assert_eq!(sniff_text("naïve café ✓".as_bytes()), Some(Encoding::Utf8));
-        assert_eq!(sniff_text(b"\xEF\xBB\xBFhello"), Some(Encoding::Utf8Bom));
-        assert_eq!(sniff_text(b"\xFF\xFEh\0i\0"), Some(Encoding::Utf16Le));
-        assert_eq!(sniff_text(b"\xFE\xFF\0h\0i"), Some(Encoding::Utf16Be));
+        assert_eq!(sniff_text(b"fn main() {}\n\tok\r\n", false), Some(Encoding::Utf8));
+        assert_eq!(sniff_text("naïve café ✓".as_bytes(), false), Some(Encoding::Utf8));
+        assert_eq!(sniff_text(b"\xEF\xBB\xBFhello", false), Some(Encoding::Utf8Bom));
+        assert_eq!(sniff_text(b"\xFF\xFEh\0i\0", false), Some(Encoding::Utf16Le));
+        assert_eq!(sniff_text(b"\xFE\xFF\0h\0i", false), Some(Encoding::Utf16Be));
         // Latin-1 (or Windows-1252): 8-bit text that isn't UTF-8, however many accents.
-        assert_eq!(sniff_text(b"Caf\xe9 cr\xe8me br\xfbl\xe9e and a lot more plain text here"), Some(Encoding::Windows1252));
-        assert_eq!(sniff_text(b"Caf\xe9 cr\xe8me br\xfbl\xe9e"), Some(Encoding::Windows1252), "23% accented: still text");
+        assert_eq!(sniff_text(b"Caf\xe9 cr\xe8me br\xfbl\xe9e and a lot more plain text here", false), Some(Encoding::Windows1252));
+        assert_eq!(sniff_text(b"Caf\xe9 cr\xe8me br\xfbl\xe9e", false), Some(Encoding::Windows1252), "23% accented: still text");
         // UTF-8 with a stray invalid byte: still UTF-8, the byte shown as U+FFFD.
         assert_eq!(
-            sniff_text(&[b"caf\xc3\xa9 cr\xc3\xa8me and some plain text, then a stray ".as_slice(), b"\xff byte"].concat()),
+            sniff_text(&[b"caf\xc3\xa9 cr\xc3\xa8me and some plain text, then a stray ".as_slice(), b"\xff byte"].concat(), false),
             Some(Encoding::Lossy)
         );
         // A character cut by the bounded read is still UTF-8.
         let cut = "a long line ending in é".as_bytes();
-        assert_eq!(sniff_text(&cut[..cut.len() - 1]), Some(Encoding::Utf8));
+        assert_eq!(sniff_text(&cut[..cut.len() - 1], true), Some(Encoding::Utf8));
         // NULs, control characters, or bytes Windows-1252 leaves undefined: binary.
-        assert_eq!(sniff_text(b"ELF\0\0\0\x01\x02 rest"), None);
-        assert_eq!(sniff_text(&(0u8..=255).cycle().take(4096).collect::<Vec<_>>()), None);
-        assert_eq!(sniff_text(&[0x8Du8, 0x41, 0x81, 0x9D, 0x42, 0x90, 0x8F, 0x43].repeat(100)), None);
+        assert_eq!(sniff_text(b"ELF\0\0\0\x01\x02 rest", false), None);
+        assert_eq!(sniff_text(&(0u8..=255).cycle().take(4096).collect::<Vec<_>>(), false), None);
+        assert_eq!(sniff_text(&[0x8Du8, 0x41, 0x81, 0x9D, 0x42, 0x90, 0x8F, 0x43].repeat(100), false), None);
         // Invalid UTF-8 with no control bytes reads as 8-bit text ("Ã(\u{A0}¡â(¡A").
-        assert_eq!(sniff_text(&[0xC3u8, 0x28, 0xA0, 0xA1, 0xE2, 0x28, 0xA1, 0x41].repeat(100)), Some(Encoding::Windows1252));
-        assert_eq!(sniff_text(b""), Some(Encoding::Utf8));
+        assert_eq!(sniff_text(&[0xC3u8, 0x28, 0xA0, 0xA1, 0xE2, 0x28, 0xA1, 0x41].repeat(100), false), Some(Encoding::Windows1252));
+        assert_eq!(sniff_text(b"", false), Some(Encoding::Utf8));
     }
 
     #[test]
@@ -1718,6 +1721,22 @@ mod tests {
         let Body::Text(t) = load(&job, &never()).unwrap().body else { panic!("text") };
         assert_eq!((t.line(0), t.line(1), t.line(2)), ("Café crème brûlée", "naïve résumé", "“quoted” € 5"));
         assert_eq!(t.note.as_deref(), Some("Shown as Windows-1252"));
+    }
+
+    /// The review's case: Latin-1 with no newline at the end ("Caf\xE9" was taken for UTF-8
+    /// cut short and shown as "Caf�"). Only a read cut at its limit excuses a partial character.
+    #[test]
+    fn latin1_at_the_end_of_the_file_is_still_latin1() {
+        assert_eq!(sniff_text(b"Caf\xe9", false), Some(Encoding::Windows1252));
+        assert_eq!(sniff_text(b"Caf\xc3", false), Some(Encoding::Windows1252), "a lone lead byte at the real end too");
+        assert_eq!(sniff_text("café".as_bytes(), false), Some(Encoding::Utf8));
+        assert_eq!(sniff_text(&"café".as_bytes()[..4], true), Some(Encoding::Utf8), "cut by the bounded read mid-é");
+        let d = folder("latin1-eof");
+        let p = d.join("cafe.txt");
+        std::fs::write(&p, b"Caf\xe9").unwrap();
+        let job = Job { path: p, is_dir: false, is_link: false, ext: "txt".into(), size: 4, fit: DEFAULT_FIT };
+        let Body::Text(t) = load(&job, &never()).unwrap().body else { panic!("text") };
+        assert_eq!((t.line(0), t.note.as_deref()), ("Café", Some("Shown as Windows-1252")));
     }
 
     /// A 1 MB text file: only the bounded head is read, and the panel says so.
