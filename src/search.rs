@@ -1379,7 +1379,7 @@ impl State {
             Key::Backspace | Key::Delete | Key::Left | Key::Right | Key::Home | Key::End => false,
             _ => match self.keymap.find(|c| c.matches_tx(ev, tx)) {
                 // The field's own copy, cut, paste, select-all and undo.
-                Some(Cmd::Copy | Cmd::Cut | Cmd::Paste | Cmd::PasteMove | Cmd::SelectAll | Cmd::Undo) | None => false,
+                Some(Cmd::Copy | Cmd::Cut | Cmd::Paste | Cmd::PasteMove | Cmd::SelectAll | Cmd::Undo | Cmd::Redo) | None => false,
                 Some(cmd) => {
                     if self.unavailable(cmd).is_none() {
                         self.run(cmd, tx);

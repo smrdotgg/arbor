@@ -137,7 +137,7 @@ impl State {
         let dir = self.cur().cwd.clone();
         match ops::new_folder(&dir, "untitled folder") {
             Ok(path) => {
-                self.undo.extend(Undo::new_folder(path.clone()));
+                self.did(Undo::new_folder(path.clone()));
                 self.rename = None;
                 self.refresh(&[(dir.clone(), self.cur().dir_id)], std::slice::from_ref(&path), &[]);
                 if let Some(p) = self.cur_mut().pending.as_mut().filter(|p| p.path == dir && p.nav == Nav::Reload) {
@@ -203,7 +203,7 @@ impl State {
                 // One lstat to fingerprint it, so undo can tell whether it changed since.
                 let undo = Undo::renamed(to.clone(), from.clone());
                 self.note = undo.is_none().then(|| format!("Renamed, but it can't be undone: “{new}” couldn't be read right after"));
-                self.undo.extend(undo);
+                self.did(undo);
                 let f = self.cur();
                 let id = if dir == f.cwd && !f.searching() { f.dir_id } else { crate::noclobber::dir_id(&dir) };
                 // Every pane on this folder, by whatever path (a symlink to it too), and every
@@ -243,6 +243,28 @@ impl State {
         self.start(Op::Undo(u));
     }
 
+    /// Redoes the last undone operation: the undo's own reverse, checked against the disk as
+    /// the undo left it, so it refuses (and stays on the redo stack) when anything changed
+    /// since. A redone operation goes back on the undo stack.
+    pub fn redo_last(&mut self) {
+        if self.job.is_some() {
+            self.note = Some("Still working on the last operation (Esc cancels it)".into());
+            return;
+        }
+        let Some(u) = self.redo.pop() else {
+            self.note = Some("Nothing to redo".into());
+            return;
+        };
+        self.start(Op::Undo(u));
+    }
+
+    /// A new operation done on this thread (a rename, a new folder): its undo, if any, goes on
+    /// the stack, and what was undone before can't be redone any more.
+    fn did(&mut self, undo: Option<Undo>) {
+        self.redo.clear();
+        self.undo.extend(undo);
+    }
+
     // ---- jobs -------------------------------------------------------------------------------
 
     /// Starts a file operation on a worker. One at a time: false when one is still running.
@@ -259,6 +281,10 @@ impl State {
         }
         self.note = None;
         self.job_seen = (0, 0);
+        // A new operation (not an undo or a redo) ends what could be redone.
+        if !matches!(op, Op::Undo(_)) {
+            self.redo.clear();
+        }
         self.job = Some(ops::start(op, dest_id, self.waker.clone()));
         true
     }
@@ -275,7 +301,11 @@ impl State {
         let (verb, total) = (job.verb, job.progress.items_total.load(Relaxed));
         self.job = None;
         let mut out = out;
-        self.undo.extend(out.undo.take());
+        // An undo's leftovers stay on the undo stack and what went can be redone; a redo's the
+        // other way round.
+        let (left, done) = if verb == "Redoing" { (&mut self.redo, &mut self.undo) } else { (&mut self.undo, &mut self.redo) };
+        left.extend(out.undo.take());
+        done.extend(out.inverse.take());
         // Renamed and moved items show where they are now at once (a fresh read or a recheck
         // follows); a search still walking remembers them for the batches still to come.
         if !out.moved.is_empty() || !out.removed.is_empty() {
@@ -315,6 +345,7 @@ impl State {
                 "Copying" => "Copied",
                 "Moving" => "Moved",
                 "Renaming" => "Renamed",
+                "Redoing" => "Redid",
                 _ => "Restored",
             };
             format!("{done} {n} item{}", plural(n))

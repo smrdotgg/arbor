@@ -104,6 +104,8 @@ pub struct State {
     pub(crate) paste_reqs: Vec<PasteReq>,
     next_paste: u64,
     pub(crate) undo: Vec<ops::Undo>,
+    /// Undone operations that can be redone, newest last. A new operation clears it.
+    pub(crate) redo: Vec<ops::Undo>,
     /// Which keys run which command (defaults plus the settings file).
     pub keymap: Keymap,
     /// The settings as last read, so "Reload Settings" applies only what changed.
@@ -243,6 +245,7 @@ impl State {
             paste_reqs: Vec::new(),
             next_paste: 0,
             undo: Vec::new(),
+            redo: Vec::new(),
             keymap: config.keymap,
             settings: config.settings,
             palette: None,
@@ -869,6 +872,7 @@ impl State {
             // holds without reading it (RUNE-GAPS.md). Pasting nothing says so.
             Paste | PasteMove => when(busy, BUSY).or(when(searching, "Leave the search (Esc) to paste into this folder")),
             Undo => when(busy, BUSY).or(when(self.undo.is_empty(), "Nothing to undo")),
+            Redo => when(busy, BUSY).or(when(self.redo.is_empty(), "Nothing to redo")),
             Cancel => when(!busy, "No file operation is running"),
             Open | Copy | Cut | Rename | BatchRename => when(nothing, "Select an item first"),
             Into => when(!f.selected().is_some_and(|e| e.is_dir), "Select a folder first"),
@@ -1019,6 +1023,7 @@ impl State {
             // Runs from the dialog (`State::answer`), with the items it named.
             Delete => {}
             Undo => self.undo_last(),
+            Redo => self.redo_last(),
             Cancel => {
                 if let Some(job) = &self.job {
                     job.cancel();
@@ -1487,6 +1492,57 @@ pub(crate) mod tests {
         assert_eq!(want, [d.join("f0")]);
         settle_all(&mut s);
         assert_eq!(s.cur().target_paths(), want);
+    }
+
+    /// Polls as frames would until the file operation lands (or 10 s pass).
+    pub(crate) fn finish_job(s: &mut State) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while s.job.is_some() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            s.poll(&mut Tx::default());
+        }
+        assert!(s.job.is_none(), "the operation never finished");
+        settle_all(s);
+    }
+
+    /// ⇧⌘Z redoes what ⌘Z undid; a redone operation can be undone again; a new operation
+    /// (on a worker or on this thread) ends what could be redone.
+    #[test]
+    fn redo_after_undo_and_a_new_operation_clears_it() {
+        let d = folder("redo", 0);
+        std::fs::write(d.join("a.txt"), "x").unwrap();
+        let mut s = state_in(&d);
+        let mut tx = Tx::default();
+        assert_eq!(s.unavailable(Cmd::Redo), Some("Nothing to redo"));
+        s.run(Cmd::Duplicate, &mut tx);
+        finish_job(&mut s);
+        assert!(d.join("a copy.txt").exists());
+        s.run(Cmd::Undo, &mut tx);
+        finish_job(&mut s);
+        assert!(!d.join("a copy.txt").exists());
+        assert_eq!((s.undo.len(), s.redo.len()), (0, 1));
+        assert_eq!(s.unavailable(Cmd::Redo), None);
+        s.run(Cmd::Redo, &mut tx);
+        finish_job(&mut s);
+        assert!(d.join("a copy.txt").exists(), "redone");
+        assert_eq!(s.note.as_deref(), Some("Redid 1 item"));
+        assert_eq!((s.undo.len(), s.redo.len()), (1, 0));
+        // Undo it again, then a new operation: nothing to redo any more.
+        s.run(Cmd::Undo, &mut tx);
+        finish_job(&mut s);
+        assert_eq!(s.redo.len(), 1);
+        s.new_folder();
+        assert!(s.redo.is_empty(), "a new folder ends the redo");
+        settle_all(&mut s);
+        s.rename = None;
+        s.run(Cmd::Undo, &mut tx);
+        finish_job(&mut s);
+        assert_eq!(s.redo.len(), 1);
+        let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "a.txt").unwrap();
+        s.cur_mut().select(i);
+        s.run(Cmd::Duplicate, &mut tx);
+        assert!(s.redo.is_empty(), "so does a copy");
+        finish_job(&mut s);
     }
 
     #[test]

@@ -588,6 +588,7 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Move to Trash | ⌘⌫, ⌦ | Ctrl+Backspace, Delete | `file.trash` |
 | Delete Permanently… | ⌥⌘⌫ | Shift+Delete | `file.delete` |
 | Undo | ⌘Z | Ctrl+Z | `file.undo` |
+| Redo | ⇧⌘Z | Ctrl+Shift+Z, Ctrl+Y | `file.redo` |
 | Cancel File Operation |  |  | `file.cancel` |
 | Move Up | ↑ | ↑ | `select.up` |
 | Move Down | ↓ | ↓ | `select.down` |

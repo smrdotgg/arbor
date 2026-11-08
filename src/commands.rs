@@ -31,7 +31,8 @@ macro_rules! commands {
             }
 
             /// Its default keys as the table writes them: `mac:` before a key makes it
-            /// macOS's only, `pc:` Windows' and Linux's only (see [`Cmd::default_keys_on`]).
+            /// macOS's only, `pc:` Windows' and Linux's only, `win:` Windows' only (see
+            /// [`Cmd::default_keys_on`]).
             fn key_specs(self) -> &'static [&'static str] {
                 match self { $(Cmd::$var => &[$($key),*]),* }
             }
@@ -60,9 +61,10 @@ impl Cmd {
         let mac = platform == KeyPlatform::Mac;
         self.key_specs()
             .iter()
-            .filter_map(|k| match (k.strip_prefix("mac:"), k.strip_prefix("pc:")) {
-                (Some(k), _) => mac.then_some(k),
-                (_, Some(k)) => (!mac).then_some(k),
+            .filter_map(|k| match (k.strip_prefix("mac:"), k.strip_prefix("pc:"), k.strip_prefix("win:")) {
+                (Some(k), ..) => mac.then_some(k),
+                (_, Some(k), _) => (!mac).then_some(k),
+                (.., Some(k)) => (platform == KeyPlatform::Windows).then_some(k),
                 _ => Some(*k),
             })
             .collect()
@@ -116,6 +118,7 @@ commands! {
     Trash "file.trash" "Move to Trash", ["cmd+backspace", "delete"];
     Delete "file.delete" "Delete Permanently…", ["mac:cmd+alt+backspace", "pc:shift+delete"];
     Undo "file.undo" "Undo", ["cmd+z"];
+    Redo "file.redo" "Redo", ["cmd+shift+z", "win:ctrl+y"];
     Cancel "file.cancel" "Cancel File Operation", [];
 
     Up "select.up" "Move Up", ["up"];

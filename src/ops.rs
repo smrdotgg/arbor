@@ -89,6 +89,7 @@ impl Op {
             Op::Trash { .. } => "Moving to Trash",
             Op::Delete { .. } => "Deleting",
             Op::Rename { .. } => "Renaming",
+            Op::Undo(u) if u.redo => "Redoing",
             Op::Undo(_) => "Undoing",
             Op::Checked { op, .. } => op.verb(),
         }
@@ -202,9 +203,16 @@ impl What {
 
 /// How to reverse a finished operation: each step's item, as it was left, goes back to where it
 /// came from or (for what the operation made) to the Trash.
+///
+/// A redo is the same record pointing the other way: undoing a step yields its inverse (a move
+/// back, a trashed item restored from where the Trash put it, a restored item trashed again),
+/// fingerprinted as the undo left it, so redoing refuses on the same terms as undoing does
+/// ([`Outcome::inverse`]). `redo` only says which way it points, for its words and for where
+/// its steps' items are (see [`Undo::in_trash`]).
 #[derive(Debug, Clone)]
 pub struct Undo {
     pub what: What,
+    pub redo: bool,
     steps: Vec<Step>,
 }
 
@@ -243,7 +251,22 @@ impl Undo {
                 Err(e) => errors.push(format!("“{}” can't be undone: it couldn't be read right after ({e})", name_of(&at))),
             }
         }
-        (!steps.is_empty()).then_some(Undo { what, steps })
+        (!steps.is_empty()).then_some(Undo { what, redo: false, steps })
+    }
+
+    /// Whether its steps' items are in the Trash, going back out of it: undoing a trash, or
+    /// redoing what an undo trashed (a copy, a duplicate, a new folder).
+    fn in_trash(&self) -> bool {
+        match self.what {
+            What::Trash => !self.redo,
+            What::Copy | What::Duplicate | What::NewFolder => self.redo,
+            What::Rename | What::BatchRename | What::Move => false,
+        }
+    }
+
+    /// "undo" or "redo", for its messages.
+    fn word(&self) -> &'static str {
+        if self.redo { "redo" } else { "undo" }
     }
 
     /// [`Undo::record_or_say`] for one item done on the window's thread: `None` (with nothing
@@ -406,6 +429,9 @@ pub struct Outcome {
     /// back. The UI puts it back on the stack, so a failed undo can be tried again and the items
     /// that did go back are never undone twice.
     pub undo: Option<Undo>,
+    /// For an undo or a redo, the steps that went, pointing back the other way: what the UI
+    /// puts on the redo stack after an undo, and on the undo stack after a redo.
+    pub inverse: Option<Undo>,
     pub errors: Vec<String>,
     /// An undo that changed nothing because the disk changed since the operation: why.
     pub refused: Option<String>,
@@ -737,6 +763,7 @@ impl<'a> Worker<'a> {
             return Outcome {
                 results: Vec::new(),
                 undo: None,
+                inverse: None,
                 errors: Vec::new(),
                 refused: Some(format!("Nothing was pasted: “{}” {why}", name_of(dest))),
                 cancelled: false,
@@ -775,6 +802,7 @@ impl<'a> Worker<'a> {
         let mut out = Outcome {
             results: Vec::new(),
             undo: None,
+            inverse: None,
             errors: Vec::new(),
             refused: None,
             cancelled: false,
@@ -811,7 +839,7 @@ impl<'a> Worker<'a> {
                 }
                 let dup = sources.iter().all(|s| s.parent() == Some(dest.as_path()));
                 if !steps.is_empty() {
-                    out.undo = Some(Undo { what: if dup { What::Duplicate } else { What::Copy }, steps });
+                    out.undo = Some(Undo { what: if dup { What::Duplicate } else { What::Copy }, redo: false, steps });
                 }
             }
             Op::Move { sources, dest } => {
@@ -918,6 +946,7 @@ impl<'a> Worker<'a> {
             return Outcome {
                 results: Vec::new(),
                 undo: None,
+                inverse: None,
                 errors: Vec::new(),
                 refused: Some(format!("Nothing was done: {}{more}", why.first().cloned().unwrap_or_default())),
                 cancelled: false,
@@ -1019,51 +1048,73 @@ impl<'a> Worker<'a> {
     /// step, and keeps the steps that don't go back in `out.undo`.
     fn undo(&mut self, undo: Undo, out: &mut Outcome) {
         self.p.items_total.store(undo.steps.len(), Relaxed);
-        let problems: Vec<String> = undo.steps.iter().filter_map(|s| self.check(undo.what, s).err()).collect();
+        let trashed = undo.in_trash();
+        let problems: Vec<String> = undo.steps.iter().filter_map(|s| self.check(trashed, s).err()).collect();
         if self.cancelled() {
             out.undo = Some(undo);
             return;
         }
         if let Some(first) = problems.first() {
             let more = if problems.len() > 1 { format!(" (and {} more)", problems.len() - 1) } else { String::new() };
-            out.refused = Some(format!("Can't undo the {}: {first}{more}. Nothing was changed.", undo.what.noun()));
+            out.refused = Some(format!("Can't {} the {}: {first}{more}. Nothing was changed.", undo.word(), undo.what.noun()));
             out.undo = Some(undo);
             return;
         }
-        let Undo { what, steps } = undo;
+        let word = undo.word();
+        let Undo { what, redo, steps } = undo;
         // With one step, the check above ran just now; with more, the others' checks (walks,
         // possibly) ran in between, so each is checked again right before it's undone.
         let recheck = steps.len() > 1;
-        let mut left = Vec::new();
+        let (mut left, mut inverse) = (Vec::new(), Vec::new());
         for step in steps {
             if self.cancelled() {
                 left.push(step);
                 continue;
             }
-            if recheck && let Err(why) = self.check(what, &step) {
-                out.errors.push(format!("Not undone: {why}"));
+            if recheck && let Err(why) = self.check(trashed, &step) {
+                out.errors.push(format!("{}: {why}", if word == "redo" { "Not redone" } else { "Not undone" }));
                 left.push(step);
                 continue;
             }
-            if let Some(kept) = self.undo_step(what, step, out) {
+            if let Some(kept) = self.undo_step(trashed, word, step, out, &mut inverse) {
                 left.push(kept);
             }
             self.p.items_done.fetch_add(1, Relaxed);
             self.tick(0);
         }
         if !left.is_empty() {
-            out.undo = Some(Undo { what, steps: left });
+            out.undo = Some(Undo { what, redo, steps: left });
+        }
+        if !inverse.is_empty() {
+            out.inverse = Some(Undo { what, redo: !redo, steps: inverse });
         }
     }
 
-    /// Undoes one checked step. Hands it back (updated if it got halfway) when it didn't go.
-    fn undo_step(&mut self, what: What, step: Step, out: &mut Outcome) -> Option<Step> {
+    /// The step that reverses one that just went, read as the disk is now: an item that went
+    /// back to `at` (`back: Some`), or one that should go to the Trash again (`back: None`,
+    /// fingerprinted with everything inside, as a copy's undo is). `None` when it can't be
+    /// read back (then it can't be reversed again, which loses nothing).
+    fn inverse_step(&self, at: PathBuf, back: Option<PathBuf>) -> Option<Step> {
+        let print = match back {
+            Some(_) => Print::of(&at, &at.symlink_metadata().ok()?),
+            None => self.print_all(&at).ok()?,
+        };
+        Some(Step { at, print, back, split: None })
+    }
+
+    /// Undoes (or redoes) one checked step. Hands it back (updated if it got halfway) when it
+    /// didn't go; when it went, adds the step that reverses it to `inverse`. `trashed`: the
+    /// item is in the Trash and goes back out of it ([`Undo::in_trash`]).
+    fn undo_step(&mut self, trashed: bool, word: &str, step: Step, out: &mut Outcome, inverse: &mut Vec<Step>) -> Option<Step> {
         let name = name_of(&step.at);
         let Some(back) = step.back.clone() else {
             self.before_act(&step.at);
             let p = self.p;
             return match (self.trash)(&step.at, &|| p.cancel.load(Relaxed)) {
-                Ok(_) => {
+                Ok(put) => {
+                    // Where the Trash put it, when it says (the Recycle Bin doesn't): redo
+                    // takes it back out from there.
+                    inverse.extend(put.and_then(|put| self.inverse_step(put, Some(step.at.clone()))));
                     out.removed.push(step.at.clone());
                     out.results.push(step.at);
                     None
@@ -1082,9 +1133,12 @@ impl<'a> Worker<'a> {
         };
         match moved {
             Ok(()) => {
-                if what == What::Trash {
+                if trashed {
                     crate::trash::forget(&step.at);
                 }
+                // Out of the Trash, reversing means trashing it again; otherwise moving it back.
+                let to = (!trashed).then(|| step.at.clone());
+                inverse.extend(self.inverse_step(back.clone(), to));
                 out.moved.push((step.at.clone(), back.clone()));
                 out.results.push(back);
                 None
@@ -1099,9 +1153,10 @@ impl<'a> Worker<'a> {
             }
             Err(MoveError::Split { split, why }) => {
                 out.errors.push(format!(
-                    "“{name}” is back in “{}”, but part of the original couldn't be removed from “{}” ({why}). Undo again to remove the rest once that's fixed",
+                    "“{name}” is back in “{}”, but part of the original couldn't be removed from “{}” ({why}). {} again to remove the rest once that's fixed",
                     parent_of(&back),
                     parent_of(&step.at),
+                    if word == "redo" { "Redo" } else { "Undo" },
                 ));
                 Some(Step { split: Some(*split), ..step })
             }
@@ -1110,14 +1165,14 @@ impl<'a> Worker<'a> {
 
     /// Whether `step` can be undone: its item is still exactly as the operation left it, and
     /// where it goes back to is free. Says what changed when not.
-    fn check(&self, what: What, step: &Step) -> Result<(), String> {
+    fn check(&self, trashed: bool, step: &Step) -> Result<(), String> {
         let name = format!("“{}”", name_of(&step.at));
         if let (Some(split), Some(back)) = (&step.split, &step.back) {
             return self.check_split(&name, step, split, back);
         }
         match self.diff(&step.at, &step.print) {
             None => {}
-            Some(Diff::Gone) if what == What::Trash => return Err(format!("{name} is no longer in the Trash")),
+            Some(Diff::Gone) if trashed => return Err(format!("{name} is no longer in the Trash")),
             Some(Diff::Gone) if step.at.parent().is_some_and(|p| p.symlink_metadata().is_err()) => {
                 return Err(format!("the folder {name} was in is gone (moved, deleted, or its drive was ejected)"));
             }
@@ -1520,12 +1575,17 @@ impl Worker<'_> {
         let moves: Vec<(PathBuf, PathBuf)> = undo.steps.iter().filter_map(|s| Some((s.at.clone(), s.back.clone()?))).collect();
         let seen: Vec<&Print> = undo.steps.iter().map(|s| &s.print).collect();
         if let Err(why) = self.check_batch(&moves, &seen) {
-            out.refused = Some(format!("Can't undo the batch rename: {why}. Nothing was changed."));
+            out.refused = Some(format!("Can't {} the batch rename: {why}. Nothing was changed.", undo.word()));
             out.undo = Some(undo);
             return;
         }
         if self.rename_all(&moves, &seen, out) {
             out.results = moves.iter().map(|(_, back)| back.clone()).collect();
+            // Redo (or undo again) goes through the same plan, the other way.
+            let steps: Vec<Step> = moves.iter().filter_map(|(at, back)| self.inverse_step(back.clone(), Some(at.clone()))).collect();
+            if !steps.is_empty() {
+                out.inverse = Some(Undo { what: What::BatchRename, redo: !undo.redo, steps });
+            }
             out.moved = moves;
         } else {
             out.undo = Some(undo);
@@ -1966,6 +2026,120 @@ mod tests {
         let o = run_now(Op::Copy { sources: vec![d.join("a")], dest: d.join("a/b") });
         assert_eq!(o.errors.len(), 1);
         assert!(!d.join("a/b/a").exists());
+    }
+
+    // ---- redo -------------------------------------------------------------------------------
+
+    /// Runs undo record `u` (an undo or a redo); panics unless it went cleanly. Returns the
+    /// record that reverses it.
+    fn reverse(u: Undo) -> Undo {
+        let redo = u.redo;
+        let o = run_now(Op::Undo(u));
+        assert!(o.refused.is_none() && o.errors.is_empty(), "{:?} {:?}", o.refused, o.errors);
+        assert!(o.undo.is_none(), "nothing left over");
+        let inv = o.inverse.expect("an inverse");
+        assert_eq!(inv.redo, !redo, "it points the other way");
+        inv
+    }
+
+    /// Move, undo, redo, undo: the item goes back and forth, and each record reverses the last.
+    #[test]
+    fn redo_a_move_and_undo_it_again() {
+        let d = tmp("redo-move");
+        fs::create_dir(d.join("into")).unwrap();
+        fs::write(d.join("f.txt"), "1").unwrap();
+        let u = take(run_now(Op::Move { sources: vec![d.join("f.txt")], dest: d.join("into") }));
+        let redo = reverse(u);
+        assert!(d.join("f.txt").exists() && !d.join("into/f.txt").exists());
+        assert_eq!(Op::Undo(redo.clone()).verb(), "Redoing");
+        let undo = reverse(redo);
+        assert!(!d.join("f.txt").exists() && d.join("into/f.txt").exists(), "redone");
+        reverse(undo);
+        assert!(d.join("f.txt").exists(), "undone again");
+    }
+
+    /// A redo refuses, as an undo does, when the item changed since the undo left it, and
+    /// hands the record back untouched.
+    #[test]
+    fn redo_refuses_when_the_disk_changed() {
+        let d = tmp("redo-refuse");
+        fs::create_dir(d.join("into")).unwrap();
+        fs::write(d.join("f.txt"), "1").unwrap();
+        let redo = reverse(take(run_now(Op::Move { sources: vec![d.join("f.txt")], dest: d.join("into") })));
+        edit(&d.join("f.txt"));
+        let o = run_now(Op::Undo(redo));
+        let why = o.refused.expect("refused");
+        assert!(why.starts_with("Can't redo the move: “f.txt” was edited"), "{why}");
+        assert!(o.undo.is_some_and(|u| u.redo), "the redo stays a redo");
+        assert!(o.inverse.is_none());
+        assert!(d.join("f.txt").exists() && !d.join("into/f.txt").exists(), "nothing moved");
+        // Something put where it would go back to: refused too.
+        let d = tmp("redo-taken");
+        fs::create_dir(d.join("into")).unwrap();
+        fs::write(d.join("f.txt"), "1").unwrap();
+        let redo = reverse(take(run_now(Op::Move { sources: vec![d.join("f.txt")], dest: d.join("into") })));
+        fs::write(d.join("into/f.txt"), "someone else's").unwrap();
+        let why = run_now(Op::Undo(redo)).refused.expect("refused");
+        assert!(why.contains("already taken"), "{why}");
+        assert_eq!(fs::read_to_string(d.join("into/f.txt")).unwrap(), "someone else's");
+    }
+
+    /// Copy, undo (the copy goes to the Trash), redo (it comes back out), undo again.
+    #[test]
+    fn redo_a_copy_takes_it_back_out_of_the_trash() {
+        let d = tmp("redo-copy");
+        fs::create_dir_all(d.join("src")).unwrap();
+        fs::write(d.join("src/f"), "x").unwrap();
+        fs::create_dir(d.join("dst")).unwrap();
+        let u = take(run_now(Op::Copy { sources: vec![d.join("src")], dest: d.join("dst") }));
+        let redo = reverse(u);
+        assert!(!d.join("dst/src").exists() && d.join("dst/.trash/src/f").exists());
+        let undo = reverse(redo);
+        assert_eq!(fs::read_to_string(d.join("dst/src/f")).unwrap(), "x", "back where the copy made it");
+        // Worked in since: the undo of the redone copy refuses, as the first undo would.
+        fs::write(d.join("dst/src/new"), "mine").unwrap();
+        let why = undo_refused(undo);
+        assert!(why.starts_with("Can't undo the copy: items were added") && why.contains("“src”"), "{why}");
+    }
+
+    /// Trash, undo (it comes back), redo (it goes to the Trash again), undo (back again).
+    #[test]
+    fn redo_a_trash() {
+        let d = tmp("redo-trash");
+        fs::write(d.join("f"), "1").unwrap();
+        let u = take(run_now(Op::Trash { sources: vec![d.join("f")] }));
+        let redo = reverse(u);
+        assert!(d.join("f").exists());
+        let undo = reverse(redo);
+        assert!(!d.join("f").exists());
+        reverse(undo);
+        assert_eq!(fs::read_to_string(d.join("f")).unwrap(), "1");
+        // A redo that finds the item gone from the Trash's side refuses.
+        let u = take(run_now(Op::Trash { sources: vec![d.join("f")] }));
+        let redo = reverse(u);
+        let undo = reverse(redo);
+        fs::remove_dir_all(d.join(".trash")).unwrap();
+        let why = undo_refused(undo);
+        assert!(why.contains("no longer in the Trash"), "{why}");
+    }
+
+    /// A batch rename's undo and redo are symmetric: the same plan both ways, swaps included.
+    #[test]
+    fn redo_a_batch_rename_with_a_swap() {
+        let d = tmp("redo-batch");
+        fs::write(d.join("a"), "A").unwrap();
+        fs::write(d.join("b"), "B").unwrap();
+        let item = |from: &str, to: &str| Renaming { from: d.join(from), to: d.join(to), seen: Seen::of(&d.join(from)).unwrap() };
+        let u = take(run_now(Op::Rename { items: vec![item("a", "b"), item("b", "a")] }));
+        assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "B");
+        let redo = reverse(u);
+        assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "A", "undone");
+        assert_eq!(redo.what, What::BatchRename);
+        let undo = reverse(redo);
+        assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "B", "redone");
+        assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "A");
+        reverse(undo);
+        assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "A", "undone again");
     }
 
     // ---- undo: rename -----------------------------------------------------------------------
