@@ -6,6 +6,7 @@
 //! arbor-timing first-frame main_ms=41.2 init_at_ms=3.1 init_ms=12.0 epoch_us=1762591234567890 entries=10000
 //! arbor-timing key ms=1.9 update_ms=1.1 encode_ms=0.6 refresh_hz=120
 //! arbor-timing nav ms=9.4 update_ms=3.2 encode_ms=0.7 entries=10000
+//! arbor-timing tab ms=12.1 update_ms=3.0 encode_ms=0.7 entries=10000 same_frame=1
 //! ```
 //!
 //! - `first-frame`: from the top of `main` to the first frame submitted. `epoch_us` is that
@@ -15,6 +16,9 @@
 //! - `key`: from the key's arrival (the OS event's own timestamp on macOS) to the frame it
 //!   changed being submitted.
 //! - `nav`: from the request (the key or click that asked) to the frame showing the new listing.
+//! - `tab`: a key that showed a hidden tab, to the frame showing its fresh listing.
+//!   `same_frame=1` when the read landed within the key's bounded wait (`State::show_tab`), so
+//!   the key's own frame shows it.
 //! - `first-listing`: only when the first folder was too slow for the first frame (the window
 //!   waits at most `app::FIRST_PAINT_WAIT` for it): from the top of `main` to the frame showing
 //!   it. `ARBOR_SLOW_FIRST_READ_MS=N` (read only when timing is on) slows that read by N ms to
@@ -27,7 +31,8 @@
 //!
 //! `ARBOR_BENCH=N` (implies timing) drives the app itself: after the first frame it does N
 //! rounds of "go to the parent, come back, press ↓", each step started by the previous step's
-//! frame (no timers), then quits. The ↓ is synthetic, so its `key` time starts when the handler
+//! frame (no timers), then quits. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
+//! parent folder instead, then does N rounds of "previous tab (the start folder), next tab". The ↓ is synthetic, so its `key` time starts when the handler
 //! is called rather than at an OS event. The window opens without taking focus and ignores real
 //! keys, so typing in another app while it runs can't reach it (and its ⌘⌫ can't trash anything).
 //!
@@ -42,6 +47,16 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use rune::{FrameEncoded, FrameOutcome, Key, KeyEvent, Mods, Tx};
 
 use crate::app::{Nav, State};
+use crate::commands::Cmd;
+
+/// Runs `cmd` as its key would. True when it could run.
+fn run(s: &mut State, cmd: Cmd, tx: &mut Tx) -> bool {
+    if s.unavailable(cmd).is_some() {
+        return false;
+    }
+    s.run(cmd, tx);
+    true
+}
 
 /// When `main` started, on both clocks.
 static MAIN: OnceLock<(Instant, SystemTime)> = OnceLock::new();
@@ -51,11 +66,13 @@ static WAKER: OnceLock<rune::Waker> = OnceLock::new();
 thread_local! {
     /// A handled key waiting for its frame: when it arrived.
     static KEY: Cell<Option<Instant>> = const { Cell::new(None) };
-    /// The navigation in flight: when it was asked for.
-    static NAV: Cell<Option<Instant>> = const { Cell::new(None) };
-    /// A navigation whose listing lands in the frame being built: when it was asked for, and
-    /// how many entries it has.
-    static LANDED: Cell<Option<(Instant, usize)>> = const { Cell::new(None) };
+    /// The navigation in flight: when it was asked for, and whether a tab switch asked.
+    static NAV: Cell<Option<(Instant, Kind)>> = const { Cell::new(None) };
+    /// A navigation whose listing lands in the frame being built: when it was asked for, how
+    /// many entries it has, what asked, and whether it landed inside the key.
+    static LANDED: Cell<Option<(Instant, usize, Kind, bool)>> = const { Cell::new(None) };
+    /// `ARBOR_BENCH_TABS`: the bench switches tabs instead of navigating.
+    static TABS: Cell<bool> = const { Cell::new(false) };
     static FIRST: Cell<bool> = const { Cell::new(true) };
     /// Entries in the first listing.
     static FIRST_ENTRIES: Cell<usize> = const { Cell::new(0) };
@@ -82,7 +99,8 @@ pub fn init() -> bool {
         return false;
     }
     MAIN.get_or_init(|| (Instant::now(), SystemTime::now()));
-    BENCH.set((rounds * 3, 0));
+    TABS.set(set("ARBOR_BENCH_TABS"));
+    BENCH.set((if TABS.get() { rounds * 2 + 1 } else { rounds * 3 }, 0));
     let slow = std::env::var("ARBOR_SLOW_FIRST_READ_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
     crate::app::SLOW_FIRST_READ_MS.store(slow, std::sync::atomic::Ordering::Relaxed);
     true
@@ -98,13 +116,13 @@ pub fn init_state() -> State {
 
 pub fn setup(s: &mut State, waker: rune::Waker) {
     let _ = WAKER.set(waker.clone());
-    FIRST_ENTRIES.set(s.entries.len());
+    FIRST_ENTRIES.set(s.cur().entries.len());
     if s.is_loading() {
         // Timed from `main`, and reported as `first-listing` rather than as a navigation.
         BOOT_LATE.set(true);
-        NAV.set(MAIN.get().map(|(m, _)| *m));
+        NAV.set(MAIN.get().map(|(m, _)| (*m, Kind::Nav)));
     }
-    bench_target(Some(s.cwd.clone()));
+    bench_target(Some(s.cur().cwd.clone()));
     s.setup(waker);
 }
 
@@ -117,26 +135,49 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 fn keyed(s: &mut State, ev: &KeyEvent, tx: &mut Tx, t: Instant) -> bool {
+    measured(s, tx, t, |s, tx| s.on_key(ev, tx))
+}
+
+/// What asked for a listing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Nav,
+    Tab,
+}
+
+/// Runs `f` (a key's handling) and notes what it asked for: a key frame, and a listing that
+/// landed inside it or is now on its way.
+fn measured(s: &mut State, tx: &mut Tx, t: Instant, f: impl FnOnce(&mut State, &mut Tx) -> bool) -> bool {
     let asked = s.pending_path().map(Path::to_path_buf);
-    let handled = s.on_key(ev, tx);
+    let (lands, tab) = (s.lands, tab_of(s));
+    let handled = f(s, tx);
     if handled {
         KEY.set(Some(t));
-        if s.pending_path().is_some_and(|p| Some(p) != asked.as_deref()) {
-            NAV.set(Some(t));
+        let kind = if tab_of(s) != tab { Kind::Tab } else { Kind::Nav };
+        if s.lands != lands && !s.is_loading() {
+            LANDED.set(Some((t, s.cur().entries.len(), kind, true)));
+        } else if s.pending_path().is_some_and(|p| Some(p) != asked.as_deref()) {
+            NAV.set(Some((t, kind)));
         }
     }
     handled
+}
+
+/// The active pane and its visible tab.
+fn tab_of(s: &State) -> (u64, usize) {
+    let p = &s.panes[s.active];
+    (p.id(), p.tab)
 }
 
 pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     let loading = s.is_loading();
     // A navigation a click (or anything but a key) asked for: the input that caused it.
     if loading && NAV.get().is_none() {
-        NAV.set(Some(rune::last_input().unwrap_or_else(Instant::now)));
+        NAV.set(Some((rune::last_input().unwrap_or_else(Instant::now), Kind::Nav)));
     }
     let mut changed = s.poll(tx);
     if loading && !s.is_loading() {
-        LANDED.set(NAV.take().map(|t| (t, s.entries.len())));
+        LANDED.set(NAV.take().map(|(t, kind)| (t, s.cur().entries.len(), kind, false)));
     }
     // One step per frame: a frame that landed a listing is that step's frame.
     if !loading && !FIRST.get() {
@@ -156,15 +197,33 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
     }
     BENCH.set((left - 1, n + 1));
     let now = Instant::now();
+    if TABS.get() {
+        match n {
+            // A second tab on the parent folder.
+            0 => {
+                s.run(Cmd::NewTab, tx);
+                let target = bench_target(None);
+                s.go(target.parent().unwrap_or(&target).to_path_buf(), Nav::New, None);
+                NAV.set(Some((now, Kind::Nav)));
+            }
+            n if n % 2 == 1 => {
+                measured(s, tx, now, |s, tx| run(s, Cmd::PrevTab, tx));
+            }
+            _ => {
+                measured(s, tx, now, |s, tx| run(s, Cmd::NextTab, tx));
+            }
+        }
+        return true;
+    }
     match n % 3 {
         0 => {
             let target = bench_target(None);
             s.go(target.parent().unwrap_or(&target).to_path_buf(), Nav::New, None);
-            NAV.set(Some(now));
+            NAV.set(Some((now, Kind::Nav)));
         }
         1 => {
             s.go(bench_target(None), Nav::New, None);
-            NAV.set(Some(now));
+            NAV.set(Some((now, Kind::Nav)));
         }
         _ => {
             keyed(s, &KeyEvent { key: Key::Down, mods: Mods::default() }, tx, now);
@@ -201,7 +260,7 @@ pub fn frame(f: &FrameEncoded) {
         let (init, init_at) = (INIT_MS.get(), INIT_AT_MS.get());
         // A late first listing can still land in time for the first frame's `poll`.
         let n = match landed {
-            Some((_, n)) if BOOT_LATE.replace(false) => n,
+            Some((_, n, _, _)) if BOOT_LATE.replace(false) => n,
             _ => FIRST_ENTRIES.get(),
         };
         eprintln!(
@@ -212,9 +271,11 @@ pub fn frame(f: &FrameEncoded) {
         if let Some(t) = key {
             eprintln!("arbor-timing key ms={:.2} {split}", ms(t));
         }
-        if let Some((t, n)) = landed {
+        if let Some((t, n, kind, inside)) = landed {
             if BOOT_LATE.replace(false) {
                 eprintln!("arbor-timing first-listing main_ms={:.2} entries={n} {split}", ms(t));
+            } else if kind == Kind::Tab {
+                eprintln!("arbor-timing tab ms={:.2} entries={n} {split} same_frame={}", ms(t), u8::from(inside));
             } else {
                 eprintln!("arbor-timing nav ms={:.2} entries={n} {split}", ms(t));
             }

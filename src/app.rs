@@ -1,16 +1,18 @@
 //! App state and everything that changes it: navigation, selection, filtering, keys.
-//! File operations live in `actions.rs`. Every handler lands its change with `tx.instant()`:
+//! File operations live in `actions.rs`, tabs and panes in `panes.rs`, and one folder's
+//! listing and selection in `folder.rs`. Every handler lands its change with `tx.instant()`:
 //! a file manager should never animate.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use rune::{Key, KeyEvent, Latest, TextEdit, Tx};
 
 use crate::commands::{Cmd, Keymap};
 use crate::config::{self, Config, Settings};
+pub use crate::folder::Nav;
+use crate::folder::{Answer, Folder, TabMemo};
 use crate::fs::{self, Entry, Listing, Sort, SortKey};
 use crate::ops;
 use crate::palette::Palette;
@@ -19,26 +21,9 @@ use crate::palette::Palette;
 const PAGE: usize = 20;
 
 /// Why a command that starts a file operation can't run while another one does.
-const BUSY: &str = "Another file operation is running";
+pub(crate) const BUSY: &str = "Another file operation is running";
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Nav {
-    New,
-    Back,
-    Forward,
-    Reload,
-}
-
-pub(crate) struct Pending {
-    pub path: PathBuf,
-    pub nav: Nav,
-    /// Names to select once the listing lands; the first gets the cursor.
-    pub select: Vec<OsString>,
-    /// Start renaming the first selected name once it lands (a new folder).
-    pub rename: bool,
-}
-
-/// An inline rename in progress.
+/// An inline rename in progress (always in the active pane).
 pub struct Rename {
     pub os: OsString,
     pub edit: TextEdit,
@@ -50,34 +35,51 @@ pub(crate) struct Clip {
     pub cut: bool,
 }
 
+/// One side of the window: its tabs, and the visible tab's live folder.
+pub struct Pane {
+    /// The visible tab's folder (its `id` is the pane's).
+    pub f: Folder,
+    /// Every tab, in order. The visible one is `None`: its state is `f`, live.
+    pub tabs: Vec<Option<TabMemo>>,
+    /// Which tab is visible.
+    pub tab: usize,
+}
+
+impl Pane {
+    pub fn id(&self) -> u64 {
+        self.f.id
+    }
+
+    /// Tab `i`'s folder.
+    pub fn tab_path(&self, i: usize) -> &Path {
+        match self.tabs.get(i) {
+            Some(Some(m)) => &m.path,
+            _ => &self.f.cwd,
+        }
+    }
+}
+
 pub struct State {
-    pub cwd: PathBuf,
-    /// The whole folder, sorted.
-    pub entries: Vec<Entry>,
-    /// Indices into `entries` that pass the hidden-file and filter rules, in display order.
-    pub visible: Vec<u32>,
-    /// The cursor: index into `visible`.
-    pub sel: usize,
-    /// Extra selection by name (⇧-arrows, ⌘-click, ⌘A). Empty means "just the cursor".
-    pub marked: HashSet<OsString>,
-    pub(crate) anchor: usize,
-    /// Typed filter. Starting with `/`, `~` (or a drive on Windows) it's a path to go to instead.
-    pub filter: String,
+    /// One pane, or two side by side (left first).
+    pub panes: Vec<Pane>,
+    /// The pane that gets keys, commands and the status bar.
+    pub active: usize,
+    /// Closed tabs, newest last, for "Reopen Closed Tab". Lightweight state only.
+    pub(crate) closed: Vec<TabMemo>,
+    next_pane: u64,
+    /// How long showing a hidden tab waits for its fresh read before drawing without it.
+    pub(crate) show_wait: std::time::Duration,
+    /// Counts listings landed, for timing.
+    pub lands: u64,
+    /// The pane a row drag between panes is over.
+    pub pane_drop: Option<u64>,
     pub show_hidden: bool,
-    pub sort: Sort,
-    pub back: Vec<PathBuf>,
-    pub fwd: Vec<PathBuf>,
     pub places: Vec<(String, PathBuf)>,
-    /// Bumped whenever `visible` changes, so virtual rows know their keys moved.
-    pub version: u64,
     /// The last error or note, shown in the status bar until the next action.
     pub note: Option<String>,
-    pub now: rune::LocalTime,
     pub rename: Option<Rename>,
     /// The running file operation, if any.
     pub job: Option<ops::Running>,
-    /// Folder row a file drag is hovering.
-    pub drop_target: Option<OsString>,
     pub(crate) clip: Option<Clip>,
     pub(crate) paste_move: bool,
     pub(crate) undo: Vec<ops::Undo>,
@@ -93,12 +95,13 @@ pub struct State {
     rename_sink: TextEdit,
     pub(crate) job_seen: (u64, usize),
     pub(crate) waker: Option<rune::Waker>,
-    loader: Latest<Listing>,
     /// "Reload Settings", reading the file on a worker.
     settings_loader: Latest<Config>,
-    pending: Option<Pending>,
     /// The startup read, while the settings or first listing haven't landed yet.
     boot: Option<Booting>,
+    /// The first folder's read request, while it's the one its pane waits for: the startup
+    /// listing lands only for it, and late settings retarget only it.
+    boot_req: Option<u64>,
 }
 
 impl State {
@@ -117,7 +120,7 @@ impl State {
         while start.is_none() || listing.is_none() {
             match boot.rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
                 Ok(Boot::Start(s)) => start = Some(s),
-                Ok(Boot::Listing(l)) => listing = Some(l),
+                Ok(Boot::Listing(_, l)) => listing = Some(l),
                 Err(_) => break,
             }
         }
@@ -127,25 +130,20 @@ impl State {
             Some(s) => (s.config, s.start, s.places, s.note),
             None => (Config::default(), std::env::current_dir().unwrap_or_else(|_| fs::home()), Vec::new(), None),
         };
+        let first = Folder::new(0, cwd, config.settings.sort, config.settings.show_hidden, None);
         let mut s = State {
-            cwd,
-            entries: Vec::new(),
-            visible: Vec::new(),
-            sel: 0,
-            marked: HashSet::new(),
-            anchor: 0,
-            filter: String::new(),
+            panes: vec![Pane { f: first, tabs: vec![None], tab: 0 }],
+            active: 0,
+            closed: Vec::new(),
+            next_pane: 1,
+            show_wait: FIRST_PAINT_WAIT,
+            lands: 0,
+            pane_drop: None,
             show_hidden: config.settings.show_hidden,
-            sort: config.settings.sort,
-            back: Vec::new(),
-            fwd: Vec::new(),
             places,
-            version: 0,
             note: config.summary().or(note),
-            now: now(),
             rename: None,
             job: None,
-            drop_target: None,
             clip: None,
             paste_move: false,
             undo: Vec::new(),
@@ -156,28 +154,39 @@ impl State {
             rename_sink: TextEdit::new(""),
             job_seen: (0, 0),
             waker: None,
-            loader: Latest::default(),
             settings_loader: Latest::default(),
-            pending: None,
             boot: None,
+            boot_req: None,
         };
+        let f = &mut s.panes[0].f;
         match listing {
             Some(first) => match first.result {
-                Ok(v) => s.entries = v,
+                Ok(v) => f.entries = v,
                 Err(e) => s.note = Some(s.note.take().map_or(e.clone(), |n| format!("{e} · {n}"))),
             },
             // The folder is slow: open on an empty list showing "Loading…", like any navigation.
             None => {
-                s.pending = Some(Pending { path: s.cwd.clone(), nav: Nav::Reload, select: Vec::new(), rename: false });
+                let req = crate::folder::next_request();
+                f.pending = Some(crate::folder::Pending {
+                    req,
+                    path: f.cwd.clone(),
+                    nav: Nav::Reload,
+                    select: Vec::new(),
+                    rename: false,
+                    scroll: 0.0,
+                });
                 s.boot = Some(boot);
+                s.boot_req = Some(req);
             }
         }
-        s.refilter(None);
+        s.panes[0].f.refilter(None);
         s
     }
 
     pub fn setup(&mut self, waker: rune::Waker) {
-        self.loader.set_waker(waker.clone());
+        for p in &self.panes {
+            p.f.loader.set_waker(waker.clone());
+        }
         self.settings_loader.set_waker(waker.clone());
         if let Some(b) = &self.boot
             && let Ok(mut w) = b.waker.lock()
@@ -185,6 +194,34 @@ impl State {
             *w = Some(waker.clone());
         }
         self.waker = Some(waker);
+    }
+
+    /// The active pane's folder.
+    pub fn cur(&self) -> &Folder {
+        &self.panes[self.active].f
+    }
+
+    pub fn cur_mut(&mut self) -> &mut Folder {
+        &mut self.panes[self.active].f
+    }
+
+    pub fn split(&self) -> bool {
+        self.panes.len() > 1
+    }
+
+    /// The index of the pane with this id (a handler from an older frame may name a pane that
+    /// has closed since).
+    pub fn pane_ix(&self, id: u64) -> Option<usize> {
+        self.panes.iter().position(|p| p.id() == id)
+    }
+
+    pub fn pane(&self, id: u64) -> Option<&Pane> {
+        self.panes.iter().find(|p| p.id() == id)
+    }
+
+    pub(crate) fn new_pane_id(&mut self) -> u64 {
+        self.next_pane += 1;
+        self.next_pane - 1
     }
 
     pub fn rename_edit(&mut self) -> &mut TextEdit {
@@ -195,50 +232,27 @@ impl State {
     }
 
     pub fn selected(&self) -> Option<&Entry> {
-        self.visible.get(self.sel).map(|&i| &self.entries[i as usize])
-    }
-
-    /// Whether row `i` (index into `visible`) is part of the selection.
-    pub fn is_selected(&self, i: usize) -> bool {
-        if self.marked.is_empty() {
-            i == self.sel
-        } else {
-            self.visible.get(i).is_some_and(|&e| self.marked.contains(&self.entries[e as usize].os))
-        }
-    }
-
-    /// The selection as entries, in display order.
-    pub fn targets(&self) -> Vec<&Entry> {
-        if self.marked.is_empty() {
-            return self.selected().into_iter().collect();
-        }
-        self.visible.iter().map(|&i| &self.entries[i as usize]).filter(|e| self.marked.contains(&e.os)).collect()
+        self.cur().selected()
     }
 
     pub fn target_paths(&self) -> Vec<PathBuf> {
-        self.targets().into_iter().map(|e| self.cwd.join(&e.os)).collect()
-    }
-
-    pub fn path_mode(&self) -> bool {
-        is_path_like(&self.filter)
+        self.cur().target_paths()
     }
 
     pub fn is_loading(&self) -> bool {
-        self.pending.is_some()
+        self.cur().is_loading()
     }
 
-    /// The folder being loaded, if any.
+    /// The folder the active pane is loading, if any.
     pub fn pending_path(&self) -> Option<&Path> {
-        self.pending.as_ref().map(|p| p.path.as_path())
+        self.cur().pending.as_ref().map(|p| p.path.as_path())
     }
 
     // ---- navigation -------------------------------------------------------------------------
 
     pub(crate) fn go_full(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, rename: bool) {
-        let sort = self.sort;
         self.rename = None;
-        self.pending = Some(Pending { path: path.clone(), nav, select, rename });
-        self.loader.request(path, move |p| fs::list(p, sort));
+        self.cur_mut().request(path, nav, select, rename);
     }
 
     pub fn go(&mut self, path: PathBuf, nav: Nav, select: Option<OsString>) {
@@ -246,36 +260,38 @@ impl State {
     }
 
     pub fn go_to(&mut self, path: PathBuf) {
-        if path != self.cwd {
+        if path != self.cur().cwd {
             self.go(path, Nav::New, None);
         }
     }
 
     pub fn parent(&mut self) {
-        if let Some(p) = self.cwd.parent() {
-            let came_from = self.cwd.file_name().map(|n| n.to_os_string());
+        let f = self.cur();
+        if let Some(p) = f.cwd.parent() {
+            let came_from = f.cwd.file_name().map(|n| n.to_os_string());
             self.go(p.to_path_buf(), Nav::New, came_from);
         }
     }
 
     pub fn go_back(&mut self) {
-        if let Some(p) = self.back.last().cloned() {
-            let came_from = self.cwd.file_name().map(|n| n.to_os_string());
-            let select = if self.cwd.parent() == Some(p.as_path()) { came_from } else { None };
+        let f = self.cur();
+        if let Some(p) = f.back.last().cloned() {
+            let came_from = f.cwd.file_name().map(|n| n.to_os_string());
+            let select = if f.cwd.parent() == Some(p.as_path()) { came_from } else { None };
             self.go(p, Nav::Back, select);
         }
     }
 
     pub fn go_forward(&mut self) {
-        if let Some(p) = self.fwd.last().cloned() {
+        if let Some(p) = self.cur().fwd.last().cloned() {
             self.go(p, Nav::Forward, None);
         }
     }
 
-    /// Re-reads the folder, keeping the selection (or selecting `names` instead).
+    /// Re-reads the active folder, keeping the selection (or selecting `names` instead).
     pub fn reload_selecting(&mut self, names: Vec<OsString>, rename: bool) {
-        let keep = if names.is_empty() { self.targets().iter().map(|e| e.os.clone()).collect() } else { names };
-        self.go_full(self.cwd.clone(), Nav::Reload, keep, rename);
+        self.rename = None;
+        reload_folder(self.cur_mut(), names, rename);
     }
 
     pub fn reload(&mut self) {
@@ -285,7 +301,8 @@ impl State {
     /// Opens the cursor's entry: a folder navigates, a file opens in its default app.
     /// With several files selected, opens each file.
     pub fn open_selected(&mut self) {
-        let targets: Vec<(PathBuf, bool)> = self.targets().iter().map(|e| (self.cwd.join(&e.os), e.is_dir)).collect();
+        let f = self.cur();
+        let targets: Vec<(PathBuf, bool)> = f.targets().iter().map(|e| (f.cwd.join(&e.os), e.is_dir)).collect();
         if let [(path, true)] = targets.as_slice() {
             let p = path.clone();
             self.go(p, Nav::New, None);
@@ -302,7 +319,8 @@ impl State {
     }
 
     pub fn reveal_selected(&mut self) {
-        let path = self.selected().map_or_else(|| self.cwd.clone(), |e| self.cwd.join(&e.os));
+        let f = self.cur();
+        let path = f.selected().map_or_else(|| f.cwd.clone(), |e| f.cwd.join(&e.os));
         if let Err(err) = fs::reveal(&path) {
             self.note = Some(format!("Couldn't reveal: {err}"));
         }
@@ -313,12 +331,11 @@ impl State {
     pub fn poll(&mut self, tx: &mut Tx) -> bool {
         tx.instant();
         let mut changed = self.poll_job();
-        if let Some(listing) = self.poll_boot() {
-            changed = true;
-            self.land(listing, tx);
-        }
-        if let Some(listing) = self.loader.take() {
-            changed |= self.land(listing, tx);
+        changed |= self.poll_boot(tx);
+        for ix in 0..self.panes.len() {
+            if let Some(a) = self.panes[ix].f.loader.take() {
+                changed |= self.land(ix, a, tx);
+            }
         }
         if let Some(c) = self.settings_loader.take() {
             self.apply_settings(c, tx);
@@ -327,86 +344,132 @@ impl State {
         changed
     }
 
-    /// What the startup read sent since the window opened: the settings are applied here, the
-    /// first listing is returned to land like any other.
-    fn poll_boot(&mut self) -> Option<Listing> {
-        let mut listing = None;
+    /// What the startup read sent since the window opened: the settings, then the first
+    /// listing, which lands like any other but only for the request it answers. True when
+    /// anything changed.
+    fn poll_boot(&mut self, tx: &mut Tx) -> bool {
+        let mut changed = false;
         while let Some(b) = &self.boot {
             match b.rx.try_recv() {
-                Ok(Boot::Start(s)) => self.land_start(*s),
-                Ok(Boot::Listing(l)) => {
-                    listing = Some(l);
+                Ok(Boot::Start(s)) => {
+                    self.land_start(*s);
+                    changed = true;
+                }
+                Ok(Boot::Listing(sort, listing)) => {
                     self.boot = None;
+                    // Gone when the user navigated (or reloaded) first: then it's stale.
+                    let req = self.boot_req.take();
+                    let ix = self.panes.iter().position(|p| req.is_some() && p.f.pending.as_ref().map(|p| p.req) == req);
+                    if let (Some(ix), Some(req)) = (ix, req) {
+                        changed |= self.land(ix, Answer { req, sort, listing }, tx);
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.boot = None,
             }
         }
-        listing
+        changed
     }
 
     /// The settings, arriving after the window opened (a slow disk under the config folder).
+    /// A folder only ever changes together with its listing: the provisional first folder is
+    /// retargeted to the start folder only while its first read is still the one it waits for
+    /// (nothing shown, nobody navigated). A preference applies only where the user hasn't
+    /// changed it since the window opened on the defaults.
     fn land_start(&mut self, start: Start) {
         let Start { config, start, places, note } = start;
-        // Still waiting on the provisional folder: wait on the real start folder instead.
-        if let Some(p) = self.pending.as_mut().filter(|p| p.nav == Nav::Reload && p.path == self.cwd) {
+        if let Some(req) = self.boot_req
+            && let Some(f) = self.panes.iter_mut().map(|p| &mut p.f).find(|f| f.pending.as_ref().is_some_and(|p| p.req == req))
+            && f.entries.is_empty()
+            && let Some(p) = f.pending.as_mut()
+        {
             p.path = start.clone();
-            self.cwd = start;
+            f.cwd = start;
         }
-        self.sort = config.settings.sort;
-        self.show_hidden = config.settings.show_hidden;
+        let (old, new) = (&self.settings, &config.settings);
+        if self.show_hidden == old.show_hidden {
+            self.show_hidden = new.show_hidden;
+            for p in &mut self.panes {
+                p.f.set_hidden(new.show_hidden);
+            }
+        }
+        for p in &mut self.panes {
+            if p.f.sort == old.sort && new.sort != old.sort {
+                p.f.sort = new.sort;
+                p.f.resort();
+            }
+            for m in p.tabs.iter_mut().flatten().filter(|m| m.sort == old.sort) {
+                m.sort = new.sort;
+            }
+        }
         self.places = places;
         self.note = config.summary().or(note).or(self.note.take());
         self.keymap = config.keymap;
         self.settings = config.settings;
-        let keep = self.cursor_name();
-        self.refilter(keep.as_deref());
     }
 
-    /// Shows a finished listing if it's the one being waited for (a newer request wins).
-    fn land(&mut self, listing: Listing, tx: &mut Tx) -> bool {
-        let Some(p) = self.pending.take_if(|p| p.path == listing.path) else { return false };
-        match listing.result {
+    /// Shows a finished listing in pane `ix` if it's the one being waited for (a newer request
+    /// wins).
+    pub(crate) fn land(&mut self, ix: usize, a: Answer, tx: &mut Tx) -> bool {
+        let active = ix == self.active;
+        let f = &mut self.panes[ix].f;
+        let Some(p) = f.pending.take_if(|p| p.req == a.req && p.path == a.listing.path) else { return false };
+        match a.listing.result {
             Err(e) => {
                 self.note = Some(format!("{}: {e}", fs::pretty(&p.path)));
             }
-            Ok(entries) => {
-                let old = std::mem::replace(&mut self.cwd, p.path);
-                let moved = old != self.cwd;
+            Ok(mut entries) => {
+                self.lands += 1;
+                // The sort changed while it was being read.
+                if a.sort != f.sort {
+                    fs::sort_entries(&mut entries, f.sort);
+                }
+                let old = std::mem::replace(&mut f.cwd, p.path);
+                let moved = old != f.cwd;
                 match p.nav {
                     Nav::New => {
-                        self.back.push(old);
-                        self.fwd.clear();
+                        f.back.push(old);
+                        f.fwd.clear();
                     }
                     Nav::Back => {
-                        self.back.pop();
-                        self.fwd.push(old);
+                        f.back.pop();
+                        f.fwd.push(old);
                     }
                     Nav::Forward => {
-                        self.fwd.pop();
-                        self.back.push(old);
+                        f.fwd.pop();
+                        f.back.push(old);
                     }
-                    Nav::Reload => {}
+                    Nav::Reload | Nav::Show => {}
                 }
-                self.entries = entries;
-                self.now = now();
-                if p.nav != Nav::Reload {
-                    self.filter.clear();
-                    self.note = None;
+                f.entries = entries;
+                f.now = crate::folder::now();
+                let navigated = matches!(p.nav, Nav::New | Nav::Back | Nav::Forward);
+                if navigated {
+                    f.filter.clear();
                 }
-                self.marked.clear();
+                f.marked.clear();
                 if p.select.len() > 1 {
-                    self.marked.extend(p.select.iter().cloned());
+                    f.marked.extend(p.select.iter().cloned());
                 }
-                self.refilter(p.select.first().map(OsString::as_os_str));
-                self.anchor = self.sel;
-                tx.set_title(title(&self.cwd));
-                if moved {
-                    tx.scroll_to_instant("list", 0.0, 0.0);
+                f.refilter(p.select.first().map(OsString::as_os_str));
+                f.anchor = f.sel;
+                if p.nav == Nav::Show {
+                    // Where it was when it was hidden (clamped if the folder shrank since).
+                    tx.scroll_to_instant(f.list_key(), 0.0, p.scroll);
+                } else {
+                    if moved {
+                        tx.scroll_to_instant(f.list_key(), 0.0, 0.0);
+                    }
+                    f.reveal(tx);
                 }
-                self.reveal(tx);
-                if p.rename {
-                    self.start_rename();
+                if active {
+                    if navigated {
+                        self.note = None;
+                    }
+                    tx.set_title(title(&self.cur().cwd));
+                    if p.rename {
+                        self.start_rename();
+                    }
                 }
             }
         }
@@ -415,119 +478,24 @@ impl State {
 
     // ---- selection, sorting, filtering ------------------------------------------------------
 
-    /// Recomputes `visible`. Keeps `select` (by name) as the cursor when it's still shown;
-    /// otherwise the first name starting with the filter, else the first row.
-    pub fn refilter(&mut self, select: Option<&OsStr>) {
-        let q = if self.path_mode() { String::new() } else { self.filter.to_lowercase() };
-        let hidden = self.show_hidden;
-        self.visible.clear();
-        self.visible.extend(
-            self.entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| (hidden || !e.hidden) && (q.is_empty() || e.lower.contains(&q)))
-                .map(|(i, _)| i as u32),
-        );
-        let by_name = select.and_then(|n| self.visible.iter().position(|&i| self.entries[i as usize].os == n));
-        let by_prefix =
-            || (!q.is_empty()).then(|| self.visible.iter().position(|&i| self.entries[i as usize].lower.starts_with(&q))).flatten();
-        self.sel = by_name.or_else(by_prefix).unwrap_or(0);
-        self.version += 1;
-    }
-
-    fn cursor_name(&self) -> Option<OsString> {
-        self.selected().map(|e| e.os.clone())
-    }
-
     pub fn set_sort(&mut self, key: SortKey) {
-        self.sort = if self.sort.key == key {
-            Sort { key, desc: !self.sort.desc }
-        } else {
-            // Newest and largest first feel right; names and kinds read A→Z.
-            Sort { key, desc: matches!(key, SortKey::Size | SortKey::Modified) }
-        };
-        let keep = self.cursor_name();
-        fs::sort_entries(&mut self.entries, self.sort);
-        self.refilter(keep.as_deref());
+        self.cur_mut().set_sort(key);
     }
 
     pub fn toggle_hidden(&mut self) {
         self.show_hidden = !self.show_hidden;
-        let keep = self.cursor_name();
-        self.refilter(keep.as_deref());
-    }
-
-    /// A plain click: just this row.
-    pub fn select(&mut self, i: usize) {
-        if !self.visible.is_empty() {
-            self.sel = i.min(self.visible.len() - 1);
-            self.anchor = self.sel;
-            self.marked.clear();
+        let on = self.show_hidden;
+        for p in &mut self.panes {
+            p.f.set_hidden(on);
         }
-    }
-
-    /// ⌘-click: add or remove this row.
-    pub fn toggle_mark(&mut self, i: usize) {
-        if i >= self.visible.len() {
-            return;
-        }
-        if self.marked.is_empty()
-            && let Some(n) = self.cursor_name()
-        {
-            self.marked.insert(n);
-        }
-        let name = self.entries[self.visible[i] as usize].os.clone();
-        if !self.marked.remove(&name) {
-            self.marked.insert(name);
-        }
-        self.sel = i;
-        self.anchor = i;
-    }
-
-    /// ⇧-click or ⇧-arrow: everything from the anchor to row `i`.
-    pub fn extend_to(&mut self, i: usize) {
-        if self.visible.is_empty() {
-            return;
-        }
-        let i = i.min(self.visible.len() - 1);
-        let (a, b) = (self.anchor.min(i), self.anchor.max(i));
-        self.marked = self.visible[a..=b].iter().map(|&e| self.entries[e as usize].os.clone()).collect();
-        self.sel = i;
-    }
-
-    pub fn select_all(&mut self) {
-        self.marked = self.visible.iter().map(|&e| self.entries[e as usize].os.clone()).collect();
-    }
-
-    fn step(&mut self, by: isize, extend: bool, tx: &mut Tx) {
-        if self.visible.is_empty() {
-            return;
-        }
-        let max = self.visible.len() as isize - 1;
-        let to = (self.sel as isize + by).clamp(0, max) as usize;
-        if extend {
-            self.extend_to(to);
-        } else {
-            self.select(to);
-        }
-        self.reveal(tx);
     }
 
     pub fn reveal(&self, tx: &mut Tx) {
-        if let Some(e) = self.selected() {
-            tx.scroll_into_view_in("rows", e.key.clone());
-        }
-    }
-
-    fn type_filter(&mut self, text: &str) {
-        let keep = self.cursor_name();
-        self.filter.push_str(text);
-        self.marked.clear();
-        self.refilter(if self.path_mode() { keep.as_deref() } else { None });
+        self.cur().reveal(tx);
     }
 
     fn submit_path(&mut self) {
-        let path = fs::expand(self.filter.trim());
+        let path = fs::expand(self.cur().filter.trim());
         if path.is_dir() {
             self.go(path, Nav::New, None);
         } else if path.exists() {
@@ -558,19 +526,26 @@ impl State {
             return true;
         }
         if let Some(cmd) = self.keymap.find(|c| c.matches_tx(ev, tx)) {
-            // A command that can't run lets the key go on (Esc with nothing to clear).
-            if self.unavailable(cmd).is_some() {
+            if let Some(why) = self.unavailable(cmd) {
+                // Closing the last tab does nothing, the same on every platform: passed on, ⌘W
+                // would close the window on macOS (Rune's standard Close item).
+                if cmd == Cmd::CloseTab {
+                    self.note = Some(why.into());
+                    return true;
+                }
+                // Any other command that can't run lets the key go on (Esc with nothing to clear).
                 return false;
             }
             self.run(cmd, tx);
             return true;
         }
+        let f = self.cur_mut();
         match &ev.key {
             // Space with nothing typed is free (reserved for preview later).
-            Key::Text(t) if t == " " && self.filter.is_empty() => false,
+            Key::Text(t) if t == " " && f.filter.is_empty() => false,
             Key::Text(t) if !ev.mods.cmd && !ev.mods.ctrl => {
-                self.type_filter(t);
-                self.reveal(tx);
+                f.type_filter(t);
+                f.reveal(tx);
                 true
             }
             _ => false,
@@ -578,27 +553,29 @@ impl State {
     }
 
     /// While the filter has text, typing, ⌫ and ⌥⌫ edit it, and in go-to mode Enter goes,
-    /// before any command sees those keys.
+    /// before any command sees those keys. Tab in go-to mode is reserved (path completion).
     fn edit_filter(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        if self.filter.is_empty() {
+        let f = self.cur_mut();
+        if f.filter.is_empty() {
             return false;
         }
         let m = ev.mods;
         match &ev.key {
             Key::Backspace if m.alt && !m.cmd && !m.ctrl => {
-                self.filter.clear();
-                self.refilter(None);
+                f.filter.clear();
+                f.refilter(None);
             }
             Key::Backspace if !m.cmd && !m.ctrl && !m.alt => {
-                self.filter.pop();
-                let keep = self.cursor_name();
-                self.refilter(keep.as_deref());
-                self.reveal(tx);
+                f.filter.pop();
+                let keep = f.cursor_name();
+                f.refilter(keep.as_deref());
+                f.reveal(tx);
             }
-            Key::Enter if !m.cmd && !m.ctrl && !m.alt && self.path_mode() => self.submit_path(),
+            Key::Tab if !m.cmd && !m.ctrl && !m.alt && f.path_mode() => {}
+            Key::Enter if !m.cmd && !m.ctrl && !m.alt && f.path_mode() => self.submit_path(),
             Key::Text(t) if !m.cmd && !m.ctrl => {
-                self.type_filter(t);
-                self.reveal(tx);
+                f.type_filter(t);
+                f.reveal(tx);
             }
             _ => return false,
         }
@@ -610,36 +587,47 @@ impl State {
     /// is listed, so a new one has to decide.
     pub fn unavailable(&self, cmd: Cmd) -> Option<&'static str> {
         use Cmd::*;
-        let nothing = self.selected().is_none();
-        let empty = self.visible.is_empty();
+        let f = self.cur();
+        let nothing = f.selected().is_none();
+        let empty = f.visible.is_empty();
         // File operations run one at a time (`State::start`).
         let busy = self.job.is_some();
+        let pane = &self.panes[self.active];
         let when = |cond: bool, why: &'static str| cond.then_some(why);
         match cmd {
             // Start a file operation.
             Duplicate | Trash => when(busy, BUSY).or(when(nothing, "Select an item first")),
+            CopyToOther | MoveToOther => when(!self.split(), NOT_SPLIT)
+                .or(when(busy, BUSY))
+                .or(when(nothing, "Select an item first"))
+                .or(when(self.other().is_some_and(|o| o.cwd == f.cwd), "Both panes show the same folder")),
             // Paste always shows as available otherwise: Rune can't ask the clipboard what it
             // holds without reading it (RUNE-GAPS.md). Pasting nothing says so.
             Paste | PasteMove => when(busy, BUSY),
             Undo => when(busy, BUSY).or(when(self.undo.is_empty(), "Nothing to undo")),
             Cancel => when(!busy, "No file operation is running"),
             Open | Copy | Cut | Rename => when(nothing, "Select an item first"),
-            Into => when(!self.selected().is_some_and(|e| e.is_dir), "Select a folder first"),
-            Parent => when(self.cwd.parent().is_none(), "Already at the top"),
-            Back => when(self.back.is_empty(), "Nothing to go back to"),
-            Forward => when(self.fwd.is_empty(), "Nothing to go forward to"),
-            Clear => when(!busy && self.filter.is_empty() && self.note.is_none() && self.marked.is_empty(), "Nothing to clear"),
+            Into => when(!f.selected().is_some_and(|e| e.is_dir), "Select a folder first"),
+            Parent => when(f.cwd.parent().is_none(), "Already at the top"),
+            Back => when(f.back.is_empty(), "Nothing to go back to"),
+            Forward => when(f.fwd.is_empty(), "Nothing to go forward to"),
+            Clear => when(!busy && f.filter.is_empty() && self.note.is_none() && f.marked.is_empty(), "Nothing to clear"),
             Up | Down | PageUp | PageDown | First | Last | ExtendUp | ExtendDown | ExtendPageUp | ExtendPageDown | ExtendFirst
             | ExtendLast | SelectAll => when(empty, "Nothing to select"),
-            SortName => when(self.sort.key == SortKey::Name, "Already sorted by name"),
-            SortKind => when(self.sort.key == SortKey::Kind, "Already sorted by kind"),
-            SortSize => when(self.sort.key == SortKey::Size, "Already sorted by size"),
-            SortModified => when(self.sort.key == SortKey::Modified, "Already sorted by date modified"),
+            SortName => when(f.sort.key == SortKey::Name, "Already sorted by name"),
+            SortKind => when(f.sort.key == SortKey::Kind, "Already sorted by kind"),
+            SortSize => when(f.sort.key == SortKey::Size, "Already sorted by size"),
+            SortModified => when(f.sort.key == SortKey::Modified, "Already sorted by date modified"),
+            CloseTab => when(!self.split() && pane.tabs.len() == 1, "This is the only tab"),
+            NextTab | PrevTab => when(pane.tabs.len() == 1, "There's only one tab here"),
+            ReopenTab => when(self.closed.is_empty(), "No closed tabs to reopen"),
+            OtherPane => when(!self.split(), NOT_SPLIT),
             Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
                 when(cmd.place().is_some_and(|i| i >= self.places.len()), "No sidebar place there")
             }
             // Always available.
-            GoTo | Reload | Reveal | Palette | OpenSettings | ReloadSettings | CopyPath | NewFolder | Hidden | SortReverse => None,
+            GoTo | Reload | Reveal | Palette | OpenSettings | ReloadSettings | CopyPath | NewFolder | Hidden | SortReverse | NewTab
+            | Split => None,
         }
     }
 
@@ -648,6 +636,8 @@ impl State {
         match cmd {
             Cmd::Hidden if self.show_hidden => "Hide Hidden Files".into(),
             Cmd::Hidden => "Show Hidden Files".into(),
+            Cmd::Split if self.split() => "Close Split View".into(),
+            Cmd::Split => "Split View".into(),
             _ => match cmd.place().and_then(|i| self.places.get(i)) {
                 Some((name, _)) => format!("Go to {name}").into(),
                 None => cmd.title().into(),
@@ -662,19 +652,21 @@ impl State {
         match cmd {
             Open => self.open_selected(),
             Into => {
-                self.select(self.sel);
+                let f = self.cur_mut();
+                f.select(f.sel);
                 self.open_selected();
             }
             Parent => self.parent(),
             Back => self.go_back(),
             Forward => self.go_forward(),
             GoTo => {
-                let mut p = fs::pretty(&self.cwd);
+                let f = self.cur_mut();
+                let mut p = fs::pretty(&f.cwd);
                 if !p.ends_with(std::path::MAIN_SEPARATOR) {
                     p.push(std::path::MAIN_SEPARATOR);
                 }
-                self.filter = p;
-                self.refilter(None);
+                f.filter = p;
+                f.refilter(None);
             }
             Reload => self.reload(),
             Reveal => self.reveal_selected(),
@@ -687,11 +679,12 @@ impl State {
                     self.note = Some("Cancelling…".into());
                 } else {
                     self.note = None;
-                    self.marked.clear();
-                    let keep = self.cursor_name();
-                    self.filter.clear();
-                    self.refilter(keep.as_deref());
-                    self.reveal(tx);
+                    let f = self.cur_mut();
+                    f.marked.clear();
+                    let keep = f.cursor_name();
+                    f.filter.clear();
+                    f.refilter(keep.as_deref());
+                    f.reveal(tx);
                 }
             }
             Copy => self.copy_selected(false, tx),
@@ -713,28 +706,40 @@ impl State {
                     self.note = Some("Cancelling…".into());
                 }
             }
-            Up => self.step(-1, false, tx),
-            Down => self.step(1, false, tx),
-            PageUp => self.step(-page, false, tx),
-            PageDown => self.step(page, false, tx),
-            First => self.step(isize::MIN / 2, false, tx),
-            Last => self.step(isize::MAX / 2, false, tx),
-            ExtendUp => self.step(-1, true, tx),
-            ExtendDown => self.step(1, true, tx),
-            ExtendPageUp => self.step(-page, true, tx),
-            ExtendPageDown => self.step(page, true, tx),
-            ExtendFirst => self.step(isize::MIN / 2, true, tx),
-            ExtendLast => self.step(isize::MAX / 2, true, tx),
-            SelectAll => self.select_all(),
+            CopyToOther => self.send_to_other_pane(false),
+            MoveToOther => self.send_to_other_pane(true),
+            Up => self.cur_mut().step(-1, false, tx),
+            Down => self.cur_mut().step(1, false, tx),
+            PageUp => self.cur_mut().step(-page, false, tx),
+            PageDown => self.cur_mut().step(page, false, tx),
+            First => self.cur_mut().step(isize::MIN / 2, false, tx),
+            Last => self.cur_mut().step(isize::MAX / 2, false, tx),
+            ExtendUp => self.cur_mut().step(-1, true, tx),
+            ExtendDown => self.cur_mut().step(1, true, tx),
+            ExtendPageUp => self.cur_mut().step(-page, true, tx),
+            ExtendPageDown => self.cur_mut().step(page, true, tx),
+            ExtendFirst => self.cur_mut().step(isize::MIN / 2, true, tx),
+            ExtendLast => self.cur_mut().step(isize::MAX / 2, true, tx),
+            SelectAll => self.cur_mut().select_all(),
             Hidden => self.toggle_hidden(),
             SortName => self.sort_by(SortKey::Name, tx),
             SortKind => self.sort_by(SortKey::Kind, tx),
             SortSize => self.sort_by(SortKey::Size, tx),
             SortModified => self.sort_by(SortKey::Modified, tx),
             SortReverse => {
-                self.set_sort(self.sort.key);
-                self.reveal(tx);
+                let key = self.cur().sort.key;
+                self.sort_by(key, tx);
             }
+            NewTab => self.new_tab(),
+            CloseTab => {
+                let (ix, tab) = (self.active, self.panes[self.active].tab);
+                self.close_tab(ix, tab, tx);
+            }
+            NextTab => self.cycle_tab(1, tx),
+            PrevTab => self.cycle_tab(-1, tx),
+            ReopenTab => self.reopen_tab(tx),
+            Split => self.toggle_split(tx),
+            OtherPane => self.activate(1 - self.active, tx),
             Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
                 if let Some((_, p)) = cmd.place().and_then(|i| self.places.get(i)).cloned() {
                     self.go_to(p);
@@ -744,8 +749,9 @@ impl State {
     }
 
     fn sort_by(&mut self, key: SortKey, tx: &mut Tx) {
-        self.set_sort(key);
-        self.reveal(tx);
+        let f = self.cur_mut();
+        f.set_sort(key);
+        f.reveal(tx);
     }
 
     // ---- settings ---------------------------------------------------------------------------
@@ -773,26 +779,42 @@ impl State {
     }
 
     /// A reloaded settings file. Keys apply at once; a preference applies only if the file
-    /// changed it, so reloading doesn't undo ⌘. or a header click made since.
+    /// changed it, so reloading doesn't undo ⌘. or a header click made since. A new sort
+    /// applies to every tab.
     fn apply_settings(&mut self, c: Config, tx: &mut Tx) {
         let (old, new) = (&self.settings, &c.settings);
-        let keep = self.cursor_name();
         if new.sort != old.sort {
-            self.sort = new.sort;
-            fs::sort_entries(&mut self.entries, self.sort);
+            for p in &mut self.panes {
+                p.f.sort = new.sort;
+                p.f.resort();
+                for m in p.tabs.iter_mut().flatten() {
+                    m.sort = new.sort;
+                }
+            }
         }
         if new.show_hidden != old.show_hidden {
             self.show_hidden = new.show_hidden;
+            for p in &mut self.panes {
+                p.f.set_hidden(new.show_hidden);
+            }
         }
         if new.places != old.places {
             self.places = places_for(new);
         }
-        self.refilter(keep.as_deref());
         self.reveal(tx);
         self.note = Some(c.summary().unwrap_or_else(|| "Settings reloaded".into()));
         self.keymap = c.keymap;
         self.settings = c.settings;
     }
+}
+
+/// Why a command that needs two panes can't run.
+pub(crate) const NOT_SPLIT: &str = "The window isn't split";
+
+/// Re-reads `f`, keeping its selection (or selecting `names` instead).
+pub(crate) fn reload_folder(f: &mut Folder, names: Vec<OsString>, rename: bool) {
+    let keep = if names.is_empty() { f.targets().iter().map(|e| e.os.clone()).collect() } else { names };
+    f.request(f.cwd.clone(), Nav::Reload, keep, rename);
 }
 
 /// How long the first window waits for the settings and first folder before opening anyway:
@@ -818,7 +840,8 @@ struct Start {
 /// What the startup read sends, in this order.
 enum Boot {
     Start(Box<Start>),
-    Listing(Listing),
+    /// The first folder, sorted by this.
+    Listing(Sort, Listing),
 }
 
 /// The startup read: a thread reading the settings, then the first folder, sending each as it
@@ -860,7 +883,7 @@ impl Booting {
             if !slow.is_zero() {
                 std::thread::sleep(slow);
             }
-            send(Boot::Listing(fs::list(dir, sort)));
+            send(Boot::Listing(sort, fs::list(dir, sort)));
         });
         Booting { rx, waker }
     }
@@ -928,11 +951,6 @@ pub fn title(p: &Path) -> String {
     p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
-fn now() -> rune::LocalTime {
-    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
-    rune::LocalTime::at(ms)
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -971,9 +989,9 @@ pub(crate) mod tests {
         let mut s = State::boot(boot, FIRST_PAINT_WAIT);
         // The bounded wait, plus scheduling slack for a loaded CI machine: far under the 400 ms read.
         assert!(t.elapsed() < Duration::from_millis(150), "waited {:?}", t.elapsed());
-        assert!(s.is_loading() && s.entries.is_empty() && s.cwd == d);
+        assert!(s.is_loading() && s.cur().entries.is_empty() && s.cur().cwd == d);
         settle(&mut s);
-        assert_eq!((s.entries.len(), s.cwd.clone()), (3, d));
+        assert_eq!((s.cur().entries.len(), s.cur().cwd.clone()), (3, d));
     }
 
     #[test]
@@ -986,7 +1004,7 @@ pub(crate) mod tests {
         let s = State::boot(boot, Duration::from_secs(5));
         assert!(t.elapsed() < Duration::from_secs(1));
         assert!(!s.is_loading() && s.boot.is_none());
-        assert_eq!((s.entries.len(), s.visible.len()), (3, 3));
+        assert_eq!((s.cur().entries.len(), s.cur().visible.len()), (3, 3));
     }
 
     #[test]
@@ -1001,9 +1019,9 @@ pub(crate) mod tests {
         let mut s = State::boot(boot, FIRST_PAINT_WAIT);
         assert!(s.is_loading() && !s.show_hidden, "opens with the defaults");
         settle(&mut s);
-        assert!(s.show_hidden && s.cwd == d);
-        assert_eq!(s.visible.len(), 4);
-        assert!(s.back.is_empty(), "the first folder isn't a navigation");
+        assert!(s.show_hidden && s.cur().cwd == d);
+        assert_eq!(s.cur().visible.len(), 4);
+        assert!(s.cur().back.is_empty(), "the first folder isn't a navigation");
     }
 
     pub(crate) fn state_in(d: &Path) -> State {
@@ -1044,7 +1062,7 @@ pub(crate) mod tests {
         }
         assert!(s.show_hidden);
         assert_eq!(s.note.as_deref(), Some("Settings reloaded"));
-        assert_eq!(s.visible.len(), 3);
+        assert_eq!(s.cur().visible.len(), 3);
     }
 
     /// Going somewhere before the first listing lands: the newer request wins.
@@ -1058,6 +1076,156 @@ pub(crate) mod tests {
         settle(&mut s);
         std::thread::sleep(Duration::from_millis(400)); // the slow one lands too, and is dropped
         s.poll(&mut Tx::default());
-        assert_eq!((s.entries.len(), s.cwd.clone()), (2, other));
+        assert_eq!((s.cur().entries.len(), s.cur().cwd.clone()), (2, other));
+    }
+
+    // ---- async results land only where they were asked for ---------------------------------
+
+    /// A startup whose messages the test sends by hand.
+    fn manual_boot() -> (std::sync::mpsc::Sender<Boot>, State) {
+        let (send, rx) = std::sync::mpsc::channel();
+        let s = State::boot(Booting { rx, waker: Default::default() }, Duration::ZERO);
+        (send, s)
+    }
+
+    /// Waits for the active folder's read to land.
+    fn land_now(s: &mut State) {
+        settle(s);
+    }
+
+    #[test]
+    fn late_settings_never_retarget_a_folder_the_user_navigated() {
+        let (a, b) = (folder("retarget-a", 1), folder("retarget-b", 1));
+        let (send, mut s) = manual_boot();
+        s.go(b.clone(), Nav::New, None);
+        land_now(&mut s);
+        assert_eq!(s.target_paths(), [b.join("f0")]);
+        s.reload(); // in flight when the settings land
+        send.send(Boot::Start(Box::new(settings_for(a.clone(), Settings::default())))).unwrap();
+        assert!(s.poll(&mut Tx::default()), "late settings redraw");
+        assert_eq!(s.cur().cwd, b, "the folder on screen stays the folder files resolve against");
+        assert_eq!(s.target_paths(), [b.join("f0")]);
+        land_now(&mut s);
+        assert_eq!(s.cur().cwd, b);
+    }
+
+    #[test]
+    fn late_settings_retarget_only_the_provisional_first_folder() {
+        let a = folder("provisional", 2);
+        let (send, mut s) = manual_boot();
+        assert!(s.is_loading() && s.cur().entries.is_empty());
+        send.send(Boot::Start(Box::new(settings_for(a.clone(), Settings::default())))).unwrap();
+        assert!(s.poll(&mut Tx::default()));
+        assert_eq!(s.cur().cwd, a, "nothing shown yet: it waits on the start folder instead");
+        assert!(s.target_paths().is_empty());
+        send.send(Boot::Listing(Settings::default().sort, fs::list(a.clone(), Settings::default().sort))).unwrap();
+        assert!(s.poll(&mut Tx::default()));
+        assert_eq!((s.cur().entries.len(), s.is_loading()), (2, false));
+    }
+
+    #[test]
+    fn late_settings_keep_a_toggle_the_user_changed() {
+        let a = folder("toggle", 1);
+        let (send, mut s) = manual_boot();
+        s.toggle_hidden();
+        s.set_sort(SortKey::Size);
+        let sort = s.cur().sort;
+        let file = Settings { show_hidden: false, sort: Sort { key: SortKey::Kind, desc: false }, ..Settings::default() };
+        send.send(Boot::Start(Box::new(settings_for(a, file)))).unwrap();
+        s.poll(&mut Tx::default());
+        assert!(s.show_hidden, "the user's ⌘. stays");
+        assert_eq!(s.cur().sort, sort, "and so does their sort");
+    }
+
+    #[test]
+    fn a_stale_boot_listing_never_takes_a_newer_reload() {
+        let d = folder("stale-boot", 1);
+        let stale = fs::list(d.clone(), Settings::default().sort);
+        let (send, mut s) = manual_boot();
+        send.send(Boot::Start(Box::new(settings_for(d.clone(), Settings::default())))).unwrap();
+        s.poll(&mut Tx::default());
+        std::fs::write(d.join("new-file"), "new").unwrap();
+        s.reload();
+        send.send(Boot::Listing(Settings::default().sort, stale)).unwrap();
+        s.poll(&mut Tx::default());
+        land_now(&mut s);
+        assert_eq!(s.cur().entries.len(), 2, "the reload's fresh listing, not the startup one");
+    }
+
+    /// A listing for a request that's been superseded (the tab navigated, switched or closed)
+    /// is dropped, even for the same path.
+    #[test]
+    fn a_late_listing_lands_only_for_its_own_request() {
+        let (a, b) = (folder("late-a", 1), folder("late-b", 3));
+        let mut s = state_in(&a);
+        let late = |req: u64, p: &Path| Answer {
+            req,
+            sort: Settings::default().sort,
+            listing: fs::list(p.to_path_buf(), Settings::default().sort),
+        };
+        // Navigated since.
+        s.go(b.clone(), Nav::New, None);
+        let old = s.cur().pending.as_ref().unwrap().req;
+        s.go(a.clone(), Nav::New, None);
+        assert!(!s.land(0, late(old, &b), &mut Tx::default()));
+        land_now(&mut s);
+        assert_eq!((s.cur().cwd.clone(), s.cur().entries.len()), (a.clone(), 1));
+        // Switched tab since: the read for the tab that was hidden again is dropped.
+        s.run(Cmd::NewTab, &mut Tx::default());
+        s.go(b.clone(), Nav::New, None);
+        land_now(&mut s);
+        s.show_wait = Duration::ZERO;
+        s.run(Cmd::PrevTab, &mut Tx::default());
+        let hidden = s.cur().pending.as_ref().unwrap().req;
+        s.run(Cmd::NextTab, &mut Tx::default());
+        assert!(!s.land(0, late(hidden, &a), &mut Tx::default()));
+        land_now(&mut s);
+        assert_eq!((s.cur().cwd.clone(), s.cur().entries.len()), (b.clone(), 3));
+        // Closed since: the neighbour's request is a new one.
+        s.run(Cmd::PrevTab, &mut Tx::default());
+        let closed = s.cur().pending.as_ref().unwrap().req;
+        s.run(Cmd::CloseTab, &mut Tx::default());
+        assert!(!s.land(0, late(closed, &a), &mut Tx::default()));
+        land_now(&mut s);
+        assert_eq!(s.cur().cwd, b);
+    }
+
+    #[test]
+    fn a_listing_read_under_an_old_sort_is_sorted_again() {
+        let d = folder("resort", 0);
+        for (name, size) in [("a", 1), ("b", 30), ("c", 200)] {
+            std::fs::write(d.join(name), "x".repeat(size)).unwrap();
+        }
+        let mut s = state_in(&d);
+        s.reload();
+        let req = s.cur().pending.as_ref().unwrap().req;
+        let by_name = Settings::default().sort;
+        s.set_sort(SortKey::Size); // largest first, while the read is in flight
+        let a = Answer { req, sort: by_name, listing: fs::list(d.clone(), by_name) };
+        assert!(s.land(0, a, &mut Tx::default()));
+        let names: Vec<&str> = s.cur().entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["c", "b", "a"]);
+    }
+
+    /// Showing a tab hands its listing over within the wait, or later through `poll`; never both,
+    /// never neither.
+    #[test]
+    fn read_waiting_hands_over_exactly_once() {
+        for wait in [Duration::ZERO, Duration::from_millis(1), Duration::from_secs(5)] {
+            let loader: Latest<u32> = Latest::default();
+            let now = crate::folder::read_waiting(&loader, wait, || {
+                std::thread::sleep(Duration::from_millis(3));
+                7
+            });
+            let until = Instant::now() + Duration::from_secs(5);
+            let mut later = None;
+            while now.is_none() && later.is_none() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(1));
+                later = loader.take();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            assert_eq!(now.or(later), Some(7), "{wait:?}");
+            assert_eq!(loader.take(), None, "{wait:?}: delivered once");
+        }
     }
 }

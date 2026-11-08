@@ -1,14 +1,16 @@
-//! The window: sidebar of places, a path bar, sortable column headers, the virtualized file
-//! list and a status line that doubles as the filter / go-to field.
+//! The window: sidebar of places, then one or two panes side by side (each with a path bar,
+//! tabs when it has more than one, sortable column headers and the virtualized file list),
+//! and a status line for the active pane that doubles as the filter / go-to field.
 
 use std::borrow::Cow;
 use std::path::{Component, PathBuf};
 
 use rune::tok::{self, TextStyle, Theme};
-use rune::{Align, Color, Cursor, Cx, El, GrowthSpec, ScrollSpec, col, el, row, text, text_input};
+use rune::{Align, Color, Cursor, Cx, Drag, El, GrowthSpec, Phase, PointerButton, ScrollPos, ScrollSpec, col, el, row, text, text_input};
 
-use crate::app::State;
+use crate::app::{Pane, State};
 use crate::commands::Cmd;
+use crate::folder::{Folder, tab_label};
 use crate::fs::{self, SortKey};
 use crate::palette;
 
@@ -19,12 +21,16 @@ const SIDEBAR_W: f32 = 168.0;
 const KIND_W: f32 = 72.0;
 const SIZE_W: f32 = 80.0;
 const DATE_W: f32 = 132.0;
+const TABS_H: f32 = 30.0;
+/// How far a row drag travels before letting go over the other pane drops there.
+const DRAG_START: f32 = 6.0;
 
 const BODY: TextStyle = TextStyle::new(13.0, 400.0);
 const SMALL: TextStyle = TextStyle::new(11.5, 500.0);
 const NUM: TextStyle = TextStyle::new(12.0, 400.0).features("\"tnum\"");
 const CRUMB: TextStyle = TextStyle::new(13.0, 500.0);
 const MONO: TextStyle = TextStyle::new(12.0, 400.0).mono();
+const TAB: TextStyle = TextStyle::new(12.0, 500.0);
 
 /// Which optional columns fit the list's width; Name always gets at least ~180 pt.
 #[derive(Clone, Copy)]
@@ -61,6 +67,38 @@ fn look(dark: bool) -> Look {
     }
 }
 
+/// Where the two panes start (window points), for a row dragged from one to the other. Only
+/// when split.
+#[derive(Clone, Copy)]
+struct Panes {
+    left: (f32, u64),
+    right: (f32, u64),
+}
+
+impl Panes {
+    /// The pane under window x `x`.
+    fn at(self, x: f32) -> Option<u64> {
+        if x >= self.right.0 {
+            Some(self.right.1)
+        } else if x >= self.left.0 {
+            Some(self.left.1)
+        } else {
+            None
+        }
+    }
+}
+
+/// How a pane draws: which pane, whether it's the active one of two, and its columns.
+#[derive(Clone, Copy)]
+struct Ctx {
+    id: u64,
+    l: Look,
+    cols: Cols,
+    /// Selection in the accent colour: the active pane, or the only one.
+    focused: bool,
+    split: Option<Panes>,
+}
+
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     root(s, cx).on_paste_content(|s: &mut State, content, tx| {
         tx.instant();
@@ -70,28 +108,30 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 
 fn root(s: &State, cx: &mut Cx<State>) -> El {
     let l = look(cx.system_dark());
-    // Reads the laid-out size only; scrolling never re-runs the view.
-    let cols = Cols::for_width(cx.layout_size("main").map_or(f32::MAX, |[w, _]| w));
+    // Reads laid-out positions and sizes only; scrolling never re-runs the view.
+    let split = match s.panes.as_slice() {
+        [a, b] => {
+            let x = |p: &Pane| cx.layout_with(&format!("pane-{}", p.id()), |r| r[0].round()).unwrap_or(f32::MAX);
+            Some(Panes { left: (x(a), a.id()), right: (x(b), b.id()) })
+        }
+        _ => None,
+    };
+    let mut panes = row().key("panes").w_full().grow(1.0).min_h(0.0);
+    for (ix, p) in s.panes.iter().enumerate() {
+        if ix > 0 {
+            panes = panes.child(el().w(1.0).h_full().fill(l.t.separator));
+        }
+        let cols = Cols::for_width(cx.layout_size(&format!("pane-{}", p.id())).map_or(f32::MAX, |[w, _]| w));
+        let c = Ctx { id: p.id(), l, cols, focused: ix == s.active || split.is_none(), split };
+        panes = panes.child(pane(s, p, c));
+    }
     let window = row()
         .w_full()
         .h_full()
         .fill(l.t.bg)
         .child(sidebar(s, l, cx.titlebar_inset() > 0.0))
         .child(el().w(1.0).h_full().fill(l.t.separator))
-        .child(
-            col()
-                .key("main")
-                .grow(1.0)
-                .min_w(0.0)
-                .h_full()
-                .child(pathbar(s, l))
-                .child(hr(l))
-                .child(header(s, l, cols))
-                .child(hr(l))
-                .child(list(s, l, cols))
-                .child(hr(l))
-                .child(status(s, l)),
-        );
+        .child(col().key("main").grow(1.0).min_w(0.0).h_full().child(panes).child(hr(l)).child(status(s, l)));
     if s.palette.is_some() { window.child(palette_view(s, l)) } else { window }
 }
 
@@ -103,8 +143,9 @@ fn sidebar(s: &State, l: Look, under_titlebar: bool) -> El {
     let mut c = col().key("sidebar").w(SIDEBAR_W).h_full().fill(l.sidebar).pb(10.0).px(8.0).gap(1.0);
     c = c.child(el().key("sidebar-drag").w_full().h(if under_titlebar { BAR_H } else { 10.0 }).window_drag());
     c = c.child(text("Places").font(SMALL).color(l.t.text_secondary).px(8.0).pb(4.0));
+    let cwd = &s.cur().cwd;
     for (i, (name, path)) in s.places.iter().enumerate() {
-        let here = *path == s.cwd;
+        let here = path == cwd;
         let p = path.clone();
         let mut item = row()
             .key(format!("place-{i}"))
@@ -131,8 +172,49 @@ fn sidebar(s: &State, l: Look, under_titlebar: bool) -> El {
     c
 }
 
-fn pathbar(s: &State, l: Look) -> El {
-    let nav = |label: &'static str, key: &'static str, on: bool, f: fn(&mut State)| {
+/// One pane. A click anywhere in it makes it the active one; every handler inside does that
+/// first, so the command acts on the pane that was clicked.
+fn pane(s: &State, p: &Pane, c: Ctx) -> El {
+    let (id, l, f) = (c.id, c.l, &p.f);
+    let mut col = col()
+        .key(format!("pane-{id}"))
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .on_press_tx(move |s: &mut State, tx| {
+            tx.instant();
+            s.activate_id(id, tx);
+        })
+        .child(pathbar(f, l));
+    if p.tabs.len() > 1 {
+        col = col.child(hr(l)).child(tabbar(p, l));
+    }
+    col = col.child(hr(l)).child(header(f, c)).child(hr(l)).child(list(f, c));
+    if c.split.is_some() {
+        // The active pane: a thin accent line along its top (its selection is in the accent
+        // colour too, the other pane's in grey).
+        if c.focused {
+            col = col.child(el().key("active-mark").pin(Some(0.0), Some(0.0), Some(0.0), None).h(2.0).fill(l.accent));
+        }
+        // A row from the other pane is dragged over this one.
+        if s.pane_drop == Some(id) {
+            col = col.child(
+                el().key("drop-mark").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).fill(l.accent.alpha(0.06)).border(2.0, l.accent),
+            );
+        }
+    }
+    col
+}
+
+/// Every handler in pane `id`: make it active first (false if it has closed since).
+fn in_pane(s: &mut State, id: u64, tx: &mut rune::Tx) -> bool {
+    tx.instant();
+    s.activate_id(id, tx)
+}
+
+fn pathbar(f: &Folder, l: Look) -> El {
+    let id = f.id;
+    let nav = |label: &'static str, key: &'static str, on: bool, go: fn(&mut State)| {
         text(label)
             .key(key)
             .font(TextStyle::new(16.0, 500.0))
@@ -144,13 +226,14 @@ fn pathbar(s: &State, l: Look) -> El {
             .hover(l.t.hover)
             .cursor(Cursor::Pointer)
             .on_press_tx(move |s: &mut State, tx| {
-                tx.instant();
-                f(s);
+                if in_pane(s, id, tx) {
+                    go(s);
+                }
             })
     };
     let mut crumbs = row().key("crumbs").grow(1.0).min_w(0.0).center_y().gap(2.0);
     let mut acc = PathBuf::new();
-    let comps: Vec<Component> = s.cwd.components().collect();
+    let comps: Vec<Component> = f.cwd.components().collect();
     let n = comps.len();
     for (i, comp) in comps.iter().enumerate() {
         acc.push(comp.as_os_str());
@@ -179,8 +262,9 @@ fn pathbar(s: &State, l: Look) -> El {
                 .truncate()
                 .min_w(if last { 0.0 } else { 12.0 })
                 .on_press_tx(move |s: &mut State, tx| {
-                    tx.instant();
-                    s.go_to(target.clone());
+                    if in_pane(s, id, tx) {
+                        s.go_to(target.clone());
+                    }
                 }),
         );
     }
@@ -192,19 +276,73 @@ fn pathbar(s: &State, l: Look) -> El {
         .px(8.0)
         .gap(2.0)
         .center_y()
-        .child(nav("‹", "nav-back", !s.back.is_empty(), State::go_back))
-        .child(nav("›", "nav-fwd", !s.fwd.is_empty(), State::go_forward))
-        .child(nav("↑", "nav-up", s.cwd.parent().is_some(), State::parent))
+        .child(nav("‹", "nav-back", !f.back.is_empty(), State::go_back))
+        .child(nav("›", "nav-fwd", !f.fwd.is_empty(), State::go_forward))
+        .child(nav("↑", "nav-up", f.cwd.parent().is_some(), State::parent))
         .child(el().w(6.0))
         .child(crumbs)
 }
 
-fn header(s: &State, l: Look, cols: Cols) -> El {
+/// The pane's tabs, only when it has two or more: each shows its folder's name (the whole
+/// path in a tooltip). A click shows it, a middle click closes it, "+" opens a new one.
+fn tabbar(p: &Pane, l: Look) -> El {
+    let id = p.id();
+    let mut bar = row().key("tabs").w_full().h(TABS_H).px(6.0).gap(4.0).center_y();
+    for j in 0..p.tabs.len() {
+        let path = p.tab_path(j);
+        let on = j == p.tab;
+        let t = row()
+            .key(format!("tab-{j}"))
+            .h(22.0)
+            .px(10.0)
+            .grow(1.0)
+            .min_w(0.0)
+            .max_w(220.0)
+            .center()
+            .radius(5.0)
+            .cursor(Cursor::Pointer)
+            .help(fs::pretty(path))
+            .pointer_buttons([PointerButton::Middle])
+            .on_press_tx(move |s: &mut State, tx| {
+                tx.instant();
+                let Some(ix) = s.pane_ix(id) else { return };
+                if tx.button() == PointerButton::Middle {
+                    s.close_tab(ix, j, tx);
+                } else {
+                    s.activate(ix, tx);
+                    s.show_tab(ix, j, tx);
+                }
+            })
+            .child(text(tab_label(path)).font(TAB).color(if on { l.t.text } else { l.t.text_secondary }).truncate().min_w(0.0));
+        bar = bar.child(if on { t.fill(l.t.control_off) } else { t.hover(l.t.hover) });
+    }
+    bar.child(
+        text("+")
+            .key("tab-new")
+            .font(TextStyle::new(15.0, 500.0))
+            .color(l.t.text_secondary)
+            .w(22.0)
+            .h(22.0)
+            .align(Align::Center)
+            .radius(5.0)
+            .hover(l.t.hover)
+            .cursor(Cursor::Pointer)
+            .help("New Tab")
+            .on_press_tx(move |s: &mut State, tx| {
+                if in_pane(s, id, tx) {
+                    s.new_tab();
+                }
+            }),
+    )
+}
+
+fn header(f: &Folder, c: Ctx) -> El {
+    let (id, l) = (c.id, c.l);
     let col_head = |label: &'static str, key: SortKey, w: Option<f32>, align: Align| {
-        let on = s.sort.key == key;
+        let on = f.sort.key == key;
         let arrow = if !on {
             ""
-        } else if s.sort.desc {
+        } else if f.sort.desc {
             " ↓"
         } else {
             " ↑"
@@ -216,9 +354,10 @@ fn header(s: &State, l: Look, cols: Cols) -> El {
             .align(align)
             .cursor(Cursor::Pointer)
             .on_press_tx(move |s: &mut State, tx| {
-                tx.instant();
-                s.set_sort(key);
-                s.reveal(tx);
+                if in_pane(s, id, tx) {
+                    s.set_sort(key);
+                    s.reveal(tx);
+                }
             });
         t = match w {
             Some(w) => t.w(w),
@@ -228,63 +367,83 @@ fn header(s: &State, l: Look, cols: Cols) -> El {
     };
     let mut h =
         row().key("header").w_full().h(24.0).px(12.0).gap(12.0).center_y().child(col_head("Name", SortKey::Name, None, Align::Start));
-    if cols.kind {
+    if c.cols.kind {
         h = h.child(col_head("Kind", SortKey::Kind, Some(KIND_W), Align::Start));
     }
     h = h.child(col_head("Size", SortKey::Size, Some(SIZE_W), Align::End));
-    if cols.date {
+    if c.cols.date {
         h = h.child(col_head("Modified", SortKey::Modified, Some(DATE_W), Align::Start));
     }
     h
 }
 
-fn list(s: &State, l: Look, cols: Cols) -> El {
-    // The list itself is a drop target for the current folder, and right-clicking empty
-    // space opens the menu with Paste and New Folder.
+fn list(f: &Folder, c: Ctx) -> El {
+    let id = c.id;
+    // The list itself is a drop target for its folder, and right-clicking empty space opens
+    // the menu with Paste and New Folder.
     let base = col()
-        .key("list")
+        .key(f.list_key())
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .on_drop_files(|s: &mut State, files, tx| {
+        .on_drop_files(move |s: &mut State, files, tx| {
             tx.instant();
-            let here = s.cwd.clone();
-            s.drop_files(files, here, tx);
+            if let Some(p) = s.pane(id) {
+                let here = p.f.cwd.clone();
+                s.drop_files(files, here, tx);
+            }
         })
-        .on_secondary_press(|s: &mut State, press, tx| {
-            tx.instant();
-            s.context_menu(None, press, tx);
+        .on_secondary_press(move |s: &mut State, press, tx| {
+            if in_pane(s, id, tx) {
+                s.context_menu(None, press, tx);
+            }
         });
-    if s.visible.is_empty() {
-        let msg = if s.entries.is_empty() { "Empty folder" } else { "No matches" };
-        return base.center().child(text(msg).font(BODY).color(l.t.text_secondary));
+    if f.visible.is_empty() {
+        // A tab whose fresh read hasn't landed yet: its path, and an empty list until it does.
+        let msg = if f.is_loading() {
+            ""
+        } else if f.entries.is_empty() {
+            "Empty folder"
+        } else {
+            "No matches"
+        };
+        return base.center().child(text(msg).font(BODY).color(c.l.t.text_secondary));
     }
-    base.scroll(ScrollSpec { stick_bottom: false }).child(
+    let scroll = f.scroll.clone();
+    base.scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(move |at: ScrollPos| scroll.set(at.offset[1])).child(
         col()
-            .key("rows")
+            .key(f.rows_key())
             .w_full()
             .growth(GrowthSpec { spring: rune::GROWTH, edge: rune::edge::NO_MASK })
             .virtual_rows(
-                s.visible.len(),
+                f.visible.len(),
                 ROW_H,
-                |s: &State, i| Cow::Borrowed(s.entries[s.visible[i] as usize].key.as_str()),
-                move |s: &State, i| file_row(s, i, l, cols),
+                move |s: &State, i| match s.pane(id) {
+                    Some(p) => Cow::Borrowed(p.f.entries[p.f.visible[i] as usize].key.as_str()),
+                    None => Cow::Borrowed(""),
+                },
+                move |s: &State, i| match s.pane(id) {
+                    Some(p) => file_row(s, &p.f, i, c),
+                    None => el(),
+                },
             )
-            .virtual_rows_version(s.version),
+            .virtual_rows_version(f.version),
     )
 }
 
-fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
-    let e = &s.entries[s.visible[i] as usize];
-    let selected = s.is_selected(i);
+fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
+    let (id, l, cols) = (c.id, c.l, c.cols);
+    let e = &f.entries[f.visible[i] as usize];
+    let selected = f.is_selected(i);
     // With several rows selected, the cursor row that isn't selected gets a soft highlight.
-    let cursor = !selected && i == s.sel && !s.marked.is_empty();
-    let drop_here = s.drop_target.as_ref() == Some(&e.os);
-    let (fg, dim) = if selected { (l.sel_text, l.sel_text.alpha(0.8)) } else { (l.t.text, l.t.text_secondary) };
+    let cursor = !selected && i == f.sel && !f.marked.is_empty();
+    let drop_here = f.drop_target.as_ref() == Some(&e.os);
+    // The other pane's selection is grey, as an unfocused list's.
+    let (fg, dim) = if selected && c.focused { (l.sel_text, l.sel_text.alpha(0.8)) } else { (l.t.text, l.t.text_secondary) };
     let glyph = if e.is_dir { "▸" } else { " " };
     let name_color = if e.hidden && !selected { fg.alpha(0.55) } else { fg };
-    let version = s.version;
-    let renaming = s.rename.as_ref().filter(|r| r.os == e.os);
+    let version = f.version;
+    let renaming = s.rename.as_ref().filter(|r| r.os == e.os && c.focused);
     let name_el = match renaming {
         Some(r) => text_input(&r.edit, BODY)
             .key("rename")
@@ -318,36 +477,35 @@ fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
         .center_y()
         .radius(4.0)
         .on_press_tx(move |s: &mut State, tx| {
-            tx.instant();
-            if s.version != version {
+            if !in_pane(s, id, tx) || s.cur().version != version {
                 return;
             }
-            if s.rename.as_ref().is_some_and(|r| s.visible.get(i).is_none_or(|&e| s.entries[e as usize].os != r.os)) {
+            let f = s.cur();
+            if s.rename.as_ref().is_some_and(|r| f.visible.get(i).is_none_or(|&e| f.entries[e as usize].os != r.os)) {
                 s.commit_rename(tx);
                 return;
             }
             let m = tx.mods();
+            let f = s.cur_mut();
             if m.shift {
-                s.extend_to(i);
+                f.extend_to(i);
             } else if m.cmd {
-                s.toggle_mark(i);
-            } else if !(s.is_selected(i) && s.marked.len() > 1) {
+                f.toggle_mark(i);
+            } else if !(f.is_selected(i) && f.marked.len() > 1) {
                 // A plain click inside a multi-selection keeps it, so it can be dragged.
-                s.select(i);
+                f.select(i);
             } else {
-                s.sel = i;
+                f.sel = i;
             }
         })
         .on_double_press_tx(move |s: &mut State, tx| {
-            tx.instant();
-            if s.version == version && s.rename.is_none() {
-                s.select(i);
+            if in_pane(s, id, tx) && s.cur().version == version && s.rename.is_none() {
+                s.cur_mut().select(i);
                 s.open_selected();
             }
         })
         .on_secondary_press(move |s: &mut State, press, tx| {
-            tx.instant();
-            if s.version == version {
+            if in_pane(s, id, tx) && s.cur().version == version {
                 s.context_menu(Some(i), press, tx);
             }
         })
@@ -357,21 +515,45 @@ fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
                 .min_w(0.0)
                 .gap(6.0)
                 .center_y()
-                .child(text(glyph).font(BODY).color(if selected { fg } else { l.accent }).w(10.0))
+                .child(text(glyph).font(BODY).color(if selected && c.focused { fg } else { l.accent }).w(10.0))
                 .child(name_el),
         );
     if renaming.is_none() {
-        r = r.drag_out(move |s: &State| if s.version == version { s.drag_item(i) } else { None }).on_drag_end(
-            |s: &mut State, outcome, tx| {
-                tx.instant();
-                if outcome == rune::DragOutcome::Moved {
-                    s.reload();
-                }
-            },
-        );
+        match c.split {
+            // Out to other apps (macOS: Rune starts no system drag elsewhere).
+            None => {
+                r = r.drag_out(move |s: &State| if s.pane(id)?.f.version == version { s.drag_item(id, i) } else { None }).on_drag_end(
+                    |s: &mut State, outcome, tx| {
+                        tx.instant();
+                        if outcome == rune::DragOutcome::Moved {
+                            s.reload();
+                        }
+                    },
+                );
+            }
+            // Split: within the window, onto the other pane. A system drag can't land in the
+            // window it came from (RUNE-GAPS.md), so this one is Arbor's own.
+            Some(panes) => {
+                r = r.on_drag(move |s: &mut State, d: &mut Drag, tx| {
+                    tx.instant();
+                    let far = d.dx.hypot(d.dy) > DRAG_START;
+                    let over = panes.at(d.window_point()[0]).filter(|&p| p != id && far);
+                    if d.phase == Phase::Up {
+                        match over {
+                            Some(to) if !d.cancelled() => s.drop_on_pane(id, i, version, to, tx),
+                            _ => s.pane_drop = None,
+                        }
+                    } else if s.pane_drop != over {
+                        s.pane_drop = over;
+                    } else {
+                        tx.live_only();
+                    }
+                });
+            }
+        }
     }
     if e.is_dir {
-        let target = s.cwd.join(&e.os);
+        let target = f.cwd.join(&e.os);
         let os = e.os.clone();
         r = r
             .on_drop_files(move |s: &mut State, files, tx| {
@@ -380,7 +562,9 @@ fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
             })
             .on_drop_hover(move |s: &mut State, over, tx| {
                 tx.instant();
-                s.drop_target = over.then(|| os.clone());
+                if let Some(ix) = s.pane_ix(id) {
+                    s.panes[ix].f.drop_target = over.then(|| os.clone());
+                }
             });
     }
     if cols.kind {
@@ -388,12 +572,14 @@ fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
     }
     r = r.child(text(if e.is_dir { "—".to_string() } else { fs::fmt_size(e.size) }).font(NUM).color(dim).align(Align::End).w(SIZE_W));
     if cols.date {
-        r = r.child(text(fs::fmt_time(e.mtime_ms, s.now)).font(NUM).color(dim).w(DATE_W));
+        r = r.child(text(fs::fmt_time(e.mtime_ms, f.now)).font(NUM).color(dim).w(DATE_W));
     }
     r = if drop_here {
         r.fill(l.accent.alpha(0.25)).border(1.5, l.accent)
-    } else if selected {
+    } else if selected && c.focused {
         r.fill(l.accent)
+    } else if selected {
+        r.fill(l.t.control_off)
     } else if cursor {
         r.fill(l.accent.alpha(0.18)).hover(l.t.hover)
     } else if i % 2 == 1 {
@@ -405,12 +591,13 @@ fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
 }
 
 fn status(s: &State, l: Look) -> El {
+    let f = s.cur();
     let mut bar = row().key("status").w_full().h(28.0).px(12.0).gap(10.0).center_y();
-    if !s.filter.is_empty() {
-        let label = if s.path_mode() { "Go to" } else { "Filter" };
+    if !f.filter.is_empty() {
+        let label = if f.path_mode() { "Go to" } else { "Filter" };
         bar = bar
             .child(text(label).font(SMALL).color(l.accent))
-            .child(text(format!("{}▏", s.filter)).font(MONO).color(l.t.text).truncate_head().min_w(0.0).shrink());
+            .child(text(format!("{}▏", f.filter)).font(MONO).color(l.t.text).truncate_head().min_w(0.0).shrink());
     }
     if let Some(job) = s.job_status() {
         bar = bar.child(text(job).font(NUM).color(l.accent).truncate().min_w(0.0).shrink());
@@ -418,16 +605,16 @@ fn status(s: &State, l: Look) -> El {
         bar = bar.child(text(n.clone()).font(SMALL).color(l.t.text_secondary).truncate().min_w(0.0).shrink());
     }
     bar = bar.child(el().grow(1.0));
-    if s.is_loading() {
+    if f.is_loading() {
         bar = bar.child(text("Loading…").font(SMALL).color(l.t.text_secondary));
     }
-    let hidden = s.entries.len() - s.entries.iter().filter(|e| !e.hidden).count();
-    let count = if s.visible.len() == s.entries.len() || (!s.show_hidden && s.visible.len() + hidden == s.entries.len()) {
-        format!("{} items", s.visible.len())
+    let hidden = f.entries.len() - f.entries.iter().filter(|e| !e.hidden).count();
+    let count = if f.visible.len() == f.entries.len() || (!f.show_hidden && f.visible.len() + hidden == f.entries.len()) {
+        format!("{} items", f.visible.len())
     } else {
-        format!("{} of {} items", s.visible.len(), s.entries.len())
+        format!("{} of {} items", f.visible.len(), f.entries.len())
     };
-    let picked = if s.marked.len() > 1 { format!("{} selected · ", s.marked.len()) } else { String::new() };
+    let picked = if f.marked.len() > 1 { format!("{} selected · ", f.marked.len()) } else { String::new() };
     let hint = if s.show_hidden { "hidden shown" } else { "" };
     bar.child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)))
         .child(text(format!("{picked}{count}")).font(NUM).color(l.t.text_secondary))

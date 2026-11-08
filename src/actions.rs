@@ -36,7 +36,7 @@ impl State {
     pub fn copy_path(&mut self, tx: &mut Tx) {
         let paths = self.target_paths();
         let text = if paths.is_empty() {
-            self.cwd.display().to_string()
+            self.cur().cwd.display().to_string()
         } else {
             paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n")
         };
@@ -66,7 +66,7 @@ impl State {
             return;
         }
         let was_cut = self.clip.as_ref().is_some_and(|c| c.cut && c.paths == files);
-        let dest = self.cwd.clone();
+        let dest = self.cur().cwd.clone();
         let op = if move_requested || was_cut { Op::Move { sources: files, dest } } else { Op::Copy { sources: files, dest } };
         if self.start(op) && was_cut {
             self.clip = None;
@@ -76,7 +76,7 @@ impl State {
     pub fn duplicate(&mut self) {
         let sources = self.target_paths();
         if !sources.is_empty() {
-            self.start(Op::Copy { sources, dest: self.cwd.clone() });
+            self.start(Op::Copy { sources, dest: self.cur().cwd.clone() });
         }
     }
 
@@ -90,7 +90,7 @@ impl State {
     // ---- rename and new folder --------------------------------------------------------------
 
     pub fn new_folder(&mut self) {
-        match ops::new_folder(&self.cwd, "untitled folder") {
+        match ops::new_folder(&self.cur().cwd, "untitled folder") {
             Ok(path) => {
                 self.undo.extend(Undo::new_folder(path.clone()));
                 let name = path.file_name().map(|n| n.to_os_string()).into_iter().collect();
@@ -112,7 +112,7 @@ impl State {
         let mut edit = TextEdit::new(label);
         edit.set_selection(0, stem);
         edit.focused = true;
-        self.marked.clear();
+        self.cur_mut().marked.clear();
         self.rename = Some(Rename { os, edit });
     }
 
@@ -130,8 +130,8 @@ impl State {
             self.note = Some(format!("“{new}” isn't a valid name"));
             return;
         }
-        let from = self.cwd.join(&r.os);
-        let to = self.cwd.join(&new);
+        let from = self.cur().cwd.join(&r.os);
+        let to = self.cur().cwd.join(&new);
         // Never over an existing item, even one that appears this instant (a case-only change
         // on a case-insensitive disk is the item itself, and goes through).
         match ops::rename(&from, &to) {
@@ -205,14 +205,18 @@ impl State {
             };
             format!("{done} {n} item{}", plural(n))
         });
-        // Select what landed here; otherwise keep the selection.
-        let here: Vec<OsString> = out
-            .results
-            .iter()
-            .filter(|p| p.parent() == Some(self.cwd.as_path()))
-            .filter_map(|p| p.file_name().map(|n| n.to_os_string()))
-            .collect();
-        self.reload_selecting(here, false);
+        // Every visible pane reads its folder again (hidden tabs read when shown): each selects
+        // what landed in it, otherwise keeps its selection.
+        self.rename = None;
+        for p in &mut self.panes {
+            let here: Vec<OsString> = out
+                .results
+                .iter()
+                .filter(|r| r.parent() == Some(p.f.cwd.as_path()))
+                .filter_map(|r| r.file_name().map(|n| n.to_os_string()))
+                .collect();
+            crate::app::reload_folder(&mut p.f, here, false);
+        }
         true
     }
 
@@ -231,14 +235,13 @@ impl State {
 
     // ---- drag and drop ----------------------------------------------------------------------
 
-    /// Files to drag out of row `i`: the whole selection if the row is in it, else the row.
-    pub fn drag_item(&self, i: usize) -> Option<DragItem> {
-        let paths = if self.is_selected(i) {
-            self.target_paths()
-        } else {
-            let e = &self.entries[*self.visible.get(i)? as usize];
-            vec![self.cwd.join(&e.os)]
-        };
+    /// Files to drag out of row `i` of pane `id`: the whole selection if the row is in it,
+    /// else the row.
+    pub fn drag_item(&self, id: u64, i: usize) -> Option<DragItem> {
+        let paths = self.pane(id)?.f.drag_paths(i);
+        if paths.is_empty() {
+            return None;
+        }
         let mut item = DragItem::new().allow_move();
         for p in paths {
             item = item.file(p);
@@ -249,7 +252,9 @@ impl State {
     /// Files dropped on a folder (or on the list, for the current folder). Same disk moves,
     /// another disk copies, as in Finder; ⌥ always copies.
     pub fn drop_files(&mut self, files: &[PathBuf], into: PathBuf, tx: &mut Tx) {
-        self.drop_target = None;
+        for p in &mut self.panes {
+            p.f.drop_target = None;
+        }
         let files: Vec<PathBuf> = files.iter().filter(|f| f.parent() != Some(into.as_path()) || tx.mods().alt).cloned().collect();
         if files.is_empty() {
             return;
@@ -264,18 +269,23 @@ impl State {
     /// their titles and keys from the command table and keymap.
     pub fn context_menu(&mut self, row: Option<usize>, press: PointerPress, tx: &mut Tx) {
         if let Some(i) = row
-            && !self.is_selected(i)
+            && !self.cur().is_selected(i)
         {
-            self.select(i);
+            self.cur_mut().select(i);
         }
-        let has = row.is_some() && !self.visible.is_empty();
-        let n = if has { self.targets().len() } else { 0 };
+        let has = row.is_some() && !self.cur().visible.is_empty();
+        let n = if has { self.cur().targets().len() } else { 0 };
         let item = |cmd: Cmd| {
             // Commands on the selection need a row under the pointer; Rename takes one item.
-            let on_selection = matches!(cmd, Cmd::Open | Cmd::Rename | Cmd::Duplicate | Cmd::Trash | Cmd::Copy | Cmd::Cut);
+            let on_selection = matches!(
+                cmd,
+                Cmd::Open | Cmd::Rename | Cmd::Duplicate | Cmd::Trash | Cmd::Copy | Cmd::Cut | Cmd::CopyToOther | Cmd::MoveToOther
+            );
             let on = self.unavailable(cmd).is_none() && (!on_selection || has) && (cmd != Cmd::Rename || n == 1);
             let title = match cmd {
-                Cmd::Duplicate | Cmd::Trash | Cmd::Copy | Cmd::Cut if n > 1 => format!("{} ({n} items)", cmd.title()),
+                Cmd::Duplicate | Cmd::Trash | Cmd::Copy | Cmd::Cut | Cmd::CopyToOther | Cmd::MoveToOther if n > 1 => {
+                    format!("{} ({n} items)", cmd.title())
+                }
                 _ => cmd.title().to_string(),
             };
             let it = PopupItem::new(cmd.id(), &title).enabled(on);
@@ -296,9 +306,10 @@ impl State {
             .item(item(Cmd::Cut))
             .item(item(Cmd::Paste))
             .item(item(Cmd::CopyPath))
-            .separator()
-            .item(item(Cmd::NewFolder))
-            .item(item(Cmd::Undo));
+            .separator();
+        // The commander commands only when there's another pane to send to.
+        let menu = if self.split() { menu.item(item(Cmd::CopyToOther)).item(item(Cmd::MoveToOther)).separator() } else { menu };
+        let menu = menu.item(item(Cmd::NewFolder)).item(item(Cmd::Undo));
         tx.popup_menu(menu, press, |s: &mut State, picked, tx| {
             tx.instant();
             if let Some(cmd) = picked.and_then(Cmd::from_id)

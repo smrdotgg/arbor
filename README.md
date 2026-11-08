@@ -39,13 +39,14 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 5,500 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
+About 7,400 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
 `ops.rs` (copy, move, trash and undo on a worker), `noclobber.rs` (moves, copies and file ids
 that never replace anything), `trash.rs` (each platform's trash), `app.rs`
-(state, selection, key dispatch, what each command does), `commands.rs` (the command table and
-keymap), `palette.rs` (the command palette), `config.rs` (the settings file), `actions.rs`
-(clipboard, rename, drag and drop, context menu), `view.rs` (UI) and `timing.rs` (opt-in speed
-measurement).
+(state, startup, key dispatch, what each command does), `folder.rs` (one folder on screen: its
+listing, selection, filter, sort and history, and what a hidden tab keeps), `panes.rs` (tabs and
+split view), `commands.rs` (the command table and keymap), `palette.rs` (the command palette),
+`config.rs` (the settings file), `actions.rs` (clipboard, rename, drag and drop, context menu),
+`view.rs` (UI) and `timing.rs` (opt-in speed measurement).
 
 ## Run
 
@@ -74,8 +75,10 @@ window waits at most 8 ms for the first folder; when it's slower, the listing's 
 logged as `first-listing`, and `ARBOR_SLOW_FIRST_READ_MS=N` (timing only) slows that read to try
 it. All times end at frame submission, a proxy: pixels reach the screen at least a refresh later. Off,
 it costs nothing: `main` reads the variable once and Rune gets the plain callbacks and no frame
-hook. `scripts/bench.sh` cold-starts Arbor on a 10,000-entry folder several times and reports
-median and p95 against each budget. It opens and closes windows, so leave the machine alone
+hook. Showing a hidden tab is logged as `tab`, with `same_frame=1` when its fresh read landed
+in time for the key's own frame. `scripts/bench.sh` cold-starts Arbor on a 10,000-entry folder
+several times and reports median and p95 against each budget (`--tabs N` adds N runs timing a
+tab switch to that folder). It opens and closes windows, so leave the machine alone
 while it runs. `cargo test --release -- --ignored --nocapture list_10k` times reading and
 sorting alone. Results are in [`BENCH.md`](BENCH.md).
 
@@ -96,12 +99,43 @@ Typing, outside the palette:
   selected. While the filter has text, typing, ⌫ and ⌥⌫ edit it.
 - **Type `/` or `~`** (or ⌘L) for go-to-path mode. Enter navigates, or opens a file.
 - Space with nothing typed does nothing (reserved for preview).
+- Tab switches to the other pane (Tab in go-to mode is reserved for path completion).
 
 Off macOS, ⌘ is Ctrl. Mouse: click to select, ⇧-click and ⌘-click to select several,
 double-click to open, click a breadcrumb or place to jump there, click a column header to sort
 (click again to reverse). Right-click opens a native context menu (macOS and Windows). Drag rows
 out to Finder or other apps (macOS). Drop files on a folder row or on the list: same disk moves,
 another disk copies, and ⌥ forces a copy.
+
+### Tabs and split view
+
+**⌘\\** splits the window into two panes side by side, the new one on the same folder (and
+active); ⌘\ again closes the other pane. Each pane has its own **tabs**: **⌘T** opens one on the
+current folder, **⌘W** closes it, **⌃Tab** / **⌃⇧Tab** (or ⇧⌘] / ⇧⌘[) go to the next and previous,
+**⇧⌘T** reopens the last closed one. Each tab has its own folder, back and forward history,
+selection, scroll, filter and sort. The tab bar appears only when a pane has two or more tabs:
+click a tab to show it, middle-click to close it, hover for its full path, "+" for a new one.
+
+One pane is **active**: it gets the keys, the palette's commands and the status bar, and in a
+split window it has a thin accent line along its top and the accent-coloured selection (the
+other pane's selection is grey). **Tab** or a click anywhere in a pane makes it active. The
+sidebar drives the active pane. File operations stay global: one at a time, one undo stack, one
+clipboard. **F5** copies and **F6** moves the selection into the other pane's folder (on a
+worker, never over anything, undoable), and rows can be dragged from one pane onto the other
+(same disk moves, another copies, ⌥ copies).
+
+Closing a split pane's last tab closes that pane. On the last tab of the last pane, ⌘W does
+nothing, on every platform: closing the window would quit Arbor and lose every tab's history,
+which a habit of pressing ⌘W to tidy tabs shouldn't do. The window's close button still closes
+it.
+
+No caching: only the visible tab of each pane has a listing. A hidden tab keeps its path,
+history, selected names, scroll offset, filter and sort, and does no work at all (no reads, no
+watching). Showing it reads its folder fresh, waiting at most 8 ms so a local folder lands in
+the same frame; a slower one shows the tab's path and an empty list until it arrives. The
+selection comes back by name and the list scrolls to where it was. ⌘T and ⌘\ show the folder
+already on screen, so they need no read. Closed tabs (up to 20, lightweight state only) are kept
+in memory for ⇧⌘T, never on disk.
 
 Every command, with its default keys (generated from `src/commands.rs`; a test keeps it in sync,
 `ARBOR_WRITE_README=1 cargo test readme` rewrites it):
@@ -125,6 +159,8 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Cut | ⌘X | Ctrl+X | `file.cut` |
 | Paste | ⌘V | Ctrl+V | `file.paste` |
 | Move Here (Paste and Move) | ⌥⌘V | Ctrl+Alt+V | `file.paste_move` |
+| Copy to Other Pane | F5 | F5 | `file.copy_to_other` |
+| Move to Other Pane | F6 | F6 | `file.move_to_other` |
 | Copy Path | ⇧⌘C, ⌥⌘C | Ctrl+Shift+C, Ctrl+Alt+C | `file.copy_path` |
 | Duplicate | ⌘D | Ctrl+D | `file.duplicate` |
 | Rename… | F2, ⇧⌘R | F2, Ctrl+Shift+R | `file.rename` |
@@ -151,10 +187,18 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Sort by Size |  |  | `view.sort_size` |
 | Sort by Date Modified |  |  | `view.sort_modified` |
 | Reverse Sort Order |  |  | `view.sort_reverse` |
+| New Tab | ⌘T | Ctrl+T | `tab.new` |
+| Close Tab | ⌘W | Ctrl+W | `tab.close` |
+| Next Tab | ⌃⇥, ⇧⌘] | Ctrl+Tab, Ctrl+Shift+] | `tab.next` |
+| Previous Tab | ⌃⇧⇥, ⇧⌘[ | Ctrl+Shift+Tab, Ctrl+Shift+[ | `tab.previous` |
+| Reopen Closed Tab | ⇧⌘T | Ctrl+Shift+T | `tab.reopen` |
+| Split View (Toggle) | ⌘\ | Ctrl+\ | `pane.split` |
+| Switch to Other Pane | ⇥ | Tab | `pane.switch` |
 | Go to sidebar place 1…9 | ⌘1 … ⌘9 | Ctrl+1 … Ctrl+9 | `place.1` … `place.9` |
 <!-- commands:end -->
 
-Notes: paste copies, or moves what you cut; ⌥⌘V always moves. Undo refuses if any item changed
+Notes: paste copies, or moves what you cut; ⌥⌘V always moves. The palette names ⌘\ "Split
+View" or "Close Split View", whichever it will do. Undo refuses if any item changed
 since. Rename selects the name before the extension; Enter saves, Esc cancels. Esc also cancels
 a running copy or move.
 
@@ -220,5 +264,6 @@ the item went, so restore it from the Recycle Bin there.
 ## Not yet
 
 Permanent delete (on purpose, for now), file watching (use ⌘R), Quick Look-style preview
-(Space is reserved for it), tabs, Tab-completion in go-to mode, redo, more than one operation
-at a time, and a context menu on Linux.
+(Space is reserved for it), Tab-completion in go-to mode, redo, more than one operation
+at a time, a context menu on Linux, reordering tabs or dragging them between panes, and
+dragging rows out to Finder while the window is split on macOS (see `RUNE-GAPS.md`).

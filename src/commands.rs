@@ -67,6 +67,8 @@ commands! {
     Cut "file.cut" "Cut", ["cmd+x"];
     Paste "file.paste" "Paste", ["cmd+v"];
     PasteMove "file.paste_move" "Move Here (Paste and Move)", ["cmd+alt+v"];
+    CopyToOther "file.copy_to_other" "Copy to Other Pane", ["f5"];
+    MoveToOther "file.move_to_other" "Move to Other Pane", ["f6"];
     CopyPath "file.copy_path" "Copy Path", ["cmd+shift+c", "cmd+alt+c"];
     Duplicate "file.duplicate" "Duplicate", ["cmd+d"];
     Rename "file.rename" "Rename…", ["f2", "cmd+shift+r"];
@@ -95,6 +97,14 @@ commands! {
     SortSize "view.sort_size" "Sort by Size", [];
     SortModified "view.sort_modified" "Sort by Date Modified", [];
     SortReverse "view.sort_reverse" "Reverse Sort Order", [];
+
+    NewTab "tab.new" "New Tab", ["cmd+t"];
+    CloseTab "tab.close" "Close Tab", ["cmd+w"];
+    NextTab "tab.next" "Next Tab", ["ctrl+tab", "cmd+shift+]"];
+    PrevTab "tab.previous" "Previous Tab", ["ctrl+shift+tab", "cmd+shift+["];
+    ReopenTab "tab.reopen" "Reopen Closed Tab", ["cmd+shift+t"];
+    Split "pane.split" "Split View (Toggle)", ["cmd+backslash"];
+    OtherPane "pane.switch" "Switch to Other Pane", ["tab"];
 
     Place1 "place.1" "Go to Place 1", ["cmd+1"];
     Place2 "place.2" "Go to Place 2", ["cmd+2"];
@@ -377,7 +387,9 @@ mod tests {
             v.into_iter().map(|(_, t)| t).collect::<Vec<_>>()
         };
         assert_eq!(rank("ren")[0], "Rename…");
-        assert_eq!(rank("new")[0], "New Folder");
+        let mut top = rank("new")[..2].to_vec();
+        top.sort();
+        assert_eq!(top, ["New Folder", "New Tab"]);
         assert_eq!(rank("folder")[0], "New Folder", "a word start beats a scatter");
         assert_eq!(rank("nf")[0], "New Folder", "initials");
         assert_eq!(rank("trash")[0], "Move to Trash");
