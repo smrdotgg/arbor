@@ -16,6 +16,26 @@ Newest first.
 
 ---
 
+## Command availability: no cheap "what's on the clipboard?" check
+
+- **Feature:** the command palette and context menu dim commands that can't run right now
+  (NORTHSTAR: every action reachable from the palette, which shows what's possible).
+- **What Rune is missing:** a synchronous, cheap query of what the clipboard holds (files, text,
+  nothing) without reading it. Rune only offers `Tx::read_clipboard` and `Tx::request_paste`,
+  which read the whole content off the event thread and answer an update later. AppKit has
+  `NSPasteboard.types` / `changeCount`, Windows `IsClipboardFormatAvailable(CF_HDROP)`, and
+  Wayland/X11 the offered MIME types, all without transferring data.
+- **What we did instead:** Paste and "Move Here" always show as available
+  (`State::unavailable` in `src/app.rs`). Pasting with nothing usable says "Nothing to paste:
+  copy some files first" (`State::paste` in `src/actions.rs`). Reading the clipboard each time the
+  palette or menu opens was rejected: it transfers the content (possibly a large image) for a
+  yes/no answer, and the answer would arrive a frame after the palette is drawn.
+- **What users lose:** Paste looks runnable in the palette and context menu when it would do
+  nothing, unlike Finder and Explorer, which grey it out. A small trust cost on a common action.
+- **Suggested Rune change:** `Tx::clipboard_kinds() -> ClipboardKinds { files, text, image, .. }`
+  (or `Cx::clipboard_kinds`), answered from the platform's type list without reading data, and
+  `None` where it can't be known cheaply (the web).
+
 ## Cold start: most of the 100 ms budget goes before the app's code runs
 
 - **Feature:** cold start to interactive window, budget 100 ms (NORTHSTAR speed budgets).

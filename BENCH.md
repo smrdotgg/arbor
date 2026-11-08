@@ -14,6 +14,35 @@ then 10 times leaves it, comes back and presses ↓, then quits (`ARBOR_BENCH`, 
 submitted to the GPU. The pixels reach the screen at the next display refresh, which Rune doesn't
 report (see [`RUNE-GAPS.md`](RUNE-GAPS.md)), so true latency is up to one refresh more.
 
+## 2026-11-08, after the command palette and settings file (milestone 2)
+
+tabot-dev only (Xvfb, lavapipe; same caveats as below). The Mac wasn't re-measured: no GUI runs
+there this milestone. Before and after were built from adjacent commits and run back to back
+(11 cold starts × 10 rounds each). The baseline ran twice to show the noise.
+
+| Measure (median / p95) | Before | Before, again | After, no settings file | After, every command bound |
+| --- | --- | --- | --- | --- |
+| Cold start (spawn → first frame) | 132.5 / 138.6 ms | 133.0 / 138.4 ms | 132.8 / 137.8 ms | 133.5 / 143.8 ms |
+| … of which `main` → first frame | 131.3 / 137.3 ms | 131.7 / 137.1 ms | 131.6 / 136.4 ms | 132.2 / 142.4 ms |
+| Listing visible (10k entries) | 40.8 / 43.9 ms | 40.6 / 44.6 ms | 42.2 / 44.9 ms | 41.6 / 45.1 ms |
+| Key → frame (synthetic ↓) | 6.2 / 6.7 ms | 6.2 / 6.8 ms | 6.4 / 7.2 ms | 6.4 / 6.9 ms |
+
+No change beyond noise. What the new code costs, measured directly
+(`cargo test --release -- --ignored --nocapture dispatch_speed parse_speed`):
+
+| Work | Time | Where it runs |
+| --- | --- | --- |
+| Find a key's command (~70 chords) | 0.3–0.8 µs | every key |
+| Sidebar's 9 shortcut labels from the keymap | 1.7 µs | every frame |
+| Rank every command for a query | 24 µs | each palette frame, only while it's open |
+| Read the settings file: none / the template / every command bound | 23 / 26 / 161 µs | once, on the startup thread, alongside the platform's launch |
+
+Opening the palette in a real window (`ARBOR_TIMING=1`, XTest key under Xvfb): 9.7 ms to the
+frame the first time (2.6 ms building the view, 7.0 ms encoding on the CPU renderer), 7.4 ms
+after (1.2 ms view). Only the rows in view are built. On lavapipe, encoding dominates every
+frame (a plain ↓ is 6.4 ms), so this says little about a real GPU; the Mac should be measured
+next time GUI runs are allowed there. The release binary grew 0.47 MB (35.8 → 36.3 MB, unstripped).
+
 ## 2026-11-08
 
 ### MacBook Pro, Apple M4 Pro, 24 GB, macOS 27.2 (the real target)
