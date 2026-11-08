@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::UNIX_EPOCH;
 
 #[derive(Clone, Debug)]
@@ -46,17 +47,38 @@ pub struct Listing {
 
 /// Reads `path` and sorts it. Runs on a worker thread.
 pub fn list(path: PathBuf, sort: Sort) -> Listing {
-    let result = read(&path).map(|mut v| {
-        sort_entries(&mut v, sort);
-        v
-    });
-    Listing { path, result }
+    list_until(path, sort, &AtomicBool::new(false)).expect("never stopped")
 }
 
-fn read(path: &Path) -> Result<Vec<Entry>, String> {
-    let rd = std::fs::read_dir(path).map_err(|e| e.to_string())?;
+/// [`list`], stopping as soon as it sees `stop` set (checked before each entry and before
+/// sorting): `None`, and the rest of the folder isn't read. A tab hidden or closed while its
+/// folder is read stops the read this way (NORTHSTAR: leaving a view cancels its work).
+pub fn list_until(path: PathBuf, sort: Sort, stop: &AtomicBool) -> Option<Listing> {
+    let mut result = read(&path, stop)?;
+    if stop.load(Relaxed) {
+        return None;
+    }
+    if let Ok(v) = &mut result {
+        sort_entries(v, sort);
+    }
+    Some(Listing { path, result })
+}
+
+/// `None` when stopped. One relaxed load per entry: nothing next to its `lstat`.
+fn read(path: &Path, stop: &AtomicBool) -> Option<Result<Vec<Entry>, String>> {
+    let rd = match std::fs::read_dir(path) {
+        Ok(rd) => rd,
+        Err(e) => return Some(Err(e.to_string())),
+    };
     let mut out = Vec::with_capacity(64);
     for de in rd.flatten() {
+        #[cfg(test)]
+        read_hook::entry(path);
+        if stop.load(Relaxed) {
+            #[cfg(test)]
+            read_hook::done(path);
+            return None;
+        }
         let os = de.file_name();
         let name = os.to_string_lossy().into_owned();
         // `file_type` comes from the directory entry itself on every platform (no stat).
@@ -79,7 +101,53 @@ fn read(path: &Path) -> Result<Vec<Entry>, String> {
         let key = format!("f:{name}");
         out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size: if is_dir { 0 } else { size }, mtime_ms });
     }
-    Ok(out)
+    #[cfg(test)]
+    read_hook::done(path);
+    Some(Ok(out))
+}
+
+/// Test-only: holds a read of one folder at its first entry, and counts the entries it reads.
+#[cfg(test)]
+pub(crate) mod read_hook {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::sync::mpsc::{Receiver, Sender};
+
+    pub(crate) struct Gate {
+        pub path: PathBuf,
+        /// Told when the read reaches its first entry; it then waits for `go`.
+        pub started: Sender<()>,
+        pub go: Option<Receiver<()>>,
+        /// Told how many entries the read looked at, once it ends or stops.
+        pub done: Sender<usize>,
+        pub seen: usize,
+    }
+
+    pub(crate) static GATES: Mutex<Vec<Gate>> = Mutex::new(Vec::new());
+
+    pub(super) fn entry(p: &Path) {
+        let go = {
+            let mut g = GATES.lock().unwrap();
+            let Some(gate) = g.iter_mut().find(|g| g.path == p) else { return };
+            gate.seen += 1;
+            if gate.seen > 1 {
+                return;
+            }
+            let _ = gate.started.send(());
+            gate.go.take()
+        };
+        if let Some(go) = go {
+            let _ = go.recv();
+        }
+    }
+
+    pub(super) fn done(p: &Path) {
+        let mut g = GATES.lock().unwrap();
+        if let Some(i) = g.iter().position(|g| g.path == p) {
+            let gate = g.remove(i);
+            let _ = gate.done.send(gate.seen);
+        }
+    }
 }
 
 fn mtime(m: &std::fs::Metadata) -> i64 {

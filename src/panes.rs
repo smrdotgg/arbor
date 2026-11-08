@@ -527,6 +527,51 @@ mod tests {
         assert_eq!(s.cur().entries.len(), 1, "the copy is there");
     }
 
+    /// A tab hidden while its folder is being read stops that read: the rest of the folder
+    /// isn't read off screen.
+    #[test]
+    fn hiding_a_tab_stops_its_read() {
+        use crate::fs::read_hook::{GATES, Gate};
+        use std::sync::mpsc::channel;
+        let names: Vec<String> = (0..100).map(|i| format!("f{i}")).collect();
+        let a = folder("stopread-a", &names.iter().map(String::as_str).collect::<Vec<_>>());
+        let b = folder("stopread-b", &["b"]);
+        let mut s = state_in(&a);
+        s.show_wait = Duration::ZERO;
+        run(&mut s, Cmd::NewTab);
+        go(&mut s, &b);
+        let ((started, wait_start), (go_on, go), (done, wait_done)) = (channel(), channel(), channel());
+        GATES.lock().unwrap().push(Gate { path: a.clone(), started, go: Some(go), done, seen: 0 });
+        run(&mut s, Cmd::PrevTab); // shows A: its read starts, and holds at the first entry
+        wait_start.recv_timeout(Duration::from_secs(5)).expect("A's read started");
+        run(&mut s, Cmd::NextTab); // hides A again
+        go_on.send(()).unwrap();
+        let seen = wait_done.recv_timeout(Duration::from_secs(5)).expect("A's read ended");
+        assert_eq!(seen, 1, "stopped at once, not after reading all 100 entries");
+        settle(&mut s);
+        assert_eq!(s.cur().cwd, b);
+    }
+
+    /// Closing the pane a read is for stops it too.
+    #[test]
+    fn closing_a_pane_stops_its_read() {
+        use crate::fs::read_hook::{GATES, Gate};
+        use std::sync::mpsc::channel;
+        let names: Vec<String> = (0..50).map(|i| format!("g{i}")).collect();
+        let a = folder("stopread-pane-a", &["a"]);
+        let c = folder("stopread-pane-c", &names.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut s = state_in(&a);
+        run(&mut s, Cmd::Split);
+        let ((started, wait_start), (go_on, go), (done, wait_done)) = (channel(), channel(), channel());
+        GATES.lock().unwrap().push(Gate { path: c.clone(), started, go: Some(go), done, seen: 0 });
+        s.go_to(c.clone());
+        wait_start.recv_timeout(Duration::from_secs(5)).expect("C's read started");
+        run(&mut s, Cmd::CloseTab); // the split pane's only tab: closes the pane
+        assert_eq!(s.panes.len(), 1);
+        go_on.send(()).unwrap();
+        assert_eq!(wait_done.recv_timeout(Duration::from_secs(5)).expect("C's read ended"), 1);
+    }
+
     fn rename_to(s: &mut State, name: &str) {
         s.start_rename();
         s.rename.as_mut().expect("renaming").edit.text = name.into();

@@ -10,7 +10,8 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
 use rune::{Latest, Tx};
 
@@ -106,6 +107,15 @@ pub struct Folder {
     /// Where the list is scrolled to, written by the list's `on_scroll_offset` (no handler, no
     /// commit), read when the tab is hidden.
     pub(crate) scroll: Rc<Cell<f32>>,
+    /// Set to stop the read in flight: when a newer one replaces it, or the tab it's for is
+    /// hidden, closed or dropped. Each read gets its own.
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Folder {
+    fn drop(&mut self) {
+        self.stop.store(true, Relaxed);
+    }
 }
 
 impl Folder {
@@ -133,7 +143,16 @@ impl Folder {
             loader,
             pending: None,
             scroll: Rc::new(Cell::new(0.0)),
+            stop: Arc::default(),
         }
+    }
+
+    /// Stops the read in flight (its answer could only be stale now) and arms a flag for the
+    /// next one.
+    fn stop_read(&mut self) -> Arc<AtomicBool> {
+        self.stop.store(true, Relaxed);
+        self.stop = Arc::default();
+        self.stop.clone()
     }
 
     pub fn list_key(&self) -> String {
@@ -188,9 +207,9 @@ impl Folder {
 
     /// Asks for a fresh read of `path`; it lands in `State::poll` (a newer request wins).
     pub(crate) fn request(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, rename: bool) {
-        let (sort, req) = (self.sort, next_request());
+        let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
         self.pending = Some(Pending { req, path: path.clone(), nav, select, rename, scroll: 0.0 });
-        self.loader.request(path, move |p| Answer { req, sort, listing: fs::list(p, sort) });
+        self.loader.request_opt(path, move |p| Some(Answer { req, sort, listing: fs::list_until(p, sort, &stop)? }));
     }
 
     /// Asks for a fresh read of the folder as it is ([`Nav::Show`]), waiting here at most `wait`
@@ -198,8 +217,8 @@ impl Folder {
     /// the path and an empty list on screen until then.
     pub(crate) fn request_now(&mut self, wait: std::time::Duration) -> Option<Answer> {
         let req = self.pending.as_ref()?.req;
-        let (path, sort) = (self.cwd.clone(), self.sort);
-        read_waiting(&self.loader, wait, move || Answer { req, sort, listing: fs::list(path, sort) })
+        let (path, sort, stop) = (self.cwd.clone(), self.sort, self.stop_read());
+        read_waiting(&self.loader, wait, move || Some(Answer { req, sort, listing: fs::list_until(path, sort, &stop)? }))
     }
 
     /// This tab's lightweight state, to keep while it's hidden.
@@ -236,6 +255,8 @@ impl Folder {
     /// Shows a hidden tab: its path, history, filter and sort at once, an empty list until its
     /// fresh read lands (`request_now`), then its selection and scroll.
     pub fn show(&mut self, m: TabMemo) {
+        // The tab that was here is hidden now: its read, if any, stops.
+        self.stop_read();
         self.entries = Vec::new();
         self.visible.clear();
         self.marked.clear();
@@ -429,11 +450,12 @@ pub(crate) fn now() -> rune::LocalTime {
 /// Runs `work` on `loader`'s worker and waits here up to `wait` for it. If it's done in time,
 /// the answer comes back from this call and never lands through the loader; otherwise `None`,
 /// and it lands through `loader.take()` in `poll` like any request. The hand-off is decided
-/// under one lock, so an answer is never lost or delivered twice.
+/// under one lock, so an answer is never lost or delivered twice. Work that stops early
+/// (`None`) hands nothing back.
 pub(crate) fn read_waiting<T: Send + 'static>(
     loader: &Latest<T>,
     wait: std::time::Duration,
-    work: impl FnOnce() -> T + Send + 'static,
+    work: impl FnOnce() -> Option<T> + Send + 'static,
 ) -> Option<T> {
     use std::sync::{Arc, Condvar, Mutex};
     struct Hand<T> {
@@ -443,7 +465,7 @@ pub(crate) fn read_waiting<T: Send + 'static>(
     let hand = Arc::new((Mutex::new(Hand { waiting: !wait.is_zero(), got: None }), Condvar::new()));
     let worker = hand.clone();
     loader.request_opt((), move |()| {
-        let listing = work();
+        let listing = work()?;
         let (lock, cv) = &*worker;
         let mut h = lock.lock().unwrap_or_else(|e| e.into_inner());
         if h.waiting {

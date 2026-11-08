@@ -1233,7 +1233,7 @@ pub(crate) mod tests {
             let loader: Latest<u32> = Latest::default();
             let now = crate::folder::read_waiting(&loader, wait, || {
                 std::thread::sleep(Duration::from_millis(3));
-                7
+                Some(7)
             });
             let until = Instant::now() + Duration::from_secs(5);
             let mut later = None;
