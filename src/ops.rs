@@ -212,6 +212,8 @@ enum Diff {
     Edited,
     Inside(std::cmp::Ordering),
     Unreadable,
+    /// It can't be looked at (its folder can't be read): not known to be gone.
+    Unreachable(io::Error),
 }
 
 impl Diff {
@@ -227,6 +229,7 @@ impl Diff {
             Diff::Inside(std::cmp::Ordering::Less) => format!("items were removed from inside {name}"),
             Diff::Inside(std::cmp::Ordering::Equal) => format!("something inside {name} was edited"),
             Diff::Unreadable => format!("something inside {name} can't be read any more"),
+            Diff::Unreachable(e) => format!("{name} can't be checked ({e})"),
         }
     }
 }
@@ -680,6 +683,9 @@ impl<'a> Worker<'a> {
         }
         match self.diff(&step.at, &split.rest) {
             None | Some(Diff::Gone) => Ok(()),
+            Some(Diff::Unreachable(e)) => Err(format!(
+                "{name} is back in “{there}”, but what's left of the original in “{here}” can't be checked ({e}), so it was left alone. Undo again once it can be read"
+            )),
             Some(_) => {
                 Err(format!("{name} is back in “{there}”, but what's left of the original in “{here}” changed since, so it was left alone"))
             }
@@ -688,7 +694,11 @@ impl<'a> Worker<'a> {
 
     /// How `path` differs from `was` (including everything inside when `was` has a tree).
     fn diff(&self, path: &Path, was: &Print) -> Option<Diff> {
-        let Ok(m) = path.symlink_metadata() else { return Some(Diff::Gone) };
+        let m = match path.symlink_metadata() {
+            Ok(m) => m,
+            Err(e) if is_gone(&e) => return Some(Diff::Gone),
+            Err(e) => return Some(Diff::Unreachable(e)),
+        };
         let now = Print::of(path, &m);
         if now.kind != was.kind {
             return Some(Diff::Kind(now.kind));
@@ -887,8 +897,8 @@ impl<'a> Worker<'a> {
     fn split(&self, from: &Path, copy: Print, why: String) -> Result<(), MoveError> {
         match self.print_all(from) {
             Ok(rest) => Err(MoveError::Split { split: Box::new(Split { copy, rest }), why }),
-            // The rest is gone after all (or unreadable, and the retry will say it changed).
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            // The rest is gone after all.
+            Err(e) if is_gone(&e) => Ok(()),
             // Unreadable: a fingerprint nothing matches, so a retry refuses and says where things are.
             Err(e) => Err(MoveError::Split { split: Box::new(Split { copy, rest: unmatchable() }), why: format!("{why}; {e}") }),
         }
@@ -937,13 +947,29 @@ impl<'a> Worker<'a> {
         }
     }
 
+    /// Only an item that's really gone counts as removed: one that can't be read (its folder
+    /// lost its permissions, say) is kept, and the step's record with it.
     fn remove_tree_checked(&self, p: &Path, kept: &mut Option<String>) {
-        let Ok(m) = p.symlink_metadata() else { return };
-        if m.is_dir()
-            && let Ok(rd) = std::fs::read_dir(p)
-        {
-            for de in rd.flatten() {
-                self.remove_tree_checked(&de.path(), kept);
+        let keep = |kept: &mut Option<String>, e: io::Error| {
+            kept.get_or_insert_with(|| format!("“{}”: {e}", p.display()));
+        };
+        let m = match p.symlink_metadata() {
+            Ok(m) => m,
+            Err(e) if is_gone(&e) => return,
+            Err(e) => return keep(kept, e),
+        };
+        if m.is_dir() {
+            match std::fs::read_dir(p) {
+                Ok(rd) => {
+                    for de in rd {
+                        match de {
+                            Ok(de) => self.remove_tree_checked(&de.path(), kept),
+                            Err(e) => keep(kept, e),
+                        }
+                    }
+                }
+                Err(e) if is_gone(&e) => return,
+                Err(e) => keep(kept, e),
             }
         }
         if let Err(e) = self.remove_one(p, m.is_dir())
@@ -953,6 +979,12 @@ impl<'a> Worker<'a> {
             *kept = Some(format!("“{}”: {e}", p.display()));
         }
     }
+}
+
+/// Whether `e` means the item isn't there: not found, or a folder on its path is now a file.
+/// Anything else (a permission error, say) means it may still be there.
+fn is_gone(e: &io::Error) -> bool {
+    matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
 }
 
 /// A fingerprint nothing on disk matches.
@@ -1660,6 +1692,51 @@ mod tests {
         assert!(o.errors[0].contains(&format!("copied to “{}”", d.join("into").join("f").display())), "{:?}", o.errors);
         assert_eq!(fs::read_to_string(d.join("into/f/x")).unwrap(), "x");
         assert_eq!(fs::read_to_string(d.join("f/x")).unwrap(), "x");
+    }
+
+    /// The rest of a split step can't be read when the undo is tried again (its folder lost its
+    /// permissions): that isn't "gone". The retry refuses, keeps the record naming both places,
+    /// and finishes once the folder can be read again.
+    #[cfg(unix)]
+    #[test]
+    fn split_retry_keeps_the_record_while_the_rest_cant_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads through any permissions
+        }
+        let lock = |p: &Path, mode| fs::set_permissions(p, fs::Permissions::from_mode(mode)).unwrap();
+        let (d, u) = split_undo("x-split-locked");
+        lock(&d.join("into"), 0o000);
+        let o = run_now(Op::Undo(u));
+        lock(&d.join("into"), 0o755);
+        let why = o.refused.expect("refused while the rest can't be read");
+        assert!(why.contains("what's left of the original in “") && why.contains("can't be checked"), "{why}");
+        assert!(why.contains(&d.join("into").display().to_string()) && why.contains(&format!("back in “{}”", d.display())), "{why}");
+        let u = o.undo.expect("the record is kept");
+        assert!(u.steps[0].split.is_some());
+        assert_eq!(fs::read_to_string(d.join("into/f/y")).unwrap(), "y");
+        undo_ok(u);
+        assert!(!d.join("into/f").exists());
+    }
+
+    /// The same, with the folder locked after the retry's check, right before it removes the
+    /// rest: the removal can't see the rest, so it doesn't count it as removed.
+    #[cfg(unix)]
+    #[test]
+    fn split_retry_that_cant_reach_the_rest_keeps_the_record() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let (d, u) = split_undo("x-split-locked-late");
+        let into = d.join("into");
+        let hook = Box::new(move |_: &Path| fs::set_permissions(&into, fs::Permissions::from_mode(0o000)).unwrap());
+        let o = run_hooked(Op::Undo(u), fake_trash, hooked(hook, false));
+        fs::set_permissions(d.join("into"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
+        assert!(o.errors[0].contains("part of the original couldn't be removed from “"), "{:?}", o.errors);
+        assert!(o.undo.is_some_and(|u| u.steps[0].split.is_some()), "the record is kept");
+        assert_eq!(fs::read_to_string(d.join("into/f/y")).unwrap(), "y");
     }
 
     // ---- known limits -----------------------------------------------------------------------
