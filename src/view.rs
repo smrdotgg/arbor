@@ -299,7 +299,7 @@ fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
         None => {
             let mut name = e.name.clone();
             if e.is_link {
-                name.push_str("  ⤴");
+                name.push_str("  ↗"); // In the bundled Inter, so it draws the same everywhere.
             }
             text(name).font(BODY).color(name_color).truncate_middle().grow(1.0).min_w(0.0)
         }
