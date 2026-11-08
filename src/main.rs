@@ -5,8 +5,11 @@
 
 mod actions;
 mod app;
+mod commands;
+mod config;
 mod fs;
 mod ops;
+mod palette;
 mod timing;
 mod trash;
 mod view;

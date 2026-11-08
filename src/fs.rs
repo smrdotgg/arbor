@@ -255,6 +255,16 @@ pub fn open(p: &Path) -> Result<(), String> {
     reap(cmd)
 }
 
+/// Opens a text file (the settings file) for editing: in the default text editor on macOS,
+/// where a `.toml` file often has no app of its own, else with its default app.
+pub fn open_text(p: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if rune::tooling::headless_run().is_none() {
+        return reap(Command::new("open").arg("-t").arg(p).spawn());
+    }
+    open(p)
+}
+
 /// Shows `p` selected in the platform's own file manager.
 pub fn reveal(p: &Path) -> Result<(), String> {
     if rune::tooling::headless_run().is_some() {

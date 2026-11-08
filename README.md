@@ -27,10 +27,12 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   item changed and how. A refused or failed undo stays on the stack. A partly failed one keeps
   only what didn't go back.
 
-About 3,200 lines in `src/` (a third of it tests): `fs.rs` (reading folders, opening files),
+About 4,500 lines in `src/` (a third of it tests): `fs.rs` (reading folders, opening files),
 `ops.rs` (copy, move, trash and undo on a worker), `trash.rs` (each platform's trash), `app.rs`
-(state, selection, keys), `actions.rs` (clipboard, rename, drag and drop, context menu),
-`view.rs` (UI) and `timing.rs` (opt-in speed measurement).
+(state, selection, key dispatch, what each command does), `commands.rs` (the command table and
+keymap), `palette.rs` (the command palette), `config.rs` (the settings file), `actions.rs`
+(clipboard, rename, drag and drop, context menu), `view.rs` (UI) and `timing.rs` (opt-in speed
+measurement).
 
 ## Run
 
@@ -61,37 +63,119 @@ median and p95 against each budget. It opens and closes windows, so leave the ma
 while it runs. `cargo test --release -- --ignored --nocapture list_10k` times reading and
 sorting alone. Results are in [`BENCH.md`](BENCH.md).
 
-## Keys
+## Keys and the command palette
 
-| Key | Action |
+Every action is a command with an id, a title and default keys, in one table
+(`src/commands.rs`). Keys, the palette, the context menu and the settings file all read it.
+
+**⌘K** (or **⇧⌘P**) opens the command palette: type part of a command's name, see its keys,
+press Enter (or click) to run it. ↑↓ and Page Up/Down move, Esc or a click outside closes it.
+Matches that start the name, then ones that start a word, come first; initials work too ("nf"
+for New Folder), and so do ids once you type a `.` ("file.tr"). Commands that can't run right
+now (Rename with nothing selected) are dimmed, and choosing one says why.
+
+Typing, outside the palette:
+
+- **Type anything** to filter the folder. The first name starting with what you typed gets
+  selected. While the filter has text, typing, ⌫ and ⌥⌫ edit it.
+- **Type `/` or `~`** (or ⌘L) for go-to-path mode. Enter navigates, or opens a file.
+- Space with nothing typed does nothing (reserved for preview).
+
+Off macOS, ⌘ is Ctrl. Mouse: click to select, ⇧-click and ⌘-click to select several,
+double-click to open, click a breadcrumb or place to jump there, click a column header to sort
+(click again to reverse). Right-click opens a native context menu (macOS and Windows). Drag rows
+out to Finder or other apps (macOS). Drop files on a folder row or on the list: same disk moves,
+another disk copies, and ⌥ forces a copy.
+
+Every command, with its default keys (generated from `src/commands.rs`; a test keeps it in sync,
+`ARBOR_WRITE_README=1 cargo test readme` rewrites it):
+
+<!-- commands:start -->
+| Command | macOS | Windows, Linux | Id |
+| --- | --- | --- | --- |
+| Open | ↩, ⌘O, ⌘↓, ⌥↓ | Enter, Ctrl+O, Ctrl+↓, Alt+↓ | `nav.open` |
+| Open Folder | → | → | `nav.into` |
+| Go to Parent Folder | ←, ⌫, ⌘↑, ⌥↑ | ←, Backspace, Ctrl+↑, Alt+↑ | `nav.parent` |
+| Go Back | ⌘[, ⌥← | Ctrl+[, Alt+← | `nav.back` |
+| Go Forward | ⌘], ⌥→ | Ctrl+], Alt+→ | `nav.forward` |
+| Go to Path… | ⌘L | Ctrl+L | `nav.goto` |
+| Reload | ⌘R | Ctrl+R | `nav.reload` |
+| Show in Finder / Explorer / file manager | ⌘↩ | Ctrl+Enter | `nav.reveal` |
+| Command Palette | ⌘K, ⇧⌘P | Ctrl+K, Ctrl+Shift+P | `app.palette` |
+| Open Settings File | ⌘, | Ctrl+, | `app.settings` |
+| Reload Settings |  |  | `app.reload_settings` |
+| Clear Filter and Selection | ⎋ | Esc | `app.clear` |
+| Copy | ⌘C | Ctrl+C | `file.copy` |
+| Cut | ⌘X | Ctrl+X | `file.cut` |
+| Paste | ⌘V | Ctrl+V | `file.paste` |
+| Move Here (Paste and Move) | ⌥⌘V | Ctrl+Alt+V | `file.paste_move` |
+| Copy Path | ⇧⌘C, ⌥⌘C | Ctrl+Shift+C, Ctrl+Alt+C | `file.copy_path` |
+| Duplicate | ⌘D | Ctrl+D | `file.duplicate` |
+| Rename… | F2, ⇧⌘R | F2, Ctrl+Shift+R | `file.rename` |
+| New Folder | ⇧⌘N | Ctrl+Shift+N | `file.new_folder` |
+| Move to Trash | ⌘⌫, ⌦ | Ctrl+Backspace, Delete | `file.trash` |
+| Undo | ⌘Z | Ctrl+Z | `file.undo` |
+| Cancel File Operation |  |  | `file.cancel` |
+| Move Up | ↑ | ↑ | `select.up` |
+| Move Down | ↓ | ↓ | `select.down` |
+| Move Up a Page | ⇞ | Page Up | `select.page_up` |
+| Move Down a Page | ⇟ | Page Down | `select.page_down` |
+| Move to First | ↖ | Home | `select.first` |
+| Move to Last | ↘ | End | `select.last` |
+| Extend Selection Up | ⇧↑ | Shift+↑ | `select.extend_up` |
+| Extend Selection Down | ⇧↓ | Shift+↓ | `select.extend_down` |
+| Extend Selection Up a Page | ⇧⇞ | Shift+Page Up | `select.extend_page_up` |
+| Extend Selection Down a Page | ⇧⇟ | Shift+Page Down | `select.extend_page_down` |
+| Extend Selection to First | ⇧↖ | Shift+Home | `select.extend_first` |
+| Extend Selection to Last | ⇧↘ | Shift+End | `select.extend_last` |
+| Select All | ⌘A | Ctrl+A | `select.all` |
+| Show or Hide Hidden Files | ⌘., ⇧⌘. | Ctrl+., Ctrl+Shift+. | `view.hidden` |
+| Sort by Name |  |  | `view.sort_name` |
+| Sort by Kind |  |  | `view.sort_kind` |
+| Sort by Size |  |  | `view.sort_size` |
+| Sort by Date Modified |  |  | `view.sort_modified` |
+| Reverse Sort Order |  |  | `view.sort_reverse` |
+| Go to sidebar place 1…9 | ⌘1 … ⌘9 | Ctrl+1 … Ctrl+9 | `place.1` … `place.9` |
+<!-- commands:end -->
+
+Notes: paste copies, or moves what you cut; ⌥⌘V always moves. Undo refuses if any item changed
+since. Rename selects the name before the extension; Enter saves, Esc cancels. Esc also cancels
+a running copy or move.
+
+## Settings
+
+One file holds settings and keybindings. "Open Settings File" (⌘, or from the palette) creates it
+with every setting and every command listed, all commented out, and opens it. Nothing watches the
+file: run "Reload Settings" after saving (or restart).
+
+| Platform | File |
 | --- | --- |
-| ↑ ↓, PgUp PgDn, Home End | Move selection |
-| Enter, → (folder), ⌘↓ | Open (folders navigate; files open in their default app) |
-| ←, ⌫ (empty filter), ⌘↑ | Parent folder (re-selects where you came from) |
-| ⌘[ ⌘], ⌥← ⌥→ | Back / forward |
-| *type anything* | Filter the folder (smart: the first prefix match gets selected) |
-| Esc | Clear filter |
-| ⌘L, or type `/` or `~` | Go-to-path mode. Enter navigates (or opens a file) |
-| ⌘. (or ⌘⇧.) | Show/hide hidden files (dotfiles, macOS `UF_HIDDEN`, Windows hidden attr) |
-| ⇧↑ ⇧↓, ⇧-click, ⌘-click, ⌘A | Select several items |
-| ⌘C / ⌘X | Copy / cut the selected files (Finder and Explorer can paste them) |
-| ⌘V / ⌥⌘V | Paste into this folder: copies, or moves if you cut them; ⌥⌘V always moves |
-| ⌘D | Duplicate |
-| F2 or ⇧⌘R | Rename inline (the name before the extension is selected). Enter saves, Esc cancels |
-| ⇧⌘N | New folder (starts renaming it) |
-| ⌘⌫ or Delete | Move to Trash |
-| ⌘Z | Undo the last rename, move, copy, trash or new folder (refuses if any item changed since) |
-| ⌘R | Reload |
-| ⇧⌘C | Copy the selected path as text |
-| ⌘O | Open |
-| ⌘Enter | Reveal in Finder / Explorer / the default file manager |
-| ⌘1…⌘9 | Jump to a sidebar place |
+| macOS | `~/Library/Application Support/Arbor/config.toml` |
+| Linux | `$XDG_CONFIG_HOME/arbor/config.toml` (default `~/.config/arbor/config.toml`) |
+| Windows | `%APPDATA%\Arbor\config.toml` |
 
-Off macOS, ⌘ is Ctrl. Mouse: click to select, double-click to open, click a breadcrumb or
-place to jump there, click a column header to sort (click again to reverse). Right-click opens
-a native context menu (macOS and Windows). Drag rows out to Finder or other apps (macOS).
-Drop files on a folder row or on the list: same disk moves, another disk copies, and ⌥ forces
-a copy.
+```toml
+[general]
+show_hidden = false        # show hidden files in new windows (⌘. toggles)
+sort = "name"              # "name", "kind", "size" or "modified"
+sort_descending = false    # default: size and modified sort largest and newest first
+start_folder = "~"         # when none is given on the command line
+places = ["~", "~/Projects", "/"]   # sidebar places, replacing the automatic list
+
+[keys]
+"file.trash" = ["cmd+backspace", "delete"]   # replaces the command's default keys
+"file.duplicate" = []                        # unbinds it
+"app.palette" = ["cmd+p"]
+```
+
+In a key, `cmd` is ⌘ on macOS and Ctrl elsewhere; `ctrl`, `alt` (`option`), `shift` and
+`super` name those keys. A binding takes its key from any command that had it by default, and if
+two lines bind the same key the later one gets it (and the status bar says so). Mistakes never
+stop Arbor: the status bar shows the first one ("Settings: line 12: unknown command
+'file.trahs' (did you mean 'file.trash'?)"), everything valid still applies, and the rest keeps
+its default. A line that isn't valid TOML is skipped. The file is read once at startup, on the
+thread that reads the first folder, so it costs nothing on the way to the first frame.
+
 
 ## Platform notes
 
@@ -102,8 +186,10 @@ All three build, pass tests and pass clippy in CI. How much has been run for rea
 - **Linux**: building needs `libxkbcommon-dev libwayland-dev`. Running under X11 also needs
   `libxkbcommon-x11-0` (desktops have it; minimal installs may not). Opens files with `xdg-open`.
   Sidebar places include `/mnt` and `/media`. Checked at runtime only under Xvfb with Mesa's
-  software Vulkan (Ubuntu 24.04): the window opens and lists a folder. Not yet checked: Wayland,
-  a real GPU, keys, drag and drop, clipboard, trash and undo, `xdg-open`.
+  software Vulkan (Ubuntu 24.04): the window opens and lists a folder, and synthetic X key
+  presses (XTest) filter, move the selection and drive the command palette and settings reload.
+  Not yet checked: Wayland, a real GPU, a real keyboard and input methods, drag and drop,
+  clipboard, trash and undo, `xdg-open`.
 - **Windows**: drive letters, hidden attribute, Recycle Bin, `explorer /select,`. Compiles and
   passes tests in CI but **has never been run**: everything at runtime is unchecked.
 

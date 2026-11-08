@@ -14,6 +14,10 @@ rune = { path = "vendor/rune/crates/rune", default-features = false, features = 
     "metal-backend",
 ] }
 
+# The settings file. Parse only (no writer, no serde): already in the lock file through Rune's
+# build dependencies, and it reports each error's position, which the status bar shows as a line.
+toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
+
 # Trash: NSFileManager on macOS, the shell's Recycle Bin on Windows (Linux follows the XDG spec).
 # windows-sys also lists the drive letters.
 [target.'cfg(target_os = "macos")'.dependencies]

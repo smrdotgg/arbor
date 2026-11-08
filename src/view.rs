@@ -8,7 +8,9 @@ use rune::tok::{self, TextStyle, Theme};
 use rune::{Align, Color, Cursor, Cx, El, GrowthSpec, ScrollSpec, col, el, row, text, text_input};
 
 use crate::app::State;
+use crate::commands::Cmd;
 use crate::fs::{self, SortKey};
+use crate::palette;
 
 const ROW_H: f32 = 24.0;
 /// Height of the top band (path bar, and the sidebar's traffic-light strip on macOS).
@@ -70,7 +72,7 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
     let l = look(cx.system_dark());
     // Reads the laid-out size only; scrolling never re-runs the view.
     let cols = Cols::for_width(cx.layout_size("main").map_or(f32::MAX, |[w, _]| w));
-    row()
+    let window = row()
         .w_full()
         .h_full()
         .fill(l.t.bg)
@@ -89,7 +91,8 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
                 .child(list(s, l, cols))
                 .child(hr(l))
                 .child(status(s, l)),
-        )
+        );
+    if s.palette.is_some() { window.child(palette_view(s, l)) } else { window }
 }
 
 fn hr(l: Look) -> El {
@@ -115,9 +118,12 @@ fn sidebar(s: &State, l: Look, under_titlebar: bool) -> El {
                 s.go_to(p.clone());
             })
             .child(text(name.clone()).font(BODY).color(l.t.text).truncate().grow(1.0).min_w(0.0));
-        if i < 9 {
-            let hint = if cfg!(target_os = "macos") { format!("⌘{}", i + 1) } else { format!("^{}", i + 1) };
-            item = item.child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.6)));
+        let hint = Cmd::ALL.get(Cmd::ALL.iter().position(|&c| c == Cmd::Place1).unwrap_or(0) + i).filter(|c| c.place() == Some(i));
+        if let Some(&cmd) = hint {
+            let label = s.keymap.label(cmd);
+            if !label.is_empty() {
+                item = item.child(text(label).font(SMALL).color(l.t.text_secondary.alpha(0.6)));
+            }
         }
         item = if here { item.fill(l.t.control_off) } else { item.hover(l.t.hover) };
         c = c.child(item);
@@ -425,4 +431,89 @@ fn status(s: &State, l: Look) -> El {
     let hint = if s.show_hidden { "hidden shown" } else { "" };
     bar.child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)))
         .child(text(format!("{picked}{count}")).font(NUM).color(l.t.text_secondary))
+}
+
+/// Rows the palette shows before it scrolls.
+const PALETTE_ROWS: f32 = 12.0;
+const PALETTE_ROW_H: f32 = 28.0;
+
+/// The command palette: over the top of the window, a field and the ranked commands with their
+/// keys right-aligned. Modal: a click outside closes it, as Esc does.
+fn palette_view(s: &State, l: Look) -> El {
+    let Some(p) = &s.palette else { return el() };
+    let hits = s.palette_hits();
+    let sel = s.palette_sel(&hits);
+    let field = text_input(&p.edit, TextStyle::new(15.0, 400.0))
+        .key("palette-field")
+        .single_line()
+        .placeholder("Type a command", l.t.text_secondary.alpha(0.7))
+        .color(l.t.text)
+        .caret(l.accent, l.accent.alpha(0.35))
+        .on_edit(|s: &mut State| s.palette_edit())
+        .on_input_key(|s: &mut State, ev, tx| s.palette_field_key(ev, tx))
+        .grow(1.0)
+        .min_w(0.0);
+    // Only the rows in view are built, as in the file list; the rest build as they scroll in.
+    let count = hits.len();
+    let hits = std::rc::Rc::new(hits);
+    let keys = hits.clone();
+    let rows =
+        col().key("palette-rows").w_full().px(6.0).growth(GrowthSpec { spring: rune::GROWTH, edge: rune::edge::NO_MASK }).virtual_rows(
+            count,
+            PALETTE_ROW_H,
+            move |_: &State, i| Cow::Owned(palette::row_key(keys[i].cmd)),
+            move |_: &State, i| palette_row(&hits[i], i == sel, l),
+        );
+    let list = if count == 0 {
+        col().key("palette-list").child(text("No matching commands").font(BODY).color(l.t.text_secondary).px(16.0).py(10.0))
+    } else {
+        let h = (count as f32).min(PALETTE_ROWS) * PALETTE_ROW_H + 8.0;
+        col().key("palette-list").w_full().h(h).py(4.0).scroll(ScrollSpec { stick_bottom: false }).child(rows)
+    };
+    let mut panel = col()
+        .key("palette")
+        .w_full()
+        .max_w(560.0)
+        .fill(l.t.card)
+        .border(1.0, l.t.card_border)
+        .radius(10.0)
+        .shadow(10.0, 30.0, l.t.shadow)
+        .modal(true, |s: &mut State| s.palette = None)
+        .child(row().h(44.0).px(14.0).center_y().child(field))
+        .child(hr(l))
+        .child(list);
+    if let Some(why) = s.palette_why() {
+        panel = panel.child(hr(l)).child(text(why).font(SMALL).color(l.t.text_secondary).px(16.0).py(7.0));
+    }
+    col().key("palette-layer").pin(Some(0.0), Some(0.0), Some(0.0), None).items_center().px(20.0).pt(BAR_H + 6.0).child(panel)
+}
+
+/// One palette row: the title, and its keys right-aligned and dimmer. Commands that can't run
+/// now are dimmed.
+fn palette_row(h: &palette::Hit, on: bool, l: Look) -> El {
+    let (fg, dim) = match (on, h.enabled) {
+        (true, true) => (l.sel_text, l.sel_text.alpha(0.75)),
+        (true, false) => (l.t.text.alpha(0.55), l.t.text_secondary.alpha(0.55)),
+        (false, true) => (l.t.text, l.t.text_secondary.alpha(0.8)),
+        (false, false) => (l.t.text.alpha(0.4), l.t.text_secondary.alpha(0.4)),
+    };
+    let cmd = h.cmd;
+    let r = row()
+        .w_full()
+        .h(PALETTE_ROW_H)
+        .px(10.0)
+        .gap(12.0)
+        .center_y()
+        .radius(5.0)
+        .cursor(Cursor::Pointer)
+        .on_press_tx(move |s: &mut State, tx| s.palette_pick(cmd, tx))
+        .child(text(h.title.to_string()).font(BODY).color(fg).truncate().grow(1.0).min_w(0.0))
+        .child(text(h.keys.clone()).font(NUM).color(dim));
+    if on && h.enabled {
+        r.fill(l.accent)
+    } else if on {
+        r.fill(l.t.control_off)
+    } else {
+        r.hover(l.t.hover)
+    }
 }

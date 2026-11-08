@@ -2,14 +2,18 @@
 //! File operations live in `actions.rs`. Every handler lands its change with `tx.instant()`:
 //! a file manager should never animate.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use rune::{Key, KeyEvent, Latest, TextEdit, Tx};
 
+use crate::commands::{Cmd, Keymap};
+use crate::config::{self, Config, Settings};
 use crate::fs::{self, Entry, Listing, Sort, SortKey};
 use crate::ops;
+use crate::palette::Palette;
 
 /// Rows a Page Up / Page Down moves.
 const PAGE: usize = 20;
@@ -74,6 +78,13 @@ pub struct State {
     pub(crate) clip: Option<Clip>,
     pub(crate) paste_move: bool,
     pub(crate) undo: Vec<ops::Undo>,
+    /// Which keys run which command (defaults plus the settings file).
+    pub keymap: Keymap,
+    /// The settings as last read, so "Reload Settings" applies only what changed.
+    settings: Settings,
+    pub palette: Option<Palette>,
+    /// The palette field's late writes after it closes (see `rename_sink`).
+    pub(crate) palette_sink: TextEdit,
     /// Where the rename field's late writes go after the rename has ended (the runtime
     /// clears the field's focus through its binding a frame after a commit).
     rename_sink: TextEdit,
@@ -85,11 +96,11 @@ pub struct State {
 
 impl State {
     pub fn new() -> State {
-        let sort = FIRST_SORT;
-        // The first frame already shows the first listing: read on the thread `main` started,
-        // or here if it didn't.
+        // The first frame already shows the first listing: read (with the settings file) on the
+        // thread `main` started, or here if it didn't.
         let first = FIRST.lock().ok().and_then(|mut h| h.take()).and_then(|h| h.join().ok());
-        let first = first.unwrap_or_else(|| fs::list(start_dir(), sort));
+        let Startup { config, listing: first, places, note } = first.unwrap_or_else(startup);
+        let sort = config.settings.sort;
         let mut s = State {
             cwd: first.path,
             entries: Vec::new(),
@@ -98,13 +109,13 @@ impl State {
             marked: HashSet::new(),
             anchor: 0,
             filter: String::new(),
-            show_hidden: false,
+            show_hidden: config.settings.show_hidden,
             sort,
             back: Vec::new(),
             fwd: Vec::new(),
-            places: fs::places(),
+            places,
             version: 0,
-            note: None,
+            note: config.summary().or(note),
             now: now(),
             rename: None,
             job: None,
@@ -112,6 +123,10 @@ impl State {
             clip: None,
             paste_move: false,
             undo: Vec::new(),
+            keymap: config.keymap,
+            settings: config.settings,
+            palette: None,
+            palette_sink: TextEdit::new(""),
             rename_sink: TextEdit::new(""),
             job_seen: (0, 0),
             waker: None,
@@ -120,7 +135,7 @@ impl State {
         };
         match first.result {
             Ok(v) => s.entries = v,
-            Err(e) => s.note = Some(e),
+            Err(e) => s.note = Some(s.note.take().map_or(e.clone(), |n| format!("{e} · {n}"))),
         }
         s.refilter(None);
         s
@@ -432,11 +447,10 @@ impl State {
         }
     }
 
-    // ---- keys -------------------------------------------------------------------------------
+    // ---- keys and commands -----------------------------------------------------------------
 
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         tx.instant();
-        let m = ev.mods;
         // While renaming, the field has the keys; only Escape (which it passes on) gets here.
         if self.rename.is_some() {
             if ev.key == Key::Escape {
@@ -445,65 +459,52 @@ impl State {
             }
             return true;
         }
+        if self.palette.is_some() {
+            return self.palette_key(ev, tx);
+        }
+        if self.edit_filter(ev, tx) {
+            return true;
+        }
+        if let Some(cmd) = self.keymap.find(|c| c.matches_tx(ev, tx)) {
+            // A command that can't run lets the key go on (Esc with nothing to clear).
+            if self.unavailable(cmd).is_some() {
+                return false;
+            }
+            self.run(cmd, tx);
+            return true;
+        }
         match &ev.key {
-            Key::Up if m.cmd || m.alt => self.parent(),
-            Key::Down if m.cmd || m.alt => self.open_selected(),
-            Key::Up => self.step(-1, m.shift, tx),
-            Key::Down => self.step(1, m.shift, tx),
-            Key::PageUp => self.step(-(PAGE as isize), m.shift, tx),
-            Key::PageDown => self.step(PAGE as isize, m.shift, tx),
-            Key::Home => self.step(isize::MIN / 2, m.shift, tx),
-            Key::End => self.step(isize::MAX / 2, m.shift, tx),
-            Key::Left if m.alt => self.go_back(),
-            Key::Right if m.alt => self.go_forward(),
-            Key::Left => self.parent(),
-            Key::Right => {
-                if self.selected().is_some_and(|e| e.is_dir) {
-                    self.select(self.sel);
-                    self.open_selected();
-                }
+            // Space with nothing typed is free (reserved for preview later).
+            Key::Text(t) if t == " " && self.filter.is_empty() => false,
+            Key::Text(t) if !ev.mods.cmd && !ev.mods.ctrl => {
+                self.type_filter(t);
+                self.reveal(tx);
+                true
             }
-            Key::Enter if m.cmd => self.reveal_selected(),
-            Key::Enter if self.path_mode() => self.submit_path(),
-            Key::Enter => self.open_selected(),
-            Key::Function(2) => self.start_rename(),
-            Key::Escape => {
-                if let Some(job) = &self.job {
-                    job.cancel();
-                    self.note = Some("Cancelling…".into());
-                } else if !self.filter.is_empty() || self.note.is_some() || !self.marked.is_empty() {
-                    self.note = None;
-                    self.marked.clear();
-                    let keep = self.cursor_name();
-                    self.filter.clear();
-                    self.refilter(keep.as_deref());
-                    self.reveal(tx);
-                } else {
-                    return false;
-                }
-            }
-            // ⌘⌫ (Finder) or Delete: move to Trash.
-            Key::Backspace if m.cmd => self.trash_selected(),
-            Key::Delete => self.trash_selected(),
-            Key::Backspace if m.alt => {
+            _ => false,
+        }
+    }
+
+    /// While the filter has text, typing, ⌫ and ⌥⌫ edit it, and in go-to mode Enter goes,
+    /// before any command sees those keys.
+    fn edit_filter(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        if self.filter.is_empty() {
+            return false;
+        }
+        let m = ev.mods;
+        match &ev.key {
+            Key::Backspace if m.alt && !m.cmd && !m.ctrl => {
                 self.filter.clear();
                 self.refilter(None);
             }
-            Key::Backspace => {
-                if self.filter.pop().is_some() {
-                    let keep = self.cursor_name();
-                    self.refilter(keep.as_deref());
-                    self.reveal(tx);
-                } else {
-                    self.parent();
-                }
+            Key::Backspace if !m.cmd && !m.ctrl && !m.alt => {
+                self.filter.pop();
+                let keep = self.cursor_name();
+                self.refilter(keep.as_deref());
+                self.reveal(tx);
             }
-            Key::Command(c) => return self.command(*c, m, tx),
+            Key::Enter if !m.cmd && !m.ctrl && !m.alt && self.path_mode() => self.submit_path(),
             Key::Text(t) if !m.cmd && !m.ctrl => {
-                // Space with nothing typed is free (reserved for preview later).
-                if t == " " && self.filter.is_empty() {
-                    return false;
-                }
                 self.type_filter(t);
                 self.reveal(tx);
             }
@@ -512,27 +513,65 @@ impl State {
         true
     }
 
-    fn command(&mut self, c: char, m: rune::Mods, tx: &mut Tx) -> bool {
-        match c {
-            '[' => self.go_back(),
-            ']' => self.go_forward(),
-            '.' | '>' => self.toggle_hidden(),
-            'r' if m.shift => self.start_rename(),
-            'r' => self.reload(),
-            'o' => self.open_selected(),
-            'a' => self.select_all(),
-            'c' if m.shift || m.alt => self.copy_path(tx),
-            'c' => self.copy_selected(false, tx),
-            'x' => self.copy_selected(true, tx),
-            // Plain ⌘V reaches the root's paste handler on its own; ⌥⌘V moves (as in Finder).
-            'v' => {
-                self.paste_move = m.alt;
-                tx.request_paste();
+    /// Why `cmd` can't run right now, or `None` when it can. Keys for an unavailable command
+    /// pass through; the palette shows it dimmed and says this when it's chosen.
+    pub fn unavailable(&self, cmd: Cmd) -> Option<&'static str> {
+        use Cmd::*;
+        let nothing = self.selected().is_none();
+        let empty = self.visible.is_empty();
+        let why = match cmd {
+            Open | Copy | Cut | Duplicate | Trash | Rename if nothing => "Select an item first",
+            Into if !self.selected().is_some_and(|e| e.is_dir) => "Select a folder first",
+            Parent if self.cwd.parent().is_none() => "Already at the top",
+            Back if self.back.is_empty() => "Nothing to go back to",
+            Forward if self.fwd.is_empty() => "Nothing to go forward to",
+            Undo if self.undo.is_empty() => "Nothing to undo",
+            Cancel if self.job.is_none() => "No file operation is running",
+            Clear if self.job.is_none() && self.filter.is_empty() && self.note.is_none() && self.marked.is_empty() => "Nothing to clear",
+            Up | Down | PageUp | PageDown | First | Last | ExtendUp | ExtendDown | ExtendPageUp | ExtendPageDown | ExtendFirst
+            | ExtendLast | SelectAll
+                if empty =>
+            {
+                "Nothing to select"
             }
-            'd' => self.duplicate(),
-            'n' if m.shift => self.new_folder(),
-            'z' => self.undo_last(),
-            'l' => {
+            SortName if self.sort.key == SortKey::Name => "Already sorted by name",
+            SortKind if self.sort.key == SortKey::Kind => "Already sorted by kind",
+            SortSize if self.sort.key == SortKey::Size => "Already sorted by size",
+            SortModified if self.sort.key == SortKey::Modified => "Already sorted by date modified",
+            _ if cmd.place().is_some_and(|i| i >= self.places.len()) => "No sidebar place there",
+            // Paste always shows as available: Rune can't ask the clipboard what it holds
+            // without reading it (RUNE-GAPS.md). Pasting nothing says so.
+            _ => return None,
+        };
+        Some(why)
+    }
+
+    /// The title the palette shows, with what's here filled in.
+    pub fn title(&self, cmd: Cmd) -> Cow<'static, str> {
+        match cmd {
+            Cmd::Hidden if self.show_hidden => "Hide Hidden Files".into(),
+            Cmd::Hidden => "Show Hidden Files".into(),
+            _ => match cmd.place().and_then(|i| self.places.get(i)) {
+                Some((name, _)) => format!("Go to {name}").into(),
+                None => cmd.title().into(),
+            },
+        }
+    }
+
+    /// Runs `cmd`, from a key, the palette or the context menu. Check `unavailable` first.
+    pub fn run(&mut self, cmd: Cmd, tx: &mut Tx) {
+        use Cmd::*;
+        let page = PAGE as isize;
+        match cmd {
+            Open => self.open_selected(),
+            Into => {
+                self.select(self.sel);
+                self.open_selected();
+            }
+            Parent => self.parent(),
+            Back => self.go_back(),
+            Forward => self.go_forward(),
+            GoTo => {
                 let mut p = fs::pretty(&self.cwd);
                 if !p.ends_with(std::path::MAIN_SEPARATOR) {
                     p.push(std::path::MAIN_SEPARATOR);
@@ -540,41 +579,177 @@ impl State {
                 self.filter = p;
                 self.refilter(None);
             }
-            d @ '1'..='9' => {
-                let i = d as usize - '1' as usize;
-                if let Some((_, p)) = self.places.get(i).cloned() {
+            Reload => self.reload(),
+            Reveal => self.reveal_selected(),
+            Palette => self.open_palette(),
+            OpenSettings => self.open_settings(),
+            ReloadSettings => self.reload_settings(tx),
+            Clear => {
+                if let Some(job) = &self.job {
+                    job.cancel();
+                    self.note = Some("Cancelling…".into());
+                } else {
+                    self.note = None;
+                    self.marked.clear();
+                    let keep = self.cursor_name();
+                    self.filter.clear();
+                    self.refilter(keep.as_deref());
+                    self.reveal(tx);
+                }
+            }
+            Copy => self.copy_selected(false, tx),
+            Cut => self.copy_selected(true, tx),
+            // The paste lands in the root's paste handler (`view::view`).
+            Paste | PasteMove => {
+                self.paste_move = cmd == PasteMove;
+                tx.request_paste();
+            }
+            CopyPath => self.copy_path(tx),
+            Duplicate => self.duplicate(),
+            Rename => self.start_rename(),
+            NewFolder => self.new_folder(),
+            Trash => self.trash_selected(),
+            Undo => self.undo_last(),
+            Cancel => {
+                if let Some(job) = &self.job {
+                    job.cancel();
+                    self.note = Some("Cancelling…".into());
+                }
+            }
+            Up => self.step(-1, false, tx),
+            Down => self.step(1, false, tx),
+            PageUp => self.step(-page, false, tx),
+            PageDown => self.step(page, false, tx),
+            First => self.step(isize::MIN / 2, false, tx),
+            Last => self.step(isize::MAX / 2, false, tx),
+            ExtendUp => self.step(-1, true, tx),
+            ExtendDown => self.step(1, true, tx),
+            ExtendPageUp => self.step(-page, true, tx),
+            ExtendPageDown => self.step(page, true, tx),
+            ExtendFirst => self.step(isize::MIN / 2, true, tx),
+            ExtendLast => self.step(isize::MAX / 2, true, tx),
+            SelectAll => self.select_all(),
+            Hidden => self.toggle_hidden(),
+            SortName => self.sort_by(SortKey::Name, tx),
+            SortKind => self.sort_by(SortKey::Kind, tx),
+            SortSize => self.sort_by(SortKey::Size, tx),
+            SortModified => self.sort_by(SortKey::Modified, tx),
+            SortReverse => {
+                self.set_sort(self.sort.key);
+                self.reveal(tx);
+            }
+            Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
+                if let Some((_, p)) = cmd.place().and_then(|i| self.places.get(i)).cloned() {
                     self.go_to(p);
                 }
             }
-            _ => return false,
         }
-        true
+    }
+
+    fn sort_by(&mut self, key: SortKey, tx: &mut Tx) {
+        self.set_sort(key);
+        self.reveal(tx);
+    }
+
+    // ---- settings ---------------------------------------------------------------------------
+
+    /// Creates the settings file from the template if there's none, then opens it in the
+    /// default app.
+    pub fn open_settings(&mut self) {
+        self.note = Some(match config::ensure_file() {
+            Err(e) => format!("Settings: {e}"),
+            Ok(p) => match fs::open_text(&p) {
+                Ok(()) => format!("Opened {} · run Reload Settings after saving", fs::pretty(&p)),
+                Err(e) => format!("Settings are in {} (couldn't open it: {e})", fs::pretty(&p)),
+            },
+        });
+    }
+
+    /// Reads the settings file again. Keys apply at once; a preference applies only if the file
+    /// changed it, so reloading doesn't undo ⌘. or a header click made since.
+    pub fn reload_settings(&mut self, tx: &mut Tx) {
+        let c = Config::load();
+        let (old, new) = (&self.settings, &c.settings);
+        let keep = self.cursor_name();
+        if new.sort != old.sort {
+            self.sort = new.sort;
+            fs::sort_entries(&mut self.entries, self.sort);
+        }
+        if new.show_hidden != old.show_hidden {
+            self.show_hidden = new.show_hidden;
+        }
+        if new.places != old.places {
+            self.places = places_for(new);
+        }
+        self.refilter(keep.as_deref());
+        self.reveal(tx);
+        self.note = Some(c.summary().unwrap_or_else(|| "Settings reloaded".into()));
+        self.keymap = c.keymap;
+        self.settings = c.settings;
     }
 }
 
-const FIRST_SORT: Sort = Sort { key: SortKey::Name, desc: false };
+/// What `State::new` starts from: read on a thread `main` starts, so it overlaps the platform's
+/// app launch instead of following it.
+struct Startup {
+    config: Config,
+    listing: Listing,
+    places: Vec<(String, PathBuf)>,
+    /// A problem with the start folder.
+    note: Option<String>,
+}
 
-/// The first folder's listing, being read on a thread `main` started before Rune's event loop,
-/// so the read overlaps the platform's app launch instead of following it.
-static FIRST: std::sync::Mutex<Option<std::thread::JoinHandle<Listing>>> = std::sync::Mutex::new(None);
+fn startup() -> Startup {
+    let config = Config::load();
+    let (start, note) = start_dir(&config.settings);
+    let listing = fs::list(start, config.settings.sort);
+    let places = places_for(&config.settings);
+    Startup { config, listing, places, note }
+}
 
-/// Starts reading the folder Arbor opens in. Call first thing in `main`.
+/// The sidebar: the settings file's places, or the ones found on this machine.
+fn places_for(s: &Settings) -> Vec<(String, PathBuf)> {
+    let Some(list) = &s.places else { return fs::places() };
+    let home = fs::home();
+    list.iter()
+        .map(|p| {
+            let name = if *p == home {
+                "Home".to_string()
+            } else {
+                p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
+            };
+            (name, p.clone())
+        })
+        .collect()
+}
+
+/// The settings and first folder, being read on a thread `main` started before Rune's event
+/// loop, so the reads overlap the platform's app launch instead of following it.
+static FIRST: std::sync::Mutex<Option<std::thread::JoinHandle<Startup>>> = std::sync::Mutex::new(None);
+
+/// Starts reading the settings file and the folder Arbor opens in. Call first thing in `main`.
 pub fn read_first_folder() {
-    let start = start_dir();
-    let read = std::thread::spawn(move || fs::list(start, FIRST_SORT));
+    let read = std::thread::spawn(startup);
     if let Ok(mut slot) = FIRST.lock() {
         *slot = Some(read);
     }
 }
 
-/// The folder named on the command line, else the current one (or home when launched from `/`).
-fn start_dir() -> PathBuf {
-    std::env::args_os()
-        .skip(1)
-        .map(PathBuf::from)
-        .find(|p| p.is_dir())
-        .or_else(|| std::env::current_dir().ok().filter(|p| p != Path::new("/")))
-        .unwrap_or_else(fs::home)
+/// The folder named on the command line, else the settings' start folder, else the current
+/// one (or home when launched from `/`). Also a note when the start folder isn't there.
+fn start_dir(s: &Settings) -> (PathBuf, Option<String>) {
+    if let Some(p) = std::env::args_os().skip(1).map(PathBuf::from).find(|p| p.is_dir()) {
+        return (p, None);
+    }
+    let mut note = None;
+    if let Some(p) = &s.start_folder {
+        if p.is_dir() {
+            return (p.clone(), None);
+        }
+        note = Some(format!("Settings: start_folder {} isn't a folder", fs::pretty(p)));
+    }
+    let dir = std::env::current_dir().ok().filter(|p| p != Path::new("/")).unwrap_or_else(fs::home);
+    (dir, note)
 }
 
 pub fn is_path_like(s: &str) -> bool {

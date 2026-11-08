@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use rune::{ClipboardContent, DragItem, PointerPress, PopupItem, PopupMenu, TextEdit, Tx};
 
 use crate::app::{Clip, Rename, State};
+use crate::commands::Cmd;
 use crate::ops::{self, Op, Undo};
 
 impl State {
@@ -264,7 +265,8 @@ impl State {
 
     // ---- context menu -----------------------------------------------------------------------
 
-    /// Right-click on row `i` (or on empty space when `None`): a native menu.
+    /// Right-click on row `i` (or on empty space when `None`): a native menu of commands, with
+    /// their titles and keys from the command table and keymap.
     pub fn context_menu(&mut self, row: Option<usize>, press: PointerPress, tx: &mut Tx) {
         if let Some(i) = row
             && !self.is_selected(i)
@@ -273,57 +275,43 @@ impl State {
         }
         let has = row.is_some() && !self.visible.is_empty();
         let n = if has { self.targets().len() } else { 0 };
-        let sc = |s: &str| s.parse::<rune::Shortcut>().ok();
-        let item = |id: &str, title: &str, on: bool, key: &str| {
-            let it = PopupItem::new(id, title).enabled(on);
-            match sc(key) {
+        let item = |cmd: Cmd| {
+            // Commands on the selection need a row under the pointer; Rename takes one item.
+            let on_selection = matches!(cmd, Cmd::Open | Cmd::Rename | Cmd::Duplicate | Cmd::Trash | Cmd::Copy | Cmd::Cut);
+            let on = self.unavailable(cmd).is_none() && (!on_selection || has) && (cmd != Cmd::Rename || n == 1);
+            let title = match cmd {
+                Cmd::Duplicate | Cmd::Trash | Cmd::Copy | Cmd::Cut if n > 1 => format!("{} ({n} items)", cmd.title()),
+                _ => cmd.title().to_string(),
+            };
+            let it = PopupItem::new(cmd.id(), &title).enabled(on);
+            match self.keymap.shortcut(cmd) {
                 Some(k) => it.key_equivalent(k),
                 None => it,
             }
         };
-        let what = if n > 1 { format!("{n} Items") } else { String::new() };
         let menu = PopupMenu::new()
-            .item(item("open", "Open", has, "cmd+o"))
-            .item(item("reveal", reveal_label(), true, "cmd+enter"))
+            .item(item(Cmd::Open))
+            .item(item(Cmd::Reveal))
             .separator()
-            .item(item("rename", "Rename…", has && n == 1, "cmd+shift+r"))
-            .item(item("duplicate", format!("Duplicate {what}").trim_end(), has, "cmd+d"))
-            .item(item("trash", &format!("Move {what} to Trash").replace("  ", " "), has, "cmd+backspace"))
+            .item(item(Cmd::Rename))
+            .item(item(Cmd::Duplicate))
+            .item(item(Cmd::Trash))
             .separator()
-            .item(item("copy", format!("Copy {what}").trim_end(), has, "cmd+c"))
-            .item(item("cut", format!("Cut {what}").trim_end(), has, "cmd+x"))
-            .item(item("paste", "Paste", true, "cmd+v"))
-            .item(item("copy-path", "Copy Path", true, "cmd+shift+c"))
+            .item(item(Cmd::Copy))
+            .item(item(Cmd::Cut))
+            .item(item(Cmd::Paste))
+            .item(item(Cmd::CopyPath))
             .separator()
-            .item(item("new-folder", "New Folder", true, "cmd+shift+n"))
-            .item(item("undo", "Undo", !self.undo.is_empty(), "cmd+z"));
+            .item(item(Cmd::NewFolder))
+            .item(item(Cmd::Undo));
         tx.popup_menu(menu, press, |s: &mut State, picked, tx| {
             tx.instant();
-            match picked {
-                Some("open") => s.open_selected(),
-                Some("reveal") => s.reveal_selected(),
-                Some("rename") => s.start_rename(),
-                Some("duplicate") => s.duplicate(),
-                Some("trash") => s.trash_selected(),
-                Some("copy") => s.copy_selected(false, tx),
-                Some("cut") => s.copy_selected(true, tx),
-                Some("paste") => tx.request_paste(),
-                Some("copy-path") => s.copy_path(tx),
-                Some("new-folder") => s.new_folder(),
-                Some("undo") => s.undo_last(),
-                _ => {}
+            if let Some(cmd) = picked.and_then(Cmd::from_id)
+                && s.unavailable(cmd).is_none()
+            {
+                s.run(cmd, tx);
             }
         });
-    }
-}
-
-fn reveal_label() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Show in Finder"
-    } else if cfg!(windows) {
-        "Show in Explorer"
-    } else {
-        "Show in File Manager"
     }
 }
 
