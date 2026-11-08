@@ -999,9 +999,9 @@ impl<'a> Worker<'a> {
                         out.errors.push(format!("{first} “{shown}”: {why}"));
                     } else {
                         // Truthful counts: what went, and what's still there (counted on this
-                        // worker, not entering mounts; left out if a cancel stops the count).
-                        let left = crate::delete::count_left(&d.path, &mounts, &mut || !self.cancelled())
-                            .map_or_else(String::new, |n| format!(", {n} left"));
+                        // worker, not entering mounts; left out if a cancel stops the count, and
+                        // never a guess when part of it can't be read).
+                        let left = left_note(crate::delete::count_left(&d.path, &mounts, &mut || !self.cancelled()), &d.path);
                         out.errors.push(format!(
                             "Partly deleted “{}”: stopped at “{shown}” ({why}); {removed} item{} deleted{left}",
                             name_of(&d.path),
@@ -1834,6 +1834,19 @@ pub fn free_name(dir: &Path, name: &std::ffi::OsStr, same_dir: bool) -> PathBuf 
         }
     }
     unreachable!()
+}
+
+/// ", 3 left", or ", some items left (count unknown: couldn't read “x/y”)" when part of what's
+/// left couldn't be read (shown from `item`'s folder), or nothing when the count was stopped.
+fn left_note(left: Option<crate::delete::Left>, item: &Path) -> String {
+    match left {
+        None => String::new(),
+        Some(crate::delete::Left::Exactly(n)) => format!(", {n} left"),
+        Some(crate::delete::Left::Unknown(at)) => {
+            let shown = item.parent().and_then(|p| at.strip_prefix(p).ok()).unwrap_or(&at).display().to_string();
+            format!(", some items left (count unknown: couldn't read “{shown}”)")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3011,6 +3024,18 @@ mod tests {
         assert!(e.starts_with("Partly deleted “doomed”: stopped at “doomed/x/y” (Permission denied"), "{e}");
         assert!(e.ends_with("); 1 item deleted, 3 left"), "{e}");
         assert!(!d.join("doomed/x/y/file").exists() && d.join("doomed/x/y").is_dir());
+    }
+
+    #[test]
+    fn what_a_stopped_delete_left_is_exact_or_says_it_isnt() {
+        use crate::delete::Left;
+        let item = Path::new("/x/doomed");
+        assert_eq!(left_note(Some(Left::Exactly(3)), item), ", 3 left");
+        assert_eq!(
+            left_note(Some(Left::Unknown(PathBuf::from("/x/doomed/z"))), item),
+            ", some items left (count unknown: couldn't read “doomed/z”)"
+        );
+        assert_eq!(left_note(None, item), "");
     }
 
     /// A permanent delete never crosses into a mounted disk: it stops at the mount point, names
