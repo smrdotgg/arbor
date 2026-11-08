@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! bench [RUNS] [ROUNDS] [--bin PATH] [--keep] [--tabs N] [--preview N] [--jump N] [--search N] [--rename N]
+//!       [--pace MS] [--gap MS]
 //! ```
 //!
 //! Makes a folder of 10,000 entries in the temp dir, then cold-starts Arbor on it RUNS times
@@ -39,10 +40,12 @@
 //! one photo preview logged per round.
 //!
 //! `--jump N` adds N more cold starts with `ARBOR_BENCH_JUMP=1` and a Jump history of
-//! [`JUMP_FOLDERS`] folders: each round opens Jump to Folder (timed from the key to the frame
-//! showing the ranked folders; the first open of a run reads and aggregates the log, later ones
-//! rank what's in memory), types two letters (each key timed, ranking all of them again) and
-//! closes it. Such a run counts only with exactly ROUNDS opens (one cold) and 4 keys a round.
+//! [`JUMP_FOLDERS`] folders under the home folder, of realistic and varied depth (2 to 9
+//! levels, short names and long ones such as iCloud's), so many rows are too long to show whole:
+//! each round opens Jump to Folder (timed from the key to the frame showing the ranked folders;
+//! the first open of a run reads and aggregates the log, later ones rank what's in memory),
+//! types two letters, a different pair each round (each key timed, ranking all of them again),
+//! and closes it. Such a run counts only with exactly ROUNDS opens (one cold) and 4 keys a round.
 //!
 //! `--search N` adds N more cold starts with `ARBOR_BENCH_SEARCH=1` in a tree of
 //! [`SEARCH_FILES`] files in [`SEARCH_DIRS`] folders: each round opens Search in This Folder,
@@ -57,6 +60,13 @@
 //! loses its e's), turns on regex and types `$` (`e$`), each timed from the key to the frame
 //! showing the whole preview for it (worked out on a worker at this size), and closes it. Such
 //! a run counts only with exactly ROUNDS plain and 2 × ROUNDS regex previews of 10,000 items.
+//!
+//! `--pace MS` spaces every step of every run at least MS apart (`ARBOR_BENCH_PACE_MS`), as a
+//! person types (120 is brisk typing): the CPU cools between keys, as it does for a real user,
+//! which back-to-back steps hide (on the M4 Pro, 4–5× for Jump keys and regex previews).
+//! `--gap MS` waits MS between cold starts (the default starts each as soon as the last exits;
+//! a second of idle adds ~45 ms to every app's launch on the M4 Pro, bare AppKit included).
+//! Report both back-to-back and paced numbers.
 //!
 //! A run that doesn't finish in 60 s is killed and reported INVALID with its last lines of
 //! output (on macOS after `sample` writes where it was stuck to a file in the temp folder). On
@@ -87,6 +97,7 @@ fn main() {
     let mut jump_runs = 0;
     let mut search_runs = 0;
     let mut rename_runs = 0;
+    let (mut pace, mut gap) = (0u64, 0u64);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -97,6 +108,8 @@ fn main() {
             "--jump" => jump_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--jump N"),
             "--search" => search_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--search N"),
             "--rename" => rename_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--rename N"),
+            "--pace" => pace = args.next().and_then(|n| n.parse::<u64>().ok()).expect("--pace MS"),
+            "--gap" => gap = args.next().and_then(|n| n.parse::<u64>().ok()).expect("--gap MS"),
             n => nums.push(n.parse::<u32>().unwrap_or_else(|_| panic!("not a number: {n}"))),
         }
     }
@@ -106,6 +119,8 @@ fn main() {
     if display_asleep() {
         eprintln!("WARNING: the display is asleep: windows never count as visible, so runs hang or mean nothing. Wake it first.");
     }
+    PACE.set(pace).expect("once");
+    GAP.set(gap).expect("once");
 
     let root = std::env::temp_dir().join(format!("arbor-bench-{}", std::process::id()));
     let big = root.join("big");
@@ -358,6 +373,9 @@ struct Run {
     rename_key: Vec<f64>,
 }
 
+static PACE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+static GAP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
 /// Whether macOS last said the display was turned off (`pmset -g log`). False elsewhere, and
 /// when it can't tell.
 fn display_asleep() -> bool {
@@ -370,6 +388,10 @@ fn display_asleep() -> bool {
 }
 
 fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, String> {
+    let gap = GAP.get().copied().unwrap_or(0);
+    if gap > 0 {
+        std::thread::sleep(Duration::from_millis(gap));
+    }
     let spawned = SystemTime::now();
     let mut cmd = Command::new(bin);
     // Its own settings folder: the Jump history for `--jump`, an empty one otherwise.
@@ -388,6 +410,10 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
             cmd.env_remove(var);
         }
     }
+    match PACE.get().copied().unwrap_or(0) {
+        0 => cmd.env_remove("ARBOR_BENCH_PACE_MS"),
+        ms => cmd.env("ARBOR_BENCH_PACE_MS", ms.to_string()),
+    };
     let mut child = cmd
         .arg(dir)
         .env("ARBOR_BENCH", rounds.to_string())
@@ -677,15 +703,55 @@ fn make_preview_folder(dir: &Path) {
 /// A Jump history of [`JUMP_FOLDERS`] folders (one line each, two visits to every fifth, spread over
 /// a month; ranks under `MAX_AGE`, so none age out), at `root`'s settings folder. The folders
 /// needn't exist: Jump never looks.
-fn make_jump_history(root: &Path, under: &Path) {
+fn make_jump_history(root: &Path, _under: &Path) {
     let dir = root.join("config").join(if cfg!(any(target_os = "macos", windows)) { "Arbor" } else { "arbor" });
     std::fs::create_dir_all(&dir).expect("settings folder");
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let words = ["projects", "arbor", "src", "photos", "2024", "work", "client", "notes", "music", "build"];
+    // Folders as people have them: under the home folder, 2 to 9 levels deep, short names and
+    // long ones (iCloud's "Mobile Documents/com~apple~CloudDocs"), most too long to show whole
+    // in the Jump card. They don't need to exist: Jump ranks what the log says.
+    let home =
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map_or_else(|| PathBuf::from("/home/someone"), PathBuf::from);
+    let words = [
+        "Documents",
+        "projects",
+        "arbor",
+        "src",
+        "Library",
+        "Mobile Documents",
+        "com~apple~CloudDocs",
+        "clients",
+        "acme-corporation",
+        "2024",
+        "Q3 reports",
+        "photos",
+        "Exports",
+        "node_modules",
+        "packages",
+        "components",
+        "build",
+        "release",
+        "notes",
+        "music",
+        "Archive",
+        "drafts",
+        "design-system",
+        "tokens",
+        "Downloads",
+    ];
     let mut log = String::new();
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
     for i in 0..JUMP_FOLDERS {
-        let w = |k: usize| words[(i / k) % words.len()];
-        let p = under.join("home").join(w(1)).join(format!("{}-{i}", w(10))).join(w(100));
+        let mut p = home.clone();
+        let depth = 2 + i % 8;
+        for _ in 0..depth {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            p.push(words[(seed % words.len() as u64) as usize]);
+        }
+        let last = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        p.set_file_name(format!("{last}-{i}"));
         log.push_str(&format!("{}\t{}\t{}\n", now - (i as u64 * 517) % (30 * 86_400), 1 + usize::from(i % 5 == 0), p.display()));
     }
     std::fs::write(dir.join("history.log"), log).expect("history.log");

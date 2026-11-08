@@ -49,8 +49,9 @@
 //! Space (preview the image), ↑, ↓, ↑ (the last two while it's open, the ↑ while the image
 //! decodes), Space; opening waits for the preview to land. With `ARBOR_BENCH_JUMP=1` each
 //! round opens Jump to Folder (waiting for the history to land; the first open of a run reads
-//! and aggregates the log, the rest rank what's in memory), types `a` and `r`, and closes it
-//! with Esc. With `ARBOR_BENCH_SEARCH=1` each round opens Search in This Folder, types `1`
+//! and aggregates the log, the rest rank what's in memory), types two letters (a different
+//! pair each round, from [`JUMP_QUERIES`], so no round repeats the last one's rows), and closes
+//! it with Esc. With `ARBOR_BENCH_SEARCH=1` each round opens Search in This Folder, types `1`
 //! (in a large tree, so the walk streams for many frames), presses ↓ once a frame while it
 //! streams, and leaves with Esc once it's done. With `ARBOR_BENCH_RENAME=1` each round selects
 //! everything, opens Batch Rename (waiting for the folder's read), types `e`, turns on regex,
@@ -60,7 +61,9 @@
 //! covered or not yet visible, no drawable in time) asks for nothing, and Rune draws again when
 //! it can. (A wake from an undrawn frame was handled in the same run-loop turn, so AppKit never
 //! got to say the window was visible, and the bench spun: RUNE-GAPS.md.)
-//! The ↓ is synthetic, so its `key` time starts when the handler
+//! `ARBOR_BENCH_PACE_MS=N` spaces the steps at least N ms apart, as a person types (a thread
+//! sleeps and wakes the window; nothing polls), so the CPU cools between keys as it does for a
+//! real user. The ↓ is synthetic, so its `key` time starts when the handler
 //! is called rather than at an OS event. The window opens without taking focus and ignores real
 //! keys, so typing in another app while it runs can't reach it (and its ⌘⌫ can't trash anything).
 //!
@@ -148,6 +151,11 @@ thread_local! {
     static WAIT_PREVIEW: Cell<bool> = const { Cell::new(false) };
     /// The last bench step's frame was drawn: the next may start.
     static STEP_SHOWN: Cell<bool> = const { Cell::new(true) };
+    /// `ARBOR_BENCH_PACE_MS`, the least time between steps, and when the last one started.
+    static PACE_MS: Cell<u64> = const { Cell::new(0) };
+    static LAST_STEP: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// A pacing thread is asleep and will wake the window.
+    static PACE_ARMED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Whether `ARBOR_BENCH` is driving the app (after `init`).
@@ -168,6 +176,7 @@ pub fn init() -> bool {
     JUMP.set(set("ARBOR_BENCH_JUMP"));
     SEARCH.set(set("ARBOR_BENCH_SEARCH"));
     RENAME.set(set("ARBOR_BENCH_RENAME"));
+    PACE_MS.set(std::env::var("ARBOR_BENCH_PACE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0));
     let steps = if SEARCH.get() {
         rounds
     } else if RENAME.get() {
@@ -338,14 +347,37 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     }
     // One step per drawn frame: a frame that landed a listing, a preview or Jump's history is
     // that step's frame, and a step whose frame wasn't drawn yet waits for it.
-    if !loading && !FIRST.get() && s.preview_lands == previews && s.history.loads == jump_loads && STEP_SHOWN.get() {
+    if !loading && !FIRST.get() && s.preview_lands == previews && s.history.loads == jump_loads && STEP_SHOWN.get() && paced() {
         let stepped = bench_step(s, tx);
         if stepped {
             STEP_SHOWN.set(false);
+            LAST_STEP.set(Some(Instant::now()));
         }
         changed |= stepped;
     }
     changed
+}
+
+/// Whether `ARBOR_BENCH_PACE_MS` has passed since the last step. If not, a thread sleeps out
+/// the rest and wakes the window (once).
+fn paced() -> bool {
+    let pace = std::time::Duration::from_millis(PACE_MS.get());
+    let Some(last) = LAST_STEP.get().filter(|_| !pace.is_zero()) else { return true };
+    let since = last.elapsed();
+    if since >= pace {
+        PACE_ARMED.set(false);
+        return true;
+    }
+    if !PACE_ARMED.replace(true)
+        && let Some(w) = WAKER.get().cloned()
+    {
+        let rest = pace - since;
+        std::thread::spawn(move || {
+            std::thread::sleep(rest);
+            w();
+        });
+    }
+    false
 }
 
 fn preview_kind(s: &State) -> &'static str {
@@ -361,8 +393,11 @@ fn preview_kind(s: &State) -> &'static str {
 
 /// Steps in a preview bench round (see the module docs).
 const PREVIEW_STEPS: u32 = 8;
-/// Steps in a Jump bench round: open, `a`, `r`, Esc.
+/// Steps in a Jump bench round: open, two letters, Esc.
 const JUMP_STEPS: u32 = 4;
+/// What the Jump bench types, one pair a round: each matches a different part of its history,
+/// so the rows change (and are laid out afresh) every round, as they do for a person.
+pub const JUMP_QUERIES: [&str; 12] = ["ar", "do", "pr", "cl", "re", "no", "mu", "sr", "ph", "de", "li", "bu"];
 /// Steps in a Batch Rename bench round: select all, open, `e`, regex on, `$`, Esc.
 const RENAME_STEPS: u32 = 6;
 
@@ -463,11 +498,10 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
             0 => {
                 measured(s, tx, now, |s, tx| run(s, Cmd::Jump, tx));
             }
-            1 => {
-                keyed(s, &key(Key::Text("a".into())), tx, now);
-            }
-            2 => {
-                keyed(s, &key(Key::Text("r".into())), tx, now);
+            k @ (1 | 2) => {
+                let q = JUMP_QUERIES[(n / JUMP_STEPS) as usize % JUMP_QUERIES.len()];
+                let c = q[k as usize - 1..k as usize].to_string();
+                keyed(s, &key(Key::Text(c)), tx, now);
             }
             _ => {
                 keyed(s, &key(Key::Escape), tx, now);
@@ -653,6 +687,21 @@ mod tests {
         assert!(!STEP_SHOWN.get());
         shown(true);
         assert!(STEP_SHOWN.get());
+    }
+
+    /// Paced steps wait out the gap after the last one.
+    #[test]
+    fn paced_steps_wait_out_the_gap() {
+        PACE_MS.set(0);
+        LAST_STEP.set(Some(Instant::now()));
+        assert!(paced(), "unpaced");
+        PACE_MS.set(60_000);
+        assert!(!paced(), "too soon");
+        assert!(PACE_ARMED.get());
+        LAST_STEP.set(Instant::now().checked_sub(std::time::Duration::from_secs(61)));
+        assert!(paced());
+        assert!(!PACE_ARMED.get());
+        PACE_MS.set(0);
     }
 
     /// A preview (or anything else) that lands in a frame that isn't drawn is reported with
