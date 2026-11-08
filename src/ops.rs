@@ -320,7 +320,13 @@ impl Running {
 
 type TrashFn = fn(&Path) -> Result<Option<PathBuf>, String>;
 
-pub fn start(op: Op, waker: Option<rune::Waker>) -> Running {
+/// Runs `op` on a worker thread; its outcome comes back through [`Running::take`].
+///
+/// With `dest_id`, a copy or move goes only into the folder the user chose as the one with that
+/// identity (a paste, asked for before the clipboard answered): if the folder at its `dest`
+/// isn't that one when the worker starts (renamed away and another made at its path, or gone),
+/// it refuses before touching anything.
+pub fn start(op: Op, dest_id: Option<noclobber::FileId>, waker: Option<rune::Waker>) -> Running {
     let progress = Arc::new(Progress::default());
     let done = Arc::new(Mutex::new(None));
     let verb = op.verb();
@@ -328,12 +334,12 @@ pub fn start(op: Op, waker: Option<rune::Waker>) -> Running {
     // Headless runs (scripts, snapshots) run on a virtual clock far faster than real time, so
     // they do the work inline to stay deterministic.
     if rune::tooling::headless_run().is_some() {
-        let outcome = Worker::new(&p, None, crate::trash::trash).run(op);
+        let outcome = Worker::new(&p, None, crate::trash::trash).run_into(op, dest_id);
         *done.lock().expect("fresh mutex") = Some(outcome);
         return Running { verb, progress, done };
     }
     std::thread::spawn(move || {
-        let outcome = Worker::new(&p, waker.as_ref(), crate::trash::trash).run(op);
+        let outcome = Worker::new(&p, waker.as_ref(), crate::trash::trash).run_into(op, dest_id);
         if let Ok(mut slot) = d.lock() {
             *slot = Some(outcome);
         }
@@ -519,6 +525,29 @@ impl<'a> Worker<'a> {
             return Err(io::Error::new(ErrorKind::PermissionDenied, "permission denied"));
         }
         if dir { std::fs::remove_dir(p) } else { std::fs::remove_file(p) }
+    }
+
+    /// [`Worker::run`], first checking that a copy's or move's destination is still the folder
+    /// with identity `dest_id`.
+    fn run_into(&mut self, op: Op, dest_id: Option<noclobber::FileId>) -> Outcome {
+        if let (Some(want), Op::Copy { dest, .. } | Op::Move { dest, .. }) = (dest_id, &op)
+            && noclobber::dir_id(dest) != Some(want)
+        {
+            let why = if dest.symlink_metadata().is_ok() {
+                "is another folder now (the one there was moved or replaced)"
+            } else {
+                "isn't there any more"
+            };
+            return Outcome {
+                results: Vec::new(),
+                undo: None,
+                errors: Vec::new(),
+                refused: Some(format!("Nothing was pasted: “{}” {why}", name_of(dest))),
+                cancelled: false,
+                folders: Vec::new(),
+            };
+        }
+        self.run(op)
     }
 
     fn run(&mut self, op: Op) -> Outcome {

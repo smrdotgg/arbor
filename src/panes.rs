@@ -505,6 +505,39 @@ mod tests {
         assert!(s.paste_reqs.is_empty());
     }
 
+    /// The folder a paste was asked for is renamed away and another made at its path before
+    /// the clipboard answers: nothing goes into the impostor, and the status bar says why.
+    #[test]
+    fn a_paste_into_a_folder_replaced_since_it_was_asked_is_refused() {
+        let (a, src) = (folder("paste-swap-a", &[]), folder("paste-swap-src", &["f0"]));
+        let aside = a.with_extension("aside");
+        let _ = std::fs::remove_dir_all(&aside);
+        let mut s = state_in(&a);
+        run(&mut s, Cmd::PasteMove);
+        std::fs::rename(&a, &aside).unwrap();
+        std::fs::create_dir(&a).unwrap();
+        let id = s.paste_reqs[0].id;
+        s.paste_reply(id, &rune::ClipboardContent::new("").with_files(vec![src.join("f0")]));
+        finish(&mut s);
+        assert!(src.join("f0").exists(), "nothing moved");
+        assert!(!a.join("f0").exists() && !aside.join("f0").exists());
+        assert!(s.note.as_deref().is_some_and(|n| n.starts_with("Nothing was pasted") && n.contains("another folder now")), "{:?}", s.note);
+        // Gone altogether: refused too.
+        let b = folder("paste-gone-b", &[]);
+        let mut s = state_in(&b);
+        run(&mut s, Cmd::PasteMove);
+        std::fs::remove_dir(&b).unwrap();
+        let id = s.paste_reqs[0].id;
+        s.paste_reply(id, &rune::ClipboardContent::new("").with_files(vec![src.join("f0")]));
+        let until = Instant::now() + Duration::from_secs(10);
+        while s.job.is_some() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            s.poll(&mut Tx::default());
+        }
+        assert!(src.join("f0").exists());
+        assert!(s.note.as_deref().is_some_and(|n| n.contains("isn't there any more")), "{:?}", s.note);
+    }
+
     /// An operation that ends while the other pane is on its way to another folder leaves that
     /// navigation alone, and re-reads only the panes showing a folder it changed.
     #[test]

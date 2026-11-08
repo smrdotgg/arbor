@@ -60,11 +60,12 @@ impl State {
     /// Files from the clipboard (or absolute paths in its text) go into the folder the paste
     /// was asked for in, even if another pane is active by the time the clipboard answers (or
     /// that folder isn't on screen any more: it's where the user said, and the paste is
-    /// undoable). A paste of what Arbor itself cut, or ⌥⌘V, moves.
+    /// undoable), but only while it's still that folder: one put in its place since is refused
+    /// (`ops::start`). A paste of what Arbor itself cut, or ⌥⌘V, moves.
     fn paste_with(&mut self, req: Option<PasteReq>, content: &ClipboardContent) {
-        let (dest, move_requested) = match req {
-            Some(PasteReq { dest, mv, .. }) => (dest, mv),
-            None => (self.cur().cwd.clone(), false),
+        let (dest, dest_id, move_requested) = match req {
+            Some(PasteReq { dest, dest_id, mv, .. }) => (dest, dest_id, mv),
+            None => (self.cur().cwd.clone(), self.cur().dir_id, false),
         };
         let mut files: Vec<PathBuf> = content.files().to_vec();
         if files.is_empty() {
@@ -85,7 +86,7 @@ impl State {
         }
         let was_cut = self.clip.as_ref().is_some_and(|c| c.cut && c.paths == files);
         let op = if move_requested || was_cut { Op::Move { sources: files, dest } } else { Op::Copy { sources: files, dest } };
-        if self.start(op) && was_cut {
+        if self.start_into(op, dest_id) && was_cut {
             self.clip = None;
         }
     }
@@ -195,13 +196,19 @@ impl State {
 
     /// Starts a file operation on a worker. One at a time: false when one is still running.
     pub fn start(&mut self, op: Op) -> bool {
+        self.start_into(op, None)
+    }
+
+    /// [`State::start`], for a copy or move into a folder that must still be the one with
+    /// identity `dest_id` when the worker starts.
+    pub fn start_into(&mut self, op: Op, dest_id: Option<crate::noclobber::FileId>) -> bool {
         if self.job.is_some() {
             self.note = Some("Still working on the last operation (Esc cancels it)".into());
             return false;
         }
         self.note = None;
         self.job_seen = (0, 0);
-        self.job = Some(ops::start(op, self.waker.clone()));
+        self.job = Some(ops::start(op, dest_id, self.waker.clone()));
         true
     }
 

@@ -37,12 +37,13 @@ pub(crate) struct Clip {
 }
 
 /// ⌘V or ⌥⌘V, waiting for the clipboard: the folder that was on screen in the active pane
-/// when it was asked for, and whether it moves.
+/// when it was asked for (its path and its identity, from its listing), and whether it moves.
 /// Each request has its own, answered by its own clipboard read (`id`), so two pastes asked
 /// before either answer each go where, and as, they were asked.
 pub(crate) struct PasteReq {
     pub id: u64,
     pub dest: PathBuf,
+    pub dest_id: Option<crate::noclobber::FileId>,
     pub mv: bool,
 }
 
@@ -757,7 +758,7 @@ impl State {
             Paste | PasteMove => {
                 self.next_paste += 1;
                 let (id, f) = (self.next_paste, self.cur());
-                self.paste_reqs.push(PasteReq { id, dest: f.cwd.clone(), mv: cmd == PasteMove });
+                self.paste_reqs.push(PasteReq { id, dest: f.cwd.clone(), dest_id: f.dir_id, mv: cmd == PasteMove });
                 tx.read_clipboard(move |s: &mut State, content, tx| {
                     tx.instant();
                     s.paste_reply(id, content);
@@ -1125,7 +1126,7 @@ pub(crate) mod tests {
         let mut s = state_in(&d);
         assert_eq!(s.unavailable(Cmd::Duplicate), None);
         assert_eq!(s.unavailable(Cmd::Cancel), Some("No file operation is running"));
-        s.job = Some(ops::start(ops::Op::Copy { sources: Vec::new(), dest: d.clone() }, None));
+        s.job = Some(ops::start(ops::Op::Copy { sources: Vec::new(), dest: d.clone() }, None, None));
         for cmd in [Cmd::Duplicate, Cmd::Trash, Cmd::Paste, Cmd::PasteMove, Cmd::Undo] {
             assert_eq!(s.unavailable(cmd), Some(BUSY), "{cmd:?}");
         }
