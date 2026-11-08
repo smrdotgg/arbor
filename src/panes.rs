@@ -477,6 +477,56 @@ mod tests {
         }
     }
 
+    /// An operation that ends while the other pane is on its way to another folder leaves that
+    /// navigation alone, and re-reads only the panes showing a folder it changed.
+    #[test]
+    fn a_finished_operation_keeps_a_navigation_going() {
+        let (a, b, c) = (folder("keepnav-a", &["f0"]), folder("keepnav-b", &[]), folder("keepnav-c", &["c0"]));
+        let mut s = state_in(&a);
+        run(&mut s, Cmd::Split);
+        go(&mut s, &b);
+        run(&mut s, Cmd::OtherPane);
+        run(&mut s, Cmd::CopyToOther); // A's f0 into B
+        run(&mut s, Cmd::OtherPane);
+        s.go_to(c.clone()); // B's pane heads for C
+        let until = Instant::now() + Duration::from_secs(10);
+        while !s.poll_job() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(s.job.is_none());
+        assert_eq!(s.pending_path(), Some(c.as_path()), "still on its way to C");
+        assert!(s.panes[0].f.pending.is_none(), "A didn't change, so it isn't read again");
+        settle(&mut s);
+        assert_eq!(s.cur().cwd, c);
+        assert!(b.join("f0").exists());
+    }
+
+    /// A navigation into the folder an operation changed is asked again, so what lands is read
+    /// after the change.
+    #[test]
+    fn a_navigation_into_a_changed_folder_reads_it_again() {
+        let (a, b) = (folder("renav-a", &["f0"]), folder("renav-b", &[]));
+        let mut s = state_in(&a);
+        run(&mut s, Cmd::Split);
+        go(&mut s, &b);
+        go(&mut s, &a);
+        run(&mut s, Cmd::OtherPane);
+        s.start(crate::ops::Op::Copy { sources: vec![a.join("f0")], dest: b.clone() });
+        run(&mut s, Cmd::OtherPane);
+        run(&mut s, Cmd::Back); // heads back to B
+        let req = s.cur().pending.as_ref().map(|p| p.req);
+        let until = Instant::now() + Duration::from_secs(10);
+        while !s.poll_job() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let p = s.cur().pending.as_ref().expect("still going");
+        assert_eq!((p.path.clone(), p.nav), (b.clone(), crate::folder::Nav::Back));
+        assert_ne!(Some(p.req), req, "asked again");
+        settle(&mut s);
+        assert_eq!(s.cur().cwd, b);
+        assert_eq!(s.cur().entries.len(), 1, "the copy is there");
+    }
+
     /// A handler from a frame drawn before a pane closed names a pane that's gone: nothing.
     #[test]
     fn stale_pane_handlers_do_nothing() {

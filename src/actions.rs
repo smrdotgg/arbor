@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use rune::{ClipboardContent, DragItem, PointerPress, PopupItem, PopupMenu, TextEdit, Tx};
 
-use crate::app::{Clip, PasteReq, Rename, State};
+use crate::app::{Clip, Nav, PasteReq, Rename, State};
 use crate::commands::Cmd;
 use crate::ops::{self, Op, Undo};
 
@@ -210,19 +210,37 @@ impl State {
             };
             format!("{done} {n} item{}", plural(n))
         });
-        // Every visible pane reads its folder again (hidden tabs read when shown): each selects
-        // what landed in it, otherwise keeps its selection.
         self.rename = None;
+        self.refresh(&out.folders, &out.results);
+        true
+    }
+
+    /// After `folders` changed on disk: every pane whose visible tab shows one of them reads it
+    /// again (a hidden tab reads when it's shown). Items in `select` land selected in the pane
+    /// showing their folder; elsewhere the selection stays. A pane on its way to another folder
+    /// keeps going there: its read is asked again only when that folder changed too, since it
+    /// may have been read before the change.
+    pub(crate) fn refresh(&mut self, folders: &[PathBuf], select: &[PathBuf]) {
         for p in &mut self.panes {
-            let here: Vec<OsString> = out
-                .results
+            let f = &mut p.f;
+            let going = f.pending.as_ref().is_some_and(|p| matches!(p.nav, Nav::New | Nav::Back | Nav::Forward));
+            let at = match &f.pending {
+                Some(p) if going => p.path.clone(),
+                _ => f.cwd.clone(),
+            };
+            if !folders.contains(&at) {
+                continue;
+            }
+            let here: Vec<OsString> = select
                 .iter()
-                .filter(|r| r.parent() == Some(p.f.cwd.as_path()))
+                .filter(|r| r.parent() == Some(at.as_path()))
                 .filter_map(|r| r.file_name().map(|n| n.to_os_string()))
                 .collect();
-            crate::app::reload_folder(&mut p.f, here, false);
+            match f.pending.take_if(|_| going) {
+                Some(g) => f.request(g.path, g.nav, if here.is_empty() { g.select } else { here }, g.rename),
+                None => crate::app::reload_folder(f, here, false),
+            }
         }
-        true
     }
 
     /// "Copying 3 of 12 · 1.2 GB of 4 GB" for the status bar.

@@ -40,6 +40,26 @@ pub enum Op {
 }
 
 impl Op {
+    /// The folders it changes: where items go and where they come from.
+    fn folders(&self) -> Vec<PathBuf> {
+        let parents = |ps: &[PathBuf]| ps.iter().filter_map(|p| p.parent().map(Path::to_path_buf)).collect::<Vec<_>>();
+        let mut v = match self {
+            Op::Copy { dest, .. } => vec![dest.clone()],
+            Op::Move { sources, dest } => [vec![dest.clone()], parents(sources)].concat(),
+            Op::Trash { sources } => parents(sources),
+            Op::Undo(u) => u
+                .steps
+                .iter()
+                .flat_map(|s| [Some(&s.at), s.back.as_ref()])
+                .flatten()
+                .filter_map(|p| p.parent().map(Path::to_path_buf))
+                .collect(),
+        };
+        v.sort();
+        v.dedup();
+        v
+    }
+
     pub fn verb(&self) -> &'static str {
         match self {
             Op::Copy { .. } => "Copying",
@@ -278,6 +298,8 @@ pub struct Outcome {
     /// An undo that changed nothing because the disk changed since the operation: why.
     pub refused: Option<String>,
     pub cancelled: bool,
+    /// The folders the operation may have changed, so the panes showing them read them again.
+    pub folders: Vec<PathBuf>,
 }
 
 pub struct Running {
@@ -499,7 +521,8 @@ impl<'a> Worker<'a> {
     }
 
     fn run(&mut self, op: Op) -> Outcome {
-        let mut out = Outcome { results: Vec::new(), undo: None, errors: Vec::new(), refused: None, cancelled: false };
+        let mut out =
+            Outcome { results: Vec::new(), undo: None, errors: Vec::new(), refused: None, cancelled: false, folders: op.folders() };
         match op {
             Op::Copy { sources, dest } => {
                 self.p.items_total.store(sources.len(), Relaxed);
