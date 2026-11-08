@@ -330,7 +330,7 @@ fn tabbar(p: &Pane, l: Look) -> El {
             .help("New Tab")
             .on_press_tx(move |s: &mut State, tx| {
                 if in_pane(s, id, tx) {
-                    s.new_tab();
+                    s.new_tab(tx);
                 }
             }),
     )

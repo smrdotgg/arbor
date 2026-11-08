@@ -730,7 +730,7 @@ impl State {
                 let key = self.cur().sort.key;
                 self.sort_by(key, tx);
             }
-            NewTab => self.new_tab(),
+            NewTab => self.new_tab(tx),
             CloseTab => {
                 let (ix, tab) = (self.active, self.panes[self.active].tab);
                 self.close_tab(ix, tab, tx);
@@ -811,8 +811,17 @@ impl State {
 /// Why a command that needs two panes can't run.
 pub(crate) const NOT_SPLIT: &str = "The window isn't split";
 
-/// Re-reads `f`, keeping its selection (or selecting `names` instead).
+/// Re-reads `f`, keeping its selection (or selecting `names` instead). A tab still waiting for
+/// the read that shows it reads again, still restoring its selection and scroll.
 pub(crate) fn reload_folder(f: &mut Folder, names: Vec<OsString>, rename: bool) {
+    if let Some(p) = f.pending.as_ref().filter(|p| p.nav == Nav::Show) {
+        let (keep, scroll) = (if names.is_empty() { p.select.clone() } else { names }, p.scroll);
+        f.request(f.cwd.clone(), Nav::Show, keep, false);
+        if let Some(p) = &mut f.pending {
+            p.scroll = scroll;
+        }
+        return;
+    }
     let keep = if names.is_empty() { f.targets().iter().map(|e| e.os.clone()).collect() } else { names };
     f.request(f.cwd.clone(), Nav::Reload, keep, rename);
 }

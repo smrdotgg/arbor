@@ -49,8 +49,10 @@ impl State {
 
     /// ⌘T: a new tab on the same folder, after this one. The listing on screen becomes the new
     /// tab's (no read); the old tab keeps only its lightweight state.
-    pub fn new_tab(&mut self) {
-        self.rename = None;
+    pub fn new_tab(&mut self, tx: &mut Tx) {
+        if self.rename.take().is_some() {
+            tx.blur();
+        }
         let p = &mut self.panes[self.active];
         p.tabs[p.tab] = Some(p.f.memo());
         p.tab += 1;
@@ -79,8 +81,8 @@ impl State {
 
     /// Puts `m` on screen in pane `ix` (whose tab slot for it is already `None`).
     fn reveal_tab(&mut self, ix: usize, m: TabMemo, tx: &mut Tx) {
-        if ix == self.active {
-            self.rename = None;
+        if ix == self.active && self.rename.take().is_some() {
+            tx.blur();
         }
         let wait = self.show_wait;
         let f = &mut self.panes[ix].f;
@@ -367,6 +369,24 @@ mod tests {
         run(&mut s, Cmd::PrevTab);
         assert!(!s.is_loading(), "landed inside the switch");
         assert_eq!((s.cur().entries.len(), cursor(&s)), (2, "two".to_string()));
+    }
+
+    /// A file operation that ends while a tab's read is in flight reads it again, and the tab
+    /// still gets its selection back.
+    #[test]
+    fn a_reload_while_showing_a_tab_keeps_its_selection() {
+        let (a, b) = (folder("showreload-a", &["one", "two", "three"]), folder("showreload-b", &[]));
+        let mut s = state_in(&a);
+        s.show_wait = Duration::ZERO;
+        s.cur_mut().select(2);
+        let keep = cursor(&s);
+        run(&mut s, Cmd::NewTab);
+        go(&mut s, &b);
+        run(&mut s, Cmd::PrevTab);
+        crate::app::reload_folder(s.cur_mut(), Vec::new(), false);
+        assert_eq!(s.cur().pending.as_ref().map(|p| p.nav), Some(crate::folder::Nav::Show));
+        settle(&mut s);
+        assert_eq!(cursor(&s), keep);
     }
 
     #[test]
