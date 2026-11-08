@@ -38,8 +38,10 @@ pub struct PickBox {
     /// The live count for `counted_for`: matches and rows, or why the pattern can't be used.
     pub count: Result<(usize, usize), String>,
     /// What it was counted for: the pattern, the rows (the folder's `version`, which changes
-    /// whenever they do: a listing landing, hidden files shown, a filter) and the case.
-    counted_for: Option<(String, u64, Case)>,
+    /// whenever they're replaced: a listing landing, hidden files shown, a filter; and how many
+    /// there are, which changes when search results are appended without a new version) and
+    /// the case.
+    counted_for: Option<(String, (u64, usize), Case)>,
 }
 
 impl Folder {
@@ -186,13 +188,14 @@ impl State {
         let case = self.pick_case();
         let f = &self.panes[self.active].f;
         let Some(p) = &mut self.pick else { return false };
-        if p.counted_for.as_ref().is_some_and(|(t, v, c)| *t == p.edit.text && *v == f.version && *c == case) {
+        let rows = (f.version, f.visible.len());
+        if p.counted_for.as_ref().is_some_and(|(t, v, c)| *t == p.edit.text && *v == rows && *c == case) {
             return false;
         }
         let q = p.edit.text.trim();
         p.count =
             if q.is_empty() { Ok((0, f.visible.len())) } else { Glob::name(q, case).map(|g| (f.count_matching(&g), f.visible.len())) };
-        p.counted_for = Some((p.edit.text.clone(), f.version, case));
+        p.counted_for = Some((p.edit.text.clone(), rows, case));
         true
     }
 

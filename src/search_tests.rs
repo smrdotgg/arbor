@@ -783,3 +783,24 @@ fn starting_a_search_never_waits_for_the_disk() {
     r.sort();
     assert_eq!(r, ["a.txt", "sub/b.txt"]);
 }
+
+/// Select by Pattern's count follows results that stream in while it's open: they're appended
+/// without a new listing version, and the count used to stay at what it first saw.
+#[test]
+fn select_by_pattern_counts_results_that_stream_in() {
+    let d = tree("pick-stream", &["hit-root", "sub/hit-child"]);
+    let mut s = state_in(&d);
+    let (started, go, left) = gate(&d.join("sub"));
+    search(&mut s, "hit");
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    frames(&mut s, 3);
+    s.open_pick(&mut tx());
+    s.pick_edit().insert("*");
+    s.pick_refresh();
+    assert_eq!(s.pick.as_ref().unwrap().count, Ok((1, 1)));
+    go.send(()).unwrap();
+    left.recv_timeout(Duration::from_secs(5)).unwrap();
+    finish_walk(&mut s);
+    assert_eq!(s.cur().visible.len(), 2);
+    assert_eq!(s.pick.as_ref().unwrap().count, Ok((2, 2)), "counted again when results arrived");
+}
