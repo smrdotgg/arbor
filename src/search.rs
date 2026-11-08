@@ -161,6 +161,9 @@ struct Walk {
     /// root, before it queues anything, so starting a walk touches no disk on the window's
     /// thread (a slow or sleeping disk would hold up the key that started it).
     devices: std::sync::OnceLock<Vec<u64>>,
+    /// The folders it has entered, by identity (device and inode), so one reached by two paths
+    /// (a bind mount of a folder on the same disk, or one of its ancestors) is walked once.
+    entered: Mutex<HashSet<crate::noclobber::FileId>>,
     /// Folders never entered: pseudo file systems, and on macOS the data volume's second path.
     skip: Vec<PathBuf>,
     stop: AtomicBool,
@@ -228,6 +231,7 @@ impl Pool {
         let walk = Arc::new(Walk {
             spec,
             devices: std::sync::OnceLock::new(),
+            entered: Mutex::new(HashSet::new()),
             skip,
             stop: AtomicBool::new(false),
             pending: AtomicUsize::new(1),
@@ -381,7 +385,12 @@ fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
     let walk = &t.walk;
     let spec = &walk.spec;
     // The root's task comes first, and nothing else is queued until it has read the root.
-    let devices = walk.devices.get_or_init(|| devices_for(&spec.root));
+    let devices = walk.devices.get_or_init(|| {
+        if let Some(id) = std::fs::metadata(&spec.root).ok().and_then(|m| folder_id(&spec.root, &m)) {
+            walk.entered.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
+        }
+        devices_for(&spec.root)
+    });
     let rd = match std::fs::read_dir(&t.dir) {
         Ok(rd) => rd,
         Err(e) => {
@@ -425,7 +434,8 @@ fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
         if real_dir {
             let path = de.path();
             if !walk.skip.contains(&path) {
-                let look = cfg!(target_os = "macos") || (cfg!(unix) && !spec.cross_devices);
+                // Unix: one lstat per folder, for its device and its identity.
+                let look = cfg!(unix);
                 if look && meta.is_none() {
                     meta = de.metadata().ok();
                 }
@@ -433,7 +443,11 @@ fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
                 if !spec.show_hidden && cfg!(target_os = "macos") && fs::is_hidden(&name, meta.as_ref()) {
                     continue;
                 }
-                if spec.cross_devices || on_devices(meta.as_ref(), devices) {
+                let first = || match meta.as_ref().and_then(|m| folder_id(&path, m)) {
+                    Some(id) => walk.entered.lock().unwrap_or_else(|e| e.into_inner()).insert(id),
+                    None => true,
+                };
+                if (spec.cross_devices || on_devices(meta.as_ref(), devices)) && first() {
                     subdirs.push(Task { walk: walk.clone(), dir: path, rel: t.rel.join(&os) });
                 }
             }
@@ -492,6 +506,25 @@ fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
     #[cfg(test)]
     hook::left(&t.dir, walk.serial);
     walk.deliver(found, seen, false);
+}
+
+/// A folder's identity for [`Walk::entered`]: device and inode from its metadata (Unix);
+/// `None` elsewhere (Windows walks never enter junctions or mounted folders: they're links).
+fn folder_id(path: &Path, m: &std::fs::Metadata) -> Option<crate::noclobber::FileId> {
+    #[cfg(test)]
+    if let Some(id) = hook::folder_alias(path) {
+        return Some(id);
+    }
+    #[cfg(unix)]
+    {
+        let _ = path;
+        crate::noclobber::file_id(path, m)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, m);
+        None
+    }
 }
 
 /// Whether a folder with metadata `m` is on one of `devices` (unknown counts as on them).
@@ -608,6 +641,14 @@ pub(crate) mod hook {
             }
         };
         let _ = go.recv_timeout(std::time::Duration::from_secs(5));
+    }
+
+    /// Folders that report another folder's identity, as a bind mount of it would.
+    pub(crate) static ALIASES: Mutex<Vec<(PathBuf, PathBuf)>> = Mutex::new(Vec::new());
+
+    pub(super) fn folder_alias(path: &Path) -> Option<crate::noclobber::FileId> {
+        let of = ALIASES.lock().unwrap().iter().find(|(a, _)| a == path).map(|(_, of)| of.clone())?;
+        crate::noclobber::dir_id(&of)
     }
 
     /// Holds the device lookup for a root until told (or a few seconds pass).

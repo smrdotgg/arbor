@@ -861,3 +861,17 @@ fn the_cap_holds_inside_one_big_folder() {
     let (found, out) = walk_all(&d, "hit", false, false, 100_000);
     assert_eq!((found.len(), out.visited, out.capped), (2500, 2500, false));
 }
+
+/// A folder reached twice by different paths (a bind mount of a folder on the same disk has
+/// its identity) is walked once. Here `mirror` reports `photos`'s identity, as a bind mount of
+/// it would.
+#[test]
+fn a_folder_reached_twice_is_walked_once() {
+    let d = tree("bind", &["photos/hit-a.jpg", "photos/deep/hit-b.jpg", "mirror/hit-a.jpg", "mirror/deep/hit-b.jpg"]);
+    hook::ALIASES.lock().unwrap().push((d.join("mirror"), d.join("photos")));
+    let (found, _) = walk_all(&d, "hit", false, false, 1000);
+    hook::ALIASES.lock().unwrap().retain(|(a, _)| a != &d.join("mirror"));
+    assert_eq!(found.len(), 2, "{found:?}");
+    let tops: HashSet<&str> = found.iter().map(|f| f.split('/').next().unwrap()).collect();
+    assert_eq!(tops.len(), 1, "one of the two paths, whole: {found:?}");
+}
