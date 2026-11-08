@@ -318,20 +318,63 @@ struct Crumb {
 }
 
 fn crumbs_of(path: &std::path::Path) -> Vec<Crumb> {
-    let comps: Vec<Component> = path.components().collect();
-    let mut acc = PathBuf::new();
-    let mut out = Vec::new();
-    for (i, comp) in comps.iter().enumerate() {
-        acc.push(comp.as_os_str());
-        if matches!(comp, Component::RootDir) && i > 0 {
-            continue; // Windows: `C:` then `\`
-        }
-        let label = match comp {
-            Component::RootDir => std::path::MAIN_SEPARATOR.to_string(),
-            c => c.as_os_str().to_string_lossy().into_owned(),
+    let parts: Vec<Part> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Prefix(p) => Some(Part::Prefix(p.as_os_str())),
+            Component::RootDir => Some(Part::Root),
+            Component::Normal(n) => Some(Part::Normal(n)),
+            Component::CurDir | Component::ParentDir => None,
+        })
+        .collect();
+    crumbs_from(&parts, std::path::MAIN_SEPARATOR_STR)
+}
+
+/// A path component, as [`crumbs_from`] needs it.
+#[derive(Clone, Copy)]
+enum Part<'a> {
+    /// A Windows drive (`C:`) or share (`\\server\share`).
+    Prefix(&'a std::ffi::OsStr),
+    Root,
+    Normal(&'a std::ffi::OsStr),
+}
+
+/// The breadcrumbs of a path's parts, joined with `sep`. A drive or share and the root after it
+/// are one crumb, which opens the drive's root (`C:\`), not the drive-relative `C:` (the
+/// current folder on that drive). Pure path logic, so it's tested for Windows paths everywhere.
+fn crumbs_from(parts: &[Part], sep: &str) -> Vec<Crumb> {
+    let mut acc = std::ffi::OsString::new();
+    let mut out: Vec<Crumb> = Vec::new();
+    let mut prev: Option<Part> = None;
+    for (i, &part) in parts.iter().enumerate() {
+        let label = match part {
+            Part::Prefix(p) => {
+                acc.push(p);
+                if matches!(parts.get(i + 1), Some(Part::Root)) {
+                    acc.push(sep);
+                }
+                p.to_string_lossy().into_owned()
+            }
+            // After a drive, its root is already in the drive's crumb.
+            Part::Root if matches!(prev, Some(Part::Prefix(_))) => {
+                prev = Some(part);
+                continue;
+            }
+            Part::Root => {
+                acc.push(sep);
+                sep.to_string()
+            }
+            Part::Normal(n) => {
+                if !acc.is_empty() && !acc.to_string_lossy().ends_with(sep) {
+                    acc.push(sep);
+                }
+                acc.push(n);
+                n.to_string_lossy().into_owned()
+            }
         };
-        let sep = i > 0 && !matches!(comps[i - 1], Component::RootDir | Component::Prefix(_));
-        out.push(Crumb { label, target: acc.clone(), sep });
+        let sep = matches!(prev, Some(Part::Normal(_)));
+        out.push(Crumb { label, target: PathBuf::from(&acc), sep });
+        prev = Some(part);
     }
     out
 }
@@ -1001,6 +1044,39 @@ mod tests {
         assert_eq!(c.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["/", "home", "smr", "arbor-smoke", "m3demo", "Photos"]);
         assert_eq!(c.iter().map(|c| c.sep).collect::<Vec<_>>(), [false, false, true, true, true, true]);
         assert_eq!(c[2].target, Path::new("/home/smr"));
+    }
+
+    /// A drive's crumb opens its root (`C:\`), never the drive-relative `C:`; a share's opens
+    /// `\\server\share\`. Pure path logic, so it runs on every platform.
+    #[test]
+    fn windows_drive_and_share_crumbs_open_their_roots() {
+        use std::ffi::OsStr;
+        let targets = |parts: &[Part]| crumbs_from(parts, "\\").into_iter().map(|c| (c.label, c.target, c.sep)).collect::<Vec<_>>();
+        let p = |s: &str| PathBuf::from(s);
+        let c = Part::Prefix(OsStr::new("C:"));
+        assert_eq!(targets(&[c, Part::Root]), [("C:".into(), p("C:\\"), false)]);
+        assert_eq!(
+            targets(&[c, Part::Root, Part::Normal(OsStr::new("Users")), Part::Normal(OsStr::new("x"))]),
+            [("C:".into(), p("C:\\"), false), ("Users".into(), p("C:\\Users"), false), ("x".into(), p("C:\\Users\\x"), true)]
+        );
+        let share = Part::Prefix(OsStr::new("\\\\server\\share"));
+        assert_eq!(
+            targets(&[share, Part::Root, Part::Normal(OsStr::new("dir"))]),
+            [("\\\\server\\share".into(), p("\\\\server\\share\\"), false), ("dir".into(), p("\\\\server\\share\\dir"), false)]
+        );
+        // Unix, for comparison: the root, then each folder.
+        let unix = crumbs_from(&[Part::Root, Part::Normal(OsStr::new("home")), Part::Normal(OsStr::new("smr"))], "/");
+        assert_eq!(unix.iter().map(|c| c.target.clone()).collect::<Vec<_>>(), [p("/"), p("/home"), p("/home/smr")]);
+    }
+
+    /// The same, through `Path` on Windows itself.
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_crumb_to_rooted_targets() {
+        let t = |s: &str| crumbs_of(Path::new(s)).into_iter().map(|c| c.target).collect::<Vec<_>>();
+        assert_eq!(t(r"C:\"), [PathBuf::from(r"C:\")]);
+        assert_eq!(t(r"C:\Users\x"), [PathBuf::from(r"C:\"), PathBuf::from(r"C:\Users"), PathBuf::from(r"C:\Users\x")]);
+        assert_eq!(t(r"\\server\share\dir"), [PathBuf::from(r"\\server\share\"), PathBuf::from(r"\\server\share\dir")]);
     }
 
     /// A narrow pane folds the leading crumbs into "…" rather than truncating every crumb,
