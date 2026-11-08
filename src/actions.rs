@@ -264,10 +264,10 @@ impl State {
 
     /// Right-click on row `i` (or on empty space when `None`): a native menu.
     pub fn context_menu(&mut self, row: Option<usize>, press: PointerPress, tx: &mut Tx) {
-        if let Some(i) = row {
-            if !self.is_selected(i) {
-                self.select(i);
-            }
+        if let Some(i) = row
+            && !self.is_selected(i)
+        {
+            self.select(i);
         }
         let has = row.is_some() && !self.visible.is_empty();
         let n = if has { self.targets().len() } else { 0 };
@@ -285,11 +285,11 @@ impl State {
             .item(item("reveal", reveal_label(), true, "cmd+enter"))
             .separator()
             .item(item("rename", "Rename…", has && n == 1, "cmd+shift+r"))
-            .item(item("duplicate", &format!("Duplicate {what}").trim_end().to_string(), has, "cmd+d"))
+            .item(item("duplicate", format!("Duplicate {what}").trim_end(), has, "cmd+d"))
             .item(item("trash", &format!("Move {what} to Trash").replace("  ", " "), has, "cmd+backspace"))
             .separator()
-            .item(item("copy", &format!("Copy {what}").trim_end().to_string(), has, "cmd+c"))
-            .item(item("cut", &format!("Cut {what}").trim_end().to_string(), has, "cmd+x"))
+            .item(item("copy", format!("Copy {what}").trim_end(), has, "cmd+c"))
+            .item(item("cut", format!("Cut {what}").trim_end(), has, "cmd+x"))
             .item(item("paste", "Paste", true, "cmd+v"))
             .item(item("copy-path", "Copy Path", true, "cmd+shift+c"))
             .separator()

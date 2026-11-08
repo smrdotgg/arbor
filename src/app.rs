@@ -367,10 +367,10 @@ impl State {
         if i >= self.visible.len() {
             return;
         }
-        if self.marked.is_empty() {
-            if let Some(n) = self.cursor_name() {
-                self.marked.insert(n);
-            }
+        if self.marked.is_empty()
+            && let Some(n) = self.cursor_name()
+        {
+            self.marked.insert(n);
         }
         let name = self.entries[self.visible[i] as usize].os.clone();
         if !self.marked.remove(&name) {
