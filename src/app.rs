@@ -85,17 +85,13 @@ pub struct State {
 
 impl State {
     pub fn new() -> State {
-        let start = std::env::args_os()
-            .skip(1)
-            .map(PathBuf::from)
-            .find(|p| p.is_dir())
-            .or_else(|| std::env::current_dir().ok().filter(|p| p != Path::new("/")))
-            .unwrap_or_else(fs::home);
-        let sort = Sort { key: SortKey::Name, desc: false };
-        // The first listing is read synchronously so the first frame already shows it.
-        let first = fs::list(start.clone(), sort);
+        let sort = FIRST_SORT;
+        // The first frame already shows the first listing: read on the thread `main` started,
+        // or here if it didn't.
+        let first = FIRST.lock().ok().and_then(|mut h| h.take()).and_then(|h| h.join().ok());
+        let first = first.unwrap_or_else(|| fs::list(start_dir(), sort));
         let mut s = State {
-            cwd: start,
+            cwd: first.path,
             entries: Vec::new(),
             visible: Vec::new(),
             sel: 0,
@@ -554,6 +550,31 @@ impl State {
         }
         true
     }
+}
+
+const FIRST_SORT: Sort = Sort { key: SortKey::Name, desc: false };
+
+/// The first folder's listing, being read on a thread `main` started before Rune's event loop,
+/// so the read overlaps the platform's app launch instead of following it.
+static FIRST: std::sync::Mutex<Option<std::thread::JoinHandle<Listing>>> = std::sync::Mutex::new(None);
+
+/// Starts reading the folder Arbor opens in. Call first thing in `main`.
+pub fn read_first_folder() {
+    let start = start_dir();
+    let read = std::thread::spawn(move || fs::list(start, FIRST_SORT));
+    if let Ok(mut slot) = FIRST.lock() {
+        *slot = Some(read);
+    }
+}
+
+/// The folder named on the command line, else the current one (or home when launched from `/`).
+fn start_dir() -> PathBuf {
+    std::env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .find(|p| p.is_dir())
+        .or_else(|| std::env::current_dir().ok().filter(|p| p != Path::new("/")))
+        .unwrap_or_else(fs::home)
 }
 
 pub fn is_path_like(s: &str) -> bool {

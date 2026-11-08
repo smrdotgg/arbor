@@ -18,6 +18,10 @@ use app::State;
 fn main() {
     // ARBOR_TIMING / ARBOR_BENCH, read once. Off, Rune gets the plain callbacks and no frame hook.
     let timed = timing::init();
+    // Both overlap the platform's app launch (about 80 ms on macOS before the window is made):
+    // the GPU device and shaders, and the first folder's read.
+    rune::prewarm_gpu();
+    app::read_first_folder();
     let mut spec = AppSpec::<State> {
         min_size: Some((520.0, 320.0)),
         setup: Some(|s, waker| s.setup(waker)),
