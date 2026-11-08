@@ -45,7 +45,7 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 16,000 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
+About 17,500 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
 `ops.rs` (copy, move, trash and undo on a worker), `noclobber.rs` (moves, copies and file ids
 that never replace anything), `trash.rs` (each platform's trash), `app.rs`
 (state, startup, key dispatch, what each command does), `folder.rs` (one folder on screen: its
@@ -216,7 +216,10 @@ until Jump opens:
 
 - Each navigation that lands (opening a folder, back, forward, a sidebar place, Jump itself;
   not reloads or tab switches) sends its folder to one writer thread, which appends a line.
-  The window does no disk I/O for it, and nothing is read at startup.
+  The window does no disk I/O for it, and nothing is read at startup. A write that fails (a
+  full disk, a read-only folder) shows in the status bar. The writer holds a lock file
+  (`history.lock`) while it appends, compacts or clears, so two Arbor processes never lose each
+  other's visits, and quitting gives it up to 100 ms to finish what's queued.
 - The first time Jump opens, the writer reads and adds up the log. The box waits at most 8 ms
   for it, then says "Loading history…" until it lands. It then stays in memory for the session.
   Past 10,000 lines the writer rewrites the log as one line for each of the top 5,000 folders.
