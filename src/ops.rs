@@ -387,6 +387,9 @@ struct Hooks {
     cross_device: bool,
     /// Fail removing these items (a permission error halfway through a delete).
     fail_remove: Option<PathTest>,
+    /// Called with each file or folder a copy makes, right after it's made: where a test
+    /// replaces it or cancels.
+    after_made: Option<PathHook>,
 }
 
 struct Worker<'a> {
@@ -423,6 +426,9 @@ struct Made {
     /// For a move, the source file or link as it was copied, so the delete afterwards removes
     /// it only if it hasn't changed since. Folders are removed only once empty.
     was: Option<Print>,
+    /// `dst` right after the copy made it, so cleaning up a failed or cancelled copy removes it
+    /// only while it's still that (see [`unmake`]). `None` if it couldn't be read back.
+    made: Option<Print>,
 }
 
 impl<'a> Worker<'a> {
@@ -463,6 +469,17 @@ impl<'a> Worker<'a> {
     #[cfg(not(test))]
     #[inline(always)]
     fn before_act(&mut self, _: &Path) {}
+
+    #[cfg(test)]
+    fn after_made(&mut self, dst: &Path) {
+        if let Some(h) = &mut self.hooks.after_made {
+            h(dst);
+        }
+    }
+
+    #[cfg(not(test))]
+    #[inline(always)]
+    fn after_made(&mut self, _: &Path) {}
 
     fn rename_excl(&self, from: &Path, to: &Path) -> io::Result<()> {
         #[cfg(test)]
@@ -775,8 +792,7 @@ impl<'a> Worker<'a> {
                 Err(CopyError::Taken) => {}
                 Err(CopyError::Failed(e)) => {
                     // Don't leave a half-made copy behind.
-                    unmake(&made);
-                    return Err(e);
+                    return Err(with_kept(e, unmake(&made)));
                 }
             }
         }
@@ -807,14 +823,16 @@ impl<'a> Worker<'a> {
         let meta = src.symlink_metadata().map_err(fail)?;
         let ft = meta.file_type();
         let was = (for_move && !ft.is_dir()).then(|| Print::of(src, &meta));
+        let print = |dst: &Path| dst.symlink_metadata().ok().map(|m| Print::of(dst, &m));
         if ft.is_symlink() {
             let target = std::fs::read_link(src).map_err(fail)?;
             make_symlink(&target, dst, src.is_dir()).map_err(fail)?;
-            made.push(Made { src: src.into(), dst: dst.into(), dir: false, was });
+            made.push(Made { src: src.into(), dst: dst.into(), dir: false, was, made: print(dst) });
         } else if ft.is_dir() {
             std::fs::create_dir(dst).map_err(fail)?;
-            made.push(Made { src: src.into(), dst: dst.into(), dir: true, was });
             let _ = std::fs::set_permissions(dst, meta.permissions());
+            made.push(Made { src: src.into(), dst: dst.into(), dir: true, was, made: print(dst) });
+            self.after_made(dst);
             for de in std::fs::read_dir(src).map_err(fail)? {
                 let de = de.map_err(fail)?;
                 let name = de.file_name();
@@ -823,8 +841,9 @@ impl<'a> Worker<'a> {
             }
         } else {
             noclobber::copy_file(src, dst).map_err(fail)?;
-            made.push(Made { src: src.into(), dst: dst.into(), dir: false, was });
+            made.push(Made { src: src.into(), dst: dst.into(), dir: false, was, made: print(dst) });
             self.tick(meta.len());
+            self.after_made(dst);
         }
         // A folder's own entry goes in after its contents, once its mtime has settled.
         if let Some(t) = tree
@@ -880,10 +899,7 @@ impl<'a> Worker<'a> {
         match self.copy_tree(from, to, Path::new(""), &mut tree, &mut made, true) {
             Ok(()) => {}
             Err(CopyError::Taken) => return Err(MoveError::Taken),
-            Err(CopyError::Failed(e)) => {
-                unmake(&made);
-                return Err(MoveError::Failed(e));
-            }
+            Err(CopyError::Failed(e)) => return Err(MoveError::Failed(with_kept(e, unmake(&made)))),
         }
         let Err(why) = self.remove_sources(&made) else { return Ok(()) };
         let copy = match to.symlink_metadata() {
@@ -992,11 +1008,51 @@ fn unmatchable() -> Print {
     Print { kind: Kind::Link, size: u64::MAX, mtime: None, id: None, tree: None }
 }
 
-/// Removes what a failed copy made, deepest first. Folders go only once empty, so anything
-/// another app put inside a half-made copy stays.
-fn unmake(made: &[Made]) {
+/// Removes what a failed or cancelled copy made, deepest first, and only what it made: each file
+/// or link only while its fingerprint (identity, size, modified time) still matches the one taken
+/// right after the copy made it, each folder only while it's the same folder (identity) and
+/// empty. Whatever another app replaced, edited or put inside meanwhile stays, and so do the
+/// folders holding it. Returns what was left and why, for the status bar.
+///
+/// Removed permanently, not to the Trash: these are Arbor's own fresh output from an operation
+/// that didn't finish, never handed to the user (no result, no undo record), and each is
+/// re-checked against its fingerprint right before it goes. Removing them puts the disk back
+/// as it was before the copy, which is what cancel means; the sources are untouched. Trashing
+/// them would fill the Trash with half-copies, and on a disk with no trash it would need a
+/// confirmation for data that was never the user's. Same limits as undo's checks (see
+/// [`Print`]): an edit within the timestamp granularity that keeps the size isn't seen, and
+/// there's an instant between the check and the removal.
+fn unmake(made: &[Made]) -> Option<String> {
+    let mut kept: Vec<(&Path, &str)> = Vec::new();
     for m in made.iter().rev() {
-        let _ = if m.dir { std::fs::remove_dir(&m.dst) } else { std::fs::remove_file(&m.dst) };
+        let now = match m.dst.symlink_metadata() {
+            Ok(now) => Print::of(&m.dst, &now),
+            Err(_) => continue, // gone already, or unreachable: nothing to remove
+        };
+        let ours = m
+            .made
+            .as_ref()
+            .is_some_and(|was| if m.dir { now.kind == was.kind && now.id.is_some() && now.id == was.id } else { now == *was });
+        if !ours {
+            kept.push((&m.dst, "it changed after Arbor made it"));
+            continue;
+        }
+        let gone = if m.dir { std::fs::remove_dir(&m.dst) } else { std::fs::remove_file(&m.dst) };
+        // A folder holding something kept below it: that one is already said.
+        if gone.as_ref().is_err_and(|e| e.kind() != ErrorKind::NotFound) && !kept.iter().any(|(k, _)| k.starts_with(&m.dst)) {
+            kept.push((&m.dst, if m.dir { "something else is inside it" } else { "it couldn't be removed" }));
+        }
+    }
+    let (at, why) = kept.last()?; // the shallowest, which holds or neighbours the rest
+    let more = if kept.len() > 1 { format!(" (and {} more)", kept.len() - 1) } else { String::new() };
+    Some(format!("kept “{}” in “{}”: {why}{more}", name_of(at), parent_of(at)))
+}
+
+/// `why` an operation failed, and what its cleanup had to leave.
+fn with_kept(why: String, kept: Option<String>) -> String {
+    match kept {
+        Some(k) => format!("{why}; {k}"),
+        None => why,
     }
 }
 
@@ -1476,7 +1532,7 @@ mod tests {
     }
 
     fn hooked(before_act: PathHook, cross_device: bool) -> Hooks {
-        Hooks { before_act: Some(before_act), cross_device, fail_remove: None }
+        Hooks { before_act: Some(before_act), cross_device, ..Hooks::default() }
     }
 
     #[test]
@@ -1595,7 +1651,7 @@ mod tests {
     // ---- cross-disk moves (copy, then delete) -------------------------------------------------
 
     fn across(fail_remove: Option<PathTest>) -> Hooks {
-        Hooks { before_act: None, cross_device: true, fail_remove }
+        Hooks { cross_device: true, fail_remove, ..Hooks::default() }
     }
 
     #[test]
@@ -1737,6 +1793,56 @@ mod tests {
         assert!(o.errors[0].contains("part of the original couldn't be removed from “"), "{:?}", o.errors);
         assert!(o.undo.is_some_and(|u| u.steps[0].split.is_some()), "the record is kept");
         assert_eq!(fs::read_to_string(d.join("into/f/y")).unwrap(), "y");
+    }
+
+    // ---- cleaning up a failed or cancelled copy ----------------------------------------------
+
+    /// A copy (and a move across disks, which copies first) is cancelled after another app
+    /// replaced the second file it made. Cleanup removes the first file, which is still Arbor's,
+    /// keeps the replacement and the folder holding it, says so, and leaves the source alone.
+    #[test]
+    fn cancelled_copy_cleanup_keeps_what_another_app_replaced() {
+        for cross_device in [false, true] {
+            let d = tmp(&format!("unmake-{cross_device}"));
+            fs::create_dir_all(d.join("src")).unwrap();
+            for n in ["a", "b", "c"] {
+                fs::write(d.join("src").join(n), n).unwrap();
+            }
+            fs::create_dir(d.join("into")).unwrap();
+            let p = Arc::new(Progress::default());
+            let (pp, dd) = (p.clone(), d.clone());
+            let mut files = Vec::new();
+            let hook = Box::new(move |dst: &Path| {
+                if dst.is_dir() {
+                    return;
+                }
+                files.push(dst.to_path_buf());
+                if files.len() == 2 {
+                    fs::rename(dst, dd.join("saved")).unwrap();
+                    fs::write(dst, "OTHER APP DATA").unwrap();
+                    pp.cancel.store(true, Relaxed);
+                }
+            });
+            let mut w = Worker::new(&p, None, fake_trash);
+            w.hooks = Hooks { after_made: Some(hook), cross_device, ..Hooks::default() };
+            let op = if cross_device {
+                Op::Move { sources: vec![d.join("src")], dest: d.join("into") }
+            } else {
+                Op::Copy { sources: vec![d.join("src")], dest: d.join("into") }
+            };
+            let o = w.run(op);
+            assert!(o.cancelled && o.undo.is_none() && o.results.is_empty());
+            let left: Vec<_> = fs::read_dir(d.join("into/src")).unwrap().map(|e| e.unwrap().path()).collect();
+            assert_eq!(left.len(), 1, "only the replacement is left: {left:?}");
+            assert_eq!(fs::read_to_string(&left[0]).unwrap(), "OTHER APP DATA");
+            let name = left[0].file_name().unwrap().to_string_lossy().into_owned();
+            assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
+            let want = format!("src: cancelled; kept “{name}” in “{}”: it changed after Arbor made it", d.join("into/src").display());
+            assert_eq!(o.errors[0], want);
+            for n in ["a", "b", "c"] {
+                assert_eq!(fs::read_to_string(d.join("src").join(n)).unwrap(), n, "the source is untouched");
+            }
+        }
     }
 
     // ---- known limits -----------------------------------------------------------------------
