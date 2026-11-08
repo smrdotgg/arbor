@@ -74,7 +74,7 @@ Missing a budget is a bug, not a trade-off. A feature that can't meet them doesn
 | Measure | Budget |
 | --- | --- |
 | Keypress to updated pixels | under one frame (8 ms at 120 Hz) |
-| Cold start to interactive window | under 100 ms |
+| Cold start to interactive window | under 100 ms on Windows and Linux; on macOS, within 25 ms of a bare native window (macOS's own launch is about 110 ms) |
 | Folder listing visible (10k entries, local SSD) | under 50 ms |
 | UI frozen, on any disk, in any state | never |
 
