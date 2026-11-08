@@ -99,7 +99,9 @@ tab switch to that folder, and `--preview N` adds N runs timing the quick previe
 text file and a 12 MP JPEG from Space to the frame showing it, and keys while it's open, and
 `--search N` adds N runs searching a 120,000-file tree: the key to the first results and to the
 end of the walk, and keys pressed while results stream in, and `--rename N` adds N runs typing
-in Batch Rename over 10,000 items: each key to the frame showing its preview). It opens and closes windows, so leave the machine alone
+in Batch Rename over 10,000 items: each key to the frame showing its preview; `--pace MS` spaces
+the steps as a person types and `--gap MS` idles between cold starts, since a cooled CPU is
+several times slower than a busy one: report both). It opens and closes windows, so leave the machine alone
 while it runs. `cargo test --release -- --ignored --nocapture list_10k` times reading and
 sorting alone. Results are in [`BENCH.md`](BENCH.md).
 

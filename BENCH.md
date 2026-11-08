@@ -8,6 +8,7 @@ scripts/bench.sh 11 10 --tabs 5                # plus 5 cold starts timing a tab
 scripts/bench.sh 11 10 --jump 5                # plus 5 cold starts opening Jump with a 5k-folder history
 scripts/bench.sh 11 10 --search 5              # plus 5 cold starts searching a 120k-file tree
 scripts/bench.sh 11 10 --rename 5              # plus 5 cold starts typing in Batch Rename over 10k items
+scripts/bench.sh 1 12 --jump 5 --pace 120 --gap 1000   # the same, paced as a person types (report both)
 cargo test --release -- --ignored --nocapture search_speed   # walk speed by thread count (vendor/, or ARBOR_SEARCH_TREE)
 xvfb-run -a scripts/bench.sh 11 10             # Linux without a display
 cargo test --release -- --ignored --nocapture list_10k   # read + sort only, no window
