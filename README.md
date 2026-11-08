@@ -27,6 +27,9 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   temporary name. On a disk without a no-replace rename, files move by hard link and folders
   can't be moved or renamed at all, since every way to do it there could replace an empty folder. On APFS, copies are clones (instant). A move to another
   disk copies, then removes only the originals that haven't changed since they were copied.
+  Each source's identity is taken when a copy, move or trash begins and checked again right
+  before that item is acted on: one replaced or removed while an earlier one was being handled
+  is left alone, and the status bar says so.
   A cancelled or failed copy removes what it made, each file known by the handle that wrote
   it, so a file another app put at the name meanwhile (a copy can stall on a slow source) stays
   and the status bar says so.
@@ -297,9 +300,14 @@ Renaming is one file operation on the worker, with progress, and Esc cancels it:
   item's old one (or its own in another case) first steps aside to a temporary `.arbor-…` name
   in its folder, the others take their new names, then it takes its own. Every step is a
   no-replace rename (`src/noclobber.rs`).
+- Each item is checked against that fingerprint again right before each of its own steps: one
+  replaced or edited by another app while the batch runs (a big batch takes a while) is never
+  renamed, and the batch is put back, saying which item changed.
 - A failure or a cancel midway puts every item back, last step first, again never over
-  anything. If another app took an old name meanwhile, that item stays where it is and the
-  message says exactly where ("“a.txt” is now “b.txt” in …").
+  anything, and only while what's at each new name is still the item that went there. If
+  another app took an old name meanwhile, or replaced or edited an item since it was renamed,
+  that item stays where it is and the message says exactly where, and how many items got their
+  old names back ("1 of 2 items have their old names again; “a.txt” is now “b.txt” in …").
 - It's one undo entry: ⌘Z puts every item back through the same plan, and changes nothing if
   any of them changed since.
 
@@ -387,7 +395,8 @@ search walks again, and nothing is kept once it ends.
   needs the file opened). Move to Trash, cut and paste, copy, F5 and F6, drops, Duplicate,
   Rename and Batch Rename check it first (on the worker for operations, at the spot for an
   inline rename and a drag out to another app), and leave out any item whose path now holds
-  something else or nothing, saying so; the rest go ahead. On Windows a file deleted and
+  something else or nothing, saying so; the rest go ahead. Operations check each item again
+  right before acting on it, so one replaced while an earlier one was handled is left alone too. On Windows a file deleted and
   recreated under the same name within 15 seconds keeps the old creation time, so a replacement
   that quick isn't seen there.
 - **After a file operation**, the results it could have touched are checked again on a worker

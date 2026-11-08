@@ -561,6 +561,13 @@ struct Worker<'a> {
     waker: Option<&'a rune::Waker>,
     last_wake: Instant,
     trash: TrashFn,
+    /// Each copy's, move's and trash's sources as they were when it began (or, for search
+    /// results, as the walk found them): checked again right before each item is acted on, so
+    /// one replaced or removed while an earlier one was being handled is left alone
+    /// ([`Worker::changed`]).
+    seen: std::collections::HashMap<PathBuf, crate::fs::Ident>,
+    /// `seen` came from a search's walk (its words name the search).
+    seen_by_search: bool,
     #[cfg(test)]
     hooks: Hooks,
 }
@@ -602,6 +609,8 @@ impl<'a> Worker<'a> {
             waker,
             last_wake: Instant::now(),
             trash,
+            seen: std::collections::HashMap::new(),
+            seen_by_search: false,
             #[cfg(test)]
             hooks: Hooks::default(),
         }
@@ -728,6 +737,15 @@ impl<'a> Worker<'a> {
             })
             .collect();
         let canon = folders.iter().filter_map(|(p, _)| Some((p.clone(), std::fs::canonicalize(p).ok()?))).collect();
+        if let Op::Copy { sources, .. } | Op::Move { sources, .. } | Op::Trash { sources } = &op {
+            for src in sources {
+                if !self.seen.contains_key(src)
+                    && let Some(id) = src.symlink_metadata().ok().as_ref().and_then(crate::fs::ident)
+                {
+                    self.seen.insert(src.clone(), id);
+                }
+            }
+        }
         let mut out = Outcome {
             results: Vec::new(),
             undo: None,
@@ -751,6 +769,11 @@ impl<'a> Worker<'a> {
                     if self.cancelled() {
                         break;
                     }
+                    if let Some(why) = self.changed(src) {
+                        out.errors.push(why);
+                        self.p.items_done.fetch_add(1, Relaxed);
+                        continue;
+                    }
                     match self.copy_one(src, &dest) {
                         Ok((to, print)) => {
                             out.results.push(to.clone());
@@ -771,6 +794,11 @@ impl<'a> Worker<'a> {
                 for src in &sources {
                     if self.cancelled() {
                         break;
+                    }
+                    if let Some(why) = self.changed(src) {
+                        out.errors.push(why);
+                        self.p.items_done.fetch_add(1, Relaxed);
+                        continue;
                     }
                     match self.move_one(src, &dest) {
                         Ok(to) => {
@@ -793,6 +821,11 @@ impl<'a> Worker<'a> {
                 for src in &sources {
                     if self.cancelled() {
                         break;
+                    }
+                    if let Some(why) = self.changed(src) {
+                        out.errors.push(why);
+                        self.p.items_done.fetch_add(1, Relaxed);
+                        continue;
                     }
                     match (self.trash)(src) {
                         Ok(Some(at)) => {
@@ -848,6 +881,9 @@ impl<'a> Worker<'a> {
             left_out.insert(path.as_path());
         }
         let (op, any) = op.without(&left_out);
+        // Each item is checked again right before it's acted on (`Worker::changed`).
+        self.seen.extend(expect.iter().cloned());
+        self.seen_by_search = true;
         if !any {
             let more = if why.len() > 1 { format!(" (and {} more)", why.len() - 1) } else { String::new() };
             return Outcome {
@@ -869,6 +905,21 @@ impl<'a> Worker<'a> {
         why.append(&mut out.errors);
         out.errors = why;
         out
+    }
+
+    /// Why `src` isn't the item it was when the operation began (or when the search found
+    /// it), checked right before it's acted on; `None` when it still is, or there's nothing to
+    /// compare with. One lstat.
+    fn changed(&self, src: &Path) -> Option<String> {
+        let want = self.seen.get(src)?;
+        let name = name_of(src);
+        Some(match (src.symlink_metadata(), self.seen_by_search) {
+            (Ok(m), _) if crate::fs::ident(&m) == Some(*want) => return None,
+            (Ok(_), true) => format!("“{name}” isn't the item the search found (something else is at its path now), so it was left alone"),
+            (Err(_), true) => format!("“{name}” isn't where the search found it any more, so it was left alone"),
+            (Ok(_), false) => format!("“{name}” was replaced while the operation ran, so it was left alone"),
+            (Err(_), false) => format!("“{name}” was moved or deleted while the operation ran, so it was left alone"),
+        })
     }
 
     /// [`Op::Delete`]: each item is checked right before it goes (an item replaced or gone since
@@ -1388,7 +1439,7 @@ impl Worker<'_> {
             out.refused = Some(format!("Nothing was renamed: {why}."));
             return;
         }
-        if self.rename_all(&moves, out) {
+        if self.rename_all(&moves, &seen, out) {
             out.results = moves.iter().map(|(_, to)| to.clone()).collect();
             out.undo = Undo::record(What::BatchRename, moves.iter().map(|(from, to)| (to.clone(), Some(from.clone()))));
             out.moved = moves;
@@ -1407,7 +1458,7 @@ impl Worker<'_> {
             out.undo = Some(undo);
             return;
         }
-        if self.rename_all(&moves, out) {
+        if self.rename_all(&moves, &seen, out) {
             out.results = moves.iter().map(|(_, back)| back.clone()).collect();
             out.moved = moves;
         } else {
@@ -1453,45 +1504,67 @@ impl Worker<'_> {
     /// (`.arbor-…`, as [`noclobber::rename`]'s case-only renames do); then the others get
     /// their new names, freeing the old ones; then the ones aside get theirs. A failure or a
     /// cancel midway puts every item back, last step first, again never over anything; what
-    /// can't go back (another app took its old name meanwhile) stays where it is and the
-    /// message says exactly where. True when every item has its new name.
-    fn rename_all(&mut self, moves: &[(PathBuf, PathBuf)], out: &mut Outcome) -> bool {
+    /// can't go back (another app took its old name meanwhile, or changed the item since it was
+    /// renamed) stays where it is and the message says exactly where. Each item is checked
+    /// against `seen` (its fingerprint when the plan was made) right before each of its steps
+    /// and before it's put back, so an item replaced or edited while the batch runs is never
+    /// renamed, and a replacement is never put back in an item's place. True when every item
+    /// has its new name.
+    fn rename_all(&mut self, moves: &[(PathBuf, PathBuf)], seen: &[&Print], out: &mut Outcome) -> bool {
         self.p.items_total.store(moves.len(), Relaxed);
         let froms: std::collections::HashSet<String> = moves.iter().map(|(f, _)| fold_path(f)).collect();
         // Compared case aside on every disk: a needless step aside costs one rename.
         let aside: Vec<bool> = moves.iter().map(|(_, to)| froms.contains(&fold_path(to))).collect();
         let mut done: Vec<Done> = Vec::new();
-        let Err(why) = self.rename_steps(moves, &aside, &mut done) else { return true };
-        let stuck = self.put_back(done);
+        let Err(why) = self.rename_steps(moves, seen, &aside, &mut done) else { return true };
+        let stuck = self.put_back(done, seen);
         let cancelled = self.cancelled();
         let lead = if cancelled { "Cancelled".to_string() } else { why };
         if stuck.is_empty() {
             out.errors.push(format!("{lead}. Nothing was renamed: every item has its old name again"));
             return false;
         }
-        let at =
-            |(item, now): &(usize, PathBuf)| format!("“{}” is now “{}” in “{}”", name_of(&moves[*item].0), name_of(now), parent_of(now));
+        let at = |(item, now, why): &(usize, PathBuf, Stuck)| match why {
+            Stuck::Taken => format!(
+                "“{}” is now “{}” in “{}” (something else took its old name)",
+                name_of(&moves[*item].0),
+                name_of(now),
+                parent_of(now)
+            ),
+            Stuck::Changed => format!(
+                "“{}” in “{}” changed after it was renamed (it was “{}”), so it was left there",
+                name_of(now),
+                parent_of(now),
+                name_of(&moves[*item].0)
+            ),
+        };
         let shown: Vec<String> = stuck.iter().take(3).map(at).collect();
         let more = if stuck.len() > 3 { format!(" (and {} more)", stuck.len() - 3) } else { String::new() };
-        let n = stuck.len();
-        out.errors.push(format!(
-            "{lead}, and {n} item{} couldn't get {} old name back (something else took it): {}{more}. The rest have their old names",
-            if n == 1 { "" } else { "s" },
-            if n == 1 { "its" } else { "their" },
-            shown.join("; "),
-        ));
+        let back = moves.len() - stuck.len();
+        out.errors.push(format!("{lead}. {back} of {} items have their old names again; {}{more}", moves.len(), shown.join("; ")));
         out.errors.extend(stuck.iter().skip(3).map(at));
         false
     }
 
+    /// Whether the item at `at` (first at `orig`) is still the one the plan was made for
+    /// (fingerprint `was`); says how it changed when not.
+    fn step_check(&self, at: &Path, orig: &Path, was: &Print) -> Result<(), String> {
+        match self.diff(at, was) {
+            None => Ok(()),
+            Some(Diff::Unreachable(e)) => Err(format!("“{}” can't be checked ({e})", name_of(orig))),
+            Some(d) => Err(format!("{} while the batch was renaming", d.say(&format!("“{}”", name_of(orig)), was.kind))),
+        }
+    }
+
     /// The steps of [`Worker::rename_all`], recording each in `done`. The first failure (or a
     /// cancel) stops it and says why.
-    fn rename_steps(&mut self, moves: &[(PathBuf, PathBuf)], aside: &[bool], done: &mut Vec<Done>) -> Result<(), String> {
+    fn rename_steps(&mut self, moves: &[(PathBuf, PathBuf)], seen: &[&Print], aside: &[bool], done: &mut Vec<Done>) -> Result<(), String> {
         let mut at: Vec<PathBuf> = moves.iter().map(|(from, _)| from.clone()).collect();
         for (i, (from, _)) in moves.iter().enumerate().filter(|&(i, _)| aside[i]) {
             if self.cancelled() {
                 return Err("Cancelled".into());
             }
+            self.step_check(from, from, seen[i])?;
             let tmp = self.step_aside(from)?;
             done.push(Done { item: i, now: tmp.clone(), was: from.clone() });
             at[i] = tmp;
@@ -1503,6 +1576,8 @@ impl Worker<'_> {
                     return Err("Cancelled".into());
                 }
                 self.before_act(to);
+                // Right before its own step: still the item the plan was made for.
+                self.step_check(&at[i], from, seen[i])?;
                 match self.rename_excl(&at[i], to) {
                     Ok(()) => {}
                     Err(e) if e.kind() == ErrorKind::AlreadyExists => {
@@ -1531,22 +1606,35 @@ impl Worker<'_> {
         Err(format!("Couldn't find a free temporary name beside “{}”", name_of(from)))
     }
 
-    /// Undoes `done`, last step first, never over anything. An item that can't go back stays
-    /// where it is (its earlier steps aren't tried). Returns those, with where each is.
-    fn put_back(&mut self, done: Vec<Done>) -> Vec<(usize, PathBuf)> {
-        let mut stuck: Vec<(usize, PathBuf)> = Vec::new();
+    /// Undoes `done`, last step first, never over anything, and only while what's at each
+    /// step's new name is still the item that went there (`seen`): a replacement or an edited
+    /// item is never moved into an item's old name. An item that can't go back stays where it is
+    /// (its earlier steps aren't tried). Returns those, with where each is and why.
+    fn put_back(&mut self, done: Vec<Done>, seen: &[&Print]) -> Vec<(usize, PathBuf, Stuck)> {
+        let mut stuck: Vec<(usize, PathBuf, Stuck)> = Vec::new();
         for d in done.into_iter().rev() {
-            if stuck.iter().any(|(i, _)| *i == d.item) {
+            if stuck.iter().any(|(i, _, _)| *i == d.item) {
                 continue;
             }
             self.before_act(&d.was);
-            if self.rename_excl(&d.now, &d.was).is_err() {
-                stuck.push((d.item, d.now));
+            if self.diff(&d.now, seen[d.item]).is_some() {
+                stuck.push((d.item, d.now, Stuck::Changed));
+            } else if self.rename_excl(&d.now, &d.was).is_err() {
+                stuck.push((d.item, d.now, Stuck::Taken));
             }
         }
-        stuck.sort_by_key(|(i, _)| *i);
+        stuck.sort_by_key(|(i, _, _)| *i);
         stuck
     }
+}
+
+/// Why a batch rename's rollback left an item where it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stuck {
+    /// Something else took its old name.
+    Taken,
+    /// What's at its new name isn't the item that went there any more (replaced or edited).
+    Changed,
 }
 
 /// A path for comparing names case aside (what a disk that ignores case sees as one name).
@@ -2671,7 +2759,7 @@ mod tests {
         assert_eq!(
             o.errors[0],
             format!(
-                "Couldn't rename “b” to “b2”: permission denied, and 1 item couldn't get its old name back (something else took it): “a” is now “a2” in “{}”. The rest have their old names",
+                "Couldn't rename “b” to “b2”: permission denied. 1 of 2 items have their old names again; “a” is now “a2” in “{}” (something else took its old name)",
                 d.display()
             )
         );
@@ -2841,5 +2929,163 @@ mod tests {
         assert_eq!(o.undo.as_ref().map(|u| u.steps.len()), Some(2), "the two that went can be undone");
         undo_ok(o.undo.unwrap());
         assert!(d.join("a").exists() && d.join("c").exists());
+    }
+
+    // ---- each item checked right before it's acted on ----------------------------------------
+
+    /// Replaces `p` with other contents the way another app's save would: the new file is made
+    /// while the old one still exists (so it can't reuse its inode), and on Windows given a
+    /// creation time of its own (NTFS would hand it the old one's).
+    fn swap_in(p: &Path, contents: &str) {
+        let new = p.with_extension("incoming");
+        fs::write(&new, contents).unwrap();
+        fs::rename(p, p.with_extension("original")).unwrap();
+        fs::rename(&new, p).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileTimesExt;
+            let f = fs::File::options().write(true).open(p).unwrap();
+            f.set_times(fs::FileTimes::new().set_created(SystemTime::now() + Duration::from_secs(3600))).unwrap();
+        }
+    }
+
+    /// The review's case: "b" is replaced while "a" is renamed. "b" is checked right before its
+    /// own step, so the replacement is never renamed; the batch is put back, and says why.
+    #[test]
+    fn batch_rename_never_renames_an_item_replaced_midway() {
+        let d = tmp("batch-midway");
+        files(&d, &["a", "b"]);
+        let root = d.clone();
+        let hooks = Hooks {
+            before_act: Some(Box::new(move |p: &Path| {
+                if p == root.join("a2") {
+                    swap_in(&root.join("b"), "replacement");
+                }
+            })),
+            ..Hooks::default()
+        };
+        let o = run_hooked(batch(&d, &[("a", "a2"), ("b", "b2")]), fake_trash, hooks);
+        assert!(o.undo.is_none() && o.results.is_empty());
+        assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
+        assert!(o.errors[0].contains("“b”") && o.errors[0].contains("while the batch was renaming"), "{}", o.errors[0]);
+        assert!(o.errors[0].ends_with("Nothing was renamed: every item has its old name again"), "{}", o.errors[0]);
+        assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "replacement", "never renamed");
+        assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "I was a");
+        assert!(!d.join("b2").exists() && !d.join("a2").exists());
+    }
+
+    /// The review's case: an item edited while an undo of a batch rename runs isn't moved; the
+    /// undo is put back and stays on the stack.
+    #[test]
+    fn batch_undo_never_moves_an_item_edited_midway() {
+        let d = tmp("batch-undo-midway");
+        files(&d, &["a", "b"]);
+        let u = take(run_now(batch(&d, &[("a", "a2"), ("b", "b2")])));
+        let root = d.clone();
+        let hooks = Hooks {
+            before_act: Some(Box::new(move |p: &Path| {
+                if p == root.join("a") {
+                    edit(&root.join("b2"));
+                }
+            })),
+            ..Hooks::default()
+        };
+        let o = run_hooked(Op::Undo(u), fake_trash, hooks);
+        assert!(o.errors.first().is_some_and(|e| e.contains("“b2”") && e.contains("while the batch was renaming")), "{:?}", o.errors);
+        assert!(d.join("b2").exists() && !d.join("b").exists(), "the edited item stays");
+        assert!(d.join("a2").exists() && !d.join("a").exists(), "and the batch is put back");
+        assert!(o.undo.is_some(), "the undo stays on the stack");
+    }
+
+    /// The review's case: a rollback never moves a replacement into an item's old name, and
+    /// says truthfully what came back and what didn't.
+    #[test]
+    fn batch_rollback_never_puts_a_replacement_back() {
+        let d = tmp("batch-rollback-swap");
+        files(&d, &["a", "b"]);
+        let root = d.clone();
+        let stop = d.join("b2");
+        let hooks = Hooks {
+            fail_rename: Some(Box::new(move |p: &Path| p == stop)),
+            before_act: Some(Box::new(move |p: &Path| {
+                // While "b" is about to be renamed (after "a" became "a2"), "a2" is replaced.
+                if p == root.join("b2") {
+                    swap_in(&root.join("a2"), "replacement");
+                }
+            })),
+            ..Hooks::default()
+        };
+        let o = run_hooked(batch(&d, &[("a", "a2"), ("b", "b2")]), fake_trash, hooks);
+        assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
+        assert_eq!(
+            o.errors[0],
+            format!(
+                "Couldn't rename “b” to “b2”: permission denied. 1 of 2 items have their old names again; “a2” in “{}” changed after it was renamed (it was “a”), so it was left there",
+                d.display()
+            )
+        );
+        assert!(!d.join("a").exists(), "the replacement isn't put in a's place");
+        assert_eq!(fs::read_to_string(d.join("a2")).unwrap(), "replacement");
+        assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "I was b");
+    }
+
+    /// Stands in for a trash that, while trashing "a", lets another app replace "b".
+    fn trash_then_replace_b(p: &Path) -> Result<Option<PathBuf>, TrashError> {
+        let out = fake_trash(p)?;
+        if p.file_name().unwrap() == "a" {
+            swap_in(&p.parent().unwrap().join("b"), "replacement");
+        }
+        Ok(out)
+    }
+
+    /// The review's case, for search results (identities from the walk) and a plain selection
+    /// (identities taken when the operation begins): "b" replaced while "a" is trashed is
+    /// checked right before its own turn and left alone.
+    #[test]
+    fn trash_rechecks_each_item_right_before_it_goes() {
+        for search in [true, false] {
+            let d = tmp(if search { "recheck-search" } else { "recheck-plain" });
+            files(&d, &["a", "b", "c"]);
+            let paths: Vec<PathBuf> = ["a", "b", "c"].iter().map(|n| d.join(n)).collect();
+            let op = Op::Trash { sources: paths.clone() };
+            let op = if search {
+                let expect = paths.iter().map(|p| (p.clone(), crate::fs::ident(&p.symlink_metadata().unwrap()).unwrap())).collect();
+                Op::Checked { expect, op: Box::new(op) }
+            } else {
+                op
+            };
+            let o = run_with(op, trash_then_replace_b);
+            assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "replacement", "search {search}: never trashed");
+            assert!(d.join(".trash/a").exists() && d.join(".trash/c").exists() && !d.join(".trash/b").exists());
+            assert_eq!(o.removed, [d.join("a"), d.join("c")]);
+            let says = if search { "isn't the item the search found" } else { "was replaced while the operation ran" };
+            assert!(o.errors.len() == 1 && o.errors[0].contains(&format!("“b” {says}")), "{:?}", o.errors);
+            assert_eq!(o.undo.map(|u| u.steps.len()), Some(2), "only what went is undoable");
+        }
+    }
+
+    /// A move and a copy check each source right before it too.
+    #[test]
+    fn move_and_copy_recheck_each_item_right_before_it_goes() {
+        for mv in [true, false] {
+            let d = tmp(if mv { "recheck-mv" } else { "recheck-cp" });
+            files(&d, &["a", "b"]);
+            fs::create_dir(d.join("into")).unwrap();
+            let root = d.clone();
+            let hooks = Hooks {
+                before_act: Some(Box::new(move |p: &Path| {
+                    if p == root.join("into/a") {
+                        swap_in(&root.join("b"), "replacement");
+                    }
+                })),
+                ..Hooks::default()
+            };
+            let sources = vec![d.join("a"), d.join("b")];
+            let op = if mv { Op::Move { sources, dest: d.join("into") } } else { Op::Copy { sources, dest: d.join("into") } };
+            let o = run_hooked(op, fake_trash, hooks);
+            assert!(d.join("into/a").exists() && !d.join("into/b").exists(), "move {mv}");
+            assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "replacement");
+            assert!(o.errors.len() == 1 && o.errors[0].contains("“b” was replaced while the operation ran"), "{:?}", o.errors);
+        }
     }
 }
