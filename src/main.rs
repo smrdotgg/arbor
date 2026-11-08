@@ -13,6 +13,7 @@ mod delete;
 mod folder;
 mod fs;
 mod jump;
+mod menu;
 mod noclobber;
 mod ops;
 mod palette;

@@ -129,6 +129,8 @@ pub struct State {
     /// A question a finished file operation raised (items its trash couldn't take), opened by
     /// the next `poll`.
     pub ask_next: Option<crate::confirm::Ask>,
+    /// The in-window context menu, where there's no native one (Linux; `menu.rs`).
+    pub menu: Option<crate::menu::Menu>,
     /// The palette's, Jump's and Select by Pattern's late field writes after they close (see
     /// `rename_sink`).
     pub(crate) palette_sink: TextEdit,
@@ -249,6 +251,7 @@ impl State {
             jump_req: None,
             asking: None,
             ask_next: None,
+            menu: None,
             palette_sink: TextEdit::new(""),
             rename_sink: TextEdit::new(""),
             job_seen: (0, 0),
@@ -701,6 +704,9 @@ impl State {
         if self.asking.is_some() {
             return self.ask_key(ev, tx);
         }
+        if self.menu.is_some() {
+            return self.menu_key(ev, tx);
+        }
         // While renaming, the field has the keys; only Escape (which it passes on) gets here.
         if self.rename.is_some() {
             if ev.key == Key::Escape {
@@ -1124,6 +1130,7 @@ impl State {
     /// Closes the palette, Jump, Select by Pattern and Batch Rename (at most one is open).
     pub fn close_overlays(&mut self, tx: &mut Tx) {
         self.asking = None;
+        self.menu = None;
         self.close_palette(tx);
         self.close_jump(tx);
         self.close_pick(tx);

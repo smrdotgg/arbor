@@ -154,6 +154,10 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         .child(col().key("main").grow(1.0).min_w(0.0).h_full().child(panes).child(hr(l)).child(status(s, l)));
     if let Some(a) = &s.asking {
         window.child(confirm_view(a, l))
+    } else if let Some(m) = &s.menu {
+        // The window's size, from last frame's layout: the sidebar, its separator and `main`.
+        let size = cx.layout_size("main").map(|[w, h]| [SIDEBAR_W + 1.0 + w, h]);
+        window.child(menu_view(m, size, l))
     } else if s.palette.is_some() {
         window.child(palette_view(s, l))
     } else if s.jump.is_some() {
@@ -1171,6 +1175,75 @@ fn jump_row(h: &crate::jump::Hit, words: &[Vec<char>], i: usize, on: bool, typed
     }
     r = r.child(text(h.shown.to_string()).spans(spans).font(BODY).color(fg).truncate_head().grow(1.0).min_w(0.0));
     if on { r.fill(l.accent) } else { r.hover(l.t.hover) }
+}
+
+const MENU_W: f32 = 250.0;
+const MENU_ROW_H: f32 = 24.0;
+const MENU_SEP_H: f32 = 9.0;
+const MENU_PAD: f32 = 5.0;
+
+/// Where a menu `w` × `h` opens for a press at `x`, `y` in a window `size`: its top-left
+/// corner at the pointer, flipped left or up where it would cross the window's edge (as native
+/// menus do), and kept inside the window.
+pub(crate) fn menu_origin(x: f32, y: f32, w: f32, h: f32, size: Option<[f32; 2]>) -> (f32, f32) {
+    let [ww, wh] = size.unwrap_or([f32::MAX, f32::MAX]);
+    let place = |at: f32, len: f32, room: f32| {
+        let at = if at + len > room && at - len >= 0.0 { at - len } else { at };
+        at.min(room - len).max(0.0).round()
+    };
+    (place(x, w, ww), place(y, h, wh))
+}
+
+/// The in-window context menu (`menu.rs`): a small card at the pointer with the native menus'
+/// items, each with its keys; the highlighted one in the accent colour, what can't run dimmed.
+/// Modal: a click outside closes it.
+fn menu_view(m: &crate::menu::Menu, size: Option<[f32; 2]>, l: Look) -> El {
+    use crate::menu::Item;
+    let h = m.items.iter().map(|it| if matches!(it, Item::Separator) { MENU_SEP_H } else { MENU_ROW_H }).sum::<f32>() + 2.0 * MENU_PAD;
+    let (x, y) = menu_origin(m.x, m.y, MENU_W, h, size);
+    let mut card = col()
+        .key("menu")
+        .pin(Some(x), Some(y), None, None)
+        .w(MENU_W)
+        .py(MENU_PAD)
+        .px(MENU_PAD)
+        .fill(l.t.card)
+        .border(1.0, l.t.card_border)
+        .radius(7.0)
+        .shadow(4.0, 14.0, l.t.shadow)
+        .modal(true, |s: &mut State| s.close_menu())
+        .focusable(true)
+        .on_key(|s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx| s.menu_key(ev, tx))
+        .no_focus_ring();
+    for (i, it) in m.items.iter().enumerate() {
+        card = card.child(match it {
+            Item::Separator => el().w_full().h(MENU_SEP_H).py(4.0).child(el().w_full().h(1.0).fill(l.t.separator)),
+            Item::Cmd { title, on, keys, .. } => {
+                let hi = m.sel == Some(i);
+                let (fg, dim) = match (hi, *on) {
+                    (true, _) => (l.sel_text, l.sel_text.alpha(0.8)),
+                    (false, true) => (l.t.text, l.t.text_secondary),
+                    (false, false) => (l.t.text_secondary.alpha(0.55), l.t.text_secondary.alpha(0.45)),
+                };
+                let r = row()
+                    .key(format!("menu-{i}"))
+                    .w_full()
+                    .h(MENU_ROW_H)
+                    .px(10.0)
+                    .gap(16.0)
+                    .center_y()
+                    .radius(4.0)
+                    .child(text(title.clone()).font(BODY).color(fg).truncate().grow(1.0).min_w(0.0))
+                    .child(text(keys.clone()).font(BODY).color(dim));
+                match (hi, *on) {
+                    (true, _) => r.fill(l.accent).on_press_tx(move |s: &mut State, tx| s.menu_pick(i, tx)),
+                    (false, true) => r.hover(l.t.hover).cursor(Cursor::Pointer).on_press_tx(move |s: &mut State, tx| s.menu_pick(i, tx)),
+                    (false, false) => r,
+                }
+            }
+        });
+    }
+    card
 }
 
 /// Arbor's one dialog: before something that can't be undone (`confirm.rs`). A title, what it

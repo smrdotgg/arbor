@@ -418,15 +418,48 @@ impl State {
 
     // ---- context menu -----------------------------------------------------------------------
 
-    /// Right-click on row `i` (or on empty space when `None`): a native menu of commands, with
-    /// their titles and keys from the command table and keymap.
+    /// Right-click on row `i` (or on empty space when `None`): a menu of commands, with their
+    /// titles and keys from the command table and keymap. Native on macOS and Windows; Rune has
+    /// none on Linux, so there it's Arbor's own, in the window (`menu.rs`, RUNE-GAPS.md), with
+    /// the same items.
     pub fn context_menu(&mut self, row: Option<usize>, press: PointerPress, tx: &mut Tx) {
         if let Some(i) = row
             && !self.cur().is_selected(i)
         {
             self.cur_mut().select(i);
         }
-        let has = row.is_some() && !self.cur().visible.is_empty();
+        let items = self.menu_items(row.is_some());
+        if !rune::popup_menu_supported() {
+            self.open_menu(items, press, tx);
+            return;
+        }
+        let mut menu = PopupMenu::new();
+        for it in items {
+            menu = match it {
+                None => menu.separator(),
+                Some((cmd, title, on)) => {
+                    let it = PopupItem::new(cmd.id(), &title).enabled(on);
+                    menu.item(match self.keymap.shortcut(cmd) {
+                        Some(k) => it.key_equivalent(k),
+                        None => it,
+                    })
+                }
+            };
+        }
+        tx.popup_menu(menu, press, |s: &mut State, picked, tx| {
+            tx.instant();
+            if let Some(cmd) = picked.and_then(Cmd::from_id)
+                && s.unavailable(cmd).is_none()
+            {
+                s.run(cmd, tx);
+            }
+        });
+    }
+
+    /// The context menu's items, in order (`None` is a separator): each command, its title for
+    /// what's selected, and whether it can run. `on_row`: the click was on a row.
+    pub(crate) fn menu_items(&self, on_row: bool) -> Vec<Option<(Cmd, String, bool)>> {
+        let has = on_row && !self.cur().visible.is_empty();
         let n = if has { self.cur().targets().len() } else { 0 };
         let item = |cmd: Cmd| {
             // Commands on the selection need a row under the pointer; with several, Rename is
@@ -443,36 +476,16 @@ impl State {
                 }
                 _ => cmd.title().to_string(),
             };
-            let it = PopupItem::new(cmd.id(), &title).enabled(on);
-            match self.keymap.shortcut(cmd) {
-                Some(k) => it.key_equivalent(k),
-                None => it,
-            }
+            Some((cmd, title, on))
         };
-        let menu = PopupMenu::new()
-            .item(item(Cmd::Open))
-            .item(item(Cmd::Reveal))
-            .separator()
-            .item(item(Cmd::Rename))
-            .item(item(Cmd::Duplicate))
-            .item(item(Cmd::Trash))
-            .separator()
-            .item(item(Cmd::Copy))
-            .item(item(Cmd::Cut))
-            .item(item(Cmd::Paste))
-            .item(item(Cmd::CopyPath))
-            .separator();
+        let mut v = vec![item(Cmd::Open), item(Cmd::Reveal), None, item(Cmd::Rename), item(Cmd::Duplicate), item(Cmd::Trash), None];
+        v.extend([item(Cmd::Copy), item(Cmd::Cut), item(Cmd::Paste), item(Cmd::CopyPath), None]);
         // The commander commands only when there's another pane to send to.
-        let menu = if self.split() { menu.item(item(Cmd::CopyToOther)).item(item(Cmd::MoveToOther)).separator() } else { menu };
-        let menu = menu.item(item(Cmd::NewFolder)).item(item(Cmd::Undo));
-        tx.popup_menu(menu, press, |s: &mut State, picked, tx| {
-            tx.instant();
-            if let Some(cmd) = picked.and_then(Cmd::from_id)
-                && s.unavailable(cmd).is_none()
-            {
-                s.run(cmd, tx);
-            }
-        });
+        if self.split() {
+            v.extend([item(Cmd::CopyToOther), item(Cmd::MoveToOther), None]);
+        }
+        v.extend([item(Cmd::NewFolder), item(Cmd::Undo)]);
+        v
     }
 }
 
