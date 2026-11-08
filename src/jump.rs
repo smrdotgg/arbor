@@ -55,8 +55,9 @@ pub const KEEP: usize = 5_000;
 /// When the ranks add up to more than this, they all shrink to 90% of it and folders under
 /// rank 1 go (zoxide's aging), so old habits fade.
 pub const MAX_AGE: f64 = 10_000.0;
-/// Rows the box ranks and shows at most.
-pub const LIMIT: usize = 500;
+/// Rows the box ranks and shows at most: far more than anyone scrolls through, and each key
+/// that changes how many there are makes Rune read every row's key again.
+pub const LIMIT: usize = 200;
 /// Rows ↑↓ skip with Page Up / Page Down.
 const PAGE: usize = 8;
 
@@ -73,27 +74,31 @@ pub fn now() -> u64 {
 /// One folder in the history.
 #[derive(Clone, Debug)]
 pub struct Dir {
-    pub path: PathBuf,
+    /// Shared with the rows showing it, so ranking copies no strings.
+    pub path: Arc<Path>,
     pub rank: f64,
     /// When it was last visited (Unix seconds).
     pub last: u64,
     /// As shown: the home folder as `~`.
-    pub shown: String,
+    pub shown: Arc<str>,
     /// `shown` folded for matching: each character lowercased to one character, and `\` as
     /// `/` on Windows, so an index here is a character index in `shown`.
-    low: Vec<char>,
+    low: Arc<[char]>,
     /// Where the last folder name starts in `low`.
     tail: usize,
+    /// The whole path folded the same way, for go-to's "folders under what's typed".
+    full: Box<[char]>,
 }
 
 impl Dir {
-    fn new(path: PathBuf, rank: f64, last: u64) -> Dir {
+    fn new(path: Arc<Path>, rank: f64, last: u64) -> Dir {
         let shown = HOME.with(|h| pretty_under(h, &path));
         let low = fold(&shown);
         let tail = low.iter().rposition(|&c| c == '/').map_or(0, |i| i + 1).min(low.len());
         // A root ("/", "C:\") is all tail.
         let tail = if tail == low.len() { 0 } else { tail };
-        Dir { path, rank, last, shown, low, tail }
+        let full = fold(&path.to_string_lossy()).into_boxed_slice();
+        Dir { path, rank, last, shown: shown.into(), low: low.into(), tail, full }
     }
 
     /// Rank weighted by how recently it was visited (zoxide's buckets).
@@ -138,9 +143,11 @@ fn pretty_under(home: &Path, p: &Path) -> String {
 #[derive(Default, Debug)]
 pub struct Frecency {
     dirs: Vec<Dir>,
-    index: HashMap<PathBuf, usize>,
+    index: HashMap<Arc<Path>, usize>,
     /// The ranks added up, for aging.
     total: f64,
+    /// Changes whenever `dirs` does, so a box narrowing its last matches knows they still hold.
+    generation: u64,
 }
 
 /// One thing the log records.
@@ -197,6 +204,7 @@ impl Frecency {
     }
 
     pub fn apply(&mut self, e: &Event) {
+        self.generation += 1;
         match e {
             Event::Visit { path, at, rank } => self.visit(path, *at, *rank),
             Event::Drop { path } => {
@@ -213,8 +221,9 @@ impl Frecency {
                 d.last = d.last.max(at);
             }
             None => {
-                self.index.insert(path.to_path_buf(), self.dirs.len());
-                self.dirs.push(Dir::new(path.to_path_buf(), rank, at));
+                let path: Arc<Path> = path.into();
+                self.index.insert(path.clone(), self.dirs.len());
+                self.dirs.push(Dir::new(path, rank, at));
             }
         }
         self.total += rank;
@@ -231,6 +240,7 @@ impl Frecency {
 
     /// Takes `path` out; true when it was there.
     pub fn remove(&mut self, path: &Path) -> bool {
+        self.generation += 1;
         let Some(i) = self.index.remove(path) else { return false };
         self.total -= self.dirs.swap_remove(i).rank;
         if let Some(moved) = self.dirs.get(i) {
@@ -273,7 +283,14 @@ impl Frecency {
         let mut v: Vec<&Dir> = self.dirs.iter().collect();
         v.sort_by(|a, b| b.frecency(now).total_cmp(&a.frecency(now)));
         v.truncate(KEEP);
-        v.iter().filter_map(|d| Event::Visit { path: d.path.clone(), at: d.last, rank: d.rank }.line(d.last)).collect::<Vec<_>>().concat()
+        v.iter()
+            .filter_map(|d| Event::Visit { path: d.path.to_path_buf(), at: d.last, rank: d.rank }.line(d.last))
+            .collect::<Vec<_>>()
+            .concat()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The folders matching `query`, best first, at most `limit`. Every word of the query must
@@ -281,12 +298,27 @@ impl Frecency {
     /// folder name, as zoxide has it ("proj arb" finds `~/projects/arbor`). A path whose last
     /// word only matches a parent still shows, far down. Score: frecency × how well it matched
     /// (the last word starting or being the folder's name counts most).
+    #[cfg(test)]
     pub fn rank(&self, query: &str, now: u64, limit: usize) -> Vec<Hit> {
+        self.rank_in(query, now, limit, None).0
+    }
+
+    /// [`rank`](Self::rank) among `among` (indices of folders that matched a query this one
+    /// narrows, from this generation), or all. Also every folder that matched, for the next
+    /// key to narrow. Only the top `limit` are sorted, and a hit shares its folder's strings.
+    pub fn rank_in(&self, query: &str, now: u64, limit: usize, among: Option<&[u32]>) -> (Vec<Hit>, Vec<u32>) {
         let words: Vec<Vec<char>> = query.split_whitespace().map(fold).collect();
-        let mut v: Vec<(f64, usize)> =
-            self.dirs.iter().enumerate().filter_map(|(i, d)| Some((d.frecency(now) * quality(&words, &d.low, d.tail, None)?, i))).collect();
-        let order = |a: &(f64, usize), b: &(f64, usize)| {
-            let (da, db) = (&self.dirs[a.1], &self.dirs[b.1]);
+        let score = |i: u32| {
+            let d = &self.dirs[i as usize];
+            Some((d.frecency(now) * quality(&words, &d.low, d.tail, None)?, i))
+        };
+        let mut v: Vec<(f64, u32)> = match among {
+            Some(ix) => ix.iter().filter_map(|&i| score(i)).collect(),
+            None => (0..self.dirs.len() as u32).filter_map(score).collect(),
+        };
+        let matched: Vec<u32> = v.iter().map(|&(_, i)| i).collect();
+        let order = |a: &(f64, u32), b: &(f64, u32)| {
+            let (da, db) = (&self.dirs[a.1 as usize], &self.dirs[b.1 as usize]);
             b.0.total_cmp(&a.0).then(da.low.len().cmp(&db.low.len())).then_with(|| da.shown.cmp(&db.shown))
         };
         if v.len() > limit {
@@ -294,31 +326,33 @@ impl Frecency {
             v.truncate(limit);
         }
         v.sort_by(order);
-        v.into_iter()
+        let hits = v
+            .into_iter()
             .map(|(score, i)| {
-                let d = &self.dirs[i];
-                let mut marks = Vec::new();
-                quality(&words, &d.low, d.tail, Some(&mut marks));
-                Hit { path: d.path.clone(), shown: d.shown.clone(), marks: byte_ranges(&d.shown, &marks), score }
+                let d = &self.dirs[i as usize];
+                Hit { path: d.path.clone(), shown: d.shown.clone(), low: Some((d.low.clone(), d.tail)), score }
             })
-            .collect()
+            .collect();
+        (hits, matched)
     }
 
     /// The folders under (or at) the path being typed, by frecency: what go-to in Jump offers.
     pub fn under(&self, typed: &Path, now: u64, limit: usize) -> Vec<Hit> {
         let want = fold(&typed.to_string_lossy());
-        let mut v: Vec<&Dir> = self
-            .dirs
-            .iter()
-            .filter(|d| {
-                let have = fold(&d.path.to_string_lossy());
-                have.len() >= want.len() && have[..want.len()] == want[..]
-            })
-            .collect();
+        let mut v: Vec<&Dir> = self.dirs.iter().filter(|d| d.full.starts_with(&want)).collect();
         v.sort_by(|a, b| b.frecency(now).total_cmp(&a.frecency(now)));
         v.truncate(limit);
-        v.into_iter().map(|d| Hit { path: d.path.clone(), shown: d.shown.clone(), marks: Vec::new(), score: d.frecency(now) }).collect()
+        v.into_iter().map(|d| Hit { path: d.path.clone(), shown: d.shown.clone(), low: None, score: d.frecency(now) }).collect()
     }
+}
+
+/// Whether every folder matching `new` also matches `old`, so `new` can rank among `old`'s
+/// matches: the same words, the last one extended, or more words after. (Matching is words
+/// in order as substrings, so a longer word or one more word only ever matches fewer.)
+pub fn narrows(old: &str, new: &str) -> bool {
+    let (old, new): (Vec<&str>, Vec<&str>) = (old.split_whitespace().collect(), new.split_whitespace().collect());
+    let Some((last, firsts)) = old.split_last() else { return true };
+    new.len() >= old.len() && new[..firsts.len()] == *firsts && new[firsts.len()].starts_with(last)
 }
 
 /// `query`'s first match in `low` from `from` on.
@@ -375,14 +409,31 @@ fn byte_ranges(s: &str, chars: &[(usize, usize)]) -> Vec<(usize, usize)> {
     chars.iter().filter(|(a, b)| a < b && *b < offs.len()).map(|&(a, b)| (offs[a], offs[b])).collect()
 }
 
-/// A row in the box.
+/// A row in the box. Its strings are its folder's own, shared.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hit {
-    pub path: PathBuf,
-    pub shown: String,
-    /// Byte ranges of `shown` that matched, to emphasise.
-    pub marks: Vec<(usize, usize)>,
+    pub path: Arc<Path>,
+    pub shown: Arc<str>,
+    /// `shown` folded and where its last name starts, to find what matched when the row is
+    /// built (`marks`); `None` for the typed path in go-to mode.
+    low: Option<(Arc<[char]>, usize)>,
     pub score: f64,
+}
+
+impl Hit {
+    /// Byte ranges of `shown` that `words` (folded) matched, to emphasise. Worked out only for
+    /// the rows being built, not for every row ranked.
+    pub fn marks(&self, words: &[Vec<char>]) -> Vec<(usize, usize)> {
+        let Some((low, tail)) = &self.low else { return Vec::new() };
+        let mut marks = Vec::new();
+        quality(words, low, *tail, Some(&mut marks));
+        byte_ranges(&self.shown, &marks)
+    }
+}
+
+/// A query's words folded for matching (and for [`Hit::marks`]).
+pub fn words(query: &str) -> Vec<Vec<char>> {
+    query.split_whitespace().map(fold).collect()
 }
 
 // ---- the writer thread --------------------------------------------------------------------
@@ -798,6 +849,11 @@ pub struct JumpBox {
     /// The rows for `hits_for`.
     pub hits: Vec<Hit>,
     hits_for: Option<String>,
+    /// The words the rows matched, folded, for their marks.
+    pub words: Vec<Vec<char>>,
+    /// Every folder the last query matched (not only the rows shown), and the history's
+    /// generation then: a query that narrows it ranks among these alone.
+    matched: Option<(String, u64, Vec<u32>)>,
     /// The cursor row, for the query `sel_for`; a new query starts it over at the top.
     sel: usize,
     sel_for: String,
@@ -825,7 +881,16 @@ impl State {
         }
         let mut edit = TextEdit::new("");
         edit.focused = true;
-        self.jump = Some(JumpBox { edit, hits: Vec::new(), hits_for: None, sel: 0, sel_for: String::new(), loading: !loaded });
+        self.jump = Some(JumpBox {
+            edit,
+            hits: Vec::new(),
+            hits_for: None,
+            words: Vec::new(),
+            matched: None,
+            sel: 0,
+            sel_for: String::new(),
+            loading: !loaded,
+        });
         self.jump_refresh();
     }
 
@@ -842,17 +907,25 @@ impl State {
         if j.hits_for.as_deref() == Some(j.edit.text.as_str()) {
             return;
         }
-        let q = j.edit.text.trim();
+        let q = j.edit.text.trim().to_string();
         let now = now();
-        j.hits = if crate::app::is_path_like(q) {
-            let typed = fs::expand(q);
-            let mut v = vec![Hit { path: typed.clone(), shown: q.to_string(), marks: Vec::new(), score: f64::INFINITY }];
+        j.words = words(&q);
+        j.hits = if crate::app::is_path_like(&q) {
+            j.matched = None;
+            let typed = fs::expand(&q);
+            let mut v = vec![Hit { path: typed.as_path().into(), shown: q.as_str().into(), low: None, score: f64::INFINITY }];
             if let Some(a) = &self.history.agg {
-                v.extend(a.under(&typed, now, LIMIT).into_iter().filter(|h| h.path != typed));
+                v.extend(a.under(&typed, now, LIMIT).into_iter().filter(|h| *h.path != *typed));
             }
             v
+        } else if let Some(a) = &self.history.agg {
+            // Typing on narrows what matched before: only those can match now.
+            let among = j.matched.as_ref().filter(|(old, g, _)| *g == a.generation() && narrows(old, &q)).map(|(_, _, ix)| ix.as_slice());
+            let (hits, matched) = a.rank_in(&q, now, LIMIT, among);
+            j.matched = Some((q.clone(), a.generation(), matched));
+            hits
         } else {
-            self.history.agg.as_ref().map(|a| a.rank(q, now, LIMIT)).unwrap_or_default()
+            Vec::new()
         };
         j.hits_for = Some(j.edit.text.clone());
     }
@@ -939,7 +1012,7 @@ impl State {
         tx.instant();
         let Some(j) = &self.jump else { return };
         let Some(hit) = j.hits.get(i) else { return };
-        let (path, typed) = (hit.path.clone(), j.path_mode() && i == 0);
+        let (path, typed) = (hit.path.to_path_buf(), j.path_mode() && i == 0);
         self.close_jump(tx);
         if typed {
             // Go-to, as typing `/` or `~` in the folder does.
@@ -1020,13 +1093,13 @@ mod tests {
     }
 
     fn top(f: &Frecency, q: &str, now: u64) -> Vec<PathBuf> {
-        f.rank(q, now, 10).into_iter().map(|h| h.path).collect()
+        f.rank(q, now, 10).into_iter().map(|h| h.path.to_path_buf()).collect()
     }
 
     #[test]
     fn frecency_weighs_recent_visits_more() {
         let now = 10 * WEEK;
-        let d = |last: u64| Dir::new(p("/x"), 2.0, last).frecency(now);
+        let d = |last: u64| Dir::new(p("/x").into(), 2.0, last).frecency(now);
         assert_eq!(d(now - 10), 8.0);
         assert_eq!(d(now - 2 * HOUR), 4.0);
         assert_eq!(d(now - 2 * DAY), 1.0);
@@ -1058,12 +1131,46 @@ mod tests {
     }
 
     #[test]
+    fn a_longer_word_or_another_word_narrows_a_query() {
+        assert!(narrows("", "a") && narrows("pro", "proj") && narrows("proj", "proj arb") && narrows("proj a", "proj arb"));
+        assert!(narrows("proj  arb", "proj arb ") && narrows("proj", "proj"));
+        assert!(!narrows("proj", "pro") && !narrows("proj arb", "proj") && !narrows("proj arb", "proj xarb") && !narrows("ab", "ba"));
+    }
+
+    /// Ranking among the last query's matches gives what ranking everything gives, key after
+    /// key, and a history that changed in between is ranked whole again.
+    #[test]
+    fn typing_on_ranks_among_the_last_matches_and_gets_the_same_rows() {
+        let now = 10 * WEEK;
+        let mut f = Frecency::default();
+        let words = ["projects", "arbor", "src", "photos", "2024", "work"];
+        for i in 0..600u64 {
+            let path = format!("/h/{}/{}-{i}/{}", words[(i % 6) as usize], words[(i / 6 % 6) as usize], words[(i / 36 % 6) as usize]);
+            visit(&mut f, &path, now - i * 600, 1 + (i % 5) as usize);
+        }
+        let (mut last, mut matched): (String, Vec<u32>) = (String::new(), (0..f.len() as u32).collect());
+        for q in ["p", "pr", "pro", "proj", "proj a", "proj ar", "proj arb", "proj arb s"] {
+            assert!(narrows(&last, q));
+            let (hits, m) = f.rank_in(q, now, LIMIT, Some(&matched));
+            let whole = f.rank(q, now, LIMIT);
+            assert_eq!(hits, whole, "{q:?}");
+            (last, matched) = (q.to_string(), m);
+        }
+        // The box: a visit lands between two keys, so the next key ranks everything again.
+        let mut j = (String::from("proj"), f.generation());
+        visit(&mut f, "/h/projects/new-one/arbor", now, 50);
+        assert_ne!(j.1, f.generation());
+        j.0.push_str(" arb");
+        assert_eq!(f.rank("proj arb", now, 1)[0].path.as_ref(), p("/h/projects/new-one/arbor").as_path());
+    }
+
+    #[test]
     fn matched_characters_are_marked_in_the_shown_path() {
         let now = 1000;
         let mut f = Frecency::default();
         visit(&mut f, "/srv/Projects/Arbor", now, 1);
         let h = &f.rank("proj arb", now, 1)[0];
-        let marked: Vec<&str> = h.marks.iter().map(|&(a, b)| &h.shown[a..b]).collect();
+        let marked: Vec<&str> = h.marks(&words("proj arb")).iter().map(|&(a, b)| &h.shown[a..b]).collect();
         assert_eq!(marked, ["Proj", "Arb"]);
     }
 
@@ -1427,7 +1534,7 @@ mod tests {
         assert_eq!(s.jump.as_ref().unwrap().hits.len(), 4, "everything visited, by frecency");
         s.jump_edit().insert("proj arb");
         s.jump_changed(&mut tx);
-        assert_eq!(s.jump.as_ref().unwrap().hits[0].path, d.join("projects/arbor"));
+        assert_eq!(*s.jump.as_ref().unwrap().hits[0].path, *d.join("projects/arbor"));
         s.jump_pick(0, &mut tx);
         assert!(s.jump.is_none());
         crate::app::tests::settle_all(&mut s);
@@ -1437,7 +1544,7 @@ mod tests {
         s.run(Cmd::Jump, &mut tx);
         s.jump_edit().insert("gone");
         s.jump_changed(&mut tx);
-        assert_eq!(s.jump.as_ref().unwrap().hits[0].path, d.join("gone"));
+        assert_eq!(*s.jump.as_ref().unwrap().hits[0].path, *d.join("gone"));
         s.jump_pick(0, &mut tx);
         crate::app::tests::settle_all(&mut s);
         assert_eq!(s.cur().cwd, d.join("projects/arbor"), "stays put");

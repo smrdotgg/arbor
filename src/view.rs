@@ -1133,8 +1133,8 @@ fn jump_view(s: &State, l: Look) -> El {
                 count,
                 PALETTE_ROW_H,
                 |_: &State, i| Cow::Owned(crate::jump::row_key(i)),
-                move |s: &State, i| match s.jump.as_ref().and_then(|j| j.hits.get(i)) {
-                    Some(h) => jump_row(h, i, i == sel, path_mode && i == 0, l),
+                move |s: &State, i| match s.jump.as_ref().and_then(|j| Some((j.hits.get(i)?, &j.words))) {
+                    Some((h, words)) => jump_row(h, words, i, i == sel, path_mode && i == 0, l),
                     None => el(),
                 },
             )
@@ -1152,9 +1152,9 @@ fn jump_view(s: &State, l: Look) -> El {
 
 /// One Jump row: the folder as `~/…`, matched letters bold (the start is cut when it's long:
 /// the folder's own name matters most). In go-to mode, the first row is the path typed.
-fn jump_row(h: &crate::jump::Hit, i: usize, on: bool, typed: bool, l: Look) -> El {
+fn jump_row(h: &crate::jump::Hit, words: &[Vec<char>], i: usize, on: bool, typed: bool, l: Look) -> El {
     let (fg, dim, mark) = if on { (l.sel_text, l.sel_text.alpha(0.75), l.sel_text) } else { (l.t.text, l.t.text_secondary, l.accent) };
-    let spans: Vec<rune::text::Span> = h.marks.iter().map(|&(a, b)| rune::text::Span::new(a, b).bold().color(mark)).collect();
+    let spans: Vec<rune::text::Span> = h.marks(words).iter().map(|&(a, b)| rune::text::Span::new(a, b).bold().color(mark)).collect();
     let mut r = row()
         .w_full()
         .h(PALETTE_ROW_H)
@@ -1167,7 +1167,7 @@ fn jump_row(h: &crate::jump::Hit, i: usize, on: bool, typed: bool, l: Look) -> E
     if typed {
         r = r.child(text("Go to").font(SMALL).color(dim));
     }
-    r = r.child(text(h.shown.clone()).spans(spans).font(BODY).color(fg).truncate_head().grow(1.0).min_w(0.0));
+    r = r.child(text(h.shown.to_string()).spans(spans).font(BODY).color(fg).truncate_head().grow(1.0).min_w(0.0));
     if on { r.fill(l.accent) } else { r.hover(l.t.hover) }
 }
 
