@@ -730,10 +730,23 @@ pub(crate) mod windows {
             use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegDeleteKeyW, RegQueryInfoKeyW};
             let Some(h) = Hkcu::open(key, KEY_READ) else { return Ok(()) };
             let (mut subkeys, mut values) = (0u32, 0u32);
-            let null = std::ptr::null_mut();
+            use std::ptr::{null, null_mut};
             // SAFETY: the open key; only the counts are asked for, the rest are null.
             let r = unsafe {
-                let r = RegQueryInfoKeyW(h, null, null, std::ptr::null(), &mut subkeys, null, null, &mut values, null, null, null, null);
+                let r = RegQueryInfoKeyW(
+                    h,
+                    null_mut(),
+                    null_mut(),
+                    null(),
+                    &mut subkeys,
+                    null_mut(),
+                    null_mut(),
+                    &mut values,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                );
                 RegCloseKey(h);
                 r
             };

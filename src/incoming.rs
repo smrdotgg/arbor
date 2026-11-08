@@ -32,6 +32,7 @@ pub enum Show {
     Items(PathBuf, Vec<OsString>),
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 /// Folders as themselves, anything else (or everything, with `items`) selected in its folder,
 /// items of one folder together, in the order asked. Looks at the disk: off the UI thread.
 pub fn classify(paths: Vec<PathBuf>, items: bool) -> Vec<Show> {
