@@ -1657,7 +1657,7 @@ mod tests {
         let op = Op::Move { sources: vec![d.join("f")], dest: d.join("into") };
         let o = run_hooked(op, fake_trash, across(Some(Box::new(move |p: &Path| p == stuck))));
         assert_eq!(o.errors.len(), 1);
-        assert!(o.errors[0].contains(&format!("copied to “{}”", d.join("into/f").display())), "{:?}", o.errors);
+        assert!(o.errors[0].contains(&format!("copied to “{}”", d.join("into").join("f").display())), "{:?}", o.errors);
         assert_eq!(fs::read_to_string(d.join("into/f/x")).unwrap(), "x");
         assert_eq!(fs::read_to_string(d.join("f/x")).unwrap(), "x");
     }
