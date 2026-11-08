@@ -442,15 +442,47 @@ fn bench_target(first: Option<PathBuf>) -> PathBuf {
     TARGET.get_or_init(|| first.unwrap_or_default()).clone()
 }
 
+/// What input handlers and `poll` marked for the frame that shows it.
+struct Marked {
+    key: Option<Instant>,
+    landed: Option<(Instant, usize, Kind, bool)>,
+    preview: Option<(Instant, bool, &'static str)>,
+    jump: Option<(Instant, bool, usize, bool)>,
+    search_first: Option<(Instant, usize)>,
+    search_done: Option<(Instant, usize, u64, bool)>,
+}
+
+/// What was marked since the last drawn frame, taken only if this frame was `drawn`. Rune runs
+/// a frame's input handlers and `poll` before building it, so what they marked shows in this
+/// frame if it's drawn; one that isn't (`Skipped`: no drawable came in time, as when a long
+/// build loads a font; `Unchanged`) shows nothing, so what it marked waits for the next drawn
+/// frame, which is the one that shows it. (Taking it anyway lost the event: a preview that
+/// landed in a skipped frame was never logged, and the bench counted one fewer.)
+fn take_marked(drawn: bool) -> Option<Marked> {
+    if !drawn {
+        return None;
+    }
+    Some(Marked {
+        key: KEY.take(),
+        landed: LANDED.take(),
+        preview: PREVIEW_LANDED.take(),
+        jump: JUMP_LANDED.take(),
+        search_first: SEARCH_FIRST.take(),
+        search_done: SEARCH_DONE.take(),
+    })
+}
+
 /// Rune's per-frame report.
 pub fn frame(f: &FrameEncoded) {
-    // Rune runs a frame's input handlers and `poll` before building it, so whatever they marked
-    // belongs to this frame, drawn or not.
-    let (key, landed, preview, jump) = (KEY.take(), LANDED.take(), PREVIEW_LANDED.take(), JUMP_LANDED.take());
-    let (search_first, search_done) = (SEARCH_FIRST.take(), SEARCH_DONE.take());
-    if f.outcome() != FrameOutcome::Drawn {
+    let Some(Marked { key, landed, preview, jump, search_first, search_done }) = take_marked(f.outcome() == FrameOutcome::Drawn) else {
+        // The bench's next step comes from a frame, drawn or not.
+        if benching()
+            && let Some(w) = WAKER.get()
+        {
+            w();
+        }
         return;
-    }
+    };
     let at = f.at();
     let ms = |t: Instant| at.saturating_duration_since(t).as_secs_f64() * 1000.0;
     let split = format!(
@@ -512,5 +544,24 @@ pub fn frame(f: &FrameEncoded) {
         && let Some(w) = WAKER.get()
     {
         w();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A preview (or anything else) that lands in a frame that isn't drawn is reported with
+    /// the next frame that is, timed to it, never dropped.
+    #[test]
+    fn what_lands_in_a_skipped_frame_waits_for_the_next_drawn_one() {
+        let t = Instant::now();
+        PREVIEW_LANDED.set(Some((t, true, "text")));
+        KEY.set(Some(t));
+        assert!(take_marked(false).is_none(), "a skipped frame shows nothing");
+        let m = take_marked(true).expect("the next drawn frame");
+        assert_eq!(m.preview.map(|p| p.2), Some("text"));
+        assert_eq!(m.key, Some(t));
+        assert!(take_marked(true).unwrap().preview.is_none(), "reported once");
     }
 }
