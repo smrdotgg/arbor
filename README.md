@@ -35,7 +35,13 @@ cargo build --profile dist          # stripped, LTO build: target/dist/arbor
 Builds are fully offline. Dependencies are vendored in `vendor/` (see `.cargo/config.toml`).
 `vendor/` is gitignored because it's about 550 MB, so a fresh clone runs `scripts/vendor.sh` first.
 `scripts/vendor.sh` refreshes them through a fast remote machine (default `smr@tabot-dev`) and
-syncs them back.
+syncs them back. When it runs on that machine itself (or with `HOST=local`) it skips ssh. Rune's
+commit is pinned in `RUNE_REV`; `REV=origin/dev scripts/vendor.sh` moves the pin.
+
+CI (`.github/workflows/ci.yml`) runs on every push and pull request on macOS, Linux and Windows:
+`cargo build --release --locked`, `cargo test --release --locked` and `cargo clippy -D warnings`,
+plus `cargo fmt --check` on Linux. It clones Rune at `RUNE_REV` and gets crates from crates.io
+instead of `vendor/`.
 
 ## Keys
 
@@ -71,12 +77,17 @@ a copy.
 
 ## Platform notes
 
-- **macOS** (main target): content sits under a transparent titlebar, with the traffic lights in
-  the sidebar. Sidebar places include `/Volumes`.
-- **Linux**: `cargo check` passes. Building needs `libxkbcommon-dev libwayland-dev`. Opens files
-  with `xdg-open`. Sidebar places include `/mnt` and `/media`.
-- **Windows**: written for it (drive letters, hidden attribute, `explorer /select,`), but not
-  compiled yet. Cross-checking from Linux needs a Windows C toolchain for `blake3`.
+All three build, pass tests and pass clippy in CI. How much has been run for real differs:
+
+- **macOS** (main target, used daily): content sits under a transparent titlebar, with the
+  traffic lights in the sidebar. Sidebar places include `/Volumes`.
+- **Linux**: building needs `libxkbcommon-dev libwayland-dev`. Running under X11 also needs
+  `libxkbcommon-x11-0` (desktops have it; minimal installs may not). Opens files with `xdg-open`.
+  Sidebar places include `/mnt` and `/media`. Checked at runtime only under Xvfb with Mesa's
+  software Vulkan (Ubuntu 24.04): the window opens and lists a folder. Not yet checked: Wayland,
+  a real GPU, keys, drag and drop, clipboard, trash and undo, `xdg-open`.
+- **Windows**: drive letters, hidden attribute, Recycle Bin, `explorer /select,`. Compiles and
+  passes tests in CI but **has never been run**: everything at runtime is unchecked.
 
 Trash uses NSFileManager on macOS, the freedesktop.org spec on Linux, and the Recycle Bin on
 Windows. Undoing a trash puts the item back on macOS and Linux. Windows doesn't report where
