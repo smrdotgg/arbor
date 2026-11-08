@@ -18,9 +18,27 @@ rune = { path = "vendor/rune/crates/rune", default-features = false, features = 
 # build dependencies, and it reports each error's position, which the status bar shows as a line.
 toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
 
+# Quick preview's image decoders, run on a worker only while the preview is open (src/preview.rs).
+# png and image (with png and jpeg) are already in the lock file through Rune. png streams rows,
+# so a big PNG shrinks as it decodes. image adds only its built-in BMP codec, plus EXIF
+# orientation parsing. jpeg-decoder, unlike zune-jpeg, can decode at 1/2, 1/4 or 1/8 size in
+# the IDCT (a 12 MP photo for a 1000 px panel: half the time, 1/16 of the memory). gif and
+# image-webp are the codecs image itself uses for those formats, without its encoders.
+png = "0.18"
+image = { version = "0.25", default-features = false, features = ["bmp"] }
+jpeg-decoder = { version = "0.3", default-features = false }
+gif = { version = "0.14", default-features = false, features = ["std"] }
+image-webp = { version = "0.2", default-features = false }
+
 # Trash: NSFileManager on macOS, the shell's Recycle Bin on Windows (Linux follows the XDG spec).
 # windows-sys also lists the drive letters, and does no-replace moves and copies and reads file ids.
 # No-replace renames and clones (renameat2, renamex_np, clonefile). Already in the lock file through Rune.
+[dev-dependencies]
+# Encoders for the preview's test images and the bench's photo (tests and examples only; the
+# app's own build gets just the features above).
+image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
+gif = { version = "0.14", default-features = false, features = ["std"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
