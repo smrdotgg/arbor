@@ -3021,7 +3021,7 @@ mod tests {
         fs::create_dir_all(d.join("doomed/mnt")).unwrap();
         fs::write(d.join("doomed/mnt/precious"), "keep").unwrap();
         let canon = fs::canonicalize(&d).unwrap();
-        let mounts = crate::delete::Mounts::of(&[&canon.join("doomed/mnt")]);
+        let mounts = crate::delete::Mounts::of(&[&canon.join("doomed").join("mnt")]);
         let o =
             run_hooked(Op::Delete { items: doomed(&[d.join("doomed")]) }, fake_trash, Hooks { mounts: Some(mounts), ..Hooks::default() });
         assert!(o.removed.is_empty());
@@ -3039,7 +3039,7 @@ mod tests {
         fs::write(d.join("src/plain"), "x").unwrap();
         fs::create_dir(d.join("into")).unwrap();
         let canon = fs::canonicalize(&d).unwrap();
-        let mounts = crate::delete::Mounts::of(&[&canon.join("src/mnt")]);
+        let mounts = crate::delete::Mounts::of(&[&canon.join("src").join("mnt")]);
         let o = run_hooked(
             Op::Move { sources: vec![d.join("src")], dest: d.join("into") },
             fake_trash,

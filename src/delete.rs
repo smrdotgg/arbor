@@ -360,13 +360,21 @@ mod imp {
         }
     }
 
-    pub fn remove_tree(path: &Path, _mounts: &Mounts, go: &mut dyn FnMut(&Path) -> bool, removed: &mut u64) -> Result<(), Halt> {
+    pub fn remove_tree(path: &Path, mounts: &Mounts, go: &mut dyn FnMut(&Path) -> bool, removed: &mut u64) -> Result<(), Halt> {
+        // Windows lists no mounts (a volume mounted in a folder is a reparse point, checked
+        // below); a list given in tests is honoured all the same.
+        let canon = super::canonical(path);
+        let inside = mounts.under(&canon);
+        rm(path, &canon, &inside, go, removed)
+    }
+
+    fn rm(path: &Path, canon: &Path, inside: &[PathBuf], go: &mut dyn FnMut(&Path) -> bool, removed: &mut u64) -> Result<(), Halt> {
         if !go(path) {
             return Err(Halt::Cancelled);
         }
         let m = path.symlink_metadata().map_err(|e| fail(path, e))?;
         let ft = m.file_type();
-        if ft.is_symlink_dir() && volume_mount_point(path) {
+        if inside.iter().any(|i| i == canon) || ft.is_symlink_dir() && volume_mount_point(path) {
             return Err(Halt::Mounted { at: path.to_path_buf() });
         }
         // A link or junction isn't a folder here (`is_dir` is false for it): removed as itself.
@@ -374,7 +382,8 @@ mod imp {
             let rd = std::fs::read_dir(path).map_err(|e| fail(path, e))?;
             let children: Vec<PathBuf> = rd.map(|e| e.map(|e| e.path())).collect::<io::Result<_>>().map_err(|e| fail(path, e))?;
             for c in children {
-                remove_tree(&c, _mounts, go, removed)?;
+                let name = c.file_name().map(PathBuf::from).unwrap_or_default();
+                rm(&c, &canon.join(name), inside, go, removed)?;
             }
             // Its name must still lead to it (as far as Windows says without opening it).
             match path.symlink_metadata() {
@@ -456,7 +465,7 @@ mod tests {
         fs::write(d.join("t/mnt/deep/precious"), "keep").unwrap();
         fs::write(d.join("t/mnt/precious"), "keep").unwrap();
         let canon = fs::canonicalize(&d).unwrap();
-        let mounts = Mounts::of(&[&canon.join("t/mnt"), &canon.join("m2")]);
+        let mounts = Mounts::of(&[&canon.join("t").join("mnt"), &canon.join("m2")]);
         let mut n = 0;
         let r = remove_tree(&d.join("t"), &mounts, &mut |_| true, &mut n);
         assert!(matches!(&r, Err(Halt::Mounted { at }) if at == &d.join("t/mnt")), "{r:?}");
