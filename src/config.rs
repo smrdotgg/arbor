@@ -37,11 +37,25 @@ pub struct Settings {
     pub start_folder: Option<PathBuf>,
     /// Sidebar places, replacing the automatic list.
     pub places: Option<Vec<PathBuf>>,
+    /// `[jump] enabled`: record visited folders for Jump to Folder.
+    pub jump_enabled: bool,
+    /// `[jump] exclude`: globs of folders never recorded.
+    pub jump_exclude: Vec<String>,
+    /// `[select] case_sensitive`: how Select by Pattern compares; `None` is the platform's way.
+    pub case_sensitive: Option<bool>,
 }
 
 impl Default for Settings {
     fn default() -> Settings {
-        Settings { show_hidden: false, sort: Sort { key: SortKey::Name, desc: false }, start_folder: None, places: None }
+        Settings {
+            show_hidden: false,
+            sort: Sort { key: SortKey::Name, desc: false },
+            start_folder: None,
+            places: None,
+            jump_enabled: true,
+            jump_exclude: Vec::new(),
+            case_sensitive: None,
+        }
     }
 }
 
@@ -105,12 +119,14 @@ impl Config {
             let at = line(root.key(name).and_then(|k| k.span()));
             match (name, item.as_table_like()) {
                 ("general", Some(t)) => general(t, &mut settings, &mut errors, &line),
+                ("jump", Some(t)) => jump(t, &mut settings, &mut errors, &line),
+                ("select", Some(t)) => select(t, &mut settings, &mut errors, &line),
                 ("keys", Some(t)) => keys = key_table(t, &mut errors, &line),
-                ("general" | "keys", None) => errors.push(format!("line {at}: '{name}' should be a section: [{name}]")),
+                ("general" | "jump" | "select" | "keys", None) => errors.push(format!("line {at}: '{name}' should be a section: [{name}]")),
                 (_, _) if GENERAL.contains(&name) => {
                     errors.push(format!("line {at}: '{name}' belongs under [general]"));
                 }
-                _ => errors.push(format!("line {at}: unknown section '{name}' (sections are [general] and [keys])")),
+                _ => errors.push(format!("line {at}: unknown section '{name}' (sections are [general], [jump], [select] and [keys])")),
             }
         }
         let keymap = build_keymap(&keys, platform, &mut errors);
@@ -197,6 +213,43 @@ fn general(t: &dyn TableLike, s: &mut Settings, errors: &mut Vec<String>, line: 
     }
     // Newest and largest first feel right; names and kinds read A→Z (as clicking a header).
     s.sort.desc = desc.unwrap_or(matches!(s.sort.key, SortKey::Size | SortKey::Modified));
+}
+
+fn jump(t: &dyn TableLike, s: &mut Settings, errors: &mut Vec<String>, line: &dyn Fn(Option<std::ops::Range<usize>>) -> usize) {
+    for (name, item) in t.iter() {
+        let at = line(t.key(name).and_then(|k| k.span()));
+        let mut bad = |want: &str| errors.push(format!("line {at}: {name} should be {want}"));
+        match name {
+            "enabled" => match item.as_bool() {
+                Some(b) => s.jump_enabled = b,
+                None => bad("true or false"),
+            },
+            "exclude" => match item.as_array().map(|a| a.iter().map(|v| v.as_str()).collect::<Option<Vec<_>>>()) {
+                Some(Some(v)) => {
+                    s.jump_exclude.clear();
+                    for p in v {
+                        match crate::pattern::Glob::path(p, crate::pattern::Case::platform()) {
+                            Ok(_) => s.jump_exclude.push(p.to_string()),
+                            Err(e) => errors.push(format!("line {at}: exclude \"{p}\": {e}")),
+                        }
+                    }
+                }
+                _ => bad("a list of folder patterns, like [\"/tmp/**\", \"**/node_modules\"]"),
+            },
+            _ => errors.push(format!("line {at}: unknown setting '{name}' under [jump] (settings are enabled, exclude)")),
+        }
+    }
+}
+
+fn select(t: &dyn TableLike, s: &mut Settings, errors: &mut Vec<String>, line: &dyn Fn(Option<std::ops::Range<usize>>) -> usize) {
+    for (name, item) in t.iter() {
+        let at = line(t.key(name).and_then(|k| k.span()));
+        match (name, item.as_bool()) {
+            ("case_sensitive", Some(b)) => s.case_sensitive = Some(b),
+            ("case_sensitive", None) => errors.push(format!("line {at}: case_sensitive should be true or false")),
+            _ => errors.push(format!("line {at}: unknown setting '{name}' under [select] (settings are case_sensitive)")),
+        }
+    }
 }
 
 fn sort_key(s: &str) -> Option<SortKey> {
@@ -325,7 +378,7 @@ fn line_of(text: &str, byte: usize) -> usize {
 /// The file "Open Settings File" creates: every setting and every command with its default
 /// keys, all commented out, so it changes nothing until a line is uncommented.
 pub fn template() -> String {
-    let mut s = String::from(
+    let s = String::from(
         "# Arbor settings. Lines starting with # are comments: remove the # to use a line.\n\
          # Changes apply when you run \"Reload Settings\" from the command palette, or at the next start.\n\
          \n\
@@ -345,6 +398,19 @@ pub fn template() -> String {
          # Sidebar places, replacing the automatic list. Empty: the automatic list.\n\
          # places = [\"~\", \"~/Downloads\", \"~/Projects\"]\n\
          \n\
+         [jump]\n\
+         # Remember the folders you visit, for Jump to Folder (cmd+j). The history is kept in\n\
+         # history.log beside this file; \"Clear Jump History\" forgets it.\n\
+         # enabled = true\n\
+         # Folders never remembered: * and ? stay within a folder name, ** crosses folders, and\n\
+         # a pattern ending in /** is the folder and everything in it. Example: [\"/tmp/**\", \"**/node_modules\"]\n\
+         # exclude = []\n\
+         \n\
+         [select]\n\
+         # Whether Select by Pattern tells capitals apart. Without this line, it does on Linux and\n\
+         # doesn't on macOS and Windows, as their usual file systems do.\n\
+         # case_sensitive = CASE_DEFAULT\n\
+         \n\
          [keys]\n\
          # Each command's keys. A list replaces the command's default keys; [] unbinds it.\n\
          # In a key, cmd is Command on macOS and Ctrl elsewhere; ctrl, alt, shift and super\n\
@@ -357,6 +423,8 @@ pub fn template() -> String {
          # (in go-to-path mode) enter edit it rather than running commands.\n\
          #\n",
     );
+    let s = s.replace("CASE_DEFAULT", if crate::pattern::Case::platform() == crate::pattern::Case::Sensitive { "true" } else { "false" });
+    let mut s = s;
     let w = Cmd::ALL.iter().map(|c| c.id().len()).max().unwrap_or(0) + 2;
     for &cmd in Cmd::ALL {
         let keys = cmd.default_keys().iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", ");
@@ -470,7 +538,9 @@ mod tests {
     /// Reads `path` on another thread; panics if that takes over 2 s (it would hang on a FIFO).
     fn read_soon(path: PathBuf) -> Config {
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || tx.send(Config::read(&path)));
+        std::thread::spawn(move || {
+            let _ = tx.send(Config::read(&path));
+        });
         rx.recv_timeout(std::time::Duration::from_secs(2)).expect("reading the settings blocked")
     }
 
@@ -539,7 +609,10 @@ mod tests {
         let c = Config::parse("show_hidden = true\n[colors]\nx = 1\n", LINUX);
         assert_eq!(
             c.errors,
-            ["line 1: 'show_hidden' belongs under [general]", "line 2: unknown section 'colors' (sections are [general] and [keys])"]
+            [
+                "line 1: 'show_hidden' belongs under [general]",
+                "line 2: unknown section 'colors' (sections are [general], [jump], [select] and [keys])"
+            ]
         );
     }
 

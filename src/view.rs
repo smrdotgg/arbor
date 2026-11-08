@@ -151,7 +151,15 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         .child(sidebar(s, l, cx.titlebar_inset() > 0.0))
         .child(el().w(1.0).h_full().fill(l.t.separator))
         .child(col().key("main").grow(1.0).min_w(0.0).h_full().child(panes).child(hr(l)).child(status(s, l)));
-    if s.palette.is_some() { window.child(palette_view(s, l)) } else { window }
+    if s.palette.is_some() {
+        window.child(palette_view(s, l))
+    } else if s.jump.is_some() {
+        window.child(jump_view(s, l))
+    } else if s.pick.is_some() {
+        window.child(pick_view(s, l))
+    } else {
+        window
+    }
 }
 
 fn hr(l: Look) -> El {
@@ -993,6 +1001,144 @@ fn palette_view(s: &State, l: Look) -> El {
         panel = panel.child(hr(l)).child(text(why).font(SMALL).color(l.t.text_secondary).px(16.0).py(7.0));
     }
     col().key("palette-layer").pin(Some(0.0), Some(0.0), Some(0.0), None).items_center().px(20.0).pt(BAR_H + 6.0).child(panel)
+}
+
+/// The layer an overlay box sits in: over the top of the window, centred.
+fn overlay_layer(key: &'static str, panel: El) -> El {
+    col().key(key).pin(Some(0.0), Some(0.0), Some(0.0), None).items_center().px(20.0).pt(BAR_H + 6.0).child(panel)
+}
+
+/// An overlay box's frame: a card, modal (a click outside runs `close`).
+fn overlay_card(key: &'static str, max_w: f32, l: Look, close: fn(&mut State)) -> El {
+    col()
+        .key(key)
+        .w_full()
+        .max_w(max_w)
+        .fill(l.t.card)
+        .border(1.0, l.t.card_border)
+        .radius(10.0)
+        .shadow(10.0, 30.0, l.t.shadow)
+        .modal(true, close)
+}
+
+/// Jump to Folder: a field, then the folders ranked for it, the matched letters in bold.
+fn jump_view(s: &State, l: Look) -> El {
+    let Some(j) = &s.jump else { return el() };
+    let field = text_input(&j.edit, TextStyle::new(15.0, 400.0))
+        .key("jump-field")
+        .single_line()
+        .placeholder("Jump to a folder you've been to, or type a path", l.t.text_secondary.alpha(0.7))
+        .color(l.t.text)
+        .caret(l.accent, l.accent.alpha(0.35))
+        .on_edit(|s: &mut State| s.jump_edit())
+        .on_input_change(|s: &mut State, tx| s.jump_changed(tx))
+        .on_input_key(|s: &mut State, ev, tx| s.jump_field_key(ev, tx))
+        .grow(1.0)
+        .min_w(0.0);
+    let count = j.hits.len();
+    let sel = j.sel();
+    let path_mode = j.path_mode();
+    let msg = |m: &str| col().key("jump-list").child(text(m.to_string()).font(BODY).color(l.t.text_secondary).px(16.0).py(10.0));
+    let list = if count == 0 && j.loading {
+        msg("Loading history…")
+    } else if count == 0 && s.history.agg.as_ref().is_none_or(|a| a.is_empty()) {
+        msg("No folders yet: the folders you open show up here. Type a path to go there.")
+    } else if count == 0 {
+        msg("No folders match")
+    } else {
+        // Only the rows in view are built.
+        let rows = col()
+            .key("jump-rows")
+            .w_full()
+            .px(6.0)
+            .growth(GrowthSpec { spring: rune::GROWTH, edge: rune::edge::NO_MASK })
+            .virtual_rows(
+                count,
+                PALETTE_ROW_H,
+                |_: &State, i| Cow::Owned(crate::jump::row_key(i)),
+                move |s: &State, i| match s.jump.as_ref().and_then(|j| j.hits.get(i)) {
+                    Some(h) => jump_row(h, i, i == sel, path_mode && i == 0, l),
+                    None => el(),
+                },
+            )
+            // Keys are row numbers, the same whatever the rows hold.
+            .virtual_rows_version(0u8);
+        let h = (count as f32).min(PALETTE_ROWS) * PALETTE_ROW_H + 8.0;
+        col().key("jump-list").w_full().h(h).py(4.0).scroll(ScrollSpec { stick_bottom: false }).child(rows)
+    };
+    let panel = overlay_card("jump", 640.0, l, |s: &mut State| s.jump = None)
+        .child(row().h(44.0).px(14.0).center_y().child(field))
+        .child(hr(l))
+        .child(list);
+    overlay_layer("jump-layer", panel)
+}
+
+/// One Jump row: the folder as `~/…`, matched letters bold (the start is cut when it's long:
+/// the folder's own name matters most). In go-to mode, the first row is the path typed.
+fn jump_row(h: &crate::jump::Hit, i: usize, on: bool, typed: bool, l: Look) -> El {
+    let (fg, dim, mark) = if on { (l.sel_text, l.sel_text.alpha(0.75), l.sel_text) } else { (l.t.text, l.t.text_secondary, l.accent) };
+    let spans: Vec<rune::text::Span> = h.marks.iter().map(|&(a, b)| rune::text::Span::new(a, b).bold().color(mark)).collect();
+    let mut r = row()
+        .w_full()
+        .h(PALETTE_ROW_H)
+        .px(10.0)
+        .gap(10.0)
+        .center_y()
+        .radius(5.0)
+        .cursor(Cursor::Pointer)
+        .on_press_tx(move |s: &mut State, tx| s.jump_pick(i, tx));
+    if typed {
+        r = r.child(text("Go to").font(SMALL).color(dim));
+    }
+    r = r.child(text(h.shown.clone()).spans(spans).font(BODY).color(fg).truncate_head().grow(1.0).min_w(0.0));
+    if on { r.fill(l.accent) } else { r.hover(l.t.hover) }
+}
+
+/// Select by Pattern: a field, the live count, and what Enter, ⇧Enter and ⌥Enter do.
+fn pick_view(s: &State, l: Look) -> El {
+    let Some(p) = &s.pick else { return el() };
+    let field = text_input(&p.edit, TextStyle::new(15.0, 400.0))
+        .key("pick-field")
+        .single_line()
+        .placeholder("Select by pattern: *.jpg, IMG_*, *.{png,jpg}", l.t.text_secondary.alpha(0.7))
+        .color(l.t.text)
+        .caret(l.accent, l.accent.alpha(0.35))
+        .on_edit(|s: &mut State| s.pick_edit())
+        .on_input_change(|s: &mut State, tx| {
+            tx.instant();
+            s.pick_refresh();
+        })
+        .on_input_key(|s: &mut State, ev, tx| s.pick_field_key(ev, tx))
+        .grow(1.0)
+        .min_w(0.0);
+    let (count, color) = match &p.count {
+        Err(e) => (e.clone(), l.t.text_secondary),
+        Ok((_, rows)) if p.edit.text.trim().is_empty() => (format!("{rows} items here"), l.t.text_secondary),
+        Ok((0, rows)) => (format!("None of {rows} match"), l.t.text_secondary),
+        Ok((n, rows)) => (format!("{n} of {rows} match"), l.accent),
+    };
+    let key = |spec: &str| crate::commands::parse_chord(spec).map(|c| c.label()).unwrap_or_default();
+    let hint = format!("{} Select   {} Add   {} Remove", key("enter"), key("shift+enter"), key("alt+enter"));
+    let case = if s.pick_case() == crate::pattern::Case::Sensitive { "Aa" } else { "aA" };
+    let foot = row()
+        .key("pick-foot")
+        .w_full()
+        .h(32.0)
+        .px(16.0)
+        .gap(12.0)
+        .center_y()
+        .child(text(count).font(NUM).color(color).truncate().grow(1.0).min_w(0.0))
+        .child(text(hint).font(SMALL).color(l.t.text_secondary))
+        .child(text(case).font(SMALL).color(l.t.text_secondary.alpha(0.7)).help(if case == "Aa" {
+            "Capitals count (select.case_sensitive)"
+        } else {
+            "Capitals don't count (select.case_sensitive)"
+        }));
+    let panel = overlay_card("pick", 520.0, l, |s: &mut State| s.pick = None)
+        .child(row().h(44.0).px(14.0).center_y().child(field))
+        .child(hr(l))
+        .child(foot);
+    overlay_layer("pick-layer", panel)
 }
 
 /// One palette row: the title, and its keys right-aligned and dimmer. Commands that can't run

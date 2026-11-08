@@ -14,9 +14,11 @@ use crate::config::{self, Config, Settings};
 pub use crate::folder::Nav;
 use crate::folder::{Answer, Folder, TabMemo};
 use crate::fs::{self, Entry, Listing, Sort, SortKey};
+use crate::jump::{History, JumpBox};
 use crate::ops;
 use crate::palette::Palette;
 use crate::preview::{self, Preview};
+use crate::select::PickBox;
 
 /// Rows a Page Up / Page Down moves.
 const PAGE: usize = 20;
@@ -103,9 +105,20 @@ pub struct State {
     /// Which keys run which command (defaults plus the settings file).
     pub keymap: Keymap,
     /// The settings as last read, so "Reload Settings" applies only what changed.
-    settings: Settings,
+    pub(crate) settings: Settings,
     pub palette: Option<Palette>,
-    /// The palette field's late writes after it closes (see `rename_sink`).
+    /// Jump to Folder's box, while it's open (`jump.rs`).
+    pub jump: Option<JumpBox>,
+    /// Select by Pattern's box, while it's open (`select.rs`).
+    pub pick: Option<PickBox>,
+    /// The folders visited, for Jump: nothing is read until it first opens.
+    pub history: History,
+    /// The read a Jump asked for, so a folder that's gone is dropped from the history.
+    pub(crate) jump_req: Option<u64>,
+    /// A command that can't be undone, run once and waiting to be run again to confirm.
+    pub(crate) confirm: Option<Cmd>,
+    /// The palette's, Jump's and Select by Pattern's late field writes after they close (see
+    /// `rename_sink`).
     pub(crate) palette_sink: TextEdit,
     /// Where the rename field's late writes go after the rename has ended (the runtime
     /// clears the field's focus through its binding a frame after a commit).
@@ -155,6 +168,10 @@ impl State {
             None => (Config::default(), std::env::current_dir().unwrap_or_else(|_| fs::home()), Vec::new(), None),
         };
         let first = Folder::new(0, cwd, config.settings.sort, config.settings.show_hidden, None);
+        // Where the history lives (environment only, no disk): tests keep theirs in memory.
+        let mut history = History::new(if cfg!(test) { None } else { crate::jump::log_path() });
+        history.enabled = config.settings.jump_enabled;
+        history.exclude = crate::jump::exclude_globs(&config.settings.jump_exclude);
         let mut s = State {
             panes: vec![Pane { f: first, tabs: vec![None], tab: 0 }],
             active: 0,
@@ -176,6 +193,11 @@ impl State {
             keymap: config.keymap,
             settings: config.settings,
             palette: None,
+            jump: None,
+            pick: None,
+            history,
+            jump_req: None,
+            confirm: None,
             palette_sink: TextEdit::new(""),
             rename_sink: TextEdit::new(""),
             job_seen: (0, 0),
@@ -374,6 +396,7 @@ impl State {
             self.apply_settings(c, tx);
             changed = true;
         }
+        changed |= self.poll_history();
         // After everything that can move the selection this frame.
         changed |= self.sync_preview();
         changed |= self.land_preview();
@@ -440,6 +463,7 @@ impl State {
             }
         }
         self.places = places;
+        self.apply_history_settings(&config.settings);
         self.note = config.summary().or(note).or(self.note.take());
         self.keymap = config.keymap;
         self.settings = config.settings;
@@ -451,7 +475,9 @@ impl State {
         let active = ix == self.active;
         let f = &mut self.panes[ix].f;
         let Some(p) = f.pending.take_if(|p| p.req == a.req && p.path == a.listing.path) else { return false };
+        let jumped = self.jump_req.take_if(|&mut r| r == p.req).is_some();
         match a.listing.result {
+            Err(_) if jumped && a.listing.missing => self.jump_missed(&p.path),
             Err(e) => {
                 self.note = Some(format!("{}: {e}", fs::pretty(&p.path)));
             }
@@ -484,7 +510,11 @@ impl State {
                 let navigated = matches!(p.nav, Nav::New | Nav::Back | Nav::Forward);
                 if navigated {
                     f.filter.clear();
+                    // For Jump: one message to the history's writer, no disk I/O here.
+                    let here = f.cwd.clone();
+                    self.history.record(&here);
                 }
+                let f = &mut self.panes[ix].f;
                 f.marked.clear();
                 if p.select.len() > 1 {
                     f.marked.extend(p.select.iter().cloned());
@@ -536,6 +566,12 @@ impl State {
 
     fn submit_path(&mut self) {
         let path = fs::expand(self.cur().filter.trim());
+        self.go_path(&path);
+    }
+
+    /// Go-to: a folder navigates, a file opens, anything else says it isn't there.
+    pub(crate) fn go_path(&mut self, path: &Path) {
+        let path = path.to_path_buf();
         if path.is_dir() {
             self.go(path, Nav::New, None);
         } else if path.exists() {
@@ -550,6 +586,11 @@ impl State {
     // ---- keys and commands -----------------------------------------------------------------
 
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        // A confirmation is only for the very next command (`run` keeps it for that one).
+        let confirm = self.confirm.take();
+        if self.keymap.find(|c| c.matches_tx(ev, tx)).is_some() {
+            self.confirm = confirm;
+        }
         let handled = self.key(ev, tx);
         if handled {
             self.sync_preview();
@@ -569,6 +610,12 @@ impl State {
         }
         if self.palette.is_some() {
             return self.palette_key(ev, tx);
+        }
+        if self.jump.is_some() {
+            return self.jump_key(ev, tx);
+        }
+        if self.pick.is_some() {
+            return self.pick_key(ev, tx);
         }
         if self.edit_filter(ev, tx) {
             return true;
@@ -667,7 +714,9 @@ impl State {
             Forward => when(f.fwd.is_empty(), "Nothing to go forward to"),
             Clear => when(!busy && f.filter.is_empty() && self.note.is_none() && f.marked.is_empty(), "Nothing to clear"),
             Up | Down | PageUp | PageDown | First | Last | ExtendUp | ExtendDown | ExtendPageUp | ExtendPageDown | ExtendFirst
-            | ExtendLast | SelectAll => when(empty, "Nothing to select"),
+            | ExtendLast | SelectAll | SelectPattern | InvertSelection => when(empty, "Nothing to select"),
+            SelectKind => when(nothing, "Select an item first"),
+            Jump => when(!self.history.enabled, "Jump is turned off in the settings (jump.enabled)"),
             SortName => when(f.sort.key == SortKey::Name, "Already sorted by name"),
             SortKind => when(f.sort.key == SortKey::Kind, "Already sorted by kind"),
             SortSize => when(f.sort.key == SortKey::Size, "Already sorted by size"),
@@ -684,7 +733,7 @@ impl State {
             }
             // Always available.
             GoTo | Reload | Reveal | Palette | OpenSettings | ReloadSettings | CopyPath | NewFolder | Hidden | SortReverse | NewTab
-            | Split => None,
+            | Split | ClearJump => None,
         }
     }
 
@@ -706,6 +755,10 @@ impl State {
 
     /// Runs `cmd`, from a key, the palette or the context menu. Check `unavailable` first.
     pub fn run(&mut self, cmd: Cmd, tx: &mut Tx) {
+        // A confirmation lasts one command: running anything else cancels it.
+        if self.confirm != Some(cmd) {
+            self.confirm = None;
+        }
         self.run_cmd(cmd, tx);
         self.sync_preview();
     }
@@ -734,7 +787,15 @@ impl State {
             }
             Reload => self.reload(),
             Reveal => self.reveal_selected(),
-            Palette => self.open_palette(),
+            Palette => {
+                self.close_overlays(tx);
+                self.open_palette();
+            }
+            Jump => self.open_jump(tx),
+            ClearJump => self.clear_jump_history(),
+            SelectPattern => self.open_pick(tx),
+            InvertSelection => self.invert_selection(tx),
+            SelectKind => self.select_kind(tx),
             OpenSettings => self.open_settings(),
             ReloadSettings => self.reload_settings(),
             Clear => {
@@ -873,10 +934,27 @@ impl State {
         if new.places != old.places {
             self.places = places_for(new);
         }
+        let new = c.settings.clone();
+        self.apply_history_settings(&new);
         self.reveal(tx);
         self.note = Some(c.summary().unwrap_or_else(|| "Settings reloaded".into()));
         self.keymap = c.keymap;
         self.settings = c.settings;
+    }
+}
+
+impl State {
+    /// `jump.enabled` and `jump.exclude`, as the settings say.
+    fn apply_history_settings(&mut self, s: &Settings) {
+        self.history.enabled = s.jump_enabled;
+        self.history.exclude = crate::jump::exclude_globs(&s.jump_exclude);
+    }
+
+    /// Closes the palette, Jump and Select by Pattern (at most one is open).
+    pub fn close_overlays(&mut self, tx: &mut Tx) {
+        self.close_palette(tx);
+        self.close_jump(tx);
+        self.close_pick(tx);
     }
 }
 

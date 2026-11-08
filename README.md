@@ -194,6 +194,8 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Go Back | ⌘[, ⌥← | Ctrl+[, Alt+← | `nav.back` |
 | Go Forward | ⌘], ⌥→ | Ctrl+], Alt+→ | `nav.forward` |
 | Go to Path… | ⌘L | Ctrl+L | `nav.goto` |
+| Jump to Folder… | ⌘J | Ctrl+J | `nav.jump` |
+| Clear Jump History |  |  | `nav.clear_jump_history` |
 | Reload | ⌘R | Ctrl+R | `nav.reload` |
 | Show in Finder / Explorer / file manager | ⌘↩ | Ctrl+Enter | `nav.reveal` |
 | Command Palette | ⌘K, ⇧⌘P | Ctrl+K, Ctrl+Shift+P | `app.palette` |
@@ -226,6 +228,9 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Extend Selection to First | ⇧↖ | Shift+Home | `select.extend_first` |
 | Extend Selection to Last | ⇧↘ | Shift+End | `select.extend_last` |
 | Select All | ⌘A | Ctrl+A | `select.all` |
+| Select by Pattern… | ⌘S | Ctrl+S | `select.pattern` |
+| Invert Selection | ⇧⌘I | Ctrl+Shift+I | `select.invert` |
+| Select All of This Kind |  |  | `select.kind` |
 | Show or Hide Hidden Files | ⌘., ⇧⌘. | Ctrl+., Ctrl+Shift+. | `view.hidden` |
 | Sort by Name |  |  | `view.sort_name` |
 | Sort by Kind |  |  | `view.sort_kind` |

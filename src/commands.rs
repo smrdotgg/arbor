@@ -56,6 +56,8 @@ commands! {
     Back "nav.back" "Go Back", ["cmd+[", "alt+left"];
     Forward "nav.forward" "Go Forward", ["cmd+]", "alt+right"];
     GoTo "nav.goto" "Go to Path…", ["cmd+l"];
+    Jump "nav.jump" "Jump to Folder…", ["cmd+j"];
+    ClearJump "nav.clear_jump_history" "Clear Jump History", [];
     Reload "nav.reload" "Reload", ["cmd+r"];
     Reveal "nav.reveal" REVEAL, ["cmd+enter"];
     Palette "app.palette" "Command Palette", ["cmd+k", "cmd+shift+p"];
@@ -90,6 +92,9 @@ commands! {
     ExtendFirst "select.extend_first" "Extend Selection to First", ["shift+home"];
     ExtendLast "select.extend_last" "Extend Selection to Last", ["shift+end"];
     SelectAll "select.all" "Select All", ["cmd+a"];
+    SelectPattern "select.pattern" "Select by Pattern…", ["cmd+s"];
+    InvertSelection "select.invert" "Invert Selection", ["cmd+shift+i"];
+    SelectKind "select.kind" "Select All of This Kind", [];
 
     Hidden "view.hidden" "Show or Hide Hidden Files", ["cmd+.", "cmd+shift+."];
     SortName "view.sort_name" "Sort by Name", [];
