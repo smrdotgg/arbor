@@ -594,7 +594,9 @@ impl State {
                 let f = &mut self.panes[ix].f;
                 f.marked.clear();
                 if p.select.len() > 1 {
-                    f.marked.extend(p.select.iter().cloned());
+                    // Only names still here: what was trashed or deleted isn't selected.
+                    let here: std::collections::HashSet<&OsString> = f.entries.iter().map(|e| &e.os).collect();
+                    f.marked.extend(p.select.iter().filter(|n| here.contains(n)).cloned());
                 }
                 f.refilter(p.select.first().map(OsString::as_os_str));
                 f.anchor = f.sel;

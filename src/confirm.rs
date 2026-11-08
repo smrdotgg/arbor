@@ -300,6 +300,7 @@ mod tests {
         assert!(!d.join("a.txt").exists() && !d.join("b.txt").exists() && !d.join("sub").exists());
         assert_eq!(s.note.as_deref(), Some("Deleted 3 items permanently"));
         assert_eq!(s.undo.len(), undos, "nothing to undo");
+        assert!(s.cur().marked.is_empty(), "what's gone isn't selected: {:?}", s.cur().marked);
         // One item: named in the title.
         std::fs::write(d.join("c.txt"), "c").unwrap();
         s.reload();
