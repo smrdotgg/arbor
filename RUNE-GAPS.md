@@ -16,6 +16,31 @@ Newest first.
 
 ---
 
+## Search: a virtual list that grows costs a read of every key
+
+- **Feature:** Search in This Folder (NORTHSTAR Core: "live walk, no index, streaming"). Results
+  arrive in batches, at most one per frame, for as long as the walk runs, and are appended to
+  the list.
+- **What Rune is missing:** a cheap append to `virtual_rows`. When the row count changes,
+  layout reads every row's key again, copies each into a `String` and rebuilds its key sets
+  (`runtime/commit/measure.rs`: `same` is false whenever `count != keys.len()`, and the
+  `virtual_rows_version` shortcut only applies to an unchanged count). So each frame that adds
+  rows costs time in proportion to the whole list. Measured under Xvfb on tabot-dev: a frame's
+  update grew from 5 ms at 6,000 results to 54 ms at 60,000, and a key pressed while results
+  streamed took 29.5 ms median, 56 ms p95.
+- **What we did instead:** while a walk is still going, the list takes in at most 1,000 results
+  (`LIVE_ROWS` in `src/search.rs`); the rest are counted in the status bar ("Searching… 5,234
+  found in 40,000 items · showing the first 1,000 until it's done") and join in one step when the
+  walk ends or Esc stops it, which costs what a listing of that size costs (7–8 ms for 61,000
+  rows here).
+- **What users lose:** during a long search over a big tree they can scroll through the first
+  1,000 results only, until it finishes or they press Esc. The step at the end is one frame of
+  Rune's per-key cost for the whole list.
+- **Suggested Rune change:** with an unchanged `virtual_rows_version` and a larger count, treat
+  the last commit's keys as a prefix and read only the new rows' keys (an append), or an explicit
+  `virtual_rows_appended(old_count)` hint. Then a streaming list costs per frame only what it
+  adds.
+
 ## Quick preview: no hook that runs after every input
 
 - **Feature:** quick preview (NORTHSTAR Core). While it's open it follows the active pane's

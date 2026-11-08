@@ -6,6 +6,8 @@ Arbor against the speed budgets in [`NORTHSTAR.md`](NORTHSTAR.md). Newest first.
 scripts/bench.sh 11 10                         # 11 cold starts, 10 rounds each (opens windows: leave the machine alone)
 scripts/bench.sh 11 10 --tabs 5                # plus 5 cold starts timing a tab switch to the 10k folder
 scripts/bench.sh 11 10 --jump 5                # plus 5 cold starts opening Jump with a 5k-folder history
+scripts/bench.sh 11 10 --search 5              # plus 5 cold starts searching a 120k-file tree
+cargo test --release -- --ignored --nocapture search_speed   # walk speed by thread count (vendor/, or ARBOR_SEARCH_TREE)
 xvfb-run -a scripts/bench.sh 11 10             # Linux without a display
 cargo test --release -- --ignored --nocapture list_10k   # read + sort only, no window
 ```
@@ -22,6 +24,70 @@ runs two to three frames behind submission (`frame/present_time.rs`). Rune doesn
 frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below means the
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
+
+## 2026-11-08, recursive search (milestone 6)
+
+What changed on the measured path: nothing runs until ⌘F. Each key and frame makes one more
+`None` check per pane (`Folder::search`), the window's walking threads start with its first
+search, and the binary carries the search code. Before is 9eecac3, after is dbef797, both
+driven by the new bench, alternating. New rows (`--search 5`: five more cold starts, 10 rounds
+each, in a tree of 120,000 small files in 2,000 folders two levels deep; each round opens
+Search in This Folder, types `1`, which about half the names contain, presses ↓ once a frame
+while results stream in, and leaves with Esc when the walk is done):
+
+- **search 120k: key → first results**: the `1` to the frame showing the first batch.
+- **search 120k: key → walk done**: the `1` to the frame after the walk finished (61,524 found
+  of 122,040 items).
+- **key → frame, query**: the `1` itself, which stops any walk, clears the list and starts one.
+- **key → frame while results stream**: each ↓ pressed while batches were still landing.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+Load average 1.5–2.3. Order: before, after, after, before. Warm cache (no root to drop it).
+
+| Measure (median / p95, submission proxy) | Before (2 passes) | After (2 passes) |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 132.2 / 140.1, 132.7 / 141.6 ms | 131.1 / 139.1, 131.8 / 136.7 ms |
+| Listing visible (10k) | 39.5 / 45.0, 38.3 / 44.4 ms | 39.2 / 45.7, 41.1 / 44.8 ms |
+| Key → frame (synthetic ↓) | 6.1 / 6.9, 6.0 / 6.5 ms | 6.1 / 7.2, 6.1 / 6.8 ms |
+| **Search 120k: key → first results** | — | **18.8 / 31.0, 19.0 / 28.8 ms** |
+| **Search 120k: key → walk done** | — | **107.6 / 135.1, 109.4 / 123.9 ms** |
+| **Key → frame, query (starts the walk)** | — | **4.5 / 10.0, 0.7 / 7.8 ms** |
+| **Key → frame while results stream** | — | **9.1 / 14.9, 9.3 / 14.2 ms** (330 and 336 keys) |
+
+No regression in cold start, listing or keys. Keys while results stream are over the 8 ms
+budget on lavapipe. Split with `ARBOR_TIMING`: the update (Arbor's work: taking the batch,
+the view, layout) is 2–3 ms against about 1.6 ms for a ↓ without a search, and the rest is
+lavapipe encoding the frame on the CPU (6–9 ms), on a 4-core machine whose cores the four
+walking threads are also using. On a real GPU encoding is under a millisecond (0.7 ms for a
+whole ↓ frame on the Mac), so the Mac should land near 2–3 ms; it hasn't been measured there
+yet (no GUI runs on it this milestone), and that's the number that decides the budget.
+
+Before the fix that's in this build, the same keys took 29.5 / 56.1 ms, growing with the
+results (a frame's update 5 ms at 6,000 results, 54 ms at 60,000): Rune reads every row key of
+a virtual list again whenever its row count changes (RUNE-GAPS.md), so a list that grew every
+frame cost time in proportion to the results. Now the list takes in at most 1,000 results while
+the walk goes on and the rest join in one step at the end (7–8 ms for 61,524 rows here). The
+walking threads also run at a lower priority than the window. Three walking threads instead of
+four (leaving a core for the window) made no measurable difference: 11.0 against 11.3–11.6 ms
+median on a busier pass (load 3–5).
+
+Walk speed by thread count, measured directly (`cargo test --release -- --ignored --nocapture
+search_speed`, warm cache, median of 7, load 2.4–3.4):
+
+| Tree | Query | 1 thread | 2 threads | 4 threads |
+| --- | --- | --- | --- | --- |
+| `vendor/` (567 MB, 26,857 items) | `mod.rs` (2,392 found) | 34.1 ms, first 5.2 ms | 25.3 ms, first 4.0 ms | **22.2 ms, first 2.7 ms** |
+| `vendor/` | none found | 29.0 ms | 21.5 ms | **18.1 ms** |
+| `~/.cargo/registry` (990 MB, 38,144 items) | `mod.rs` (3,558 found) | 82.6 ms, first 13.6 ms | 52.6 ms, first 8.4 ms | **48.6 ms, first 8.1 ms** |
+| `~` (115,550 items) | `mod.rs` (4,895 found) | 203.4 ms, first 25.2 ms | 111.6 ms, first 14.2 ms | **79.2 ms, first 5.9 ms** |
+| `~` | none found | 117.8 ms | 88.5 ms | **71.5 ms** |
+
+Four threads finish 1.5–2.6× faster than one and show the first result sooner, so a window
+walks on min(4, cores). A cold cache (a first search after boot, or a spinning disk) will be
+slower and lean harder on the parallel reads; it couldn't be measured here without root.
+
+Binary: release 37.67 → 37.81 MB unstripped, 28.46 → 28.58 MB stripped (+0.12 MB). No new crates.
 
 ## 2026-11-08, Jump to Folder and Select by Pattern (milestone 5)
 

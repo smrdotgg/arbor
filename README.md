@@ -45,7 +45,7 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 13,200 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
+About 16,000 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
 `ops.rs` (copy, move, trash and undo on a worker), `noclobber.rs` (moves, copies and file ids
 that never replace anything), `trash.rs` (each platform's trash), `app.rs`
 (state, startup, key dispatch, what each command does), `folder.rs` (one folder on screen: its
@@ -53,7 +53,8 @@ listing, selection, filter, sort and history, and what a hidden tab keeps), `pan
 split view), `commands.rs` (the command table and keymap), `palette.rs` (the command palette),
 `config.rs` (the settings file), `actions.rs` (clipboard, rename, drag and drop, context menu),
 `preview.rs` (quick preview: reading, sniffing and decoding on a worker), `jump.rs` (Jump to
-Folder: the history's writer thread, frecency and ranking), `pattern.rs` (globs), `select.rs`
+Folder: the history's writer thread, frecency and ranking), `search.rs` (Search in This Folder:
+the walk, its threads and the results), `pattern.rs` (globs), `select.rs`
 (Select by Pattern and the other selection commands), `view.rs` (UI) and `timing.rs` (opt-in
 speed measurement).
 
@@ -88,7 +89,9 @@ hook. Showing a hidden tab is logged as `tab`, with `same_frame=1` when its fres
 in time for the key's own frame. `scripts/bench.sh` cold-starts Arbor on a 10,000-entry folder
 several times and reports median and p95 against each budget (`--tabs N` adds N runs timing a
 tab switch to that folder, and `--preview N` adds N runs timing the quick preview of a 256 KB
-text file and a 12 MP JPEG from Space to the frame showing it, and keys while it's open). It opens and closes windows, so leave the machine alone
+text file and a 12 MP JPEG from Space to the frame showing it, and keys while it's open, and
+`--search N` adds N runs searching a 120,000-file tree: the key to the first results and to the
+end of the walk, and keys pressed while results stream in). It opens and closes windows, so leave the machine alone
 while it runs. `cargo test --release -- --ignored --nocapture list_10k` times reading and
 sorting alone. Results are in [`BENCH.md`](BENCH.md).
 
@@ -232,6 +235,50 @@ shows "Aa" or "aA"). Glob only: regular expressions would need a new crate.
 the cursor row's extension (or every folder). The selection is a set of names, so a listing that
 refreshes keeps it.
 
+### Search in This Folder
+
+**⌘F** turns the active tab into a search of its folder and everything inside it: a query field
+over the results, which stream in while the folder tree is walked. There's no index: every
+search walks again, and nothing is kept once it ends.
+
+- **Matching names** (files and folders): each word is a substring, case aside, unless it has
+  a capital (then capitals count: `README`). A word with `*`, `?` or `[` is a glob matching the
+  whole name (`*.rs`, `IMG_[0-9]*`), with the same rule for capitals. Several words must all
+  match (`report 2024 *.pdf`).
+- **Results** show the name, the folder it's in below the search's root (dim), size and date.
+  They stay in the order found, shallow folders first, and nothing reshuffles under the pointer;
+  click a header to sort them (results found after that join the order when the walk ends).
+  The status bar says "Searching… 1,234 found in 18,000 items", then "1,234 found in 52,113
+  items · 1.8 s". While the walk goes on, the list holds the first 1,000 results, and the rest
+  join when it ends or Esc stops it: Rune reads every row's key again whenever a list grows, so
+  a list growing every frame would slow the window in proportion to the results (see
+  `RUNE-GAPS.md`).
+- **Keys:** typing edits the query; ↑↓ and Page Up/Down move through the results while you
+  type; Enter or Tab hands the keys to the results, so Space previews, ⌫ goes back to the query
+  and everything else works as in a folder: open, Show in Finder, copy, cut, Move to Trash,
+  rename, duplicate, Copy Path, drag, F5 and F6, the context menu, Select by Pattern. Each acts
+  on the result's own full path (a rename stays in the item's folder; two `report.txt` in
+  different folders are two items). Paste, New Folder and drops onto the list wait until you
+  leave the search (where would they go?); a drop onto a folder in the results works.
+  Duplicate works on items from one folder at a time.
+- **After a file operation**, the results it could have touched are checked again on a worker
+  (not the whole walk): what's gone drops, what changed updates, and what landed inside the
+  search's root and matches joins. A renamed folder takes its results with it.
+- **Esc** stops a walk that's still going, keeping what it found; Esc again (or Back, ⌘[, or
+  clearing the query) goes back to the folder, read fresh, with its selection, scroll and filter
+  as they were. Opening a folder in the results goes there (Back comes back to the folder). A
+  tab hidden while searching keeps only its query, and searches again when it's shown.
+- **The walk** runs on a few threads of the window's own (at most four), started by its first
+  search, kept, and idle between searches, below the window's priority (nice 10 and the lowest
+  disk priority on Linux, the utility class on macOS, below normal on Windows). They share one queue of folders and check a stop flag
+  before every entry, so a new query, Esc, navigating, or hiding or closing the tab stops the
+  old walk at once. What they find goes into one shared batch, and the window takes it at most
+  once a frame and only appends it, so a slow disk slows the results, never the window. It
+  doesn't enter links to folders (no loops), hidden folders while hidden files are hidden, other
+  file systems mounted inside (`[search] cross_devices = true` to search those), or `/proc`,
+  `/sys` and `/dev` on Linux. Folders it can't read are counted ("3 folders couldn't be read").
+  It stops at 100,000 results and says so.
+
 Every command, with its default keys (generated from `src/commands.rs`; a test keeps it in sync,
 `ARBOR_WRITE_README=1 cargo test readme` rewrites it):
 
@@ -334,6 +381,9 @@ exclude = ["/tmp/**", "**/node_modules"]    # never remembered; "dir/**" is dir 
 
 [select]
 case_sensitive = false     # Select by Pattern; default true on Linux, false on macOS and Windows
+
+[search]
+cross_devices = false      # Search in This Folder also walks file systems mounted inside it
 
 [keys]
 "file.trash" = ["cmd+backspace", "delete"]   # replaces the command's default keys
