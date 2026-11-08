@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
 
-use rune::{ClipboardContent, DragItem, PopupItem, PopupMenu, PointerPress, TextEdit, Tx};
+use rune::{ClipboardContent, DragItem, PointerPress, PopupItem, PopupMenu, TextEdit, Tx};
 
 use crate::app::{Clip, Rename, State};
 use crate::ops::{self, Op, Undo};
@@ -34,7 +34,11 @@ impl State {
     /// ⌘⇧C: the selected path as text.
     pub fn copy_path(&mut self, tx: &mut Tx) {
         let paths = self.target_paths();
-        let text = if paths.is_empty() { self.cwd.display().to_string() } else { paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n") };
+        let text = if paths.is_empty() {
+            self.cwd.display().to_string()
+        } else {
+            paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n")
+        };
         self.note = Some(format!("Copied {text}"));
         tx.copy(text);
     }

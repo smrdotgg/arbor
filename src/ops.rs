@@ -11,11 +11,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub enum Op {
-    Copy { sources: Vec<PathBuf>, dest: PathBuf },
-    Move { sources: Vec<PathBuf>, dest: PathBuf },
-    Trash { sources: Vec<PathBuf> },
+    Copy {
+        sources: Vec<PathBuf>,
+        dest: PathBuf,
+    },
+    Move {
+        sources: Vec<PathBuf>,
+        dest: PathBuf,
+    },
+    Trash {
+        sources: Vec<PathBuf>,
+    },
     /// Move each `.0` to exactly `.1` (undoing a move, rename or trash).
-    MovePairs { pairs: Vec<(PathBuf, PathBuf)> },
+    MovePairs {
+        pairs: Vec<(PathBuf, PathBuf)>,
+    },
 }
 
 impl Op {

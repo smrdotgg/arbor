@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 use std::path::{Component, PathBuf};
 
-use rune::tok::{self, Theme, TextStyle};
+use rune::tok::{self, TextStyle, Theme};
 use rune::{Align, Color, Cursor, Cx, El, GrowthSpec, ScrollSpec, col, el, row, text, text_input};
 
 use crate::app::State;
@@ -196,7 +196,13 @@ fn pathbar(s: &State, l: Look) -> El {
 fn header(s: &State, l: Look, cols: Cols) -> El {
     let col_head = |label: &'static str, key: SortKey, w: Option<f32>, align: Align| {
         let on = s.sort.key == key;
-        let arrow = if !on { "" } else if s.sort.desc { " ↓" } else { " ↑" };
+        let arrow = if !on {
+            ""
+        } else if s.sort.desc {
+            " ↓"
+        } else {
+            " ↑"
+        };
         let mut t = text(format!("{label}{arrow}"))
             .key(format!("sort-{label}"))
             .font(SMALL)
@@ -214,14 +220,8 @@ fn header(s: &State, l: Look, cols: Cols) -> El {
         };
         t
     };
-    let mut h = row()
-        .key("header")
-        .w_full()
-        .h(24.0)
-        .px(12.0)
-        .gap(12.0)
-        .center_y()
-        .child(col_head("Name", SortKey::Name, None, Align::Start));
+    let mut h =
+        row().key("header").w_full().h(24.0).px(12.0).gap(12.0).center_y().child(col_head("Name", SortKey::Name, None, Align::Start));
     if cols.kind {
         h = h.child(col_head("Kind", SortKey::Kind, Some(KIND_W), Align::Start));
     }
@@ -355,14 +355,14 @@ fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
                 .child(name_el),
         );
     if renaming.is_none() {
-        r = r
-            .drag_out(move |s: &State| if s.version == version { s.drag_item(i) } else { None })
-            .on_drag_end(|s: &mut State, outcome, tx| {
+        r = r.drag_out(move |s: &State| if s.version == version { s.drag_item(i) } else { None }).on_drag_end(
+            |s: &mut State, outcome, tx| {
                 tx.instant();
                 if outcome == rune::DragOutcome::Moved {
                     s.reload();
                 }
-            });
+            },
+        );
     }
     if e.is_dir {
         let target = s.cwd.join(&e.os);
@@ -380,13 +380,7 @@ fn file_row(s: &State, i: usize, l: Look, cols: Cols) -> El {
     if cols.kind {
         r = r.child(text(fs::kind(e).to_string()).font(NUM).color(dim).truncate().w(KIND_W));
     }
-    r = r.child(
-        text(if e.is_dir { "—".to_string() } else { fs::fmt_size(e.size) })
-            .font(NUM)
-            .color(dim)
-            .align(Align::End)
-            .w(SIZE_W),
-    );
+    r = r.child(text(if e.is_dir { "—".to_string() } else { fs::fmt_size(e.size) }).font(NUM).color(dim).align(Align::End).w(SIZE_W));
     if cols.date {
         r = r.child(text(fs::fmt_time(e.mtime_ms, s.now)).font(NUM).color(dim).w(DATE_W));
     }

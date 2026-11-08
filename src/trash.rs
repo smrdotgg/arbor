@@ -9,8 +9,7 @@ pub fn trash(path: &Path) -> Result<Option<PathBuf>, String> {
     let url = NSURL::from_file_path(path).ok_or("bad path")?;
     let fm = NSFileManager::defaultManager();
     let mut out = None;
-    fm.trashItemAtURL_resultingItemURL_error(&url, Some(&mut out))
-        .map_err(|e| e.localizedDescription().to_string())?;
+    fm.trashItemAtURL_resultingItemURL_error(&url, Some(&mut out)).map_err(|e| e.localizedDescription().to_string())?;
     Ok(out.and_then(|u| u.to_file_path()))
 }
 
@@ -67,9 +66,7 @@ fn url_escape(p: &Path) -> String {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn deletion_date() -> String {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64);
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
     let t = rune::LocalTime::at(ms);
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute, t.second)
 }

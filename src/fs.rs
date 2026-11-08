@@ -83,10 +83,7 @@ fn read(path: &Path) -> Result<Vec<Entry>, String> {
 }
 
 fn mtime(m: &std::fs::Metadata) -> i64 {
-    m.modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_millis() as i64)
+    m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as i64)
 }
 
 #[allow(unused_variables)]
@@ -175,9 +172,7 @@ fn trim_zeros(d: &[u8]) -> &[u8] {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// Sidebar places that exist on this machine.

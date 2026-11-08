@@ -324,9 +324,8 @@ impl State {
                 .map(|(i, _)| i as u32),
         );
         let by_name = select.and_then(|n| self.visible.iter().position(|&i| self.entries[i as usize].os == n));
-        let by_prefix = || {
-            (!q.is_empty()).then(|| self.visible.iter().position(|&i| self.entries[i as usize].lower.starts_with(&q))).flatten()
-        };
+        let by_prefix =
+            || (!q.is_empty()).then(|| self.visible.iter().position(|&i| self.entries[i as usize].lower.starts_with(&q))).flatten();
         self.sel = by_name.or_else(by_prefix).unwrap_or(0);
         self.version += 1;
     }
@@ -568,8 +567,6 @@ pub fn title(p: &Path) -> String {
 }
 
 fn now() -> rune::LocalTime {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64);
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
     rune::LocalTime::at(ms)
 }
