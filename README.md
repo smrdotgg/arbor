@@ -27,6 +27,9 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   temporary name. On a disk without a no-replace rename, files move by hard link and folders
   can't be moved or renamed at all, since every way to do it there could replace an empty folder. On APFS, copies are clones (instant). A move to another
   disk copies, then removes only the originals that haven't changed since they were copied.
+  A cancelled or failed copy removes what it made, each file known by the handle that wrote
+  it, so a file another app put at the name meanwhile (a copy can stall on a slow source) stays
+  and the status bar says so.
 - **Undo refuses rather than guesses.** When an operation finishes, each result gets a
   fingerprint: identity (device and inode; volume and file id on Windows), type, size and
   modified time. For copies and new folders, which undo sends to the Trash, it also covers
@@ -241,9 +244,12 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Go to sidebar place 1…9 | ⌘1 … ⌘9 | Ctrl+1 … Ctrl+9 | `place.1` … `place.9` |
 <!-- commands:end -->
 
-Notes: paste copies, or moves what you cut; ⌥⌘V always moves. The palette names ⌘\ "Split
-View" or "Close Split View", and Space "Quick Preview" or "Close Preview", whichever it will do. Undo refuses if any item changed
-since. Rename selects the name before the extension; Enter saves, Esc cancels. Esc also cancels
+Notes: paste copies, or moves what you cut; ⌥⌘V always moves. A paste goes into the folder it
+was asked for in, each paste on its own (two asked before the clipboard answers keep their own
+folders), and is refused if that folder was moved or replaced before the clipboard answered.
+Two panes on one folder by different paths (a symlink to it) are known to be the same folder.
+The palette names ⌘\ "Split View" or "Close Split View", and Space "Quick Preview" or "Close
+Preview", whichever it will do. Undo refuses if any item changed since. Rename selects the name before the extension; Enter saves, Esc cancels. Esc also cancels
 a running copy or move.
 
 ## Settings
