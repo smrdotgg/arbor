@@ -177,10 +177,13 @@ clears the filter or cancels a file operation.
   BMP, interlaced PNG and GIF, and progressive JPEG, which decode whole first), or wider or
   taller than 65,535 pixels, is refused with a "Too large to preview" card, so a huge image
   never takes gigabytes. WebP can't be stopped once it starts decoding (its decoder has no way
-  to), so it's held to what decodes in about 30 ms here: 0.45 megapixels for lossy and animated
-  WebP, 1.7 for lossless. Larger ones say "Too large to preview" until a decoder that can stop
-  partway is available. So is a JPEG with over 16 MB of metadata (its markers are walked before it's
-  decoded), and a WebP's bitstreams are checked against its canvas before decoding.
+  to), so it's held to 12 megapixels (lossy, lossless and animated): a decode you've moved on
+  from still runs to the end on the preview's thread, up to about 2 s for the worst 12 MP image
+  here (random pixels; a photo-like one 0.3–0.5 s), and its result is dropped. That's an
+  exception to the "cancels it immediately" rule, signed off by the owner (NORTHSTAR.md). Larger
+  ones say "Too large to preview", and so does a JPEG with over 16 MB of metadata (its markers
+  are walked before it's decoded); a WebP's bitstreams are checked against its canvas before
+  decoding.
 - **Everything else**, and folders: name, kind, size and date, and for a folder how many items
   it has (one read of it). PDF, video, audio, office documents and other image formats (HEIC,
   TIFF, RAW) say they need the platform's own preview API, which Arbor doesn't use yet.

@@ -25,6 +25,29 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-08, WebP previews up to 12 MP (NORTHSTAR exception)
+
+The owner signed off an exception to the view-triggered work rule (NORTHSTAR.md, Exceptions log):
+WebP previews go up to 12 MP, lossy and lossless, instead of 0.45 / 1.7 MP. image-webp can't
+stop a decode partway, so a WebP you've moved on from still decodes to the end on the preview's
+thread (one at a time; a newer request replaces any waiting one; the result is dropped). The
+65,535-pixel side cap and the bitstream checks stay.
+
+`ARBOR_WEBP_DIR=… cargo test --release -- --ignored --nocapture webp_decode_speed` on 4000 × 3000
+images made with Pillow 10.2 (libwebp), median of 5 whole decodes, which is the work that goes on
+after a cancel. tabot-dev was busy (load average 4–5: other agents compiling on its 4 cores), so
+two passes are given; the quieter earlier measurements below put random-pixel lossy at 63–67 ms a
+megapixel, about half of these. Peak RSS: the whole preview path (decode, then shrink to the
+panel) for one file, `/usr/bin/time -v`, against 4.8 MB for the test binary with no file.
+
+| 12 MP WebP | File | Decode (2 passes) | Peak RSS |
+| --- | --- | --- | --- |
+| Lossy, random pixels with alpha (worst) | 22.2 MB | 1,835 / 2,005 ms | 92 MB |
+| Lossy, random pixels | 10.1 MB | 1,519 / 1,538 ms | 78 MB |
+| Lossy, photo-like (gradients) | 57 KB | 305 / 480 ms | 60 MB |
+| Lossless, random pixels with alpha | 48.0 MB | 349 / 579 ms | 55 MB |
+| Lossless, photo-like | 4.5 KB | 84 / 121 ms | 88 MB |
+
 ## 2026-11-08, milestone 5 review fixes and Jump ranking
 
 ### MacBook Pro, Apple M4 Pro, macOS 27.2 (60 Hz display), at 6932cf2, run by the owner

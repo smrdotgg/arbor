@@ -28,7 +28,8 @@
 //!   progressive JPEG, interlaced GIF) are refused over [`MAX_PIXELS_WHOLE`]. GIF decodes a
 //!   chunk of rows at a time and looks at the stop flag between them. WebP can't be stopped
 //!   once it starts (image-webp has no incremental decoding), so it's held to
-//!   [`MAX_PIXELS_WEBP_LOSSY`] and [`MAX_PIXELS_WEBP_LOSSLESS`], about 30 ms of decoding.
+//!   [`MAX_PIXELS_WEBP`]: an exception to the view-triggered work rule, signed off by the owner
+//!   (NORTHSTAR.md, Exceptions log).
 
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -65,13 +66,15 @@ pub const MAX_PIXELS: u64 = 100_000_000;
 /// that's at most about 200 MB for a moment on an 8 GB machine, however fast Space is tapped.
 pub const MAX_PIXELS_WHOLE: u64 = 24_000_000;
 /// WebP decodes whole, and image-webp has no way to stop partway (no incremental decoding: a
-/// lossy image's data is read up front, and a well-compressed one is in the first read), so its
-/// limits keep a decode that can't be stopped to about 30 ms. Measured on tabot-dev (Xeon
-/// 8375C, `webp_decode_speed`): the slowest lossy images (random pixels with alpha) take 67 ms
-/// a megapixel, lossless 17 ms. So lossy (and animated) WebP up to 0.45 MP and lossless up to
-/// 1.7 MP, and "Too large to preview" above.
-pub const MAX_PIXELS_WEBP_LOSSY: u64 = 450_000;
-pub const MAX_PIXELS_WEBP_LOSSLESS: u64 = 1_700_000;
+/// lossy image's data is read up front, and a well-compressed one is in the first read), so a
+/// decode that has started runs to the end after it's told to stop, and its result is dropped.
+/// That breaks the view-triggered work rule's "cancels it immediately", by an exception the
+/// owner signed off (NORTHSTAR.md, Exceptions log): lossy, lossless and animated WebP up to
+/// 12 MP (4000 × 3000), "Too large to preview" above. Measured on tabot-dev (Xeon 8375C,
+/// `webp_decode_speed`), the slowest 12 MP images (random pixels) are in BENCH.md. The UI
+/// thread is never involved: one decode at a time on the preview's worker, and a newer request
+/// replaces any waiting one.
+pub const MAX_PIXELS_WEBP: u64 = 12_000_000;
 /// The widest or tallest image decoded: JPEG's own limit. A pixel limit alone lets a
 /// 99,999,999 × 1 image through, whose rows and column map would take gigabytes; with each side
 /// at most this, a row is at most 512 KB (16-bit RGBA) and the column map 256 KB.
@@ -1354,12 +1357,7 @@ fn webp<R: BufRead + Seek>(mut r: R, fit: [u32; 2], stop: &AtomicBool) -> Result
     r.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let mut d = image_webp::WebPDecoder::new(r).map_err(|e| e.to_string())?;
     let (w, h) = d.dimensions();
-    // An animation's frames can be either kind: the lossy limit for all of it.
-    let (limit, what) = if d.is_animated() || d.is_lossy() {
-        (MAX_PIXELS_WEBP_LOSSY, "lossy WebP, which can't be stopped once it starts decoding")
-    } else {
-        (MAX_PIXELS_WEBP_LOSSLESS, "lossless WebP, which can't be stopped once it starts decoding")
-    };
+    let (limit, what) = (MAX_PIXELS_WEBP, "WebP, which can't be stopped once it starts decoding");
     if let Some(why) = no_pixels(w as u64, h as u64).or_else(|| too_big_for(w as u64, h as u64, limit, what)) {
         return Err(why);
     }
@@ -1818,31 +1816,43 @@ mod tests {
         }
     }
 
-    /// WebP can't be stopped once it starts decoding, so it's held to sizes that decode in about
-    /// 30 ms: lossless up to 1.7 MP, lossy up to 0.45 MP.
+    /// WebP can't be stopped once it starts decoding, so it's held to 12 MP (the exception in
+    /// NORTHSTAR.md), lossy and lossless alike, checked from the header before decoding.
     #[test]
-    fn webp_is_held_to_what_decodes_in_about_30_ms() {
-        let d = folder("webp-caps");
-        let lossless = |w: u32, h: u32| {
-            let mut b = Vec::new();
-            image_webp::WebPEncoder::new(&mut b).encode(&gradient(w, h), w, h, image_webp::ColorType::Rgba8).unwrap();
-            b
-        };
-        assert!(image(Format::Webp, std::io::Cursor::new(lossless(1300, 1300)), DEFAULT_FIT, &never()).is_ok(), "1.69 MP");
-        let err = image(Format::Webp, std::io::Cursor::new(lossless(1400, 1300)), DEFAULT_FIT, &never()).unwrap_err();
-        assert!(err.starts_with(TOO_LARGE) && err.contains("1.82 megapixels (the limit is 1.7 for lossless WebP"), "{err}");
-        // A lossy header (a VP8 key frame) of 800 × 600: over 0.45 MP, refused before decoding.
+    fn webp_is_held_to_12_megapixels() {
         let chunk =
             |id: &[u8], body: &[u8]| [id, &(body.len() as u32).to_le_bytes(), body, if body.len() % 2 == 1 { &[0] } else { &[] }].concat();
-        let mut vp8 = vec![0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a];
-        vp8.extend_from_slice(&800u16.to_le_bytes());
-        vp8.extend_from_slice(&600u16.to_le_bytes());
-        vp8.extend_from_slice(&[0; 64]);
-        let body = [b"WEBP".as_slice(), &chunk(b"VP8 ", &vp8)].concat();
-        let file = [b"RIFF".as_slice(), &(body.len() as u32).to_le_bytes(), &body].concat();
-        let err = image(Format::Webp, std::io::Cursor::new(&file), DEFAULT_FIT, &never()).unwrap_err();
-        assert!(err.starts_with(TOO_LARGE) && err.contains("(the limit is 0.45 for lossy WebP"), "{err}");
-        let _ = d;
+        let riff = |body: Vec<u8>| [b"RIFF".as_slice(), &(body.len() as u32).to_le_bytes(), &body].concat();
+        // A lossy header (a VP8 key frame) of `w` × `h`, with no image data after it.
+        let lossy = |w: u16, h: u16| {
+            let mut vp8 = vec![0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a];
+            vp8.extend_from_slice(&w.to_le_bytes());
+            vp8.extend_from_slice(&h.to_le_bytes());
+            vp8.extend_from_slice(&[0; 64]);
+            riff([b"WEBP".as_slice(), &chunk(b"VP8 ", &vp8)].concat())
+        };
+        // A lossless header (VP8L): 14-bit width and height, minus one.
+        let lossless = |w: u32, h: u32| {
+            let bits = (w - 1) | ((h - 1) << 14);
+            let mut vp8l = vec![0x2f];
+            vp8l.extend_from_slice(&bits.to_le_bytes());
+            vp8l.extend_from_slice(&[0; 64]);
+            riff([b"WEBP".as_slice(), &chunk(b"VP8L", &vp8l)].concat())
+        };
+        for (file, kind) in [(lossy(4001, 3000), "lossy"), (lossless(4001, 3000), "lossless")] {
+            let err = image(Format::Webp, std::io::Cursor::new(&file), DEFAULT_FIT, &never()).unwrap_err();
+            assert!(err.starts_with(TOO_LARGE) && err.contains("12 megapixels (the limit is 12 for WebP"), "{kind}: {err}");
+        }
+        // At the limit, it gets past the size check (to the decoder, which finds no data).
+        for (file, kind) in [(lossy(4000, 3000), "lossy"), (lossless(4000, 3000), "lossless")] {
+            let r = image(Format::Webp, std::io::Cursor::new(&file), DEFAULT_FIT, &never());
+            assert!(r.as_ref().is_err_and(|e| !e.starts_with(TOO_LARGE)), "{kind}: {:?}", r.map(|_| ()));
+        }
+        // A real lossless one decodes.
+        let (w, h) = (1400, 1300);
+        let mut b = Vec::new();
+        image_webp::WebPEncoder::new(&mut b).encode(&gradient(w, h), w, h, image_webp::ColorType::Rgba8).unwrap();
+        assert!(image(Format::Webp, std::io::Cursor::new(b), DEFAULT_FIT, &never()).is_ok());
     }
 
     /// How long a decode goes on after it's told to stop: a 24 MP GIF (6000 × 4000) told 12 ms
@@ -2309,8 +2319,8 @@ mod tests {
         settle(&mut s);
     }
 
-    /// How long a whole WebP decode takes (it can't be stopped once started), for each `.webp`
-    /// in `ARBOR_WEBP_DIR`: what sets [`MAX_PIXELS_WEBP`]. Median of 5.
+    /// How long a whole WebP decode takes (it can't be stopped once started, so this is the work
+    /// that goes on after a cancel), for each `.webp` in `ARBOR_WEBP_DIR`. Median of 5.
     /// `ARBOR_WEBP_DIR=… cargo test --release -- --ignored --nocapture webp_decode_speed`
     #[test]
     #[ignore = "benchmark: needs ARBOR_WEBP_DIR"]
@@ -2330,6 +2340,10 @@ mod tests {
                 })
                 .collect();
             times.sort_by(f64::total_cmp);
+            // The whole preview path once (decode, then shrink to the panel), for its peak memory:
+            // run with one file in the folder under `/usr/bin/time -v`.
+            let r = image(Format::Webp, BufReader::new(std::fs::File::open(&p).unwrap()), DEFAULT_FIT, &never());
+            assert!(r.is_ok(), "{:?}", r.err());
             let d = image_webp::WebPDecoder::new(BufReader::new(std::fs::File::open(&p).unwrap())).unwrap();
             let (w, h) = d.dimensions();
             let mp = (w as f64 * h as f64) / 1e6;
