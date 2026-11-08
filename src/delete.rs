@@ -10,7 +10,10 @@
 //! - **Mounts:** a folder on another device than the item (a disk, a FUSE or network mount), or
 //!   a mount point on the same one (a bind mount: Linux reads `/proc/self/mountinfo` once per
 //!   operation, [`Mounts`]), is never entered or removed: the delete stops there and says another
-//!   disk is mounted there. So does an item that is itself a mount point.
+//!   disk is mounted there. So does an item that is itself a mount point. On macOS each folder's
+//!   volume is compared too ([`volume`]): the APFS volumes of one group share a device number
+//!   (`/` and `/System/Volumes/Data`), and firmlinks (`/Users`, `/Applications`) lead from one
+//!   to the other.
 //! - **Identity:** each folder's opened handle must be the folder that was checked, and before
 //!   it's removed its name must still lead to it; one moved or replaced meanwhile stops the
 //!   delete there, untouched.
@@ -102,27 +105,75 @@ fn unescape(s: &str) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// The mount boundaries of one tree: its device, and the mount points inside it (by canonical
-/// path). For the other recursive removals (a cross-disk move's originals), which go by path.
+/// macOS: which volume a folder is on, as the mount point `statfs` names (`f_mntonname`). The
+/// APFS volumes of one group share a device number, and a firmlink (`/Users`, `/Applications`)
+/// leads from the system volume to the Data volume, so a device number alone doesn't tell
+/// them apart. Elsewhere `None`: the device number does.
+pub mod volume {
+    #[cfg(target_os = "macos")]
+    fn name(s: &libc::statfs) -> Vec<u8> {
+        s.f_mntonname.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect()
+    }
+
+    /// The volume of the open folder `fd`.
+    #[cfg(unix)]
+    pub fn of_fd(fd: std::os::fd::RawFd) -> Option<Vec<u8>> {
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: a zeroed statfs is a valid out-buffer for an open descriptor.
+            let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+            (unsafe { libc::fstatfs(fd, &mut s) } == 0).then(|| name(&s))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = fd;
+            None
+        }
+    }
+
+    /// The volume of the folder at `p` (following links: call it for folders).
+    pub fn of_path(p: &std::path::Path) -> Option<Vec<u8>> {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+            // SAFETY: a NUL-terminated path and a zeroed out-buffer.
+            let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+            (unsafe { libc::statfs(c.as_ptr(), &mut s) } == 0).then(|| name(&s))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = p;
+            None
+        }
+    }
+}
+
+/// The mount boundaries of one tree: its device (and on macOS its volume), and the mount points
+/// inside it (by canonical path). For the other recursive removals (a cancelled copy's leftovers,
+/// a cross-disk move's originals) and the count of what's left, which go by path.
 pub struct Fence {
     root: PathBuf,
     canon: PathBuf,
     #[cfg(unix)]
     dev: Option<u64>,
+    vol: Option<Vec<u8>>,
     inside: Vec<PathBuf>,
 }
 
 impl Fence {
     pub fn new(root: &Path, mounts: &Mounts) -> Fence {
         let canon = canonical(root);
+        let meta = root.symlink_metadata().ok();
         #[cfg(unix)]
-        let dev = root.symlink_metadata().ok().map(|m| std::os::unix::fs::MetadataExt::dev(&m));
+        let dev = meta.as_ref().map(std::os::unix::fs::MetadataExt::dev);
         Fence {
             root: root.to_path_buf(),
             inside: mounts.under(&canon),
             canon,
             #[cfg(unix)]
             dev,
+            vol: meta.filter(|m| m.is_dir()).and_then(|_| volume::of_path(root)),
         }
     }
 
@@ -130,6 +181,9 @@ impl Fence {
     pub fn crosses(&self, p: &Path, m: &std::fs::Metadata) -> bool {
         #[cfg(unix)]
         if self.dev.is_some_and(|d| d != std::os::unix::fs::MetadataExt::dev(m)) {
+            return true;
+        }
+        if m.is_dir() && self.vol.is_some() && volume::of_path(p) != self.vol {
             return true;
         }
         #[cfg(not(unix))]
@@ -153,7 +207,16 @@ fn canonical(p: &Path) -> PathBuf {
 /// before removing it; `false` stops (a cancel). Adds one to `removed` for each file, link and
 /// folder removed. Never enters or removes a mount point (`mounts`, or another device).
 pub fn remove_tree(path: &Path, mounts: &Mounts, go: &mut dyn FnMut(&Path) -> bool, removed: &mut u64) -> Result<(), Halt> {
-    imp::remove_tree(path, mounts, go, removed)
+    imp::remove_tree(path, mounts, go, removed, false)
+}
+
+/// [`remove_tree`]'s walk with every check, removing nothing: where it would stop, and how many
+/// items it would remove (tests, and the Mac's check that it stops at a volume boundary).
+#[cfg(all(test, unix))]
+pub fn dry_run(path: &Path, mounts: &Mounts) -> (Result<(), Halt>, u64) {
+    let mut n = 0;
+    let r = imp::remove_tree(path, mounts, &mut |_| true, &mut n, true);
+    (r, n)
 }
 
 /// How many items are left in `path` (itself included), not entering mount points: what a
@@ -184,7 +247,7 @@ mod imp {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
 
-    use super::{Halt, Mounts};
+    use super::{Halt, Mounts, volume};
 
     fn cstr(s: &OsStr) -> io::Result<CString> {
         CString::new(s.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
@@ -198,13 +261,17 @@ mod imp {
     struct Walk<'a> {
         /// The item's device: a folder on another is a mount.
         dev: libc::dev_t,
+        /// macOS: the item's volume; a folder on another is a mount or behind a firmlink.
+        vol: Option<Vec<u8>>,
         /// Mount points inside the item, by canonical path (usually none).
         inside: Vec<PathBuf>,
         go: &'a mut dyn FnMut(&Path) -> bool,
         removed: &'a mut u64,
+        /// Walk and check, but remove nothing (`dry_run`).
+        dry: bool,
     }
 
-    pub fn remove_tree(path: &Path, mounts: &Mounts, go: &mut dyn FnMut(&Path) -> bool, removed: &mut u64) -> Result<(), Halt> {
+    pub fn remove_tree(path: &Path, mounts: &Mounts, go: &mut dyn FnMut(&Path) -> bool, removed: &mut u64, dry: bool) -> Result<(), Halt> {
         let name = path.file_name().ok_or_else(|| fail(path, io::Error::from(io::ErrorKind::InvalidInput)))?;
         let parent = match path.parent() {
             Some(p) if !p.as_os_str().is_empty() => p,
@@ -222,7 +289,19 @@ mod imp {
         if is_dir(&st) && st.st_dev != parent_dev {
             return Err(Halt::Mounted { at: path.to_path_buf() });
         }
-        let mut w = Walk { dev: st.st_dev, inside, go, removed };
+        // macOS: a folder on another volume than its folder (a mount point sharing the device
+        // number, or a firmlink such as /Users) is one too.
+        let mut vol = None;
+        if is_dir(&st)
+            && let Some(parent_vol) = volume::of_fd(dir.as_raw_fd())
+            && let Ok(item) = open_dir(dir.as_raw_fd(), &name, false)
+        {
+            vol = volume::of_fd(item.as_raw_fd());
+            if vol.as_ref().is_some_and(|v| *v != parent_vol) {
+                return Err(Halt::Mounted { at: path.to_path_buf() });
+            }
+        }
+        let mut w = Walk { dev: st.st_dev, vol, inside, go, removed, dry };
         remove_at(&dir, &name, path, &canon, &mut w)
     }
 
@@ -279,6 +358,9 @@ mod imp {
             if !same(&fstat(&sub).map_err(|e| fail(shown, e))?, &st) {
                 return Err(Halt::Changed { at: shown.to_path_buf() });
             }
+            if w.vol.is_some() && volume::of_fd(sub.as_raw_fd()) != w.vol {
+                return Err(Halt::Mounted { at: shown.to_path_buf() });
+            }
             for child in names(&sub).map_err(|e| fail(shown, e))? {
                 let n = OsStr::from_bytes(child.as_bytes());
                 remove_at(&sub, &child, &shown.join(n), &canon.join(n), w)?;
@@ -289,6 +371,10 @@ mod imp {
                 Ok(now) if same(&now, &st) => {}
                 _ => return Err(Halt::Changed { at: shown.to_path_buf() }),
             }
+        }
+        if w.dry {
+            *w.removed += 1;
+            return Ok(());
         }
         let flags = if is_dir { libc::AT_REMOVEDIR } else { 0 };
         // SAFETY: `name` is NUL-terminated and `dir` an open folder.
@@ -360,7 +446,8 @@ mod imp {
         }
     }
 
-    pub fn remove_tree(path: &Path, mounts: &Mounts, go: &mut dyn FnMut(&Path) -> bool, removed: &mut u64) -> Result<(), Halt> {
+    /// (`_dry` is for Unix's `dry_run`; Windows is never asked for one.)
+    pub fn remove_tree(path: &Path, mounts: &Mounts, go: &mut dyn FnMut(&Path) -> bool, removed: &mut u64, _dry: bool) -> Result<(), Halt> {
         // Windows lists no mounts (a volume mounted in a folder is a reparse point, checked
         // below); a list given in tests is honoured all the same.
         let canon = super::canonical(path);
@@ -480,6 +567,49 @@ mod tests {
         assert!(d.join("m2/precious").exists());
         // What's left is counted without entering the mount: t and mnt.
         assert_eq!(count_left(&d.join("t"), &mounts, &mut || true), Some(2));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The review's blocker: on macOS `/` and `/System/Volumes/Data` share a device number, so
+    /// a delete walked into the Data volume, and through the `/Users` firmlink. A dry run (it
+    /// removes nothing) now stops at each, and still walks a folder of the user's whole.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_volume_boundaries_stop_a_delete() {
+        for root in ["/System/Volumes/Data", "/Users", "/Applications"] {
+            let (r, n) = dry_run(Path::new(root), &Mounts::read());
+            assert!(matches!(&r, Err(Halt::Mounted { at }) if at == Path::new(root)), "{root}: {r:?}");
+            assert_eq!(n, 0, "{root}");
+        }
+        // Rooted above them: it stops at the first volume inside (after any empty folders of
+        // the system volume it meets first), never past it.
+        let (r, _) = dry_run(Path::new("/System/Volumes"), &Mounts::read());
+        assert!(matches!(&r, Err(Halt::Mounted { at }) if at.parent() == Some(Path::new("/System/Volumes"))), "{r:?}");
+        // The path-based fence agrees.
+        let fence = Fence::new(Path::new("/System/Volumes"), &Mounts::read());
+        let data = Path::new("/System/Volumes/Data");
+        assert!(fence.crosses(data, &data.symlink_metadata().unwrap()));
+        let fence = Fence::new(Path::new("/"), &Mounts::read());
+        let users = Path::new("/Users");
+        assert!(fence.crosses(users, &users.symlink_metadata().unwrap()), "the /Users firmlink is another volume");
+    }
+
+    /// A dry run walks with every check and removes nothing: a plain folder whole, and it stops
+    /// at a mount point inside.
+    #[cfg(unix)]
+    #[test]
+    fn a_dry_run_removes_nothing_and_stops_at_mounts() {
+        let d = std::env::temp_dir().join(format!("arbor-delete-dry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("a/b")).unwrap();
+        fs::write(d.join("a/b/f"), "x").unwrap();
+        let (r, n) = dry_run(&d, &Mounts::default());
+        assert!(r.is_ok() && n == 4, "{r:?} {n}");
+        assert!(d.join("a/b/f").exists(), "a dry run removes nothing");
+        let canon = fs::canonicalize(&d).unwrap();
+        let (r, _) = dry_run(&d, &Mounts::of(&[&canon.join("a/b")]));
+        assert!(matches!(&r, Err(Halt::Mounted { at }) if at == &d.join("a/b")), "{r:?}");
+        assert!(d.join("a/b/f").exists());
         let _ = fs::remove_dir_all(&d);
     }
 
