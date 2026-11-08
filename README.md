@@ -178,7 +178,9 @@ clears the filter or cancels a file operation.
   it has (one read of it). PDF, video, audio, office documents and other image formats (HEIC,
   TIFF, RAW) say they need the platform's own preview API, which Arbor doesn't use yet.
 - A link previews what it points to and says where; a broken link, an unreadable file, or a
-  pipe or device (never opened: reading a pipe would wait forever) says so.
+  pipe or device (never opened: reading a pipe would wait forever) says so. A file swapped for a
+  pipe after that check is still never waited on: the open doesn't block, and the opened
+  file's own type is checked before anything is read.
 
 It costs nothing while closed: no reads, no decoding, nothing per key. Open, it's background
 work that follows the rules for it: the list moves at once and the header (from the listing)

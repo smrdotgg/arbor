@@ -549,21 +549,52 @@ fn couldnt(e: impl std::fmt::Display) -> Body {
     Body::Error(format!("Couldn't read it: {e}"))
 }
 
+/// Opens `p` only if it's a regular file, without ever blocking on the open: on Unix with
+/// `O_NONBLOCK` (a FIFO swapped in after the check would otherwise wait for a writer), then
+/// the opened handle's own type is checked, and blocking reads are turned back on. `None`
+/// when it isn't a regular file.
+fn open_regular(p: &Path) -> std::io::Result<Option<std::fs::File>> {
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut o, libc::O_NONBLOCK);
+    let f = o.open(p)?;
+    if !f.metadata()?.is_file() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = f.as_raw_fd();
+        // SAFETY: `fd` is open for the life of `f`; F_GETFL and F_SETFL only change its flags.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+            }
+        }
+    }
+    Ok(Some(f))
+}
+
 /// A file: an image by its first bytes, else text if it looks like text, else a card.
 fn file(job: &Job, stop: &AtomicBool) -> Option<Loaded> {
+    // A pipe would block the read until something writes to it; a device may never end.
+    let not_regular = || {
+        Loaded::body(Body::Card(Card { items: None, note: Some("Not a regular file (a pipe, socket or device): it isn't opened.".into()) }))
+    };
     match std::fs::metadata(&job.path) {
         Err(e) => return Some(Loaded::body(couldnt(e))),
-        // A pipe would block the read until something writes to it; a device may never end.
-        Ok(m) if !m.is_file() => {
-            return Some(Loaded::body(Body::Card(Card {
-                items: None,
-                note: Some("Not a regular file (a pipe, socket or device): it isn't opened.".into()),
-            })));
-        }
+        // Not even opened (opening some devices does something).
+        Ok(m) if !m.is_file() => return Some(not_regular()),
         Ok(_) => {}
     }
-    let f = match std::fs::File::open(&job.path) {
-        Ok(f) => f,
+    #[cfg(test)]
+    hook::at(&job.path, "before-open");
+    // It can be swapped for something else since: the open checks again.
+    let f = match open_regular(&job.path) {
+        Ok(Some(f)) => f,
+        Ok(None) => return Some(not_regular()),
         Err(e) => return Some(Loaded::body(couldnt(e))),
     };
     let mut r = Stop { r: f, stop };
@@ -1983,6 +2014,36 @@ mod tests {
         let job = Job { path: p, is_dir: false, is_link: false, ext: String::new(), size: 0, fit: DEFAULT_FIT };
         let Body::Card(c) = load(&job, &never()).unwrap().body else { panic!() };
         assert!(c.note.unwrap().starts_with("Not a regular file"));
+    }
+
+    /// The file is swapped for a FIFO between the check and the open: the open doesn't wait
+    /// for a writer, and the opened handle is found not to be a file.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_swapped_in_after_the_check_is_not_read() {
+        let d = folder("fifo-swap");
+        let p = d.join("swap.txt");
+        std::fs::write(&p, "a file, for now").unwrap();
+        let ((reached, wait), (go, gate)) = (channel(), channel());
+        hook::GATES.lock().unwrap().push(hook::Gate { path: p.clone(), stage: "before-open", reached, go: Some(gate) });
+        let (tx, rx) = channel();
+        let job = Job { path: p.clone(), is_dir: false, is_link: false, ext: "txt".into(), size: 15, fit: DEFAULT_FIT };
+        std::thread::spawn(move || {
+            let _ = tx.send(load(&job, &never()).map(|l| l.body));
+        });
+        wait.recv_timeout(Duration::from_secs(5)).expect("checked");
+        std::fs::remove_file(&p).unwrap();
+        let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        go.send(()).unwrap();
+        let body = rx.recv_timeout(Duration::from_secs(2)).expect("the open blocked on the FIFO");
+        assert!(matches!(&body, Some(Body::Card(c)) if c.note.as_deref().unwrap().starts_with("Not a regular file")), "{body:?}");
+        // A regular file still reads normally (blocking reads back on).
+        std::fs::remove_file(&p).unwrap();
+        std::fs::write(&p, "a file again").unwrap();
+        let job = Job { path: p, is_dir: false, is_link: false, ext: "txt".into(), size: 12, fit: DEFAULT_FIT };
+        assert!(matches!(load(&job, &never()).unwrap().body, Body::Text(t) if t.line(0) == "a file again"));
     }
 
     #[test]
