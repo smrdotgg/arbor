@@ -26,6 +26,32 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-08, Batch Rename's frame cost (milestone 7 review)
+
+The review measured 15–16 ms a key typing in Batch Rename over 10,000 items here: update 5.3 ms,
+encode 10.9 ms. `encode_ms` is Rune's CPU time from the end of the update to submission
+(uploads, prepare, draw); under lavapipe it includes rasterizing in software what the frame
+changes, so it follows how much of the window a key changes, not Arbor's work. Taken apart with
+the same driver (`ARBOR_BENCH=12 ARBOR_BENCH_RENAME=1`, 12 rounds, the three typing keys of
+each), one change at a time, load 2–3:
+
+| Build | Encode, typing keys (median) |
+| --- | --- |
+| As it was (card shadow: offset 10, blur 30) | 14.2 ms |
+| No card shadow | 12.5 ms |
+| No shadow and no preview rows | 11.2 ms |
+| No shadow, no rows, not modal | 11.1 ms |
+| For comparison: Select All in the folder, no dialog (every visible row changes) | 8.1 ms |
+
+So the dialog itself costs a few milliseconds over a frame that redraws the list, and most of
+that is its shadow and its rows; the rest is lavapipe drawing what changed. The cheap cut:
+overlay cards (Batch Rename, the palette, Jump, Select by Pattern, the confirm dialog) get a
+smaller shadow (offset 4, blur 10). Alternating before and after, two passes each: encode 14.1 /
+14.3 ms before, 13.2 / 13.4 ms after; the key to its frame 20.2 / 20.1 ms before, 18.5 / 19.4 ms
+after (medians). The rows stay (only the 12 in view are built). The 8 ms budget is still missed
+here; this is software rendering, and **the Mac still needs measuring** (`scripts/bench.sh 11
+10 --rename 5`).
+
 ## 2026-11-08, Delete Permanently, trash that never deletes, Linux context menu (milestone 8)
 
 What changed on the measured path: nothing runs at startup or per key that didn't before, apart

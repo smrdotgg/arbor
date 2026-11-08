@@ -1075,7 +1075,7 @@ fn palette_view(s: &State, l: Look) -> El {
         .fill(l.t.card)
         .border(1.0, l.t.card_border)
         .radius(10.0)
-        .shadow(10.0, 30.0, l.t.shadow)
+        .shadow(OVERLAY_SHADOW.0, OVERLAY_SHADOW.1, l.t.shadow)
         .modal(true, |s: &mut State| s.palette = None)
         .child(row().h(44.0).px(14.0).center_y().child(field))
         .child(hr(l))
@@ -1091,6 +1091,11 @@ fn overlay_layer(key: &'static str, panel: El) -> El {
     col().key(key).pin(Some(0.0), Some(0.0), Some(0.0), None).items_center().px(20.0).pt(BAR_H + 6.0).child(panel)
 }
 
+/// An overlay card's shadow: offset and blur. Kept small: the area a shadow covers is drawn
+/// again whenever the card's contents change (each key in Batch Rename or the palette), and a
+/// blur of 30 points cost 1.7 ms a key there in software rendering (BENCH.md).
+const OVERLAY_SHADOW: (f32, f32) = (4.0, 10.0);
+
 /// An overlay box's frame: a card, modal (a click outside runs `close`).
 fn overlay_card(key: &'static str, max_w: f32, l: Look, close: fn(&mut State)) -> El {
     col()
@@ -1100,7 +1105,7 @@ fn overlay_card(key: &'static str, max_w: f32, l: Look, close: fn(&mut State)) -
         .fill(l.t.card)
         .border(1.0, l.t.card_border)
         .radius(10.0)
-        .shadow(10.0, 30.0, l.t.shadow)
+        .shadow(OVERLAY_SHADOW.0, OVERLAY_SHADOW.1, l.t.shadow)
         .modal(true, close)
 }
 
