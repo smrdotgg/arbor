@@ -67,6 +67,16 @@ Format: date · decision · why · how to undo.
   Why: `TSF_DELETE_RECYCLE_IF_POSSIBLE` only means "if possible"; oversized items can be deleted
   permanently with no UI. Undo: drop the pre-check in `src/trash.rs` (not recommended).
 
+- **2026-11-09 · Incident: the QA bundle left `launchservicesd` spinning (Review).** The
+  throwaway `~/arbor-qa/Arbor-QA.app` used a zsh script as its bundle executable (it `exec`ed the
+  real binary). After Codex quit it, launchservicesd kept polling the dead pid at ~95% of a core
+  from 00:14, adding ~15–25 ms to every app launch on the Mac. The bundle is unregistered and
+  deleted; the daemon needs a logout or `sudo killall launchservicesd` (the owner was told via
+  Telegram). Future QA bundles must use the real binary as the bundle executable and pass
+  arguments and environment via `open --args` / `LSEnvironment`, as the shipping `Arbor.app`
+  does. The 166 ms cold-start bench at 55134bd ran during this and isn't valid; alternating
+  passes showed no Arbor regression (+9 ms over a bare AppKit window, within budget).
+
 ## Made with the owner's answer
 
 - **2026-11-08 · Windows trash checks the Recycle Bin's registry settings first** (owner's
@@ -88,6 +98,30 @@ Format: date · decision · why · how to undo.
   12 MP led to 4 MP.
 
 ## Made by the agent (owner said "I trust your judgment")
+
+- **2026-11-09 · Windows: still no single instance (Review).** See the milestone 11 entry
+  below if it changes; otherwise each folder opened from Explorer starts a new Arbor.
+- **2026-11-09 · File-list rows are named from their cells, with no separate description.**
+  A reader hears "notes.txt, txt, 5 KB, Today 10:30" as the row's name. A description holding
+  kind, size and date apart would cost a string per visible row every frame for everyone, since
+  Rune can't build labels lazily (RUNE-GAPS.md). Undo: `.label(name).description(…)` in
+  `file_row` (`src/view.rs`).
+- **2026-11-09 · The file list can hold keyboard focus and hands every key to the window's
+  handler; no focus ring on it** (its selection shows focus, as in AppKit's tables). Both lists
+  of a split window name the active pane's cursor row as their active descendant, since Rune
+  can't move focus when Tab switches panes. Undo: `list` in `src/view.rs`.
+- **2026-11-09 · Announced at once (alerts): an operation's errors or refusal and a folder that
+  can't be read; every other note politely.** Undo: `State::alert`.
+- **2026-11-09 · Redo: undoing records the undo's reverse; any new operation (one that starts,
+  or a rename or new folder) clears redo.** ⇧⌘Z everywhere, Ctrl+Y on Windows only (Linux apps
+  mostly use Ctrl+Shift+Z; Ctrl+Y would be a new key nobody expects there). It's "Redid N items"
+  in the status bar. Undo: `Cmd::Redo` and `Outcome::inverse`.
+- **2026-11-09 · Go-to completion follows the platform's case rule, not
+  `[select] case_sensitive`,** lists files as well as folders (Enter opens a file), shows
+  hidden items while they're shown or once a dot is typed, and its card sits over the status
+  bar (nothing is under the field). Undo: `src/complete.rs`.
+- **2026-11-09 · The text preview's contents are a Tab stop that arrows scroll** (three lines a
+  press), so keyboard users can read a long file. Undo: `preview_scroll_key` in `src/view.rs`.
 
 - **2026-11-09 · A reload puts back exactly what was selected; a cursor the user deselected
   (⌘-click) isn't reselected.** The first selected item takes the cursor instead, so what an
