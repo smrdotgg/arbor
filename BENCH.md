@@ -26,6 +26,33 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-08, Delete Permanently, trash that never deletes, Linux context menu (milestone 8)
+
+What changed on the measured path: nothing runs at startup or per key that didn't before, apart
+from the keymap picking each command's default keys for this platform (`Keymap::defaults`, 16 µs
+for the whole table, `dispatch_speed`). Each key makes one more `None` check (the in-window
+menu); the view one more. Trash and Delete Permanently run on the file operation worker. Before
+is 117ae24, after is 8a29b81, both driven by the new bench.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+Busy: load average 5.3–6.4 (other agents on its 4 cores). Order: before, after, after, before.
+
+| Measure (median / p95, submission proxy) | Before (2 passes) | After (2 passes) |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 140.5 / 152.9, 141.8 / 155.2 ms | 147.4 / 151.7, 146.4 / 177.5 ms |
+| Listing visible (10k) | 47.2 / 60.8, 48.0 / 66.0 ms | 48.2 / 59.0, 49.3 / 59.7 ms |
+| Key → frame (synthetic ↓) | 7.7 / 8.8, 8.0 / 11.7 ms | 8.0 / 8.9, 8.1 / 10.8 ms |
+
+Cold start read 4–7 ms slower after in both passes, so it was checked twice more. Six more
+alternations (11 cold starts each, load 3.5–4.0): after 148.4, 149.0, 145.1 ms; before 140.7,
+143.0, 145.1 ms (median). Then `ARBOR_TIMING`'s own breakdown, six alternating pairs on a 10,000-
+file folder: `main` → first frame 146.2 ms after against 146.7 ms before (medians), with Arbor's
+own share the same in both (`init_ms` 0.1–1.2 ms, first view build `update_ms` 8.9–9.5 ms; the
+rest is Rune and the window before `init`). Nothing in this milestone runs in that window beyond
+the keymap's 16 µs, so the bench's gap is taken as the machine's load, not a regression; to be
+re-checked on a quiet machine and on the Mac.
+
 ## 2026-11-08, WebP cap lowered to 4 MP (NORTHSTAR exception)
 
 The owner lowered the WebP preview cap from 12 MP to 4 MP, lossy and lossless, after the 12 MP

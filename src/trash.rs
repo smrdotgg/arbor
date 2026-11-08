@@ -932,16 +932,15 @@ mod tests {
         let s = abs.to_string_lossy();
         let s = s.trim_start_matches(r"\\?\");
         let unc = PathBuf::from(format!(r"\\localhost\{}${}", &s[..1], &s[2..]));
-        if unc.symlink_metadata().is_err() {
-            eprintln!("skipped the network half: {} isn't reachable", unc.display());
-        } else {
-            let r = trash(&unc);
-            assert!(matches!(&r, Err(TrashError::NoTrash(w)) if w.contains("network")), "{r:?}");
-            let root = r"\\localhost\C$\";
-            let r = recycle(&unc, root);
-            assert!(matches!(&r, Err(TrashError::NoTrash(_))), "the shell's own refusal: {r:?}");
-            assert!(f.exists(), "never deleted");
-        }
+        // CI's runner shares C$; the test must reach it, or it proves nothing about the shell.
+        assert!(unc.symlink_metadata().is_ok(), "{} isn't reachable", unc.display());
+        let r = trash(&unc);
+        assert!(matches!(&r, Err(TrashError::NoTrash(w)) if w.contains("network")), "{r:?}");
+        // With the precheck skipped, the shell itself is asked, and the sink stops it.
+        let root = r"\\localhost\C$\";
+        let r = recycle(&unc, root);
+        assert!(matches!(&r, Err(TrashError::NoTrash(_))), "the shell's own refusal: {r:?}");
+        assert!(f.exists(), "never deleted");
         let _ = std::fs::remove_dir_all(&d);
     }
 
