@@ -724,13 +724,20 @@ pub enum Encoding {
     Utf8Bom,
     Utf16Le,
     Utf16Be,
-    /// Mostly UTF-8 with some invalid bytes (Latin-1, a broken file): shown with U+FFFD.
+    /// Mostly UTF-8 with some invalid bytes (a broken file): shown with U+FFFD.
     Lossy,
+    /// 8-bit text that isn't UTF-8 (Latin-1, Windows' own code page): read as Windows-1252,
+    /// which is Latin-1 with printable characters where Latin-1 has control codes.
+    Windows1252,
 }
 
 /// Whether `b` (a file's first bytes, possibly cut mid-character) is text, and how to read
-/// it. Not text: NUL bytes (beyond one in a thousand), control characters (over 2%), or
-/// invalid UTF-8 (over 10%: accented Latin-1 text stays under it). A UTF-16 byte order mark reads as UTF-16 (it's full of NULs).
+/// it. Not text: NUL bytes (beyond one in a thousand), or control characters (over 2%,
+/// counting the five bytes Windows-1252 leaves undefined when it isn't UTF-8). Valid UTF-8 is
+/// UTF-8; UTF-8 with a few invalid bytes (up to 10%) is shown with U+FFFD, but only if it has
+/// real multi-byte characters too; anything else 8-bit is Windows-1252 (Latin-1 text has no
+/// valid multi-byte sequences: "Café" is `43 61 66 E9`). A UTF-16 byte order mark reads as
+/// UTF-16 (it's full of NULs).
 pub fn sniff_text(b: &[u8]) -> Option<Encoding> {
     if b.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return Some(Encoding::Utf8Bom);
@@ -750,8 +757,9 @@ pub fn sniff_text(b: &[u8]) -> Option<Encoding> {
     if ctrl * 50 > b.len() {
         return None;
     }
-    let mut bad = 0;
+    let (mut bad, mut multi) = (0, 0);
     for chunk in b.utf8_chunks() {
+        multi += chunk.valid().chars().filter(|c| c.len_utf8() > 1).count();
         // An incomplete sequence at the very end is a character cut by the bounded read.
         let cut = chunk.invalid().len() < 4 && chunk.invalid().as_ptr_range().end == b.as_ptr_range().end;
         if !chunk.invalid().is_empty() && !cut {
@@ -759,11 +767,26 @@ pub fn sniff_text(b: &[u8]) -> Option<Encoding> {
         }
     }
     if bad == 0 {
-        Some(Encoding::Utf8)
-    } else if bad * 10 <= b.len() {
-        Some(Encoding::Lossy)
-    } else {
-        None
+        return Some(Encoding::Utf8);
+    }
+    if multi > 0 && bad * 10 <= b.len() {
+        return Some(Encoding::Lossy);
+    }
+    let undefined = b.iter().filter(|&&c| matches!(c, 0x81 | 0x8D | 0x8F | 0x90 | 0x9D)).count();
+    ((ctrl + undefined) * 50 <= b.len()).then_some(Encoding::Windows1252)
+}
+
+/// Windows-1252's characters for bytes 0x80–0x9F (where Latin-1 has control codes); its five
+/// undefined bytes show as U+FFFD. 0xA0–0xFF are Latin-1's, the same code points.
+const CP1252_HIGH: [char; 32] = [
+    '€', '\u{FFFD}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{FFFD}', 'Ž', '\u{FFFD}', '\u{FFFD}', '‘', '’', '“', '”',
+    '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{FFFD}', 'ž', 'Ÿ',
+];
+
+fn cp1252(b: u8) -> char {
+    match b {
+        0x80..=0x9F => CP1252_HIGH[(b - 0x80) as usize],
+        b => b as char,
     }
 }
 
@@ -776,6 +799,7 @@ pub fn text(bytes: &[u8], truncated: bool, total: u64) -> Option<Text> {
         Encoding::Utf8 => String::from_utf8_lossy(bytes),
         Encoding::Utf8Bom => String::from_utf8_lossy(&bytes[3..]),
         Encoding::Lossy => String::from_utf8_lossy(bytes),
+        Encoding::Windows1252 => bytes.iter().map(|&b| cp1252(b)).collect::<String>().into(),
         Encoding::Utf16Le | Encoding::Utf16Be => {
             let units = bytes[2..].as_chunks::<2>().0.iter().map(|c| {
                 let pair = [c[0], c[1]];
@@ -831,6 +855,7 @@ pub fn text(bytes: &[u8], truncated: bool, total: u64) -> Option<Text> {
     }
     match enc {
         Encoding::Lossy => notes.push("Not valid UTF-8: invalid bytes show as �".into()),
+        Encoding::Windows1252 => notes.push("Shown as Windows-1252".into()),
         Encoding::Utf16Le | Encoding::Utf16Be => notes.push("UTF-16".into()),
         _ => {}
     }
@@ -1627,15 +1652,23 @@ mod tests {
         assert_eq!(sniff_text(b"\xEF\xBB\xBFhello"), Some(Encoding::Utf8Bom));
         assert_eq!(sniff_text(b"\xFF\xFEh\0i\0"), Some(Encoding::Utf16Le));
         assert_eq!(sniff_text(b"\xFE\xFF\0h\0i"), Some(Encoding::Utf16Be));
-        // Latin-1: a few invalid bytes in plain text.
-        assert_eq!(sniff_text(b"Caf\xe9 cr\xe8me br\xfbl\xe9e and a lot more plain text here"), Some(Encoding::Lossy));
+        // Latin-1 (or Windows-1252): 8-bit text that isn't UTF-8, however many accents.
+        assert_eq!(sniff_text(b"Caf\xe9 cr\xe8me br\xfbl\xe9e and a lot more plain text here"), Some(Encoding::Windows1252));
+        assert_eq!(sniff_text(b"Caf\xe9 cr\xe8me br\xfbl\xe9e"), Some(Encoding::Windows1252), "23% accented: still text");
+        // UTF-8 with a stray invalid byte: still UTF-8, the byte shown as U+FFFD.
+        assert_eq!(
+            sniff_text(&[b"caf\xc3\xa9 cr\xc3\xa8me and some plain text, then a stray ".as_slice(), b"\xff byte"].concat()),
+            Some(Encoding::Lossy)
+        );
         // A character cut by the bounded read is still UTF-8.
         let cut = "a long line ending in é".as_bytes();
         assert_eq!(sniff_text(&cut[..cut.len() - 1]), Some(Encoding::Utf8));
-        // NULs, control characters, or mostly invalid bytes: binary.
+        // NULs, control characters, or bytes Windows-1252 leaves undefined: binary.
         assert_eq!(sniff_text(b"ELF\0\0\0\x01\x02 rest"), None);
         assert_eq!(sniff_text(&(0u8..=255).cycle().take(4096).collect::<Vec<_>>()), None);
-        assert_eq!(sniff_text(&[0xC3u8, 0x28, 0xA0, 0xA1, 0xE2, 0x28, 0xA1, 0x41].repeat(100)), None);
+        assert_eq!(sniff_text(&[0x8Du8, 0x41, 0x81, 0x9D, 0x42, 0x90, 0x8F, 0x43].repeat(100)), None);
+        // Invalid UTF-8 with no control bytes reads as 8-bit text ("Ã(\u{A0}¡â(¡A").
+        assert_eq!(sniff_text(&[0xC3u8, 0x28, 0xA0, 0xA1, 0xE2, 0x28, 0xA1, 0x41].repeat(100)), Some(Encoding::Windows1252));
         assert_eq!(sniff_text(b""), Some(Encoding::Utf8));
     }
 
@@ -1658,12 +1691,29 @@ mod tests {
         assert_eq!(t.line(0), "é".repeat(9));
         assert_eq!(t.note.as_deref(), Some("Showing the first 256 KB of 3.4 MB"));
         let t = text(b"Caf\xe9 and a lot more plain text to make it count", false, 40).unwrap();
-        assert!(t.line(0).starts_with("Caf\u{FFFD} and"));
+        assert!(t.line(0).starts_with("Café and"));
+        assert_eq!(t.note.as_deref(), Some("Shown as Windows-1252"));
+        let t = text(b"caf\xc3\xa9 and plain text with one stray \xff byte in it", false, 40).unwrap();
+        assert!(t.line(0).contains("café") && t.line(0).contains('\u{FFFD}'));
         assert_eq!(t.note.as_deref(), Some("Not valid UTF-8: invalid bytes show as �"));
         let t = text(b"\xFF\xFEh\0i\0\n\0", false, 8).unwrap();
         assert_eq!((t.line(0), t.note.as_deref()), ("hi", Some("UTF-16")));
         assert!(text(b"", false, 0).unwrap().lines.is_empty());
         assert!(text(b"\0\0\0\0binary", false, 10).is_none());
+    }
+
+    /// The QA's Latin-1 file: "Café crème brûlée" and "naïve résumé" show with their accents
+    /// (they used to go to Quick Look as binary, which drew them as Mac Roman: "CafÈ"), and the
+    /// panel says how it read them.
+    #[test]
+    fn latin1_text_shows_as_windows_1252() {
+        let d = folder("latin1");
+        let p = d.join("latin1.txt");
+        std::fs::write(&p, b"Caf\xe9 cr\xe8me br\xfbl\xe9e\nna\xefve r\xe9sum\xe9\n\x93quoted\x94 \x80 5\n").unwrap();
+        let job = Job { path: p, is_dir: false, is_link: false, ext: "txt".into(), size: 40, fit: DEFAULT_FIT };
+        let Body::Text(t) = load(&job, &never()).unwrap().body else { panic!("text") };
+        assert_eq!((t.line(0), t.line(1), t.line(2)), ("Café crème brûlée", "naïve résumé", "“quoted” € 5"));
+        assert_eq!(t.note.as_deref(), Some("Shown as Windows-1252"));
     }
 
     /// A 1 MB text file: only the bounded head is read, and the panel says so.
