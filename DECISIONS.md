@@ -44,6 +44,25 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-09 · Text preview: horizontal scrolling, not soft wrap** (it already scrolled
+  sideways; checked under X11 with a horizontal wheel and with Shift+wheel). Code and logs keep
+  their columns, and only the lines in view are laid out either way. The Mac QA's "no change" is
+  most likely its tool's synthetic Shift+scroll, which macOS doesn't turn into a horizontal one
+  as it does for a real mouse (Rune relies on macOS for that); a trackpad swipe is horizontal.
+  Undo: `.wrap()` on the preview's lines in `src/view.rs`.
+- **2026-11-09 · 8-bit text that isn't UTF-8 is Windows-1252**, said in the panel ("Shown as
+  Windows-1252"). UTF-8 with a few invalid bytes stays UTF-8 (shown with �) only if it has real
+  multi-byte characters too; text full of invalid UTF-8 and no control bytes counts as text now
+  (it was binary, and since milestone 9 went to Quick Look, which drew Latin-1 as Mac Roman).
+  Undo: `sniff_text` in `src/preview.rs`.
+- **2026-11-09 · A reload keeps a selection the user made after it was asked for** (a click, an
+  arrow, ⌘A, Select by Pattern bump `Folder::picks`), instead of the operation's own pick (the new
+  folder, the copy), and starts no rename then. This was the QA's "can't copy a folder into
+  itself". Undo: the `picks` check in `State::land`.
+- **2026-11-09 · Any drag out that nothing took says how to move files** ("Nothing took the drop.
+  … cut and paste them (⌘X, ⌘V) or use split view (⌘\\)"), also after an Escape or a refused drop
+  elsewhere, since Rune doesn't say where a drag ended. Undo: `State::drag_out_ended`.
+
 - **2026-11-09 · Long paths are cut at whole folders, by estimate.** Jump rows and Search's
   folder column show "…/" and the trailing folders that fit, estimated from per-character
   advances measured once per thread (3% to spare; a character outside ASCII counts as the widest
@@ -69,10 +88,11 @@ Format: date · decision · why · how to undo.
 - **2026-11-08 · Quick Look is asked for a thumbnail, never an icon** (representation types
   Thumbnail and LowQualityThumbnail). A generic file-type icon says less than the card. Undo: add
   `Types::Icon` in `src/thumb.rs`.
-- **2026-11-08 · When the OS has no thumbnail, the card shows with no note**, for formats it
-  should know (PDF, video…): the header already says what it is, and the task asked for no error
-  noise. Binary files of other types keep "Binary file: there's no preview for its contents."
-  Undo: give the `Thumb::Nothing` arm in `preview::load_with` a note.
+- **2026-11-08 · When the OS has no thumbnail, the card says "Can't preview this file."**
+  (changed 2026-11-09 after the Mac QA found a blank panel for a broken PDF; it first showed no
+  note). A request that hasn't answered in 10 s (`thumb::OS_LIMIT`) is cancelled and gets the
+  same card. Binary files of other types keep "Binary file: there's no preview for its
+  contents." Undo: the `Thumb::Nothing` arm in `preview::load_with`.
 - **2026-11-08 · Every binary file Arbor can't show goes to the OS's thumbnailer**, not just a
   list of extensions, so fonts, `.usdz`, `.sketch`, Keynote and so on preview where the OS can.
   Only extensions that are never text go straight to it (PDF, video, audio, documents, fonts,
