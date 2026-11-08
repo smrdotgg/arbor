@@ -43,9 +43,11 @@ fn main() {
     make_folder(&big);
 
     let (mut cold, mut main, mut nav, mut key) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut each = Vec::new();
     for run in 0..runs {
         match run_once(&bin, &big, rounds) {
             Ok(r) => {
+                each.push(format!("{:.0}/{:.0}", r.cold, r.main));
                 cold.push(r.cold);
                 main.push(r.main);
                 nav.extend(r.nav);
@@ -88,6 +90,7 @@ fn main() {
         };
         println!("{name:<34} {:>5} {med:>6.1} ms {p95:>6.1} ms {b:>8}  {verdict}", v.len());
     }
+    println!("each run, cold/main ms: {}", each.join(" "));
     println!("Times end when the frame is submitted to the GPU; it reaches the screen at the next refresh.");
 }
 
