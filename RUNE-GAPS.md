@@ -16,6 +16,32 @@ Newest first.
 
 ---
 
+## Wakes: one raised while Rune drains wakes is handled in the same run-loop turn
+
+- **Feature:** the speed bench (`ARBOR_BENCH`, `src/timing.rs`), which drives Arbor one step per
+  frame from `App::on_frame_encoded`, and anything else that wakes the window from a frame hook
+  or from `poll`.
+- **What Rune is missing:** wakes raised during the drain going to the next turn. On macOS a
+  wake raised while Rune is draining them (winit's `control_flow_end_handler` →
+  `map_user_event`, which loops on `try_recv`) is picked up by the same loop. A covered or
+  not-yet-visible window's frame (`covered_frame` → `poll_hidden` → the frame report) that wakes
+  again therefore never returns to AppKit, so the occlusion change that would end covered mode is
+  never delivered. Sampled on the M4 Pro: 100% of the main thread in that observer callout,
+  46–100% CPU, until the bench's 60 s timeout; 13 of 63 Jump and tab runs with the display
+  awake (the window opens inactive and lacks `.visible` for its first ~100 ms), every run with
+  it asleep.
+- **What we did instead:** the bench never wakes from a frame that wasn't drawn, and starts its
+  next step only once the last step's frame was drawn (`shown` and `STEP_SHOWN` in
+  `src/timing.rs`); Rune draws again by itself when the window shows. With that, 0 of 12 runs
+  stuck. On a timeout the bench prints the run's last lines and, on macOS, `sample`s it first,
+  and it warns when the display is asleep (`examples/bench.rs`).
+- **What users lose:** nothing directly (outside the bench nothing wakes from a frame hook). The
+  risk is for any future code that wakes from `poll` or a frame report while the window is
+  covered: it would spin a core and starve AppKit.
+- **Suggested Rune change:** hand wakes that arrive while a drain runs to the next run-loop
+  turn (drain only what was queued when the drain began), so AppKit's notifications always get
+  a turn in between.
+
 ## Truncated text: each width tried shapes the whole string again
 
 - **Feature:** Jump to Folder's rows and Search's folder column, which show long paths cut at the
@@ -230,6 +256,9 @@ Newest first.
   the start (`src/timing.rs`), labelled a "submission proxy" in `BENCH.md` and the bench output,
   which claim no pass against the pixel budgets. Presentation runs two to three frames behind
   submission (`frame/present_time.rs`).
+- **At launch:** the first two drawables are never presented even in a bare AppKit + Metal app
+  (`presentedTime` 0 for frames 1–2 on the M4 Pro), so pixels reach the screen ~55 ms after the
+  first submission the cold-start numbers end at.
 - **What users lose:** nothing directly, but the budget can't be verified. Measured numbers
   undercount by up to one refresh (8.3 ms at 120 Hz, 16.7 ms at 60 Hz) plus compositor latency,
   so a key press that measures 1 ms could still miss the 8 ms budget on screen.

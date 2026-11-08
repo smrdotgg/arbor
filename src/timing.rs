@@ -55,7 +55,12 @@
 //! streams, and leaves with Esc once it's done. With `ARBOR_BENCH_RENAME=1` each round selects
 //! everything, opens Batch Rename (waiting for the folder's read), types `e`, turns on regex,
 //! types `$` (each waiting for its preview) and closes it with Esc. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
-//! parent folder instead, then does N rounds of "previous tab (the start folder), next tab". The ↓ is synthetic, so its `key` time starts when the handler
+//! parent folder instead, then does N rounds of "previous tab (the start folder), next tab".
+//! A step starts only once the previous step's frame was drawn: a frame that wasn't (the window
+//! covered or not yet visible, no drawable in time) asks for nothing, and Rune draws again when
+//! it can. (A wake from an undrawn frame was handled in the same run-loop turn, so AppKit never
+//! got to say the window was visible, and the bench spun: RUNE-GAPS.md.)
+//! The ↓ is synthetic, so its `key` time starts when the handler
 //! is called rather than at an OS event. The window opens without taking focus and ignores real
 //! keys, so typing in another app while it runs can't reach it (and its ⌘⌫ can't trash anything).
 //!
@@ -141,6 +146,8 @@ thread_local! {
     static BENCH: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     /// The last preview bench step waits for its preview to land.
     static WAIT_PREVIEW: Cell<bool> = const { Cell::new(false) };
+    /// The last bench step's frame was drawn: the next may start.
+    static STEP_SHOWN: Cell<bool> = const { Cell::new(true) };
 }
 
 /// Whether `ARBOR_BENCH` is driving the app (after `init`).
@@ -329,10 +336,14 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     {
         PREVIEW_LANDED.set(Some((t, opened, preview_kind(s))));
     }
-    // One step per frame: a frame that landed a listing, a preview or Jump's history is that
-    // step's frame.
-    if !loading && !FIRST.get() && s.preview_lands == previews && s.history.loads == jump_loads {
-        changed |= bench_step(s, tx);
+    // One step per drawn frame: a frame that landed a listing, a preview or Jump's history is
+    // that step's frame, and a step whose frame wasn't drawn yet waits for it.
+    if !loading && !FIRST.get() && s.preview_lands == previews && s.history.loads == jump_loads && STEP_SHOWN.get() {
+        let stepped = bench_step(s, tx);
+        if stepped {
+            STEP_SHOWN.set(false);
+        }
+        changed |= stepped;
     }
     changed
 }
@@ -543,14 +554,9 @@ fn take_marked(drawn: bool) -> Option<Marked> {
 
 /// Rune's per-frame report.
 pub fn frame(f: &FrameEncoded) {
-    let Some(Marked { key, landed, preview, jump, search_first, search_done, rename }) = take_marked(f.outcome() == FrameOutcome::Drawn)
-    else {
-        // The bench's next step comes from a frame, drawn or not.
-        if benching()
-            && let Some(w) = WAKER.get()
-        {
-            w();
-        }
+    let drawn = f.outcome() == FrameOutcome::Drawn;
+    let wake = shown(drawn);
+    let Some(Marked { key, landed, preview, jump, search_first, search_done, rename }) = take_marked(drawn) else {
         return;
     };
     let at = f.at();
@@ -618,16 +624,36 @@ pub fn frame(f: &FrameEncoded) {
             }
         }
     }
-    if benching()
-        && let Some(w) = WAKER.get()
-    {
+    if wake && let Some(w) = WAKER.get() {
         w();
     }
+}
+
+/// A frame's outcome for the bench: a drawn one showed the last step, so the next may start,
+/// and the bench wakes for it. One that wasn't drawn does neither: Rune draws again when it can
+/// (the window shows, a drawable comes), and that frame is the step's. A wake from an undrawn
+/// frame was handled in the same run-loop turn, so a covered window spun without AppKit ever
+/// reporting it visible (RUNE-GAPS.md).
+fn shown(drawn: bool) -> bool {
+    if drawn {
+        STEP_SHOWN.set(true);
+    }
+    drawn && benching()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a drawn frame lets the bench's next step start; an undrawn one asks for nothing.
+    #[test]
+    fn the_next_step_waits_for_a_drawn_frame() {
+        STEP_SHOWN.set(false);
+        assert!(!shown(false), "no wake from an undrawn frame");
+        assert!(!STEP_SHOWN.get());
+        shown(true);
+        assert!(STEP_SHOWN.get());
+    }
 
     /// A preview (or anything else) that lands in a frame that isn't drawn is reported with
     /// the next frame that is, timed to it, never dropped.

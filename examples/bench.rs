@@ -58,6 +58,11 @@
 //! showing the whole preview for it (worked out on a worker at this size), and closes it. Such
 //! a run counts only with exactly ROUNDS plain and 2 × ROUNDS regex previews of 10,000 items.
 //!
+//! A run that doesn't finish in 60 s is killed and reported INVALID with its last lines of
+//! output (on macOS after `sample` writes where it was stuck to a file in the temp folder). On
+//! macOS the bench warns first if the display is asleep: a window then never counts as visible,
+//! and the numbers mean nothing.
+//!
 //! Every run gets its own settings folder (`RUNE_DIRS_ROOT`), so the user's settings don't
 //! change the numbers and the navigations don't land in their Jump history.
 
@@ -98,6 +103,9 @@ fn main() {
     let runs = nums.first().copied().unwrap_or(10);
     let rounds = nums.get(1).copied().unwrap_or(10);
     assert!(bin.exists(), "{} not found: build with `cargo build --release` first", bin.display());
+    if display_asleep() {
+        eprintln!("WARNING: the display is asleep: windows never count as visible, so runs hang or mean nothing. Wake it first.");
+    }
 
     let root = std::env::temp_dir().join(format!("arbor-bench-{}", std::process::id()));
     let big = root.join("big");
@@ -350,6 +358,17 @@ struct Run {
     rename_key: Vec<f64>,
 }
 
+/// Whether macOS last said the display was turned off (`pmset -g log`). False elsewhere, and
+/// when it can't tell.
+fn display_asleep() -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    let Ok(out) = Command::new("pmset").args(["-g", "log"]).output() else { return false };
+    let log = String::from_utf8_lossy(&out.stdout);
+    log.lines().rev().find(|l| l.contains("Display is turned")).is_some_and(|l| l.contains("Display is turned off"))
+}
+
 fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, String> {
     let spawned = SystemTime::now();
     let mut cmd = Command::new(bin);
@@ -385,8 +404,27 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(status) => break status,
             None if Instant::now() > deadline => {
+                // Where it was stuck, before it goes.
+                let mut sampled = String::new();
+                if cfg!(target_os = "macos") {
+                    let file = std::env::temp_dir().join(format!("arbor-bench-stuck-{}.txt", child.id()));
+                    let ok = Command::new("sample")
+                        .args([&child.id().to_string(), "1", "-mayDie", "-file"])
+                        .arg(&file)
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .is_ok_and(|s| s.success());
+                    if ok {
+                        sampled = format!("; where it was stuck: {}", file.display());
+                    }
+                }
                 let _ = child.kill();
-                return Err("timed out after 60 s".into());
+                let _ = child.wait();
+                let lines = reader.join().unwrap_or_default();
+                let tail = lines[lines.len().saturating_sub(12)..].join("\n");
+                let asleep = if display_asleep() { " (the display is asleep)" } else { "" };
+                return Err(format!("timed out after 60 s{asleep}{sampled}; its last lines:\n{tail}"));
             }
             None => std::thread::sleep(Duration::from_millis(20)),
         }
