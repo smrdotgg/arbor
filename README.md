@@ -45,7 +45,7 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 17,500 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
+About 17,200 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
 `ops.rs` (copy, move, trash and undo on a worker), `noclobber.rs` (moves, copies and file ids
 that never replace anything), `trash.rs` (each platform's trash), `app.rs`
 (state, startup, key dispatch, what each command does), `folder.rs` (one folder on screen: its
