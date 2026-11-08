@@ -395,6 +395,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// The review's case: several folders in one request (a macOS open-documents event, a
+    /// burst of D-Bus calls) arrive before the first one's read lands. Each ends up in its own
+    /// tab, selection included; the first used to be lost (its tab was hidden still showing
+    /// the folder it was leaving).
+    #[test]
+    fn several_requests_at_once_each_get_their_tab() {
+        let d = tmp("burst");
+        std::fs::create_dir(d.join("second")).unwrap();
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        s.show_external(
+            vec![Show::Folder(d.join("sub")), Show::Items(d.join("second"), Vec::new()), Show::Items(d.clone(), vec!["a.txt".into()])],
+            &mut Tx::default(),
+        );
+        settle_all(&mut s);
+        let p = &s.panes[0];
+        assert_eq!(p.tabs.len(), 3);
+        assert_eq!((0..3).map(|j| p.tab_path(j).to_path_buf()).collect::<Vec<_>>(), [d.join("sub"), d.join("second"), d.clone()]);
+        assert_eq!(s.cur().selected().map(|e| e.name.clone()).as_deref(), Some("a.txt"));
+        // The hidden ones show their folders, history fresh, when chosen.
+        s.show_tab(0, 0, &mut Tx::default());
+        settle_all(&mut s);
+        assert_eq!(s.cur().cwd, d.join("sub"));
+        assert!(s.cur().back.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A folder opened (not yet landed) and then ⌘T: the tab left behind keeps the folder it
+    /// was opening, with the folder it left in its Back history.
+    #[test]
+    fn a_tab_hidden_on_its_way_keeps_where_it_was_going() {
+        let d = tmp("on-its-way");
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        s.go(d.join("sub"), Nav::New, None);
+        s.new_tab(&mut Tx::default());
+        settle_all(&mut s);
+        let m = s.panes[0].tabs[0].as_ref().expect("the hidden tab's memo");
+        assert_eq!((m.path.clone(), m.back.clone()), (d.join("sub"), vec![d.clone()]));
+        assert_eq!(s.cur().cwd, d.join("sub"), "and the new tab shows it too");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_window_in_use_keeps_its_tab() {
         let d = tmp("in-use");

@@ -274,6 +274,41 @@ impl Folder {
         if let Some(s) = &self.search {
             return TabMemo { search: Some(s.edit.text.clone()).filter(|q| !q.trim().is_empty()), ..s.memo.clone() };
         }
+        // On its way somewhere (a folder opened, a request from another app) when it's hidden:
+        // keep where it's going and what it was going to select, with the history as landing
+        // would leave it, so the hidden tab shows that folder (independent of disk timing).
+        if let Some(p) = self.pending.as_ref().filter(|p| matches!(p.nav, Nav::New | Nav::Back | Nav::Forward | Nav::Fresh)) {
+            let (mut back, mut fwd) = (self.back.clone(), self.fwd.clone());
+            match p.nav {
+                Nav::New => {
+                    back.push(self.cwd.clone());
+                    fwd.clear();
+                }
+                Nav::Back => {
+                    back.pop();
+                    fwd.push(self.cwd.clone());
+                }
+                Nav::Forward => {
+                    fwd.pop();
+                    back.push(self.cwd.clone());
+                }
+                _ => {
+                    back.clear();
+                    fwd.clear();
+                }
+            }
+            return TabMemo {
+                path: p.path.clone(),
+                back,
+                fwd,
+                select: p.select.clone(),
+                scroll: 0.0,
+                filter: String::new(),
+                sort: self.sort,
+                sort_set: self.sort_set,
+                search: None,
+            };
+        }
         // Hidden again before its read landed: keep what it was going to restore.
         if let Some(p) = self.pending.as_ref().filter(|p| p.nav == Nav::Show) {
             return TabMemo {
