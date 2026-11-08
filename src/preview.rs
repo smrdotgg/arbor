@@ -70,11 +70,12 @@ pub const MAX_PIXELS_WHOLE: u64 = 24_000_000;
 /// decode that has started runs to the end after it's told to stop, and its result is dropped.
 /// That breaks the view-triggered work rule's "cancels it immediately", by an exception the
 /// owner signed off (NORTHSTAR.md, Exceptions log): lossy, lossless and animated WebP up to
-/// 12 MP (4000 × 3000), "Too large to preview" above. Measured on tabot-dev (Xeon 8375C,
-/// `webp_decode_speed`), the slowest 12 MP images (random pixels) are in BENCH.md. The UI
+/// 4 MP (2309 × 1732 at 4:3), "Too large to preview" above (the owner lowered it from 12 MP).
+/// Measured on tabot-dev (Xeon 8375C, `webp_decode_speed`), the slowest 4 MP images (random
+/// pixels) are in BENCH.md. The UI
 /// thread is never involved: one decode at a time on the preview's worker, and a newer request
 /// replaces any waiting one.
-pub const MAX_PIXELS_WEBP: u64 = 12_000_000;
+pub const MAX_PIXELS_WEBP: u64 = 4_000_000;
 /// The widest or tallest image decoded: JPEG's own limit. A pixel limit alone lets a
 /// 99,999,999 × 1 image through, whose rows and column map would take gigabytes; with each side
 /// at most this, a row is at most 512 KB (16-bit RGBA) and the column map 256 KB.
@@ -1816,10 +1817,10 @@ mod tests {
         }
     }
 
-    /// WebP can't be stopped once it starts decoding, so it's held to 12 MP (the exception in
+    /// WebP can't be stopped once it starts decoding, so it's held to 4 MP (the exception in
     /// NORTHSTAR.md), lossy and lossless alike, checked from the header before decoding.
     #[test]
-    fn webp_is_held_to_12_megapixels() {
+    fn webp_is_held_to_4_megapixels() {
         let chunk =
             |id: &[u8], body: &[u8]| [id, &(body.len() as u32).to_le_bytes(), body, if body.len() % 2 == 1 { &[0] } else { &[] }].concat();
         let riff = |body: Vec<u8>| [b"RIFF".as_slice(), &(body.len() as u32).to_le_bytes(), &body].concat();
@@ -1839,12 +1840,12 @@ mod tests {
             vp8l.extend_from_slice(&[0; 64]);
             riff([b"WEBP".as_slice(), &chunk(b"VP8L", &vp8l)].concat())
         };
-        for (file, kind) in [(lossy(4001, 3000), "lossy"), (lossless(4001, 3000), "lossless")] {
+        for (file, kind) in [(lossy(2400, 1700), "lossy"), (lossless(2400, 1700), "lossless")] {
             let err = image(Format::Webp, std::io::Cursor::new(&file), DEFAULT_FIT, &never()).unwrap_err();
-            assert!(err.starts_with(TOO_LARGE) && err.contains("12 megapixels (the limit is 12 for WebP"), "{kind}: {err}");
+            assert!(err.starts_with(TOO_LARGE) && err.contains("4.08 megapixels (the limit is 4 for WebP"), "{kind}: {err}");
         }
         // At the limit, it gets past the size check (to the decoder, which finds no data).
-        for (file, kind) in [(lossy(4000, 3000), "lossy"), (lossless(4000, 3000), "lossless")] {
+        for (file, kind) in [(lossy(2309, 1732), "lossy"), (lossless(2309, 1732), "lossless")] {
             let r = image(Format::Webp, std::io::Cursor::new(&file), DEFAULT_FIT, &never());
             assert!(r.as_ref().is_err_and(|e| !e.starts_with(TOO_LARGE)), "{kind}: {:?}", r.map(|_| ()));
         }

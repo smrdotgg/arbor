@@ -26,6 +26,24 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-08, WebP cap lowered to 4 MP (NORTHSTAR exception)
+
+The owner lowered the WebP preview cap from 12 MP to 4 MP, lossy and lossless, after the 12 MP
+numbers below came in. The exception (NORTHSTAR.md, Exceptions log) stays, with these numbers.
+
+Same method as the 12 MP table (`webp_decode_speed`, median of 5 whole decodes, which is the
+work that goes on after a cancel), on 2309 × 1732 images (3.999 MP, 4:3, just under the cap)
+made with Pillow 10.2. Three passes on tabot-dev with load average 1.5–2.7. Peak RSS: the whole
+preview path for one file under `/usr/bin/time -v`, against 4.5 MB for the test binary with no file.
+
+| 4 MP WebP | File | Decode (3 passes) | Peak RSS |
+| --- | --- | --- | --- |
+| Lossy, random pixels with alpha (worst) | 7.4 MB | 567 / 389 / 327 ms | 34 MB |
+| Lossy, random pixels | 3.4 MB | 505 / 312 / 313 ms | 29 MB |
+| Lossy, photo-like (gradients) | 37 KB | 71 / 53 / 26 ms | 23 MB |
+| Lossless, random pixels with alpha | 16.0 MB | 153 / 161 / 89 ms | 24 MB |
+| Lossless, photo-like | 24 KB | 61 / 52 / 41 ms | 33 MB |
+
 ## 2026-11-08, milestone 6 review fixes (search)
 
 What changed on the measured path: results carry the identity from the `lstat` the walk
@@ -128,6 +146,8 @@ regex-lite's own symbols are 64 KB and `rename.rs` and `batch.rs` 47 KB; the res
 view, the operation and the generic code they instantiate.
 
 ## 2026-11-08, WebP previews up to 12 MP (NORTHSTAR exception)
+
+Superseded: the cap is now 4 MP (above). Kept for the numbers that led to it.
 
 The owner signed off an exception to the view-triggered work rule (NORTHSTAR.md, Exceptions log):
 WebP previews go up to 12 MP, lossy and lossless, instead of 0.45 / 1.7 MP. image-webp can't
