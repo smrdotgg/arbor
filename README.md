@@ -82,7 +82,8 @@ it costs nothing: `main` reads the variable once and Rune gets the plain callbac
 hook. Showing a hidden tab is logged as `tab`, with `same_frame=1` when its fresh read landed
 in time for the key's own frame. `scripts/bench.sh` cold-starts Arbor on a 10,000-entry folder
 several times and reports median and p95 against each budget (`--tabs N` adds N runs timing a
-tab switch to that folder). It opens and closes windows, so leave the machine alone
+tab switch to that folder, and `--preview N` adds N runs timing the quick preview of a 256 KB
+text file and a 12 MP JPEG from Space to the frame showing it, and keys while it's open). It opens and closes windows, so leave the machine alone
 while it runs. `cargo test --release -- --ignored --nocapture list_10k` times reading and
 sorting alone. Results are in [`BENCH.md`](BENCH.md).
 

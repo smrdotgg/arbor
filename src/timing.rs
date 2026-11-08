@@ -19,6 +19,9 @@
 //! - `tab`: a key that showed a hidden tab, to the frame showing its fresh listing.
 //!   `same_frame=1` when the read landed within the key's bounded wait (`State::show_tab`), so
 //!   the key's own frame shows it.
+//! - `preview`: a key that started a quick preview read (Space opening it, or moving the
+//!   selection while it's open), to the frame showing what it read. `from=open` or `from=move`,
+//!   and `kind=text|image|card|error`. A `key` line has `preview=1` when the preview was open.
 //! - `first-listing`: only when the first folder was too slow for the first frame (the window
 //!   waits at most `app::FIRST_PAINT_WAIT` for it): from the top of `main` to the frame showing
 //!   it. `ARBOR_SLOW_FIRST_READ_MS=N` (read only when timing is on) slows that read by N ms to
@@ -31,7 +34,10 @@
 //!
 //! `ARBOR_BENCH=N` (implies timing) drives the app itself: after the first frame it does N
 //! rounds of "go to the parent, come back, press ↓", each step started by the previous step's
-//! frame (no timers), then quits. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
+//! frame (no timers), then quits. With `ARBOR_BENCH_PREVIEW=1` (in a folder whose first two
+//! files are a text file and an image) each round is: Space (preview the text), Space, ↓,
+//! Space (preview the image), ↑, ↓, ↑ (the last two while it's open, the ↑ while the image
+//! decodes), Space; opening waits for the preview to land. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
 //! parent folder instead, then does N rounds of "previous tab (the start folder), next tab". The ↓ is synthetic, so its `key` time starts when the handler
 //! is called rather than at an OS event. The window opens without taking focus and ignores real
 //! keys, so typing in another app while it runs can't reach it (and its ⌘⌫ can't trash anything).
@@ -73,6 +79,14 @@ thread_local! {
     static LANDED: Cell<Option<(Instant, usize, Kind, bool)>> = const { Cell::new(None) };
     /// `ARBOR_BENCH_TABS`: the bench switches tabs instead of navigating.
     static TABS: Cell<bool> = const { Cell::new(false) };
+    /// `ARBOR_BENCH_PREVIEW`: the bench opens and moves the quick preview.
+    static PREVIEW: Cell<bool> = const { Cell::new(false) };
+    /// A preview read in flight: when its key came, and whether that key opened the preview.
+    static PREVIEW_ASKED: Cell<Option<(Instant, bool)>> = const { Cell::new(None) };
+    /// A preview that lands in the frame being built: its key's time, whether it opened, its kind.
+    static PREVIEW_LANDED: Cell<Option<(Instant, bool, &'static str)>> = const { Cell::new(None) };
+    /// The handled key's frame shows an open preview.
+    static KEY_PREVIEW: Cell<bool> = const { Cell::new(false) };
     static FIRST: Cell<bool> = const { Cell::new(true) };
     /// Entries in the first listing.
     static FIRST_ENTRIES: Cell<usize> = const { Cell::new(0) };
@@ -84,6 +98,8 @@ thread_local! {
     static INIT_AT_MS: Cell<f64> = const { Cell::new(0.0) };
     /// Bench steps left, and the step counter.
     static BENCH: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
+    /// The last preview bench step waits for its preview to land.
+    static WAIT_PREVIEW: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Whether `ARBOR_BENCH` is driving the app (after `init`).
@@ -100,7 +116,15 @@ pub fn init() -> bool {
     }
     MAIN.get_or_init(|| (Instant::now(), SystemTime::now()));
     TABS.set(set("ARBOR_BENCH_TABS"));
-    BENCH.set((if TABS.get() { rounds * 2 + 1 } else { rounds * 3 }, 0));
+    PREVIEW.set(set("ARBOR_BENCH_PREVIEW"));
+    let steps = if PREVIEW.get() {
+        rounds * PREVIEW_STEPS
+    } else if TABS.get() {
+        rounds * 2 + 1
+    } else {
+        rounds * 3
+    };
+    BENCH.set((steps, 0));
     let slow = std::env::var("ARBOR_SLOW_FIRST_READ_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
     crate::app::SLOW_FIRST_READ_MS.store(slow, std::sync::atomic::Ordering::Relaxed);
     true
@@ -150,9 +174,14 @@ enum Kind {
 fn measured(s: &mut State, tx: &mut Tx, t: Instant, f: impl FnOnce(&mut State, &mut Tx) -> bool) -> bool {
     let asked = s.pending_path().map(Path::to_path_buf);
     let (lands, tab) = (s.lands, tab_of(s));
+    let (reads, closed) = (s.preview_reads, s.preview.is_none());
     let handled = f(s, tx);
     if handled {
         KEY.set(Some(t));
+        KEY_PREVIEW.set(s.preview.is_some());
+        if s.preview_reads != reads {
+            PREVIEW_ASKED.set(Some((t, closed)));
+        }
         let kind = if tab_of(s) != tab { Kind::Tab } else { Kind::Nav };
         if s.lands != lands && !s.is_loading() {
             LANDED.set(Some((t, s.cur().entries.len(), kind, true)));
@@ -175,20 +204,61 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     if loading && NAV.get().is_none() {
         NAV.set(Some((rune::last_input().unwrap_or_else(Instant::now), Kind::Nav)));
     }
+    let previews = s.preview_lands;
     let mut changed = s.poll(tx);
     if loading && !s.is_loading() {
         LANDED.set(NAV.take().map(|(t, kind)| (t, s.cur().entries.len(), kind, false)));
     }
-    // One step per frame: a frame that landed a listing is that step's frame.
-    if !loading && !FIRST.get() {
+    if s.preview_lands != previews
+        && let Some((t, opened)) = PREVIEW_ASKED.take()
+    {
+        PREVIEW_LANDED.set(Some((t, opened, preview_kind(s))));
+    }
+    // One step per frame: a frame that landed a listing or a preview is that step's frame.
+    if !loading && !FIRST.get() && s.preview_lands == previews {
         changed |= bench_step(s, tx);
     }
     changed
 }
 
+fn preview_kind(s: &State) -> &'static str {
+    use crate::preview::Body;
+    match s.preview.as_ref().map(|p| &p.body) {
+        Some(Body::Text(_)) => "text",
+        Some(Body::Image(_)) => "image",
+        Some(Body::Card(_)) => "card",
+        Some(Body::Error(_)) => "error",
+        _ => "none",
+    }
+}
+
+/// Steps in a preview bench round (see the module docs).
+const PREVIEW_STEPS: u32 = 8;
+
+/// One step of the preview bench: the keys, and whether to wait for the preview to land first.
+fn preview_step(s: &mut State, tx: &mut Tx, n: u32, now: Instant) -> bool {
+    let space = || KeyEvent { key: Key::Text(" ".into()), mods: Mods::default() };
+    let (key, then_wait) = match n % PREVIEW_STEPS {
+        0 => (space(), true),
+        1 => (space(), false),
+        2 => (KeyEvent { key: Key::Down, mods: Mods::default() }, false),
+        3 => (space(), true),
+        4 => (KeyEvent { key: Key::Up, mods: Mods::default() }, false),
+        5 => (KeyEvent { key: Key::Down, mods: Mods::default() }, false),
+        6 => (KeyEvent { key: Key::Up, mods: Mods::default() }, true),
+        _ => (space(), false),
+    };
+    keyed(s, &key, tx, now);
+    then_wait
+}
+
 /// The next bench step, once the last one's frame is up.
 fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
     let (left, n) = BENCH.get();
+    // The preview bench waits for a preview to land before its next step.
+    if PREVIEW.get() && WAIT_PREVIEW.get() && s.preview.as_ref().is_some_and(|p| p.is_loading()) {
+        return false;
+    }
     if left == 0 {
         if n > 0 {
             tx.quit();
@@ -197,6 +267,10 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
     }
     BENCH.set((left - 1, n + 1));
     let now = Instant::now();
+    if PREVIEW.get() {
+        WAIT_PREVIEW.set(preview_step(s, tx, n, now));
+        return true;
+    }
     if TABS.get() {
         match n {
             // A second tab on the parent folder.
@@ -242,7 +316,7 @@ fn bench_target(first: Option<PathBuf>) -> PathBuf {
 pub fn frame(f: &FrameEncoded) {
     // Rune runs a frame's input handlers and `poll` before building it, so whatever they marked
     // belongs to this frame, drawn or not.
-    let (key, landed) = (KEY.take(), LANDED.take());
+    let (key, landed, preview) = (KEY.take(), LANDED.take(), PREVIEW_LANDED.take());
     if f.outcome() != FrameOutcome::Drawn {
         return;
     }
@@ -269,7 +343,10 @@ pub fn frame(f: &FrameEncoded) {
         );
     } else {
         if let Some(t) = key {
-            eprintln!("arbor-timing key ms={:.2} {split}", ms(t));
+            eprintln!("arbor-timing key ms={:.2} {split} preview={}", ms(t), u8::from(KEY_PREVIEW.get()));
+        }
+        if let Some((t, opened, kind)) = preview {
+            eprintln!("arbor-timing preview ms={:.2} from={} kind={kind} {split}", ms(t), if opened { "open" } else { "move" });
         }
         if let Some((t, n, kind, inside)) = landed {
             if BOOT_LATE.replace(false) {

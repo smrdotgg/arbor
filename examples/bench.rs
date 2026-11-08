@@ -30,6 +30,13 @@
 //! parent folder, then ROUNDS times shows the first tab again (a fresh read of the 10k folder,
 //! timed from the key to the frame showing it) and goes back to the second. Such a run counts
 //! only with exactly ROUNDS tab switches to the 10k folder logged.
+//!
+//! `--preview N` adds N more cold starts with `ARBOR_BENCH_PREVIEW=1` in a folder holding a
+//! 300 KB text file (the preview shows its first 256 KB) and a 12 MP JPEG (4000 × 3000). Each
+//! round previews the text and then the photo, each timed from Space to the frame showing it,
+//! and moves the selection while the preview is open, once while the photo is still decoding
+//! (see `src/timing.rs`). Such a run counts only with exactly 8 keys, one text preview and
+//! one photo preview logged per round.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -43,12 +50,14 @@ fn main() {
     let mut bin = PathBuf::from(format!("target/release/arbor{}", std::env::consts::EXE_SUFFIX));
     let mut keep = false;
     let mut tab_runs = 0;
+    let mut preview_runs = 0;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--bin" => bin = args.next().map(PathBuf::from).expect("--bin PATH"),
             "--keep" => keep = true,
             "--tabs" => tab_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--tabs N"),
+            "--preview" => preview_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--preview N"),
             n => nums.push(n.parse::<u32>().unwrap_or_else(|_| panic!("not a number: {n}"))),
         }
     }
@@ -64,7 +73,7 @@ fn main() {
     let (mut each, mut late, mut invalid) = (Vec::new(), Vec::new(), Vec::new());
     let mut first = None;
     for run in 0..runs {
-        match run_once(&bin, &big, rounds, false) {
+        match run_once(&bin, &big, rounds, Mode::Nav) {
             Ok(r) => {
                 each.push(format!("{:.0}/{:.0}", r.cold, r.main));
                 if let Some(ms) = r.first_listing {
@@ -87,7 +96,7 @@ fn main() {
     }
     let (mut tab, mut same) = (Vec::new(), 0);
     for run in 0..tab_runs {
-        match run_once(&bin, &big, rounds, true) {
+        match run_once(&bin, &big, rounds, Mode::Tabs) {
             Ok(r) => {
                 same += r.same_frame;
                 tab.extend(r.tab);
@@ -98,6 +107,25 @@ fn main() {
             }
         }
     }
+    let (mut text, mut photo, mut open_key, mut decoding_key) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    if preview_runs > 0 {
+        let dir = root.join("preview");
+        make_preview_folder(&dir);
+        for run in 0..preview_runs {
+            match run_once(&bin, &dir, rounds, Mode::Preview) {
+                Ok(r) => {
+                    text.extend(r.preview_text);
+                    photo.extend(r.preview_photo);
+                    open_key.extend(r.key_open);
+                    decoding_key.extend(r.key_decoding);
+                }
+                Err(e) => {
+                    eprintln!("preview run {run}: INVALID: {e}");
+                    invalid.push(runs + tab_runs + run);
+                }
+            }
+        }
+    }
     if !keep {
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -105,15 +133,20 @@ fn main() {
     println!("{} {} · {runs} runs × {rounds} rounds · {ENTRIES} entries", std::env::consts::OS, std::env::consts::ARCH);
     println!("{:<34} {:>5} {:>9} {:>9} {:>8}  result (submission proxy)", "measure", "n", "median", "p95", "budget");
     let tabs = tab_runs > 0;
-    let rows: [(&str, &mut Vec<f64>, Option<f64>); 5] = [
+    let previews = preview_runs > 0;
+    let rows: [(&str, &mut Vec<f64>, Option<f64>); 9] = [
         ("cold start (spawn → first frame)*", &mut cold, Some(100.0)),
         ("  of which main → first frame", &mut main, None),
         ("listing visible (10k, nav → frame)", &mut nav, Some(50.0)),
         ("key → frame (synthetic ↓)", &mut key, Some(8.0)),
         ("tab switch to 10k (key → frame)", &mut tab, Some(50.0)),
+        ("preview 256 KB text (Space → frame)", &mut text, None),
+        ("preview 12 MP JPEG (Space → frame)", &mut photo, None),
+        ("key → frame, preview open", &mut open_key, Some(8.0)),
+        ("  … while the JPEG decodes", &mut decoding_key, Some(8.0)),
     ];
     for (name, v, budget) in rows {
-        if v.is_empty() && name.starts_with("tab") && !tabs {
+        if v.is_empty() && ((name.starts_with("tab") && !tabs) || (name.contains("preview") || name.contains("JPEG")) && !previews) {
             continue;
         }
         if v.is_empty() {
@@ -157,6 +190,13 @@ fn main() {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Nav,
+    Tabs,
+    Preview,
+}
+
 struct Run {
     cold: f64,
     main: f64,
@@ -167,15 +207,23 @@ struct Run {
     /// Tab switches to the 10k folder, and how many landed in the key's own frame.
     tab: Vec<f64>,
     same_frame: usize,
+    /// Space → frame showing the text or the photo; keys while the preview is open, and those
+    /// while the photo decodes.
+    preview_text: Vec<f64>,
+    preview_photo: Vec<f64>,
+    key_open: Vec<f64>,
+    key_decoding: Vec<f64>,
 }
 
-fn run_once(bin: &Path, dir: &Path, rounds: u32, tabs: bool) -> Result<Run, String> {
+fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, String> {
     let spawned = SystemTime::now();
     let mut cmd = Command::new(bin);
-    if tabs {
-        cmd.env("ARBOR_BENCH_TABS", "1");
-    } else {
-        cmd.env_remove("ARBOR_BENCH_TABS");
+    for (var, on) in [("ARBOR_BENCH_TABS", mode == Mode::Tabs), ("ARBOR_BENCH_PREVIEW", mode == Mode::Preview)] {
+        if on {
+            cmd.env(var, "1");
+        } else {
+            cmd.env_remove(var);
+        }
     }
     let mut child = cmd
         .arg(dir)
@@ -204,8 +252,20 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, tabs: bool) -> Result<Run, Stri
         return Err(format!("arbor exited with {status}:\n{}", lines.join("\n")));
     }
     let spawn_us = spawned.duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_micros() as f64;
-    let mut run =
-        Run { cold: f64::NAN, main: f64::NAN, nav: Vec::new(), key: Vec::new(), first_listing: None, tab: Vec::new(), same_frame: 0 };
+    let mut run = Run {
+        cold: f64::NAN,
+        main: f64::NAN,
+        nav: Vec::new(),
+        key: Vec::new(),
+        first_listing: None,
+        tab: Vec::new(),
+        same_frame: 0,
+        preview_text: Vec::new(),
+        preview_photo: Vec::new(),
+        key_open: Vec::new(),
+        key_decoding: Vec::new(),
+    };
+    let mut keys = 0;
     for line in &lines {
         let Some(rest) = line.strip_prefix("arbor-timing ") else { continue };
         let field = |k: &str| rest.split_whitespace().find_map(|f| f.strip_prefix(k)?.strip_prefix('=')?.parse::<f64>().ok());
@@ -216,7 +276,22 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, tabs: bool) -> Result<Run, Stri
             }
             Some("first-listing") => run.first_listing = field("main_ms"),
             Some("nav") if field("entries").is_some_and(|n| n as usize >= ENTRIES) => run.nav.extend(field("ms")),
+            Some("key") if mode == Mode::Preview => {
+                // Each round's keys: Space, Space, ↓, Space, ↑, ↓, ↑, Space. The ↑ ↓ ↑ move
+                // the selection with the preview open; the last ↑ comes while the photo decodes.
+                match keys % 8 {
+                    4 | 5 => run.key_open.extend(field("ms")),
+                    6 => {
+                        run.key_open.extend(field("ms"));
+                        run.key_decoding.extend(field("ms"));
+                    }
+                    _ => {}
+                }
+                keys += 1;
+            }
             Some("key") => run.key.extend(field("ms")),
+            Some("preview") if rest.contains("from=open") && rest.contains("kind=text") => run.preview_text.extend(field("ms")),
+            Some("preview") if rest.contains("from=open") && rest.contains("kind=image") => run.preview_photo.extend(field("ms")),
             Some("tab") if field("entries").is_some_and(|n| n as usize >= ENTRIES) => {
                 run.tab.extend(field("ms"));
                 run.same_frame += usize::from(field("same_frame") == Some(1.0));
@@ -228,7 +303,19 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, tabs: bool) -> Result<Run, Stri
         return Err(format!("no first frame logged:\n{}", lines.join("\n")));
     }
     let want = rounds as usize;
-    if tabs {
+    if mode == Mode::Preview {
+        if keys != want * 8 || run.preview_text.len() != want || run.preview_photo.len() != want {
+            return Err(format!(
+                "expected {} keys and {want} text and photo previews, got {keys}, {} and {}:\n{}",
+                want * 8,
+                run.preview_text.len(),
+                run.preview_photo.len(),
+                lines.join("\n")
+            ));
+        }
+        return Ok(run);
+    }
+    if mode == Mode::Tabs {
         if run.tab.len() != want {
             return Err(format!("expected {want} tab switches to {ENTRIES} entries, got {}:\n{}", run.tab.len(), lines.join("\n")));
         }
@@ -260,6 +347,40 @@ fn make_folder(dir: &Path) {
         let made = if i % 40 == 0 { std::fs::create_dir(&p) } else { std::fs::write(&p, b"x") };
         made.unwrap_or_else(|e| panic!("{}: {e}", p.display()));
     }
+}
+
+/// `a.txt`, 300 KB of text, and `b.jpg`, a 4000 × 3000 photo-like JPEG (gradients, shapes and
+/// noise, so it compresses like a photo: a few MB at quality 90).
+fn make_preview_folder(dir: &Path) {
+    use image::ImageEncoder;
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).expect("temp dir");
+    let mut text = String::new();
+    let mut i = 0;
+    while text.len() < 300_000 {
+        text.push_str(&format!("{i:06}\tfn line_{i}() -> usize {{ {} }} // some code-like text\n", i * 7 % 1000));
+        i += 1;
+    }
+    std::fs::write(dir.join("a.txt"), text).expect("a.txt");
+    let (w, h) = (4000u32, 3000u32);
+    let mut seed = 0x2545_f491_u32;
+    let mut px = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let n = (seed & 31) as i32 - 16;
+            let disc = (((x / 250) + (y / 250)) % 3) as i32 * 40;
+            let c = |v: i32| (v + n).clamp(0, 255) as u8;
+            px.extend([c((x * 255 / w) as i32 + disc / 2), c((y * 255 / h) as i32), c(160 - disc)]);
+        }
+    }
+    let mut jpg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 90)
+        .write_image(&px, w, h, image::ExtendedColorType::Rgb8)
+        .expect("encode the photo");
+    std::fs::write(dir.join("b.jpg"), jpg).expect("b.jpg");
 }
 
 /// The `p`th percentile of sorted `v` (nearest rank).
