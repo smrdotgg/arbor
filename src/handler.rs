@@ -670,7 +670,7 @@ pub(crate) mod windows {
             let (mut kind, mut len) = (0u32, 0u32);
             // SAFETY: the open key, a NUL-terminated name, and out-pointers; the second call
             // gets a buffer of the size the first reported.
-            let r = unsafe {
+            unsafe {
                 let mut r = RegQueryValueExW(h, n.as_ptr(), std::ptr::null(), &mut kind, std::ptr::null_mut(), &mut len);
                 let mut data = vec![0u8; len as usize];
                 if r == 0 && len > 0 {
@@ -679,8 +679,7 @@ pub(crate) mod windows {
                 }
                 RegCloseKey(h);
                 (r == 0).then_some((kind, data))
-            };
-            r
+            }
         }
 
         fn set(&mut self, key: &str, name: &str, kind: u32, data: &[u8]) -> Result<(), String> {
