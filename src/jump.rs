@@ -1460,8 +1460,6 @@ mod tests {
         assert_eq!(s.cur().cwd, d.join("x").join("y"));
     }
 
-    /// Clearing can't be undone: the first run only asks, and anything else in between
-    /// cancels the question.
     #[test]
     fn jump_off_records_nothing_and_cant_open() {
         let d = dirs("off", &["a"]);

@@ -144,6 +144,37 @@ pub struct State {
     pub preview_lands: u64,
     /// The threads searches walk on, from the first search on (kept, idle between searches).
     pub(crate) search_pool: Option<crate::search::Pool>,
+    /// A go-to's look at what's at its path (on a worker), and which go-to is waited for.
+    path_check: Latest<(u64, PathBuf, PathKind)>,
+    pub(crate) going_to: Option<u64>,
+}
+
+/// What's at a typed path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PathKind {
+    Folder,
+    File,
+    Missing,
+}
+
+/// Test only: holds a go-to's look at one path until told.
+#[cfg(test)]
+pub(crate) mod path_hook {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::sync::mpsc::Receiver;
+
+    pub(crate) static GATES: Mutex<Vec<(PathBuf, Receiver<()>)>> = Mutex::new(Vec::new());
+
+    pub(super) fn check(p: &Path) {
+        let gate = {
+            let mut g = GATES.lock().unwrap();
+            g.iter().position(|(q, _)| q == p).map(|i| g.remove(i))
+        };
+        if let Some((_, go)) = gate {
+            let _ = go.recv();
+        }
+    }
 }
 
 impl State {
@@ -216,6 +247,8 @@ impl State {
             preview_reads: 0,
             preview_lands: 0,
             search_pool: None,
+            path_check: Latest::default(),
+            going_to: None,
         };
         let f = &mut s.panes[0].f;
         match listing {
@@ -251,6 +284,7 @@ impl State {
         }
         self.settings_loader.set_waker(waker.clone());
         self.history.waker = Some(waker.clone());
+        self.path_check.set_waker(waker.clone());
         if let Some(b) = &self.boot
             && let Ok(mut w) = b.waker.lock()
         {
@@ -408,6 +442,10 @@ impl State {
         }
         if let Some(c) = self.settings_loader.take() {
             self.apply_settings(c, tx);
+            changed = true;
+        }
+        if let Some(a) = self.path_check.take() {
+            self.went_path(a);
             changed = true;
         }
         changed |= self.poll_history();
@@ -583,17 +621,45 @@ impl State {
         self.go_path(&path);
     }
 
-    /// Go-to: a folder navigates, a file opens, anything else says it isn't there.
+    /// Go-to: a folder navigates, a file opens, anything else says it isn't there. What's at
+    /// the path is looked up on a worker (a typed path can be on a slow or gone disk), waiting
+    /// here at most a frame as showing a tab does; a slower answer acts when it lands, unless
+    /// another go-to was asked for since.
     pub(crate) fn go_path(&mut self, path: &Path) {
-        let path = path.to_path_buf();
-        if path.is_dir() {
-            self.go(path, Nav::New, None);
-        } else if path.exists() {
-            if let Err(e) = fs::open(&path) {
-                self.note = Some(format!("Couldn't open: {e}"));
+        let (id, path) = (crate::folder::next_request(), path.to_path_buf());
+        self.going_to = Some(id);
+        let wait = self.show_wait;
+        let answer = crate::folder::read_waiting(&self.path_check, wait, move || {
+            #[cfg(test)]
+            path_hook::check(&path);
+            let kind = if path.is_dir() {
+                PathKind::Folder
+            } else if path.exists() {
+                PathKind::File
+            } else {
+                PathKind::Missing
+            };
+            Some((id, path, kind))
+        });
+        if let Some(a) = answer {
+            self.went_path(a);
+        }
+    }
+
+    /// What a go-to found, if it's still the one asked for.
+    fn went_path(&mut self, (id, path, kind): (u64, PathBuf, PathKind)) {
+        if self.going_to != Some(id) {
+            return;
+        }
+        self.going_to = None;
+        match kind {
+            PathKind::Folder => self.go(path, Nav::New, None),
+            PathKind::File => {
+                if let Err(e) = fs::open(&path) {
+                    self.note = Some(format!("Couldn't open: {e}"));
+                }
             }
-        } else {
-            self.note = Some(format!("No such folder: {}", path.display()));
+            PathKind::Missing => self.note = Some(format!("No such folder: {}", path.display())),
         }
     }
 
@@ -1253,7 +1319,7 @@ pub(crate) mod tests {
     /// Polls as frames would until no pane is loading (or 10 s pass).
     pub(crate) fn settle_all(s: &mut State) {
         let until = Instant::now() + Duration::from_secs(10);
-        while s.panes.iter().any(|p| p.f.is_loading()) && Instant::now() < until {
+        while (s.panes.iter().any(|p| p.f.is_loading()) || s.going_to.is_some()) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(2));
             s.poll(&mut Tx::default());
         }
@@ -1299,6 +1365,33 @@ pub(crate) mod tests {
         assert!(s.show_hidden);
         assert_eq!(s.note.as_deref(), Some("Settings reloaded"));
         assert_eq!(s.cur().visible.len(), 3);
+    }
+
+    /// A go-to looks at what's at its path on a worker: a path on a disk that doesn't answer
+    /// holds up nothing (it used to be looked at here, on the UI thread), and it goes there when
+    /// the answer lands; a newer go-to wins over it.
+    #[test]
+    fn a_typed_path_is_looked_at_off_the_ui_thread() {
+        let (a, b) = (folder("goto-a", 1), folder("goto-b", 1));
+        let mut s = state_in(&a);
+        let (go, gate) = std::sync::mpsc::channel();
+        path_hook::GATES.lock().unwrap().push((b.clone(), gate));
+        let t = Instant::now();
+        s.go_path(&b);
+        assert!(t.elapsed() < Duration::from_millis(500), "waited {:?}", t.elapsed());
+        assert!(s.going_to.is_some() && !s.is_loading() && s.cur().cwd == a, "nothing happens until it's known");
+        go.send(()).unwrap();
+        settle_all(&mut s);
+        assert_eq!(s.cur().cwd, b);
+        // Two go-tos: only the newer acts, even when the older answers last.
+        let (go, gate) = std::sync::mpsc::channel();
+        path_hook::GATES.lock().unwrap().push((a.clone(), gate));
+        s.go_path(&a);
+        s.go_path(&a.join("missing"));
+        go.send(()).unwrap();
+        settle_all(&mut s);
+        assert_eq!(s.cur().cwd, b, "the older go-to didn't act");
+        assert!(s.note.as_deref().is_some_and(|n| n.starts_with("No such folder")), "{:?}", s.note);
     }
 
     /// Going somewhere before the first listing lands: the newer request wins.
