@@ -30,6 +30,12 @@ jpeg-decoder = { version = "0.3", default-features = false }
 gif = { version = "0.14", default-features = false, features = ["std"] }
 image-webp = { version = "0.2", default-features = false }
 
+# Regular expressions for Batch Rename and Select by Pattern's `re:`. regex-lite, not regex: no
+# Unicode tables and no DFA, so a fraction of the size, and file names are short, so its
+# backtracking-free NFA matcher is fast enough (see BENCH.md). Classes like \w and case folding
+# are ASCII only.
+regex-lite = "0.1"
+
 # Trash: NSFileManager on macOS, the shell's Recycle Bin on Windows (Linux follows the XDG spec).
 # windows-sys also lists the drive letters, and does no-replace moves and copies and reads file ids.
 # No-replace renames and clones (renameat2, renamex_np, clonefile). Already in the lock file through Rune.

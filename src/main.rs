@@ -17,6 +17,7 @@ mod palette;
 mod panes;
 mod pattern;
 mod preview;
+mod rename;
 mod search;
 mod select;
 mod timing;

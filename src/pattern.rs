@@ -594,5 +594,17 @@ mod tests {
             println!("{pat}: {n} of 50k in {best:.2} ms (best of 20)");
             assert_eq!(n, want, "{pat}");
         }
+        // A regex (regex-lite) for comparison: why Select by Pattern has no `re:` yet.
+        for (pat, want) in [(r"\.jpg$", 16_667), (r"^img_\d*1", 26_281)] {
+            let re = regex_lite::RegexBuilder::new(pat).case_insensitive(true).build().unwrap();
+            let (mut best, mut n) = (f64::MAX, 0);
+            for _ in 0..20 {
+                let t = std::time::Instant::now();
+                n = names.iter().filter(|s| re.is_match(s)).count();
+                best = best.min(t.elapsed().as_secs_f64() * 1e3);
+            }
+            println!("re:{pat}: {n} of 50k in {best:.2} ms (best of 20)");
+            assert_eq!(n, want, "{pat}");
+        }
     }
 }

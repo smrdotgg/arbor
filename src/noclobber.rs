@@ -69,7 +69,7 @@ fn via_temp(from: &Path, to: &Path) -> io::Result<()> {
 
 /// An unused-looking name beside `p` for [`via_temp`]: `.arbor-<64 random bits>-<start of its
 /// name>`, kept short so a long name can't push it past the disk's name limit.
-fn temp_sibling(p: &Path) -> io::Result<std::path::PathBuf> {
+pub(crate) fn temp_sibling(p: &Path) -> io::Result<std::path::PathBuf> {
     use std::hash::BuildHasher;
     let name = p.file_name().ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "no file name"))?;
     // `RandomState` is seeded randomly per process; the clock varies it per call.

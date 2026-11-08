@@ -35,6 +35,11 @@ pub enum Op {
     Trash {
         sources: Vec<PathBuf>,
     },
+    /// Batch rename: every item gets its new name in its own folder, or none does (see
+    /// [`Worker::rename_all`]).
+    Rename {
+        items: Vec<Renaming>,
+    },
     /// Reverse an earlier operation, if the disk still looks the way it left it.
     Undo(Undo),
 }
@@ -47,6 +52,7 @@ impl Op {
             Op::Copy { dest, .. } => vec![dest.clone()],
             Op::Move { sources, dest } => [vec![dest.clone()], parents(sources)].concat(),
             Op::Trash { sources } => parents(sources),
+            Op::Rename { items } => items.iter().filter_map(|r| r.from.parent().map(Path::to_path_buf)).collect(),
             Op::Undo(u) => u
                 .steps
                 .iter()
@@ -65,8 +71,30 @@ impl Op {
             Op::Copy { .. } => "Copying",
             Op::Move { .. } => "Moving",
             Op::Trash { .. } => "Moving to Trash",
+            Op::Rename { .. } => "Renaming",
             Op::Undo(_) => "Undoing",
         }
+    }
+}
+
+/// One item of a batch rename: where it is, its new name's path (in the same folder), and what
+/// it looked like when the preview was made.
+#[derive(Debug, Clone)]
+pub struct Renaming {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    pub seen: Seen,
+}
+
+/// An item's fingerprint, taken when the batch rename's preview read its folder, so applying
+/// refuses an item that changed since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seen(Print);
+
+impl Seen {
+    /// `path` as it is now (not following a link); `None` when it isn't there.
+    pub fn of(path: &Path) -> Option<Seen> {
+        Some(Seen(Print::of(path, &path.symlink_metadata().ok()?)))
     }
 }
 
@@ -74,6 +102,8 @@ impl Op {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum What {
     Rename,
+    /// A batch rename: undone as one, through the same two-step plan.
+    BatchRename,
     Move,
     Copy,
     Duplicate,
@@ -85,6 +115,7 @@ impl What {
     fn noun(self) -> &'static str {
         match self {
             What::Rename => "rename",
+            What::BatchRename => "batch rename",
             What::Move => "move",
             What::Copy => "copy",
             What::Duplicate => "duplicate",
@@ -297,6 +328,9 @@ pub struct Outcome {
     /// An undo that changed nothing because the disk changed since the operation: why.
     pub refused: Option<String>,
     pub cancelled: bool,
+    /// Items that got a new name in their own folder (a batch rename or its undo): `(from, to)`,
+    /// so panes can show them under their new names at once.
+    pub renamed: Vec<(PathBuf, PathBuf)>,
     /// The folders the operation may have changed, with their identities (links followed), so
     /// the panes showing them, by any path, read them again.
     pub folders: Vec<(PathBuf, Option<noclobber::FileId>)>,
@@ -420,6 +454,8 @@ struct Hooks {
     before_act: Option<PathHook>,
     /// Treat every rename as crossing disks, so moves copy then delete.
     cross_device: bool,
+    /// Fail renaming onto these paths (a batch rename failing midway).
+    fail_rename: Option<PathTest>,
     /// Fail removing these items (a permission error halfway through a delete).
     fail_remove: Option<PathTest>,
     /// Called with each file or folder a copy makes, right after it's made: where a test
@@ -535,6 +571,10 @@ impl<'a> Worker<'a> {
         if self.hooks.cross_device {
             return Err(io::Error::from(ErrorKind::CrossesDevices));
         }
+        #[cfg(test)]
+        if self.hooks.fail_rename.as_ref().is_some_and(|f| f(to)) {
+            return Err(io::Error::new(ErrorKind::PermissionDenied, "permission denied"));
+        }
         noclobber::rename(from, to)
     }
 
@@ -564,6 +604,7 @@ impl<'a> Worker<'a> {
                 errors: Vec::new(),
                 refused: Some(format!("Nothing was pasted: “{}” {why}", name_of(dest))),
                 cancelled: false,
+                renamed: Vec::new(),
                 folders: Vec::new(),
             };
         }
@@ -580,7 +621,8 @@ impl<'a> Worker<'a> {
                 (p, id)
             })
             .collect();
-        let mut out = Outcome { results: Vec::new(), undo: None, errors: Vec::new(), refused: None, cancelled: false, folders };
+        let mut out =
+            Outcome { results: Vec::new(), undo: None, errors: Vec::new(), refused: None, cancelled: false, renamed: Vec::new(), folders };
         match op {
             Op::Copy { sources, dest } => {
                 self.p.items_total.store(sources.len(), Relaxed);
@@ -644,6 +686,8 @@ impl<'a> Worker<'a> {
                     out.undo = Undo::record(What::Trash, pairs);
                 }
             }
+            Op::Rename { items } => self.batch_rename(items, &mut out),
+            Op::Undo(undo) if undo.what == What::BatchRename => self.undo_batch_rename(undo, &mut out),
             Op::Undo(undo) => self.undo(undo, &mut out),
         }
         out.cancelled = self.cancelled();
@@ -1093,6 +1137,193 @@ impl<'a> Worker<'a> {
             *kept = Some(format!("“{}”: {e}", p.display()));
         }
     }
+}
+
+// ---- batch rename ---------------------------------------------------------------------------
+
+/// Where one item of a batch is while it's renamed, in the order it got there.
+struct Done {
+    item: usize,
+    now: PathBuf,
+    was: PathBuf,
+}
+
+impl Worker<'_> {
+    /// A batch rename. Before touching anything, every item must still be as the preview saw it
+    /// and every new name free (or held by another item of the batch, which moves out of the
+    /// way); otherwise nothing is renamed and it says which item and why. Then
+    /// [`Worker::rename_all`]: all of it, or none of it.
+    fn batch_rename(&mut self, items: Vec<Renaming>, out: &mut Outcome) {
+        let moves: Vec<(PathBuf, PathBuf)> = items.iter().map(|r| (r.from.clone(), r.to.clone())).collect();
+        let seen: Vec<&Print> = items.iter().map(|r| &r.seen.0).collect();
+        if let Err(why) = self.check_batch(&moves, &seen) {
+            out.refused = Some(format!("Nothing was renamed: {why}."));
+            return;
+        }
+        if self.rename_all(&moves, out) {
+            out.results = moves.iter().map(|(_, to)| to.clone()).collect();
+            out.undo = Undo::record(What::BatchRename, moves.iter().map(|(from, to)| (to.clone(), Some(from.clone()))));
+            out.renamed = moves;
+        }
+    }
+
+    /// Undoes a batch rename as one: every item must be as the batch left it and its old name
+    /// free or held by another item of the batch, or nothing is undone. Then the same two-step
+    /// plan, which swaps and chains need going back too. A failed or cancelled undo stays on
+    /// the stack.
+    fn undo_batch_rename(&mut self, undo: Undo, out: &mut Outcome) {
+        let moves: Vec<(PathBuf, PathBuf)> = undo.steps.iter().filter_map(|s| Some((s.at.clone(), s.back.clone()?))).collect();
+        let seen: Vec<&Print> = undo.steps.iter().map(|s| &s.print).collect();
+        if let Err(why) = self.check_batch(&moves, &seen) {
+            out.refused = Some(format!("Can't undo the batch rename: {why}. Nothing was changed."));
+            out.undo = Some(undo);
+            return;
+        }
+        if self.rename_all(&moves, out) {
+            out.results = moves.iter().map(|(_, back)| back.clone()).collect();
+            out.renamed = moves;
+        } else {
+            out.undo = Some(undo);
+        }
+    }
+
+    /// Whether every `(from, to)` can go: `from` still has fingerprint `seen`, and `to` is in
+    /// the same folder and free, or is an item of the batch (which moves first). Says the first
+    /// problem.
+    fn check_batch(&self, moves: &[(PathBuf, PathBuf)], seen: &[&Print]) -> Result<(), String> {
+        for ((from, _), was) in moves.iter().zip(seen) {
+            if let Some(d) = self.diff(from, was) {
+                let name = format!("“{}”", name_of(from));
+                return Err(match d {
+                    Diff::Unreachable(e) => format!("{name} can't be checked ({e})"),
+                    d => format!("{} since the preview", d.say(&name, was.kind)),
+                });
+            }
+        }
+        let ids: std::collections::HashSet<(u64, u64)> = seen.iter().filter_map(|p| p.id).collect();
+        let froms: std::collections::HashSet<String> = moves.iter().map(|(f, _)| fold_path(f)).collect();
+        for (from, to) in moves {
+            if from.parent() != to.parent() || to.file_name().is_none() {
+                return Err(format!("“{}” would leave its folder", name_of(from)));
+            }
+            let Ok(m) = to.symlink_metadata() else { continue };
+            let ours = match noclobber::file_id(to, &m) {
+                Some(id) => ids.contains(&id),
+                // No identity to tell by: only a name the batch itself holds.
+                None => froms.contains(&fold_path(to)),
+            };
+            if !ours {
+                return Err(format!("“{}” already exists in “{}”", name_of(to), parent_of(to)));
+            }
+        }
+        Ok(())
+    }
+
+    /// Renames each `(from, to)` (each in its own folder), never over anything, as one step
+    /// that either all happens or is put back. An item whose new name is another item's old one
+    /// (a swap, a chain, a case-only change) first steps aside to a temporary name beside it
+    /// (`.arbor-…`, as [`noclobber::rename`]'s case-only renames do); then the others get
+    /// their new names, freeing the old ones; then the ones aside get theirs. A failure or a
+    /// cancel midway puts every item back, last step first, again never over anything; what
+    /// can't go back (another app took its old name meanwhile) stays where it is and the
+    /// message says exactly where. True when every item has its new name.
+    fn rename_all(&mut self, moves: &[(PathBuf, PathBuf)], out: &mut Outcome) -> bool {
+        self.p.items_total.store(moves.len(), Relaxed);
+        let froms: std::collections::HashSet<String> = moves.iter().map(|(f, _)| fold_path(f)).collect();
+        // Compared case aside on every disk: a needless step aside costs one rename.
+        let aside: Vec<bool> = moves.iter().map(|(_, to)| froms.contains(&fold_path(to))).collect();
+        let mut done: Vec<Done> = Vec::new();
+        let Err(why) = self.rename_steps(moves, &aside, &mut done) else { return true };
+        let stuck = self.put_back(done);
+        let cancelled = self.cancelled();
+        let lead = if cancelled { "Cancelled".to_string() } else { why };
+        if stuck.is_empty() {
+            out.errors.push(format!("{lead}. Nothing was renamed: every item has its old name again"));
+            return false;
+        }
+        let at =
+            |(item, now): &(usize, PathBuf)| format!("“{}” is now “{}” in “{}”", name_of(&moves[*item].0), name_of(now), parent_of(now));
+        let shown: Vec<String> = stuck.iter().take(3).map(at).collect();
+        let more = if stuck.len() > 3 { format!(" (and {} more)", stuck.len() - 3) } else { String::new() };
+        let n = stuck.len();
+        out.errors.push(format!(
+            "{lead}, and {n} item{} couldn't get {} old name back (something else took it): {}{more}. The rest have their old names",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "its" } else { "their" },
+            shown.join("; "),
+        ));
+        out.errors.extend(stuck.iter().skip(3).map(at));
+        false
+    }
+
+    /// The steps of [`Worker::rename_all`], recording each in `done`. The first failure (or a
+    /// cancel) stops it and says why.
+    fn rename_steps(&mut self, moves: &[(PathBuf, PathBuf)], aside: &[bool], done: &mut Vec<Done>) -> Result<(), String> {
+        let mut at: Vec<PathBuf> = moves.iter().map(|(from, _)| from.clone()).collect();
+        for (i, (from, _)) in moves.iter().enumerate().filter(|&(i, _)| aside[i]) {
+            if self.cancelled() {
+                return Err("Cancelled".into());
+            }
+            let tmp = self.step_aside(from)?;
+            done.push(Done { item: i, now: tmp.clone(), was: from.clone() });
+            at[i] = tmp;
+            self.tick(0);
+        }
+        for pass in [false, true] {
+            for (i, (from, to)) in moves.iter().enumerate().filter(|&(i, _)| aside[i] == pass) {
+                if self.cancelled() {
+                    return Err("Cancelled".into());
+                }
+                self.before_act(to);
+                match self.rename_excl(&at[i], to) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                        return Err(format!("“{}” was taken just now, so “{}” couldn't have that name", name_of(to), name_of(from)));
+                    }
+                    Err(e) => return Err(format!("Couldn't rename “{}” to “{}”: {e}", name_of(from), name_of(to))),
+                }
+                done.push(Done { item: i, now: to.clone(), was: std::mem::replace(&mut at[i], to.clone()) });
+                self.p.items_done.fetch_add(1, Relaxed);
+                self.tick(0);
+            }
+        }
+        Ok(())
+    }
+
+    /// Moves `from` to a free temporary name beside it; returns the name.
+    fn step_aside(&mut self, from: &Path) -> Result<PathBuf, String> {
+        for _ in 0..TRIES {
+            let tmp = noclobber::temp_sibling(from).map_err(|e| e.to_string())?;
+            match self.rename_excl(from, &tmp) {
+                Ok(()) => return Ok(tmp),
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(format!("Couldn't rename “{}”: {e}", name_of(from))),
+            }
+        }
+        Err(format!("Couldn't find a free temporary name beside “{}”", name_of(from)))
+    }
+
+    /// Undoes `done`, last step first, never over anything. An item that can't go back stays
+    /// where it is (its earlier steps aren't tried). Returns those, with where each is.
+    fn put_back(&mut self, done: Vec<Done>) -> Vec<(usize, PathBuf)> {
+        let mut stuck: Vec<(usize, PathBuf)> = Vec::new();
+        for d in done.into_iter().rev() {
+            if stuck.iter().any(|(i, _)| *i == d.item) {
+                continue;
+            }
+            self.before_act(&d.was);
+            if self.rename_excl(&d.now, &d.was).is_err() {
+                stuck.push((d.item, d.now));
+            }
+        }
+        stuck.sort_by_key(|(i, _)| *i);
+        stuck
+    }
+}
+
+/// A path for comparing names case aside (what a disk that ignores case sees as one name).
+fn fold_path(p: &Path) -> String {
+    p.to_string_lossy().to_lowercase()
 }
 
 /// Whether `e` means the item isn't there: not found, or a folder on its path is now a file.
@@ -2046,6 +2277,208 @@ mod tests {
         assert!(o.undo.is_none() && o.results.is_empty());
         assert!(o.errors[0].contains("something else took the place of “src”"), "{:?}", o.errors);
         assert_eq!(fs::read_to_string(d.join("into/src/a")).unwrap(), "theirs", "the other folder stays, with what's in it");
+    }
+
+    // ---- batch rename -----------------------------------------------------------------------
+
+    /// A batch rename of `pairs` (names in `d`), fingerprinted as they are now (the preview).
+    fn batch(d: &Path, pairs: &[(&str, &str)]) -> Op {
+        let items =
+            pairs.iter().map(|(a, b)| Renaming { from: d.join(a), to: d.join(b), seen: Seen::of(&d.join(a)).expect("exists") }).collect();
+        Op::Rename { items }
+    }
+
+    fn files(d: &Path, names: &[&str]) {
+        for n in names {
+            fs::write(d.join(n), format!("I was {n}")).unwrap();
+        }
+    }
+
+    /// What's in `d`, name → contents ("I was a"), skipping the fake trash.
+    fn contents(d: &Path) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = fs::read_dir(d)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name() != ".trash")
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), fs::read_to_string(e.path()).unwrap_or_default()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn was(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = pairs.iter().map(|(n, w)| (n.to_string(), format!("I was {w}"))).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn batch_rename_swaps_chains_and_cycles() {
+        let d = tmp("batch-swap");
+        files(&d, &["a", "b", "c", "x", "y", "n"]);
+        let o = run_now(batch(&d, &[("a", "b"), ("b", "a"), ("x", "y"), ("y", "z"), ("c", "n2"), ("n", "c")]));
+        assert!(o.errors.is_empty() && o.refused.is_none(), "{:?} {:?}", o.errors, o.refused);
+        assert_eq!(contents(&d), was(&[("a", "b"), ("b", "a"), ("y", "x"), ("z", "y"), ("n2", "c"), ("c", "n")]));
+        assert_eq!(o.results.len(), 6);
+        assert_eq!(o.renamed.len(), 6);
+        // A three-way cycle.
+        let d = tmp("batch-cycle");
+        files(&d, &["1", "2", "3"]);
+        take(run_now(batch(&d, &[("1", "2"), ("2", "3"), ("3", "1")])));
+        assert_eq!(contents(&d), was(&[("2", "1"), ("3", "2"), ("1", "3")]));
+    }
+
+    #[test]
+    fn batch_rename_changes_case_only() {
+        let d = tmp("batch-case");
+        files(&d, &["a.txt", "b.txt"]);
+        take(run_now(batch(&d, &[("a.txt", "A.txt"), ("b.txt", "B.TXT")])));
+        assert_eq!(contents(&d), was(&[("A.txt", "a.txt"), ("B.TXT", "b.txt")]));
+    }
+
+    /// One undo entry undoes the whole batch, swaps included (going back is a swap too).
+    #[test]
+    fn batch_rename_is_one_undo_entry() {
+        let d = tmp("batch-undo");
+        files(&d, &["a", "b", "c"]);
+        let u = take(run_now(batch(&d, &[("a", "b"), ("b", "a"), ("c", "d")])));
+        assert_eq!(u.what, What::BatchRename);
+        assert_eq!(u.steps.len(), 3);
+        let o = run_now(Op::Undo(u));
+        assert!(o.errors.is_empty() && o.refused.is_none() && o.undo.is_none(), "{:?} {:?}", o.errors, o.refused);
+        assert_eq!(contents(&d), was(&[("a", "a"), ("b", "b"), ("c", "c")]));
+        assert_eq!(o.results.len(), 3);
+    }
+
+    /// Undo refuses as a whole when one item changed since, and keeps the record.
+    #[test]
+    fn batch_rename_undo_refuses_when_one_item_changed() {
+        let d = tmp("batch-undo-edit");
+        files(&d, &["a", "b"]);
+        let u = take(run_now(batch(&d, &[("a", "b"), ("b", "a")])));
+        edit(&d.join("a"));
+        let why = undo_refused(u);
+        assert!(why.starts_with("Can't undo the batch rename: “a” was edited"), "{why}");
+        assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "I was a", "nothing went back");
+        // Or when an old name was taken by something outside the batch.
+        let d = tmp("batch-undo-taken");
+        files(&d, &["a"]);
+        let u = take(run_now(batch(&d, &[("a", "b")])));
+        fs::write(d.join("a"), "newcomer").unwrap();
+        let why = undo_refused(u);
+        assert!(why.contains("“a” already exists"), "{why}");
+        assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "newcomer");
+    }
+
+    /// An item changed after the preview: nothing is renamed, and the message names it.
+    #[test]
+    fn batch_rename_refuses_items_changed_since_the_preview() {
+        let d = tmp("batch-changed");
+        files(&d, &["a", "b"]);
+        let op = batch(&d, &[("a", "x"), ("b", "y")]);
+        edit(&d.join("b"));
+        let o = run_now(op);
+        assert_eq!(o.refused.as_deref(), Some("Nothing was renamed: “b” was edited since the preview."));
+        assert!(o.undo.is_none() && o.results.is_empty());
+        assert_eq!(contents(&d).iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        // Replaced by another file of the same name.
+        let op = batch(&d, &[("a", "x")]);
+        fs::remove_file(d.join("a")).unwrap();
+        fs::write(d.join("a"), "I was a").unwrap();
+        let o = run_now(op);
+        assert!(o.refused.as_deref().is_some_and(|r| r.contains("replaced") || r.contains("edited")), "{:?}", o.refused);
+        // A new name taken since the preview by something outside the batch.
+        let op = batch(&d, &[("a", "x"), ("b", "y")]);
+        fs::write(d.join("y"), "newcomer").unwrap();
+        let o = run_now(op);
+        assert!(o.refused.as_deref().is_some_and(|r| r.contains("“y” already exists")), "{:?}", o.refused);
+        assert_eq!(fs::read_to_string(d.join("y")).unwrap(), "newcomer");
+        assert!(d.join("a").exists() && !d.join("x").exists());
+    }
+
+    /// The third rename fails (a permission error): the first two, and the swap's temporary
+    /// name, go back, and nothing is left under a temporary name.
+    #[test]
+    fn batch_rename_rolls_back_a_failure_midway() {
+        let d = tmp("batch-fail");
+        files(&d, &["a", "b", "c", "d"]);
+        let stop = d.join("d2");
+        let hooks = Hooks { fail_rename: Some(Box::new(move |p: &Path| p == stop)), ..Hooks::default() };
+        let o = run_hooked(batch(&d, &[("a", "b"), ("b", "a"), ("c", "c2"), ("d", "d2")]), fake_trash, hooks);
+        assert!(o.undo.is_none() && o.results.is_empty() && o.renamed.is_empty());
+        assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
+        assert_eq!(o.errors[0], "Couldn't rename “d” to “d2”: permission denied. Nothing was renamed: every item has its old name again");
+        assert_eq!(contents(&d), was(&[("a", "a"), ("b", "b"), ("c", "c"), ("d", "d")]));
+    }
+
+    /// The rollback itself meets a name another app took: that item stays where it is, the rest
+    /// go back, nothing is overwritten, and the message says where the item is.
+    #[test]
+    fn batch_rename_that_cant_roll_back_says_where_each_item_is() {
+        let d = tmp("batch-stuck");
+        files(&d, &["a", "b"]);
+        let (stop, old_a) = (d.join("b2"), d.join("a"));
+        let hooks = Hooks {
+            fail_rename: Some(Box::new(move |p: &Path| p == stop)),
+            // Called before each step, and before each step back: another app takes "a" just
+            // as it would go back.
+            before_act: Some(Box::new(move |p: &Path| {
+                if p == old_a {
+                    fs::write(p, "newcomer").unwrap();
+                }
+            })),
+            ..Hooks::default()
+        };
+        let o = run_hooked(batch(&d, &[("a", "a2"), ("b", "b2")]), fake_trash, hooks);
+        assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
+        assert_eq!(
+            o.errors[0],
+            format!(
+                "Couldn't rename “b” to “b2”: permission denied, and 1 item couldn't get its old name back (something else took it): “a” is now “a2” in “{}”. The rest have their old names",
+                d.display()
+            )
+        );
+        assert_eq!(contents(&d), vec![("a".into(), "newcomer".into()), ("a2".into(), "I was a".into()), ("b".into(), "I was b".into())]);
+    }
+
+    /// Cancelled midway: everything goes back.
+    #[test]
+    fn batch_rename_cancelled_midway_puts_everything_back() {
+        let d = tmp("batch-cancel");
+        files(&d, &["a", "b", "c"]);
+        let p = Arc::new(Progress::default());
+        let pp = p.clone();
+        let mut n = 0;
+        let mut w = Worker::new(&p, None, fake_trash);
+        w.hooks.before_act = Some(Box::new(move |_: &Path| {
+            n += 1;
+            if n == 2 {
+                pp.cancel.store(true, Relaxed);
+            }
+        }));
+        let o = w.run(batch(&d, &[("a", "b"), ("b", "c"), ("c", "d")]));
+        assert!(o.cancelled && o.undo.is_none());
+        assert_eq!(o.errors, ["Cancelled. Nothing was renamed: every item has its old name again"]);
+        assert_eq!(contents(&d), was(&[("a", "a"), ("b", "b"), ("c", "c")]));
+    }
+
+    /// Search results: items from several folders, each renamed in its own.
+    #[test]
+    fn batch_rename_across_folders() {
+        let d = tmp("batch-folders");
+        for sub in ["one", "two"] {
+            fs::create_dir(d.join(sub)).unwrap();
+            fs::write(d.join(sub).join("report.txt"), sub).unwrap();
+        }
+        let op = batch(&d, &[("one/report.txt", "one/1.txt"), ("two/report.txt", "two/1.txt")]);
+        let u = take(run_now(op));
+        assert_eq!(fs::read_to_string(d.join("one/1.txt")).unwrap(), "one");
+        assert_eq!(fs::read_to_string(d.join("two/1.txt")).unwrap(), "two");
+        undo_ok(u);
+        assert_eq!(fs::read_to_string(d.join("two/report.txt")).unwrap(), "two");
+        // Out of its folder: refused.
+        let o = run_now(batch(&d, &[("one/report.txt", "two/x.txt")]));
+        assert!(o.refused.as_deref().is_some_and(|r| r.contains("would leave its folder")), "{:?}", o.refused);
     }
 
     // ---- known limits -----------------------------------------------------------------------

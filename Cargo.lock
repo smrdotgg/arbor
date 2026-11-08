@@ -172,6 +172,7 @@ dependencies = [
  "libc",
  "objc2-foundation 0.3.2",
  "png",
+ "regex-lite",
  "rune",
  "toml_edit",
  "windows-sys 0.59.0",
@@ -2390,6 +2391,12 @@ checksum = "580c875845b41ecb1564ad1ae4703044cef774145e3d7a94dc2b3fa7c97868fd"
 dependencies = [
  "bitflags 2.13.2",
 ]
+
+[[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "renderdoc-sys"
