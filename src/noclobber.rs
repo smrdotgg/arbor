@@ -315,6 +315,7 @@ mod tests {
     }
 
     /// Runs `f` between the two steps of the next [`via_temp`] on this thread.
+    #[cfg(unix)] // only the Unix tests reach the two steps
     fn when_between(f: impl FnOnce() + 'static) {
         BETWEEN.with_borrow_mut(|b| *b = Some(Box::new(f)));
     }
