@@ -1860,7 +1860,8 @@ mod tests {
             assert_eq!(fs::read_to_string(&left[0]).unwrap(), "OTHER APP DATA");
             let name = left[0].file_name().unwrap().to_string_lossy().into_owned();
             assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
-            let want = format!("src: cancelled; kept “{name}” in “{}”: it changed after Arbor made it", d.join("into/src").display());
+            let want =
+                format!("src: cancelled; kept “{name}” in “{}”: it changed after Arbor made it", d.join("into").join("src").display());
             assert_eq!(o.errors[0], want);
             for n in ["a", "b", "c"] {
                 assert_eq!(fs::read_to_string(d.join("src").join(n)).unwrap(), n, "the source is untouched");

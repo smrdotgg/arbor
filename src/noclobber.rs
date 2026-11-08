@@ -349,8 +349,11 @@ mod tests {
     }
 
     /// Two hard links are one item under two names, the same escape a case-only rename takes.
-    /// Renaming one onto the other is refused and both stay (a plain rename there either did
-    /// nothing and claimed success, on Unix, or replaced the other name, on Windows).
+    /// Renaming one onto the other is refused and both stay (a plain rename there did nothing
+    /// and claimed success). Unix only: on Windows the no-replace `MoveFileExW` itself renames
+    /// one link onto another of the same file (as it does a case-only rename), so the two-step
+    /// path isn't reached there; see `rename_onto_another_hard_link_loses_nothing`.
+    #[cfg(unix)]
     #[test]
     fn rename_onto_another_hard_link_is_refused() {
         let d = tmp("alias");
@@ -361,8 +364,26 @@ mod tests {
         assert!(same_item(&d.join("a"), &d.join("b")));
     }
 
+    /// On every platform: refused with both names kept, or (Windows) done, the file under the
+    /// new name. Never anything lost.
+    #[test]
+    fn rename_onto_another_hard_link_loses_nothing() {
+        let d = tmp("alias-any");
+        fs::write(d.join("a"), "mine").unwrap();
+        fs::hard_link(d.join("a"), d.join("b")).unwrap();
+        match rename(&d.join("a"), &d.join("b")) {
+            Err(e) => {
+                assert_eq!(e.kind(), ErrorKind::AlreadyExists);
+                assert_eq!(names(&d), ["a", "b"]);
+            }
+            Ok(()) => assert_eq!(std::env::consts::OS, "windows", "only Windows renames onto its own hard link"),
+        }
+        assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "mine");
+    }
+
     /// Another app takes the new name between the two steps: the second step refuses, the item
     /// goes back to its old name, and the newcomer is untouched.
+    #[cfg(unix)] // see `rename_onto_another_hard_link_is_refused`
     #[test]
     fn same_item_rename_never_replaces_what_takes_the_name_in_between() {
         let d = tmp("alias-race");
@@ -381,6 +402,7 @@ mod tests {
 
     /// Both names taken between the steps: the item keeps its temporary name, and the error
     /// says what it is.
+    #[cfg(unix)] // see `rename_onto_another_hard_link_is_refused`
     #[test]
     fn same_item_rename_says_where_it_left_the_item() {
         let d = tmp("alias-stuck");
