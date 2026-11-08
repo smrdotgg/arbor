@@ -157,8 +157,10 @@ struct Out {
 /// One walk, shared by the threads working on it.
 struct Walk {
     spec: Spec,
-    /// The devices it stays on (unless `cross_devices`).
-    devices: Vec<u64>,
+    /// The devices it stays on (unless `cross_devices`): found by the thread that reads the
+    /// root, before it queues anything, so starting a walk touches no disk on the window's
+    /// thread (a slow or sleeping disk would hold up the key that started it).
+    devices: std::sync::OnceLock<Vec<u64>>,
     /// Folders never entered: pseudo file systems, and on macOS the data volume's second path.
     skip: Vec<PathBuf>,
     stop: AtomicBool,
@@ -223,10 +225,9 @@ impl Pool {
             skip.push(PathBuf::from("/System/Volumes/Data"));
         }
         skip.retain(|p| !spec.root.starts_with(p));
-        let devices = devices_for(&spec.root);
         let walk = Arc::new(Walk {
             spec,
-            devices,
+            devices: std::sync::OnceLock::new(),
             skip,
             stop: AtomicBool::new(false),
             pending: AtomicUsize::new(1),
@@ -297,6 +298,8 @@ impl Drop for Running {
 /// The devices a walk from `root` stays on: the root's, and on macOS both halves of the startup
 /// disk (the sealed system volume and its data volume, joined by firmlinks).
 fn devices_for(root: &Path) -> Vec<u64> {
+    #[cfg(test)]
+    hook::devices(root);
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -377,6 +380,8 @@ fn background() {
 fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
     let walk = &t.walk;
     let spec = &walk.spec;
+    // The root's task comes first, and nothing else is queued until it has read the root.
+    let devices = walk.devices.get_or_init(|| devices_for(&spec.root));
     let rd = match std::fs::read_dir(&t.dir) {
         Ok(rd) => rd,
         Err(e) => {
@@ -425,7 +430,7 @@ fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
                 if !spec.show_hidden && cfg!(target_os = "macos") && fs::is_hidden(&name, meta.as_ref()) {
                     continue;
                 }
-                if spec.cross_devices || on_devices(meta.as_ref(), &walk.devices) {
+                if spec.cross_devices || on_devices(meta.as_ref(), devices) {
                     subdirs.push(Task { walk: walk.clone(), dir: path, rel: t.rel.join(&os) });
                 }
             }
@@ -557,6 +562,18 @@ pub(crate) mod hook {
     }
 
     pub(crate) static GATES: Mutex<Vec<Gate>> = Mutex::new(Vec::new());
+    /// Holds the device lookup for a root until told (or a few seconds pass).
+    pub(crate) static DEVICES: Mutex<Vec<(PathBuf, Receiver<()>)>> = Mutex::new(Vec::new());
+
+    pub(super) fn devices(root: &Path) {
+        let gate = {
+            let mut g = DEVICES.lock().unwrap();
+            g.iter().position(|(d, _)| d == root).map(|i| g.remove(i))
+        };
+        if let Some((_, go)) = gate {
+            let _ = go.recv_timeout(std::time::Duration::from_secs(3));
+        }
+    }
     static CAUGHT: Mutex<Vec<Caught>> = Mutex::new(Vec::new());
 
     pub(super) fn entry(dir: &Path, walk: u64) {

@@ -764,3 +764,22 @@ fn batch_rename_renames_results_in_their_own_folders() {
     s.run(Cmd::BatchRename, &mut tx());
     assert_eq!(rule(&mut s), crate::rename::Status::Problem("“two.txt” already exists here".into()));
 }
+
+/// Starting a walk touches no disk on the window's thread: the root's device is looked up by
+/// the thread that reads it. Here that lookup is held (as a sleeping disk would hold it): the
+/// key that started the search returns at once, and the walk goes on when it's let go.
+#[test]
+fn starting_a_search_never_waits_for_the_disk() {
+    let d = tree("no-block", &["a.txt", "sub/b.txt"]);
+    let mut s = state_in(&d);
+    let (go, gate) = channel();
+    hook::DEVICES.lock().unwrap().push((d.clone(), gate));
+    let t = Instant::now();
+    search(&mut s, "txt");
+    assert!(t.elapsed() < Duration::from_millis(1000), "the key waited {:?} for the disk", t.elapsed());
+    go.send(()).unwrap();
+    finish_walk(&mut s);
+    let mut r = results(&s);
+    r.sort();
+    assert_eq!(r, ["a.txt", "sub/b.txt"]);
+}
