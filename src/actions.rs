@@ -92,7 +92,7 @@ impl State {
         let path = ops::free_name(&self.cwd, "untitled folder".as_ref(), false);
         match std::fs::create_dir(&path) {
             Ok(()) => {
-                self.undo.push(Undo::Trash(vec![path.clone()]));
+                self.undo.extend(Undo::new_folder(path.clone()));
                 let name = path.file_name().map(|n| n.to_os_string()).into_iter().collect();
                 self.reload_selecting(name, true);
             }
@@ -140,7 +140,8 @@ impl State {
         }
         match std::fs::rename(&from, &to) {
             Ok(()) => {
-                self.undo.push(Undo::Moves(vec![(to, from)]));
+                // One lstat to fingerprint it, so undo can tell whether it changed since.
+                self.undo.extend(Undo::renamed(to, from));
                 self.note = None;
                 self.reload_selecting(vec![OsString::from(new)], false);
             }
@@ -150,21 +151,19 @@ impl State {
 
     // ---- undo -------------------------------------------------------------------------------
 
+    /// Undoes the last operation on a worker, which checks the disk first. The record comes off
+    /// the stack only while the undo runs: if it's refused, fails or is cancelled, the worker
+    /// hands back what's left and `poll_job` puts it back (undoing isn't itself undoable).
     pub fn undo_last(&mut self) {
+        if self.job.is_some() {
+            self.note = Some("Still working on the last operation (Esc cancels it)".into());
+            return;
+        }
         let Some(u) = self.undo.pop() else {
             self.note = Some("Nothing to undo".into());
             return;
         };
-        let op = match u.clone() {
-            Undo::Moves(pairs) => Op::MovePairs { pairs },
-            Undo::Trash(paths) => Op::Trash { sources: paths },
-        };
-        if !self.start(op) {
-            self.undo.push(u);
-        } else {
-            // Undoing isn't itself undoable.
-            self.undo_pending_skip = true;
-        }
+        self.start(Op::Undo(u));
     }
 
     // ---- jobs -------------------------------------------------------------------------------
@@ -192,12 +191,11 @@ impl State {
         };
         let verb = job.verb;
         self.job = None;
-        let skip_undo = std::mem::take(&mut self.undo_pending_skip);
-        if let Some(u) = out.undo.filter(|_| !skip_undo) {
-            self.undo.push(u);
-        }
+        self.undo.extend(out.undo);
         let n = out.results.len();
-        self.note = Some(if !out.errors.is_empty() {
+        self.note = Some(if let Some(why) = out.refused {
+            why
+        } else if !out.errors.is_empty() {
             let more = if out.errors.len() > 1 { format!(" (+{} more)", out.errors.len() - 1) } else { String::new() };
             format!("{}{more}", out.errors[0])
         } else if out.cancelled {

@@ -74,8 +74,6 @@ pub struct State {
     pub(crate) clip: Option<Clip>,
     pub(crate) paste_move: bool,
     pub(crate) undo: Vec<ops::Undo>,
-    /// The running job is an undo, so its own undo record is dropped.
-    pub(crate) undo_pending_skip: bool,
     /// Where the rename field's late writes go after the rename has ended (the runtime
     /// clears the field's focus through its binding a frame after a commit).
     rename_sink: TextEdit,
@@ -118,7 +116,6 @@ impl State {
             clip: None,
             paste_move: false,
             undo: Vec::new(),
-            undo_pending_skip: false,
             rename_sink: TextEdit::new(""),
             job_seen: (0, 0),
             waker: None,

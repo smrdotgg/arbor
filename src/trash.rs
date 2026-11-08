@@ -17,12 +17,16 @@ pub fn trash(path: &Path) -> Result<Option<PathBuf>, String> {
 /// per item. Items on another filesystem are refused rather than copied across.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn trash(path: &Path) -> Result<Option<PathBuf>, String> {
-    use std::io::Write;
     let data = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| crate::fs::home().join(".local/share"));
-    let root = data.join("Trash");
+    trash_in(&data.join("Trash"), path)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn trash_in(root: &Path, path: &Path) -> Result<Option<PathBuf>, String> {
+    use std::io::Write;
     let (files, info) = (root.join("files"), root.join("info"));
     std::fs::create_dir_all(&files).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&info).map_err(|e| e.to_string())?;
@@ -49,6 +53,24 @@ pub fn trash(path: &Path) -> Result<Option<PathBuf>, String> {
     }
     Ok(Some(dest))
 }
+
+/// After an item at `trashed` (`Trash/files/NAME`) was put back: removes its
+/// `Trash/info/NAME.trashinfo`, which would otherwise list it in the trash still.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn forget(trashed: &Path) {
+    let (Some(files), Some(name)) = (trashed.parent(), trashed.file_name()) else { return };
+    if files.file_name() != Some("files".as_ref()) {
+        return;
+    }
+    let Some(root) = files.parent() else { return };
+    let mut info = name.to_os_string();
+    info.push(".trashinfo");
+    let _ = std::fs::remove_file(root.join("info").join(info));
+}
+
+/// macOS keeps no record beside the item, and Windows trash can't be undone from Arbor.
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+pub fn forget(_trashed: &Path) {}
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn url_escape(p: &Path) -> String {
@@ -109,6 +131,24 @@ pub fn trash(path: &Path) -> Result<Option<PathBuf>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn freedesktop_trash_and_restore_leave_no_record() {
+        let d = std::env::temp_dir().join(format!("arbor-xdg-trash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("a b.txt");
+        std::fs::write(&f, "x").unwrap();
+        let at = super::trash_in(&d.join("Trash"), &f).unwrap().unwrap();
+        assert_eq!(at, d.join("Trash/files/a b.txt"));
+        let info = std::fs::read_to_string(d.join("Trash/info/a b.txt.trashinfo")).unwrap();
+        assert!(info.contains("a%20b.txt"), "{info}");
+        std::fs::rename(&at, &f).unwrap();
+        super::forget(&at);
+        assert!(!d.join("Trash/info/a b.txt.trashinfo").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     #[ignore = "moves a scratch file to the real Trash"]
     fn trashes_a_file() {
