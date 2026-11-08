@@ -24,6 +24,17 @@ Format: date · decision · why · how to undo.
 
 ## Made with the owner's answer
 
+- **2026-11-08 · Windows trash checks the Recycle Bin's registry settings first** (owner's
+  decision). Before the shell is asked: the volume's `BitBucket\Volume\{GUID}` key
+  (`NukeOnDelete`, `MaxCapacity` MB), the parent key's `NukeOnDelete` when the volume has none,
+  and the `NoRecycleFiles` / `RecycleBinSize` policies; the item's size is walked on the worker
+  (cancellable, not following reparse points). Turned off, too big, or anything unknown means
+  Arbor's permanent-delete question. Removable drives are allowed when these say they have a bin.
+  Agent's calls within it: (1) a volume key with no `NukeOnDelete` anywhere counts as unknown;
+  (2) only `MaxCapacity` is compared, not what's free in the bin, since a full bin drops its oldest
+  items to make room (a size over the limit is what makes Windows delete for good); (3) the
+  existing progress-sink check stays as a second line. Undo: `trash::bin_verdict`.
+
 - **2026-11-08 · OS thumbnail caches are acceptable** for PDF and video preview (macOS QuickLook,
   Windows shell thumbnails). Arbor stores nothing; the OS cache is the one Finder and Explorer
   already fill. Linux stays text and images only.

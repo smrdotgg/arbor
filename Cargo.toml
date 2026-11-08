@@ -71,8 +71,9 @@ objc2-quick-look-thumbnailing = { version = "0.3", default-features = false, fea
 ] }
 
 [target.'cfg(windows)'.dependencies]
-# Win32_Graphics_Gdi: reading the shell thumbnail's bitmap (src/thumb.rs).
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_Shell"] }
+# Win32_Graphics_Gdi: reading the shell thumbnail's bitmap (src/thumb.rs). Win32_System_Registry:
+# the Recycle Bin's settings, checked before a trash (src/trash.rs).
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell"] }
 
 [profile.dev.package."*"]
 opt-level = 2

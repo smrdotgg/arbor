@@ -33,6 +33,10 @@ pub enum TrashError {
     /// the Recycle Bin). Never expected; reported plainly if it happens.
     #[cfg_attr(not(windows), allow(dead_code))]
     DeletedForGood,
+    /// The operation was cancelled before anything happened to it (Windows: while its size was
+    /// being added up). The item is untouched.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Cancelled,
 }
 
 impl std::fmt::Display for TrashError {
@@ -41,6 +45,7 @@ impl std::fmt::Display for TrashError {
             TrashError::NoTrash(why) => write!(f, "can't go to the {BIN}: {why}"),
             TrashError::Failed(why) => f.write_str(why),
             TrashError::DeletedForGood => write!(f, "Windows deleted it permanently instead of putting it in the {BIN}"),
+            TrashError::Cancelled => f.write_str("cancelled"),
         }
     }
 }
@@ -48,7 +53,7 @@ impl std::fmt::Display for TrashError {
 // ---- macOS ------------------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
-pub fn trash(path: &Path) -> Result<Option<PathBuf>, TrashError> {
+pub fn trash(path: &Path, _stop: &dyn Fn() -> bool) -> Result<Option<PathBuf>, TrashError> {
     use objc2_foundation::{NSFileManager, NSURL};
     let url = NSURL::from_file_path(path).ok_or_else(|| TrashError::Failed("bad path".into()))?;
     let fm = NSFileManager::defaultManager();
@@ -101,7 +106,7 @@ fn writable(dir: &Path) -> bool {
 
 /// The freedesktop.org trash spec (see the module docs).
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn trash(path: &Path) -> Result<Option<PathBuf>, TrashError> {
+pub fn trash(path: &Path, _stop: &dyn Fn() -> bool) -> Result<Option<PathBuf>, TrashError> {
     use std::os::unix::fs::MetadataExt;
     let data = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -321,24 +326,77 @@ mod drive {
     pub const RAMDISK: u32 = 6;
 }
 
-/// Before asking the shell: only a fixed local disk can have a Recycle Bin. Windows keeps none
-/// on network shares (mapped drives and `\\server\share` paths), removable drives (USB sticks,
-/// SD cards), optical discs and RAM disks, and deletes from them for good. `root` is the
-/// volume's root as `GetVolumePathNameW` gives it (`E:\`, `\\server\share\`), `kind` its
-/// `GetDriveTypeW`. Returns why it can't be recycled, or `None` to go on to the shell (which
-/// still refuses per item, see [`recycle`]).
+/// Before anything else: only a local disk can have a Recycle Bin. Windows keeps none on
+/// network shares (mapped drives and `\\server\share` paths), optical discs and RAM disks, and
+/// deletes from them for good. A removable drive goes on to the registry's settings
+/// ([`bin_verdict`]): most have no Recycle Bin, but one Windows keeps a bin for may be used.
+/// `root` is the volume's root as `GetVolumePathNameW` gives it (`E:\`, `\\server\share\`),
+/// `kind` its `GetDriveTypeW`. Returns why it can't be recycled, or `None` to go on.
 #[cfg(any(windows, test))]
 pub fn precheck(root: &str, kind: u32) -> Option<String> {
     let name = root.trim_end_matches('\\');
     let place = if name.len() == 2 && name.ends_with(':') { format!("drive {name}") } else { format!("“{name}”") };
     match kind {
-        drive::FIXED if !root.starts_with(r"\\") || root.starts_with(r"\\?\") && !root.starts_with(r"\\?\UNC\") => None,
-        drive::FIXED | drive::REMOTE => Some(format!("{place} is a network location, which has no {BIN}")),
-        drive::REMOVABLE => Some(format!("{place} is a removable drive, and Windows keeps no {BIN} on those")),
+        drive::FIXED | drive::REMOVABLE if !root.starts_with(r"\\") || root.starts_with(r"\\?\") && !root.starts_with(r"\\?\UNC\") => None,
+        drive::FIXED | drive::REMOVABLE | drive::REMOTE => Some(format!("{place} is a network location, which has no {BIN}")),
         drive::CDROM => Some(format!("{place} is a disc, which has no {BIN}")),
         drive::RAMDISK => Some(format!("{place} is a RAM disk, which has no {BIN}")),
         _ => Some(format!("Arbor can't tell whether {place} has a {BIN}")),
     }
+}
+
+/// What Windows' registry says about the Recycle Bin of one volume: the per-volume key
+/// `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{GUID}`
+/// (`NukeOnDelete`, and `MaxCapacity` in MB), the parent `BitBucket` key's `NukeOnDelete` for a
+/// volume without its own, and the Explorer policies in HKCU and HKLM (`NoRecycleFiles`,
+/// `RecycleBinSize` in MB).
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BinSettings {
+    pub policy_off: bool,
+    pub policy_max_mb: Option<u64>,
+    /// The volume has a key of its own.
+    pub volume_key: bool,
+    pub nuke: Option<u32>,
+    pub global_nuke: Option<u32>,
+    pub max_mb: Option<u64>,
+}
+
+/// Whether an item of `size` bytes (`None`: it couldn't all be read) would go to the Recycle Bin
+/// on `place`, as far as the registry says; the reason when it wouldn't, or when anything is
+/// unknown. A bin that's full makes room by dropping its oldest items, so only its size limit
+/// matters, not what's in it. The shell's own answer is still checked per item ([`recycle`]).
+#[cfg(any(windows, test))]
+pub fn bin_verdict(s: &BinSettings, size: Option<u64>, place: &str, removable: bool) -> Result<(), String> {
+    if s.policy_off {
+        return Err(format!("the {BIN} is turned off by a policy on this computer"));
+    }
+    if !s.volume_key {
+        return Err(if removable {
+            format!("{place} is a removable drive, and Windows keeps no {BIN} on it")
+        } else {
+            format!("Windows has no {BIN} settings for {place}, so Arbor can't be sure it would keep it")
+        });
+    }
+    match s.nuke.or(s.global_nuke) {
+        Some(0) => {}
+        Some(_) => return Err(format!("the {BIN} on {place} is set to remove files immediately")),
+        None => return Err(format!("Windows doesn't say whether the {BIN} on {place} keeps files")),
+    }
+    let max = match (s.max_mb, s.policy_max_mb) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(m), None) | (None, Some(m)) => m,
+        (None, None) => return Err(format!("Windows doesn't say how big the {BIN} on {place} is")),
+    };
+    let Some(size) = size else { return Err(format!("Arbor couldn't read all of it to check that it fits in the {BIN}")) };
+    if size > max.saturating_mul(1 << 20) {
+        return Err(format!(
+            "it's bigger ({}) than the {BIN} on {place} can hold ({})",
+            crate::fs::fmt_size(size),
+            crate::fs::fmt_size(max.saturating_mul(1 << 20))
+        ));
+    }
+    Ok(())
 }
 
 /// What the shell's per-item answers add up to (see [`recycle`]): `refused` when Arbor stopped
@@ -363,14 +421,66 @@ pub fn verdict(refused: bool, performed: i32, deleted: Option<(i32, bool)>, plac
 
 /// The Recycle Bin. Windows doesn't say where the item went (Arbor can't undo it; restore it
 /// from the Recycle Bin), so this returns `None` on success.
+///
+/// Before the shell is asked, on this worker: the registry's settings for the item's volume and
+/// the item's size (a walk that never follows links, junctions or mounted volumes, and stops
+/// when `stop` says), so an item the bin wouldn't keep (turned off, too big, unknown) is never
+/// handed to a delete that might be permanent. It's left for Arbor's own question instead.
 #[cfg(windows)]
-pub fn trash(path: &Path) -> Result<Option<PathBuf>, TrashError> {
+pub fn trash(path: &Path, stop: &dyn Fn() -> bool) -> Result<Option<PathBuf>, TrashError> {
     let abs = std::path::absolute(path).map_err(|e| TrashError::Failed(e.to_string()))?;
     let (root, kind) = win::volume(&abs);
     if let Some(why) = precheck(&root, kind) {
         return Err(TrashError::NoTrash(why));
     }
+    let settings = win::bin_settings(&root);
+    let size = match tree_size(&abs, stop) {
+        Size::Stopped => return Err(TrashError::Cancelled),
+        Size::Known(n) => Some(n),
+        Size::Unreadable => None,
+    };
+    bin_verdict(&settings, size, &place_of(&root), kind == drive::REMOVABLE).map_err(TrashError::NoTrash)?;
     recycle(&abs, &root)
+}
+
+/// `drive C:` or `“\\server\share”`, from a volume root.
+#[cfg(any(windows, test))]
+fn place_of(root: &str) -> String {
+    let name = root.trim_end_matches('\\');
+    if name.len() == 2 && name.ends_with(':') { format!("drive {name}") } else { format!("“{name}”") }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq)]
+enum Size {
+    Known(u64),
+    Unreadable,
+    Stopped,
+}
+
+/// The bytes in `p`'s files, not following links, junctions or volumes mounted in folders
+/// (they aren't recycled with it), checking `stop` before each entry.
+#[cfg(any(windows, test))]
+fn tree_size(p: &Path, stop: &dyn Fn() -> bool) -> Size {
+    fn walk(p: &Path, stop: &dyn Fn() -> bool, n: &mut u64) -> Result<(), Size> {
+        if stop() {
+            return Err(Size::Stopped);
+        }
+        let m = p.symlink_metadata().map_err(|_| Size::Unreadable)?;
+        if m.file_type().is_dir() {
+            for de in std::fs::read_dir(p).map_err(|_| Size::Unreadable)? {
+                walk(&de.map_err(|_| Size::Unreadable)?.path(), stop, n)?;
+            }
+        } else if m.file_type().is_file() {
+            *n += m.len();
+        }
+        Ok(())
+    }
+    let mut n = 0;
+    match walk(p, stop, &mut n) {
+        Ok(()) => Size::Known(n),
+        Err(s) => s,
+    }
 }
 
 /// The shell's Recycle Bin, item by item, through `IFileOperation` with
@@ -388,9 +498,7 @@ pub fn trash(path: &Path) -> Result<Option<PathBuf>, TrashError> {
 #[cfg(windows)]
 fn recycle(abs: &Path, root: &str) -> Result<Option<PathBuf>, TrashError> {
     let r = win::recycle(abs)?;
-    let place = root.trim_end_matches('\\');
-    let place = if place.len() == 2 { format!("drive {place}") } else { format!("“{place}”") };
-    verdict(r.refused, r.performed, r.deleted, &place).map(|()| None)
+    verdict(r.refused, r.performed, r.deleted, &place_of(root)).map(|()| None)
 }
 
 #[cfg(windows)]
@@ -440,6 +548,76 @@ mod win {
         // SAFETY: `buf` holds a NUL-terminated root path.
         let kind = unsafe { GetDriveTypeW(buf.as_ptr()) };
         (String::from_utf16_lossy(&buf[..n]), kind)
+    }
+
+    /// The registry's Recycle Bin settings for the volume at `root` (see [`super::BinSettings`]).
+    pub fn bin_settings(root: &str) -> super::BinSettings {
+        use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+        use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        const POLICIES: &str = r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer";
+        const BITBUCKET: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket";
+        let policy = |name: &str| dword(HKEY_CURRENT_USER, POLICIES, name).or_else(|| dword(HKEY_LOCAL_MACHINE, POLICIES, name));
+        let mut s = super::BinSettings {
+            policy_off: policy("NoRecycleFiles").is_some_and(|v| v != 0),
+            policy_max_mb: policy("RecycleBinSize").map(u64::from),
+            global_nuke: dword(HKEY_CURRENT_USER, BITBUCKET, "NukeOnDelete"),
+            ..Default::default()
+        };
+        // `\\?\Volume{…}\`: its GUID names the volume's key.
+        let mut name = [0u16; 64];
+        let path = wide(std::ffi::OsStr::new(root));
+        // SAFETY: `path` is NUL-terminated and `name` is as long as we say.
+        if unsafe { GetVolumeNameForVolumeMountPointW(path.as_ptr(), name.as_mut_ptr(), name.len() as u32) } == 0 {
+            return s;
+        }
+        let name = String::from_utf16_lossy(&name[..name.iter().position(|&c| c == 0).unwrap_or(name.len())]);
+        let (Some(a), Some(b)) = (name.find('{'), name.find('}')) else { return s };
+        let key = format!(r"{BITBUCKET}\Volume\{}", &name[a..=b]);
+        s.volume_key = key_exists(HKEY_CURRENT_USER, &key);
+        s.nuke = dword(HKEY_CURRENT_USER, &key, "NukeOnDelete");
+        s.max_mb = dword(HKEY_CURRENT_USER, &key, "MaxCapacity").map(u64::from);
+        s
+    }
+
+    fn dword(root: windows_sys::Win32::System::Registry::HKEY, key: &str, value: &str) -> Option<u32> {
+        use windows_sys::Win32::System::Registry::{RRF_RT_REG_DWORD, RegGetValueW};
+        let (k, v) = (wide(std::ffi::OsStr::new(key)), wide(std::ffi::OsStr::new(value)));
+        let mut data = 0u32;
+        let mut len = 4u32;
+        // SAFETY: NUL-terminated names; `data` holds the DWORD asked for.
+        let r = unsafe {
+            RegGetValueW(root, k.as_ptr(), v.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), (&mut data as *mut u32).cast(), &mut len)
+        };
+        (r == 0).then_some(data)
+    }
+
+    fn key_exists(root: windows_sys::Win32::System::Registry::HKEY, key: &str) -> bool {
+        use windows_sys::Win32::System::Registry::{HKEY, KEY_READ, RegCloseKey, RegOpenKeyExW};
+        let k = wide(std::ffi::OsStr::new(key));
+        let mut h: HKEY = std::ptr::null_mut();
+        // SAFETY: a NUL-terminated name and an out-handle, closed once here.
+        unsafe {
+            if RegOpenKeyExW(root, k.as_ptr(), 0, KEY_READ, &mut h) != 0 {
+                return false;
+            }
+            RegCloseKey(h);
+        }
+        true
+    }
+
+    /// The volume key's name for `root` (tests set its values).
+    #[cfg(test)]
+    pub fn volume_key(root: &str) -> Option<String> {
+        use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+        let mut name = [0u16; 64];
+        let path = wide(std::ffi::OsStr::new(root));
+        // SAFETY: as in `bin_settings`.
+        if unsafe { GetVolumeNameForVolumeMountPointW(path.as_ptr(), name.as_mut_ptr(), name.len() as u32) } == 0 {
+            return None;
+        }
+        let name = String::from_utf16_lossy(&name[..name.iter().position(|&c| c == 0).unwrap_or(name.len())]);
+        let (a, b) = (name.find('{')?, name.find('}')?);
+        Some(format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{}", &name[a..=b]))
     }
 
     /// What the shell said about one delete.
@@ -894,7 +1072,7 @@ mod tests {
         assert_eq!(classify_mac("NSPOSIXErrorDomain", 3328, true, msg(), None), TrashError::Failed(msg()));
     }
 
-    /// Only a fixed local disk goes on to the shell; everything else is refused up front.
+    /// Only a local disk goes on; network locations, discs and RAM disks are refused up front.
     #[test]
     fn windows_asks_the_shell_only_about_fixed_local_disks() {
         assert_eq!(precheck(r"C:\", drive::FIXED), None);
@@ -904,7 +1082,8 @@ mod tests {
             let why = precheck(root, kind).unwrap_or_default();
             assert!(why.contains(says), "{root} {kind}: {why}");
         };
-        no(r"E:\", drive::REMOVABLE, "drive E: is a removable drive");
+        // A removable drive goes on to the registry's settings (`bin_verdict`).
+        assert_eq!(precheck(r"E:\", drive::REMOVABLE), None);
         no(r"Z:\", drive::REMOTE, "drive Z: is a network location");
         no(r"\\nas\photos\", drive::REMOTE, "“\\\\nas\\photos” is a network location");
         no(r"\\nas\photos\", drive::FIXED, "network location");
@@ -933,6 +1112,115 @@ mod tests {
         assert!(matches!(verdict(false, 0, None, at), Err(TrashError::Failed(_))));
     }
 
+    /// Windows: an item goes to the shell only when the registry says the volume's Recycle Bin
+    /// keeps files and is big enough for it; anything turned off, too big or unknown is left for
+    /// Arbor's own question.
+    #[test]
+    fn windows_recycles_only_what_the_bin_would_keep() {
+        let ok = BinSettings { volume_key: true, nuke: Some(0), max_mb: Some(100), ..Default::default() };
+        let mb = 1 << 20;
+        assert_eq!(bin_verdict(&ok, Some(100 * mb), "drive C:", false), Ok(()));
+        let why = |s: &BinSettings, size: Option<u64>| bin_verdict(s, size, "drive C:", false).unwrap_err();
+        assert!(why(&ok, Some(200 * mb)).contains(&format!("bigger (210 MB) than the {BIN} on drive C: can hold (105 MB)")));
+        assert!(why(&ok, Some(100 * mb + 1)).contains("bigger"));
+        assert!(why(&ok, None).contains("couldn't read all of it"));
+        assert!(why(&BinSettings { nuke: Some(1), ..ok.clone() }, Some(1)).contains("remove files immediately"));
+        // The volume's own setting wins over the parent key's; without one, the parent's counts.
+        assert_eq!(bin_verdict(&BinSettings { global_nuke: Some(1), ..ok.clone() }, Some(1), "drive C:", false), Ok(()));
+        assert!(why(&BinSettings { nuke: None, global_nuke: Some(1), ..ok.clone() }, Some(1)).contains("immediately"));
+        assert_eq!(bin_verdict(&BinSettings { nuke: None, global_nuke: Some(0), ..ok.clone() }, Some(1), "drive C:", false), Ok(()));
+        // Unknown: no key, no say on nuking, no size.
+        assert!(why(&BinSettings { nuke: None, ..ok.clone() }, Some(1)).contains("doesn't say whether"));
+        assert!(why(&BinSettings { max_mb: None, ..ok.clone() }, Some(1)).contains("doesn't say how big"));
+        assert!(why(&BinSettings { volume_key: false, ..ok.clone() }, Some(1)).contains(&format!("no {BIN} settings for drive C:")));
+        let removable = bin_verdict(&BinSettings::default(), Some(1), "drive E:", true).unwrap_err();
+        assert!(removable.contains("drive E: is a removable drive"), "{removable}");
+        assert_eq!(bin_verdict(&ok, Some(1), "drive E:", true), Ok(()), "a removable drive with a bin");
+        // Policies: off, or a smaller limit.
+        assert!(why(&BinSettings { policy_off: true, ..ok.clone() }, Some(1)).contains("policy"));
+        assert!(why(&BinSettings { policy_max_mb: Some(1), ..ok.clone() }, Some(2 * mb)).contains("bigger"));
+        assert_eq!(bin_verdict(&BinSettings { max_mb: None, policy_max_mb: Some(5), ..ok.clone() }, Some(mb), "drive C:", false), Ok(()));
+        assert_eq!(place_of(r"C:\"), "drive C:");
+        assert_eq!(place_of(r"\\nas\photos\"), "“\\\\nas\\photos”");
+    }
+
+    /// The size walk adds up files, doesn't follow links, and stops when told.
+    #[test]
+    fn the_size_walk_adds_up_files_and_stops_when_told() {
+        let d = std::env::temp_dir().join(format!("arbor-trash-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("t/sub")).unwrap();
+        std::fs::write(d.join("t/a"), [0u8; 1000]).unwrap();
+        std::fs::write(d.join("t/sub/b"), [0u8; 24]).unwrap();
+        std::fs::create_dir_all(d.join("big")).unwrap();
+        std::fs::write(d.join("big/huge"), [0u8; 5000]).unwrap();
+        #[cfg(unix)]
+        let _ = std::os::unix::fs::symlink(d.join("big"), d.join("t/link"));
+        #[cfg(windows)]
+        let _ = std::os::windows::fs::symlink_dir(d.join("big"), d.join("t/link"));
+        assert_eq!(tree_size(&d.join("t"), &|| false), Size::Known(1024));
+        assert_eq!(tree_size(&d.join("t"), &|| true), Size::Stopped);
+        assert_eq!(tree_size(&d.join("gone"), &|| false), Size::Unreadable);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// On CI's Windows runner: with the Recycle Bin for C: limited to 1 MB in HKCU, a 2 MB file
+    /// comes back as needing Arbor's question and is still there; a small one still goes. The
+    /// registry is put back afterwards.
+    #[cfg(windows)]
+    #[test]
+    fn windows_a_file_too_big_for_the_bin_is_left_for_the_question() {
+        use windows_sys::Win32::System::Registry::{
+            HKEY, HKEY_CURRENT_USER, REG_DWORD, RegCloseKey, RegCreateKeyW, RegDeleteValueW, RegSetValueExW,
+        };
+        if std::env::var_os("CI").is_none() {
+            eprintln!("skipped: only on CI (it changes the Recycle Bin's settings and uses it)");
+            return;
+        }
+        let _one = CI_BIN.lock().unwrap_or_else(|e| e.into_inner());
+        let d = std::env::temp_dir().join(format!("arbor-recycle-big-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let abs = std::path::absolute(&d).unwrap();
+        let (root, _) = win::volume(&abs);
+        let before = win::bin_settings(&root);
+        eprintln!("Recycle Bin settings for {root}: {before:?}");
+        let key = win::volume_key(&root).expect("C:'s volume name");
+        let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let mut h: HKEY = std::ptr::null_mut();
+        // SAFETY: NUL-terminated names and out-handles; values are DWORDs; the key is closed.
+        let set = |h: HKEY, name: &str, v: u32| unsafe {
+            RegSetValueExW(h, wide(name).as_ptr(), 0, REG_DWORD, (&v as *const u32).cast(), 4);
+        };
+        // SAFETY: a NUL-terminated name and an out-handle, closed below.
+        assert_eq!(unsafe { RegCreateKeyW(HKEY_CURRENT_USER, wide(&key).as_ptr(), &mut h) }, 0);
+        set(h, "MaxCapacity", 1);
+        set(h, "NukeOnDelete", 0);
+        let big = d.join("big.bin");
+        std::fs::write(&big, vec![7u8; 2 << 20]).unwrap();
+        let r = trash(&big, &|| false);
+        let small = d.join("small.txt");
+        std::fs::write(&small, "x").unwrap();
+        let r_small = trash(&small, &|| false);
+        // Put the settings back as they were.
+        let restore = |name: &str, v: Option<u64>| match v {
+            Some(v) => set(h, name, v as u32),
+            // SAFETY: an open key and a NUL-terminated name.
+            None => unsafe {
+                RegDeleteValueW(h, wide(name).as_ptr());
+            },
+        };
+        restore("MaxCapacity", before.max_mb);
+        restore("NukeOnDelete", before.nuke.map(u64::from));
+        // SAFETY: opened above.
+        unsafe { RegCloseKey(h) };
+        assert!(matches!(&r, Err(TrashError::NoTrash(w)) if w.contains("bigger")), "{r:?}");
+        assert!(big.exists(), "never deleted");
+        assert_eq!(r_small, Ok(None), "a small file still goes to the bin");
+        assert!(!small.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// On CI's Windows runner (a throwaway machine, so its Recycle Bin can take a scratch file):
     /// a file on the fixed system drive goes to the bin, and the same kind of file reached
     /// through the admin share (`\\localhost\C$\…`, a network path with no bin) is refused and
@@ -944,12 +1232,13 @@ mod tests {
             eprintln!("skipped: only on CI (it uses the real Recycle Bin)");
             return;
         }
+        let _one = CI_BIN.lock().unwrap_or_else(|e| e.into_inner());
         let d = std::env::temp_dir().join(format!("arbor-recycle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let local = d.join("local.txt");
         std::fs::write(&local, "x").unwrap();
-        assert_eq!(trash(&local), Ok(None));
+        assert_eq!(trash(&local, &|| false), Ok(None));
         assert!(!local.exists());
         let f = d.join("remote.txt");
         std::fs::write(&f, "x").unwrap();
@@ -959,7 +1248,7 @@ mod tests {
         let unc = PathBuf::from(format!(r"\\localhost\{}${}", &s[..1], &s[2..]));
         // CI's runner shares C$; the test must reach it, or it proves nothing about the shell.
         assert!(unc.symlink_metadata().is_ok(), "{} isn't reachable", unc.display());
-        let r = trash(&unc);
+        let r = trash(&unc, &|| false);
         assert!(matches!(&r, Err(TrashError::NoTrash(w)) if w.contains("network")), "{r:?}");
         // With the precheck skipped, the shell itself is asked, and the sink stops it.
         let root = r"\\localhost\C$\";
@@ -969,13 +1258,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// The CI tests that use the real Recycle Bin (one changes its settings), one at a time.
+    #[cfg(windows)]
+    static CI_BIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     #[ignore = "moves a scratch file to the real Trash"]
     fn trashes_a_file() {
         let p = std::env::temp_dir().join(format!("arbor-trash-test-{}.txt", std::process::id()));
         std::fs::write(&p, "x").unwrap();
         let t = std::time::Instant::now();
-        let r = super::trash(&p);
+        let r = super::trash(&p, &|| false);
         eprintln!("trash took {:?}: {r:?}", t.elapsed());
         assert!(r.is_ok());
         assert!(!p.exists());

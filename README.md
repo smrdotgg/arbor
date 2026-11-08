@@ -364,9 +364,15 @@ Cancel has the focus, and Esc keeps them.
   own disk, never copied. If neither can be used (a read-only top folder, no permission, a FUSE
   disk that refuses), the question; if the item's own folder can't be changed either, an error,
   since a delete couldn't remove it.
-- **Windows:** only a fixed local disk can have a Recycle Bin, so items on network shares and
-  mapped drives, removable drives, discs and RAM disks get the question without the shell being
-  asked. On a fixed disk, the shell's `IFileOperation` recycles each item, and Arbor stops the
+- **Windows:** items on network shares and mapped drives, discs and RAM disks get the question
+  without the shell being asked. On a local disk, before the shell is asked, the worker reads the
+  Recycle Bin's settings for the item's volume from the registry (`HKCU\…\Explorer\BitBucket\
+  Volume\{GUID}`: `NukeOnDelete` and `MaxCapacity`; the parent key's `NukeOnDelete`; the
+  `NoRecycleFiles` and `RecycleBinSize` policies) and adds up the item's size (never following
+  links, junctions or mounted volumes; Esc stops it). An item the bin wouldn't keep (turned off,
+  bigger than the bin, or any of it unknown, as on most removable drives, which have no bin) gets
+  the question instead; a removable drive with a bin of its own is used. Then the shell's
+  `IFileOperation` recycles each item, and Arbor stops the
   delete before it begins unless the shell says it's about to recycle the item (it doesn't for
   an item too big for the bin, a bin turned off for the drive, or a virtual drive such as
   Cryptomator's or another WinFsp one that doesn't support it). If the shell ever deleted an item

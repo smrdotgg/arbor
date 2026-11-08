@@ -445,7 +445,9 @@ impl Running {
     }
 }
 
-type TrashFn = fn(&Path) -> Result<Option<PathBuf>, TrashError>;
+/// The trash: moves one item, checking the second argument ("stop?") during any long work
+/// before it.
+type TrashFn = fn(&Path, &dyn Fn() -> bool) -> Result<Option<PathBuf>, TrashError>;
 
 /// The trash [`start`] uses: the platform's, or in tests a `.trash` folder beside each item, so
 /// no test fills the user's own Trash.
@@ -851,7 +853,8 @@ impl<'a> Worker<'a> {
                         self.p.items_done.fetch_add(1, Relaxed);
                         continue;
                     }
-                    match (self.trash)(src) {
+                    let p = self.p;
+                    match (self.trash)(src, &|| p.cancel.load(Relaxed)) {
                         Ok(Some(at)) => {
                             pairs.push((at, Some(src.clone())));
                             out.removed.push(src.clone());
@@ -871,6 +874,8 @@ impl<'a> Worker<'a> {
                             out.errors.push(format!("{}: {}", name_of(src), TrashError::DeletedForGood));
                         }
                         Err(TrashError::Failed(e)) => out.errors.push(format!("{}: {e}", name_of(src))),
+                        // Untouched; the loop sees the cancel.
+                        Err(TrashError::Cancelled) => {}
                     }
                     self.p.items_done.fetch_add(1, Relaxed);
                     self.tick(0);
@@ -1056,7 +1061,8 @@ impl<'a> Worker<'a> {
         let name = name_of(&step.at);
         let Some(back) = step.back.clone() else {
             self.before_act(&step.at);
-            return match (self.trash)(&step.at) {
+            let p = self.p;
+            return match (self.trash)(&step.at, &|| p.cancel.load(Relaxed)) {
                 Ok(_) => {
                     out.removed.push(step.at.clone());
                     out.results.push(step.at);
@@ -1846,7 +1852,7 @@ mod tests {
     /// Stands in for the platform trash: moves the item to a `.trash` folder beside it, so tests
     /// never touch the real one.
     /// An item named "notrash…" stands for one on a disk with no trash: it's left alone.
-    pub(super) fn fake_trash(p: &Path) -> Result<Option<PathBuf>, TrashError> {
+    pub(super) fn fake_trash(p: &Path, _stop: &dyn Fn() -> bool) -> Result<Option<PathBuf>, TrashError> {
         if p.file_name().unwrap().to_string_lossy().starts_with("notrash") {
             return Err(TrashError::NoTrash("the test disk has no trash".into()));
         }
@@ -1858,7 +1864,7 @@ mod tests {
         Ok(Some(at))
     }
 
-    fn refusing_trash(_: &Path) -> Result<Option<PathBuf>, TrashError> {
+    fn refusing_trash(_: &Path, _stop: &dyn Fn() -> bool) -> Result<Option<PathBuf>, TrashError> {
         Err(TrashError::Failed("permission denied".into()))
     }
 
@@ -2217,11 +2223,11 @@ mod tests {
     }
 
     /// Trashes like `fake_trash`, but refuses anything named "b…".
-    fn picky_trash(p: &Path) -> Result<Option<PathBuf>, TrashError> {
+    fn picky_trash(p: &Path, stop: &dyn Fn() -> bool) -> Result<Option<PathBuf>, TrashError> {
         if p.file_name().unwrap().to_string_lossy().starts_with('b') {
             Err(TrashError::Failed("permission denied".into()))
         } else {
-            fake_trash(p)
+            fake_trash(p, stop)
         }
     }
 
@@ -3166,8 +3172,8 @@ mod tests {
     }
 
     /// Stands in for a trash that, while trashing "a", lets another app replace "b".
-    fn trash_then_replace_b(p: &Path) -> Result<Option<PathBuf>, TrashError> {
-        let out = fake_trash(p)?;
+    fn trash_then_replace_b(p: &Path, stop: &dyn Fn() -> bool) -> Result<Option<PathBuf>, TrashError> {
+        let out = fake_trash(p, stop)?;
         if p.file_name().unwrap() == "a" {
             swap_in(&p.parent().unwrap().join("b"), "replacement");
         }

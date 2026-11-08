@@ -35,6 +35,11 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -yq libxkbcommon-dev libwayland-dev
 
+      # What the runner's registry says about its Recycle Bins (src/trash.rs reads it before a trash).
+      - name: Recycle Bin settings
+        if: runner.os == 'Windows'
+        run: reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket' //s || true
+
       - name: Toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustc -V
 
