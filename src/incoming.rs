@@ -230,7 +230,7 @@ mod mac {
 
     /// Arbor's handler object, made once and kept for the process.
     fn handler() -> Option<*mut AnyObject> {
-        const NAME: &str = "ArborOpenDocuments";
+        const NAME: &std::ffi::CStr = c"ArborOpenDocuments";
         let class = AnyClass::get(NAME).or_else(|| {
             let mut b = ClassBuilder::new(NAME, NSObject::class())?;
             // SAFETY: each function matches its selector (objects in, void out).
