@@ -11,6 +11,9 @@
 //!   a mount point on the same one (a bind mount: Linux reads `/proc/self/mountinfo` once per
 //!   operation, [`Mounts`]), is never entered or removed: the delete stops there and says another
 //!   disk is mounted there. So does an item that is itself a mount point.
+//! - **Identity:** each folder's opened handle must be the folder that was checked, and before
+//!   it's removed its name must still lead to it; one moved or replaced meanwhile stops the
+//!   delete there, untouched.
 //! - **Windows:** a file or folder with the read-only attribute is deleted after clearing it
 //!   (as Explorer does); the attribute is put back if the delete still fails. A directory link
 //!   or junction is removed as itself, and a volume mounted in a folder is left alone.
@@ -28,6 +31,9 @@ pub enum Halt {
     /// Another disk is mounted at `at`: neither it nor anything in it was touched, and nothing
     /// after it in this item was tried.
     Mounted { at: PathBuf },
+    /// The folder at `at` was moved or replaced while it was being deleted: it (or what's now
+    /// at its name) was left alone, and nothing after it in this item was tried.
+    Changed { at: PathBuf },
 }
 
 impl Halt {
@@ -37,6 +43,7 @@ impl Halt {
             Halt::Cancelled => None,
             Halt::Failed { at, err } => Some((at, err.to_string())),
             Halt::Mounted { at } => Some((at, "another disk is mounted there".into())),
+            Halt::Changed { at } => Some((at, "it was moved or replaced while it was being deleted".into())),
         }
     }
 }
@@ -228,6 +235,10 @@ mod imp {
         st.st_mode & libc::S_IFMT == libc::S_IFDIR
     }
 
+    fn same(a: &libc::stat, b: &libc::stat) -> bool {
+        (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+    }
+
     fn remove_at(dir: &OwnedFd, name: &CStr, shown: &Path, canon: &Path, w: &mut Walk) -> Result<(), Halt> {
         if !(w.go)(shown) {
             return Err(Halt::Cancelled);
@@ -244,9 +255,19 @@ mod imp {
             }
             // O_NOFOLLOW: a link put here since the check above is refused, not followed.
             let sub = open_dir(dir.as_raw_fd(), name, false).map_err(|e| fail(shown, e))?;
+            // And a folder swapped in since is refused too.
+            if !same(&fstat(&sub).map_err(|e| fail(shown, e))?, &st) {
+                return Err(Halt::Changed { at: shown.to_path_buf() });
+            }
             for child in names(&sub).map_err(|e| fail(shown, e))? {
                 let n = OsStr::from_bytes(child.as_bytes());
                 remove_at(&sub, &child, &shown.join(n), &canon.join(n), w)?;
+            }
+            // Its name must still lead to it: one moved aside meanwhile (and maybe replaced by
+            // another folder) is left alone.
+            match stat_at(dir, name) {
+                Ok(now) if same(&now, &st) => {}
+                _ => return Err(Halt::Changed { at: shown.to_path_buf() }),
             }
         }
         let flags = if is_dir { libc::AT_REMOVEDIR } else { 0 };
@@ -334,6 +355,11 @@ mod imp {
             let children: Vec<PathBuf> = rd.map(|e| e.map(|e| e.path())).collect::<io::Result<_>>().map_err(|e| fail(path, e))?;
             for c in children {
                 remove_tree(&c, _mounts, go, removed)?;
+            }
+            // Its name must still lead to it (as far as Windows says without opening it).
+            match path.symlink_metadata() {
+                Ok(now) if now.file_type().is_dir() && crate::fs::ident(&now) == crate::fs::ident(&m) => {}
+                _ => return Err(Halt::Changed { at: path.to_path_buf() }),
             }
         }
         let as_dir = ft.is_dir() || ft.is_symlink_dir();
@@ -457,6 +483,36 @@ mod tests {
             &mut n,
         );
         eprintln!("result={r:?} removed={n}");
+    }
+
+    /// A folder moved aside while its contents are deleted, and an empty one made at its name:
+    /// the replacement is left alone (it used to be removed, reported as the folder).
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_moved_aside_midway_is_left_alone() {
+        let d = tmp("aside");
+        fs::create_dir_all(d.join("t")).unwrap();
+        fs::write(d.join("t/child"), "x").unwrap();
+        let (t, aside) = (d.join("t"), d.join("t-aside"));
+        let mut n = 0;
+        let r = remove_tree(
+            &t,
+            &Mounts::default(),
+            &mut |at| {
+                if at.ends_with("t/child") {
+                    fs::rename(&t, &aside).unwrap();
+                    fs::create_dir(&t).unwrap();
+                    fs::write(t.join("theirs"), "another app's").unwrap();
+                    fs::remove_file(t.join("theirs")).unwrap();
+                }
+                true
+            },
+            &mut n,
+        );
+        assert!(matches!(&r, Err(Halt::Changed { at }) if at == &d.join("t")), "{r:?}");
+        assert!(d.join("t").is_dir(), "the replacement stays");
+        assert!(d.join("t-aside").is_dir(), "the original, moved, stays");
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// A folder goes with everything in it; a link inside it goes, and what it points to (a

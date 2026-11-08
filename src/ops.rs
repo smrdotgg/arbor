@@ -989,7 +989,7 @@ impl<'a> Worker<'a> {
                 Err(halt) => {
                     let Some((at, why)) = halt.why() else { continue };
                     let shown = d.path.parent().and_then(|p| at.strip_prefix(p).ok()).unwrap_or(at).display().to_string();
-                    if matches!(halt, crate::delete::Halt::Mounted { .. }) {
+                    if !matches!(halt, crate::delete::Halt::Failed { .. }) {
                         out.errors.push(format!("Skipped “{shown}”: {why}"));
                     } else {
                         let part = if removed > 0 { " (the rest of it was deleted)" } else { "" };

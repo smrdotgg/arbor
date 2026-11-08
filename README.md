@@ -385,7 +385,9 @@ is neither entered nor removed, the delete stops there and says "Skipped “x”
 mounted there", and so does deleting a mount point itself. A move to another disk leaves the
 originals of anything mounted inside the moved folder where they are, and says so. Folders go with everything inside, and links are removed, never followed
 (on Unix each folder is opened relative to its parent without following links, so one swapped
-for a link meanwhile is refused). Unix deletes a read-only file as it is (its folder's
+for a link meanwhile is refused; the folder opened must be the one checked, and before it's
+removed its name must still lead to it, so one moved aside and replaced meanwhile is left alone
+and named). Unix deletes a read-only file as it is (its folder's
 permission is what counts) and reports what it can't remove; Windows clears the read-only
 attribute first, as Explorer does.
 
