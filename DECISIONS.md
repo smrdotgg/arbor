@@ -9,6 +9,16 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-09 · Windows: one Arbor per session through a named pipe (Review: never run on
+  a real Windows machine; CI runs a hand-off between two threads).** A second `arbor.exe
+  <folder>` writes its folders to `\\.\pipe\gg.smr.arbor.<session>.<user>` and exits; the first
+  waits on the pipe in a blocking thread (no polling) and opens each in a tab, and lets itself
+  come to the front (`AllowSetForegroundWindow`). `arbor.exe` without a folder (Win+E) still
+  opens its own window: a new tab of Home in the running one is the other choice. The pipe takes
+  local clients only, and its default security lets only this user and administrators write.
+  Not handled: another user's process taking the name first would receive the folder paths (it
+  can't make Arbor do anything). Undo: `incoming::windows`, and its call in `main`.
+
 - **2026-11-09 · Windows trash: residual race accepted (Review).** A file that grows past the
   Recycle Bin's capacity, or a bin setting changed, between the pre-check and the shell's delete
   could still be deleted permanently. The pre-check plus the sink's `PostDeleteItem` check cover
@@ -99,8 +109,6 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
-- **2026-11-09 · Windows: still no single instance (Review).** See the milestone 11 entry
-  below if it changes; otherwise each folder opened from Explorer starts a new Arbor.
 - **2026-11-09 · File-list rows are named from their cells, with no separate description.**
   A reader hears "notes.txt, txt, 5 KB, Today 10:30" as the row's name. A description holding
   kind, size and date apart would cost a string per visible row every frame for everyone, since
@@ -155,7 +163,8 @@ Format: date · decision · why · how to undo.
   it still holds what Arbor wrote; the rest are named in the status bar. Making Arbor the default
   again keeps the first backup. A damaged backup file is an error, not a guess. Undo:
   `handler::{linux, windows, mac}::restore`.
-- **2026-11-09 · Single instance: macOS and Linux get it from the platform, Windows later.**
+- **2026-11-09 · Single instance: macOS and Linux get it from the platform, Windows later**
+  (Windows since milestone 11: a named pipe, above).
   macOS sends folders to the running app (open-documents events) and Linux's FileManager1
   requests reach the running Arbor; each opens a tab. On Windows each folder opened from Explorer
   starts a new Arbor: a named-pipe listener would do it without polling, but nothing can be run

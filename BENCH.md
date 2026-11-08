@@ -27,6 +27,51 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-09, milestone 11 (accessibility, go-to completion, redo, one Arbor on Windows)
+
+What could cost time on every key: the roles, states and names the view now gives assistive
+technology (a role and a selected flag per row, `a11y_hidden` on decoration, a few dozen short
+labels for the window's chrome), the file list being focusable with its own key handler, and
+its active descendant (one string a frame). Rune builds the accessibility tree only when a
+client asks (`nothing_is_built_until_a_client_asks`), so none of the tree is built here.
+Completion and redo cost nothing until used.
+
+### Arbor's own work per key, without the GPU (`frame_cost`, tabot-dev)
+
+`cargo test --release -- --ignored --nocapture frame_cost`: a headless runtime on a
+10,000-entry folder, 1,200 keys (↓, and ↑ now and then), each timed from the key to the
+committed frame (handler, view, layout, commit; no rendering). Steadier than the windowed bench
+on a busy machine. The previous commit (41fed24, with the test file copied in) and this one, three
+runs each:
+
+| Build | median (ms) | p95 (ms) |
+| --- | --- | --- |
+| 41fed24 | 1.736, 1.768, 1.739 | 1.880, 1.886, 1.908 |
+| this | 1.784, 1.790, 1.780, 1.808, 1.814, 1.813, 1.787 | 1.881, 2.194, 1.950, 1.884, 1.897, 1.916, 1.881 |
+
+About 0.04–0.05 ms more a key (2–3% of Arbor's own work, 0.6% of the 8 ms budget). Taking the
+rows' accessibility attributes out recovered about 0.02 ms of it (1.773–1.798 ms), and the list's
+focus and key handler nothing measurable; the rest is the chrome's labels and Rune's handling of
+the extra properties. Rune can't build labels lazily (RUNE-GAPS.md), so this is what being
+readable costs everyone; the rows themselves are named from text they already draw.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+`xvfb-run target/release/examples/bench 11 10 --bin …`, alternating, five passes each. The
+machine was busy throughout (load average 2.1–3.4, other users' processes), and the spread
+between passes of the same build (key median 2.1–6.4 ms for 41fed24) is larger than any
+difference between builds:
+
+| Measure (median / p95) | 41fed24 (5 passes) | this (5 passes) |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 128.7–155.3 / 141.2–241.9 ms | 134.3–166.3 / 141.9–220.0 ms |
+| Listing visible (10k, nav → frame) | 42.2–53.6 / 46.1–72.8 ms | 42.2–52.6 / 51.9–76.8 ms |
+| Key → frame (synthetic ↓) | 2.1–6.4 / 7.0–12.4 ms | 6.3–8.2 / 8.5–12.7 ms |
+
+No change shows through the noise at the median; the headless numbers above are the
+measurement. Cold start does no new work (Windows' single-instance check runs only with a
+folder on the command line, and costs one failed pipe open when no Arbor is running).
+
 ## 2026-11-09, milestone 10 (packages, the folder default, requests from other apps)
 
 What could cost start-up time: on Linux a thread started in `main` that reads one file (whether

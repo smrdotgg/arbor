@@ -43,6 +43,14 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   stack. A partly failed one keeps only what didn't go back; an undo across disks that copied
   an item back but couldn't remove all of the original says where both halves are, and undoing
   again finishes the job if neither has changed.
+- **Redo** (⇧⌘Z; Ctrl+Shift+Z, and Ctrl+Y on Windows) puts back what ⌘Z undid. Undoing an
+  operation records its reverse, fingerprinted the same way as the disk was left after the
+  undo: a move or rename goes forward again, a copy, duplicate or new folder comes back out of
+  the Trash (from where the Trash put it), and a trashed item goes to the Trash again. A redo
+  refuses on the same terms as an undo, stays on the redo stack when refused, and a redone
+  operation can be undone again. A batch rename's undo and redo go through the same plan both
+  ways (swaps included). Any new operation clears what could be redone. On Windows the Recycle
+  Bin doesn't say where it put an item, so an undone copy or new folder can't be redone there.
 - **Known limit:** contents aren't hashed (too slow for big files), so an edit that keeps a
   file's size and leaves its modified time unchanged isn't seen. That includes an edit within
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
@@ -57,7 +65,8 @@ listing, selection, filter, sort and history, and what a hidden tab keeps), `pan
 split view), `commands.rs` (the command table and keymap), `palette.rs` (the command palette),
 `config.rs` (the settings file), `actions.rs` (clipboard, rename, drag and drop, context menu),
 `menu.rs` (the context menu in the window, on Linux), `handler.rs` (making Arbor the default for
-folders, and putting the old default back), `incoming.rs` (folders other apps ask Arbor to show),
+folders, and putting the old default back), `incoming.rs` (folders other apps ask Arbor to show,
+and one Arbor on Windows), `complete.rs` (Tab completion in go-to mode),
 `preview.rs` (quick preview: reading, sniffing and decoding on a worker), `thumb.rs` (the OS's
 thumbnails for the preview: Quick Look, the Windows shell), `jump.rs` (Jump to
 Folder: the history's writer thread, frecency and ranking), `search.rs` (Search in This Folder:
@@ -100,9 +109,11 @@ so), then deletes the backup. Without a backup, Restore still takes back what Ar
 runs it).
 
 Folders other apps send open in the running Arbor where the platform passes them to it (macOS,
-and Linux through D-Bus): each in a new tab of the active pane, or, when Arbor was started for
-it and nobody has used the window yet, in its first tab. "Show item" requests open the item's
-folder with the item selected.
+Linux through D-Bus, and Windows through a named pipe: a second `arbor.exe <folder>` hands the
+folder to the first and exits before opening a window): each in a new tab of the active pane,
+or, when Arbor was started for it and nobody has used the window yet, in its first tab. "Show
+item" requests open the item's folder with the item selected. On Windows, `arbor.exe` without a
+folder still opens a window of its own, and two started at the same instant may both open.
 
 - **macOS:** LaunchServices' viewer for folders (`public.folder`) becomes `gg.smr.arbor`, which
   only works from `Arbor.app` (the bare program says so). Restore sets back the viewer you had
@@ -131,8 +142,8 @@ folder with the item selected.
   covers Control Panel, the Recycle Bin and other virtual folders Arbor can't show. Restore
   writes every saved value back exactly, type included, and removes the keys Arbor made once
   they're empty. In Arbor: opening a folder or drive in Explorer or on the desktop, Win+E, and
-  apps that open a folder through the shell; each opens a new Arbor window (no single instance
-  yet). **Still Explorer:** "Show in folder" from apps that call `SHOpenFolderAndSelectItems`,
+  apps that open a folder through the shell; with Arbor already running, each opens as a new
+  tab there (below). **Still Explorer:** "Show in folder" from apps that call `SHOpenFolderAndSelectItems`,
   Explorer's own navigation pane, and Arbor's own Show in Explorer. Moving or deleting `arbor.exe`
   while it's the default stops folders opening: restore first. Never run on a real Windows machine
   yet; CI writes and restores the same plan under a test-only key.
@@ -197,10 +208,17 @@ Typing, outside the palette:
 
 - **Type anything** to filter the folder. The first name starting with what you typed gets
   selected. While the filter has text, typing, ⌫ and ⌥⌫ edit it.
-- **Type `/` or `~`** (or ⌘L) for go-to-path mode. Enter navigates, or opens a file.
+- **Type `/` or `~`** (or ⌘L) for go-to-path mode. Enter navigates, or opens a file. **Tab**
+  completes the last part of the path against what's in its folder: the first Tab as far as
+  every match agrees (all of a single match, with a `/` after a folder) and, with several, lists
+  them in a small card over the status bar; Tab again cycles through them, ⇧Tab backwards.
+  Typing anything else carries on from there. Capitals count on Linux and don't on macOS and
+  Windows; hidden items are matches while hidden files are shown, or once you type a dot. The
+  folder is read fresh on a worker for each completion (no cache), and the key waits at most a
+  frame for it; a slower folder completes when it answers, unless you've typed on.
 - **Space** with nothing typed opens or closes the quick preview (below). While the filter has
   text, Space types a space, since names have spaces; a filter never starts with one.
-- Tab switches to the other pane (Tab in go-to mode is reserved for path completion).
+- Tab switches to the other pane (in go-to mode it completes the path, above).
 
 Off macOS, ⌘ is Ctrl. Mouse: click to select, ⇧-click and ⌘-click to select several,
 double-click to open, click a breadcrumb or place to jump there (in a narrow pane the
@@ -630,8 +648,65 @@ folders), and is refused if that folder was moved or replaced before the clipboa
 Two panes on one folder by different paths (a symlink to it) are known to be the same folder.
 The palette names ⌘\ "Split View" or "Close Split View", and Space "Quick Preview" or "Close
 Preview", whichever it will do. Delete Permanently is ⌥⌘⌫ on macOS and Shift+Delete on Windows and
-Linux, each platform's own convention. Undo refuses if any item changed since. Rename selects the name before the extension; Enter saves, Esc cancels. With two or more items selected, Rename opens Batch Rename. Esc also cancels
+Linux, each platform's own convention. Undo and redo refuse if any item changed since. Ctrl+Y
+(redo) is Windows' only; Linux has Ctrl+Shift+Z. Rename selects the name before the extension; Enter saves, Esc cancels. With two or more items selected, Rename opens Batch Rename. Esc also cancels
 a running copy or move.
+
+## Accessibility
+
+Rune exposes Arbor's window to each platform's accessibility API through AccessKit
+(VoiceOver and Voice Control on macOS, Narrator, NVDA and JAWS on Windows, Orca on Linux), and
+Arbor gives every part a role and a name (`src/view.rs`; `src/a11y_tests.rs` checks the tree):
+
+- **The file list** is a list box named for its folder ("Files in Downloads"). Each row is an
+  option named from its cells in reading order (name, kind, size, modified: "notes.txt, txt,
+  5 KB, Today 10:30"; a folder says "Folder" when the Kind column is hidden), selected when it
+  is, with its place in the whole folder ("2 of 120", not of the rows built). The list's active
+  descendant is the cursor's row, so a reader follows ↑↓, typing and every other key. In a
+  split window both lists point at the active pane's cursor row.
+- **The sidebar** is a list box of places (the folder on screen selected, ⌘1–9 as each one's
+  shortcut); **the path bar** a toolbar of named buttons (Go Back, Go Forward, Go to Parent
+  Folder, dimmed when they can't) and the breadcrumbs as links; **the tab strip** a tab list
+  with the shown tab selected; the column headers say which one sorts and which way.
+- **The status bar's note is a live region**: results ("Moved 3 items to the Trash", "Restored
+  1 item", "Redid 2 items") are announced when the user is idle, and failures (a refused undo,
+  an operation's errors, a folder that can't be read) at once, as alerts. Progress isn't
+  announced (it changes many times a second).
+- **Overlays** are modal dialogs that keep focus while open and give it back when they close
+  (Esc or a click outside): the palette (field "Command"; its options carry their shortcuts,
+  unavailable ones are dimmed, the highlighted one is the field's active descendant), Jump,
+  Select by Pattern (its count is a status), Batch Rename (named fields, switches for
+  regular expressions and capitals, a radio group for case, a checkbox for the extension, the
+  summary a status), the in-window context menu on Linux (a menu of items with shortcuts) and
+  go-to's completion card. **The confirm dialog** is an alert dialog named by its title and
+  described by what it says; the button with the focus (Cancel when it opens) is its active
+  descendant.
+- **The preview** is a complementary region named Preview, the item's name a heading, an image
+  named for its file, and a text file's contents a document that Tab reaches; while it has
+  focus ↑↓ ←→ scroll three lines, Page Up/Down a page, Home and End to the ends.
+
+**Keyboard only.** Every command is in the palette (⌘K), including those with no key (Sort by
+Name, Kind, Size or Date, Batch Rename, Select All of This Kind…). Sidebar places are ⌘1–9 and
+"Go to …" in the palette; the breadcrumbs are ⌘↑ (parent) and ⌘L (type a path, Tab completes).
+Tab moves focus to the list, the search field and the preview's contents (and switches panes
+when the window is split). Focus shows as the selection (the accent colour in the active pane,
+grey in the other, with an accent line along the active pane's top), the caret in a field, a
+ring on the dialog's focused button, the menu's highlight, and Rune's focus ring on the
+preview's contents.
+
+**It costs nothing until a reader connects.** Rune builds the tree only when an assistive client
+asks for it (`AccessibilityLink`; until then a frame does no accessibility work), and Arbor adds
+no per-row work for it: rows are named from the text they already draw. The test
+`nothing_is_built_until_a_client_asks` checks that nothing is sent before activation and
+nothing on an idle frame after it. Measured: BENCH.md (milestone 11).
+
+**OS settings.** Arbor never animates, so reduce motion changes nothing. Rune doesn't report
+increased contrast or a larger text size, so those settings don't change Arbor yet
+(`RUNE-GAPS.md`). **Limits** (`RUNE-GAPS.md`): Rune can't move keyboard focus from a handler, so
+at launch focus is on the window until the first Tab or click puts it in the list (in a split
+window, a click: Tab switches panes); readers aren't told the list allows several selected; a
+note identical to the last one isn't announced again. Checked only through the tree Rune
+builds (unit tests); no screen reader has been run against it yet.
 
 ## Settings
 
@@ -729,6 +804,9 @@ one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine
 - [ ] Shift+Delete asks, names the items, and deletes; a read-only file and a folder with a
       junction inside (the junction's target stays) go too.
 - [ ] Right-click opens the native menu with the same items as on macOS.
+- [ ] With Arbor running, `arbor.exe C:\Users` from a terminal (and a folder opened from
+      Explorer once Arbor is the default) opens a tab in the running window, which comes to
+      the front, and no second window opens.
 - [ ] `arbor.exe` shows its icon in Explorer and the taskbar, and Properties → Details shows
       Arbor and its version; no console window opens with it.
 - [ ] "Make Arbor the Default for Folders…": double-clicking a folder in Explorer, a drive in
@@ -739,8 +817,7 @@ one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine
 
 Emptying the Trash, file watching (use ⌘R), rich previews (PDF, video, documents) on Linux and
 new (uncached) thumbnails on Windows (see Quick preview), syntax highlighting in the text
-preview, regular expressions in Select by Pattern, Tab-completion in go-to mode, redo, more than one operation
-at a time, reordering tabs or dragging them between panes, a single Arbor on Windows (a folder
-opened from Explorer starts a new window), a universal (Intel and Apple silicon) Mac build,
+preview, regular expressions in Select by Pattern, more than one operation
+at a time, reordering tabs or dragging them between panes, a universal (Intel and Apple silicon) Mac build,
 notarized and signed packages, and
 dragging rows out to Finder while the window is split on macOS (see `RUNE-GAPS.md`).

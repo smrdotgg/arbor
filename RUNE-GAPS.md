@@ -16,6 +16,81 @@ Newest first.
 
 ---
 
+## Accessibility: no way to put keyboard focus on an element from a handler
+
+- **Feature:** screen-reader use of the file list (milestone 11; NORTHSTAR "zero learning to
+  start", for everyone). A reader follows the selection only while the list holds focus (its
+  active descendant is the cursor's row).
+- **What Rune is missing:** a `Tx::focus(key)` for any focusable element. Text fields take focus
+  through their `TextEdit::focused`, and focus returns to a keyed element when an overlay or a
+  `focus_return` element goes away, but nothing else moves it: not at launch, not when Arbor
+  switches panes.
+- **What we did instead:** the list is focusable and hands every key to the window's own
+  handler (`list` in `src/view.rs`, `timing::key`), so keys behave the same focused or not; Tab
+  puts focus there when the window has one pane (Arbor passes Tab on), a click does in any
+  case, and overlays give it back when they close. In a split window both lists name the
+  active pane's cursor row as their active descendant (`active_row`), so whichever holds focus,
+  a reader hears the row the keys move.
+- **What users lose:** at launch, focus is on the window: a VoiceOver, Narrator or Orca user
+  hears nothing as ↑↓ move the selection until a first Tab (one pane) or a click puts focus in
+  the list. In a split window opened before that, Tab switches panes instead, so it takes a
+  click.
+- **Suggested Rune change:** `Tx::focus(key)` (and `AppSpec::initial_focus` or
+  `El::autofocus`) for any focusable element, applied after the handler's commit as
+  `TextEdit::focused` is.
+
+## Accessibility: no announcements on demand, and no "several can be selected"
+
+- **Feature:** the status bar announcing operation results and errors; the file list's
+  multi-selection.
+- **What Rune is missing:** a `Tx::announce(text, politeness)` (AccessKit's adapters announce
+  only when a live region's name changes), and `El::multiselectable` (AccessKit has
+  `Node::set_multiselectable`; `A11yMore` has no field for it).
+- **What we did instead:** the note is a live region (`role("status")`, or `"alert"` for a
+  failure: `State::alert`), so each new note is announced. Rows report selected or not.
+- **What users lose:** the same note twice in a row ("Restored 1 item" after two undos) is
+  announced once. Readers don't say the list takes several selected items (⇧ and ⌘ with a
+  click or an arrow), so a blind user has to know.
+- **Suggested Rune change:** `Tx::announce(text, LiveRegion)`, routed to each adapter's
+  announcement (NSAccessibility's announcement request, UIA's notification event, AT-SPI's
+  `Announcement`), and `El::multiselectable(bool)`.
+
+## Accessibility: per-frame labels can't be lazy, and the app can't tell a reader is there
+
+- **Feature:** what Arbor names for assistive technology must cost nothing when no reader is
+  connected (NORTHSTAR: pay only for what you use).
+- **What Rune is missing:** a way to build labels only when the tree is built (a label closure,
+  or `Cx::accessibility_active()`). `El::label` and `El::description` take a `String`, made
+  every time the view runs; Rune itself builds nothing until a client asks
+  (`AccessibilityLink`).
+- **What we did instead:** nothing per row: rows are named by Rune from the text they already
+  draw (`roles::named_from_content` for options), a folder's "▸" is `a11y_hidden` (or labelled
+  "Folder" only while the Kind column is hidden), and shortcuts and decoration are
+  `a11y_hidden`. Labels are kept to the window's chrome (a few dozen short strings a frame:
+  the list's "Files in …", the path bar's buttons, headers) and to overlays while open.
+- **What users lose:** nothing measurable (BENCH.md, milestone 11), but a richer description per
+  row (kind, size and date as a description separate from the name, as Finder gives them)
+  would cost an allocation per visible row per frame for everyone.
+- **Suggested Rune change:** `Cx::accessibility_active() -> bool` (true once a client
+  activated the window's tree; the view re-runs when it changes), or `El::label_with(|| ..)`
+  called only when the node is built.
+
+## Accessibility: increased contrast and larger text aren't reported
+
+- **Feature:** respecting each OS's accessibility settings (milestone 11).
+- **What Rune is missing:** the system's increased-contrast setting (macOS "Increase contrast",
+  `accessibilityDisplayShouldIncreaseContrast`; Windows high-contrast themes,
+  `SPI_GETHIGHCONTRAST`; GNOME's `high-contrast`) and its text-size preference (Windows' "Text
+  size", GNOME's `text-scaling-factor`; macOS has no global one). `Cx` reports dark mode,
+  accent, reduced motion, scroll-bar style and Full Keyboard Access only.
+- **What we did instead:** nothing: Arbor draws its normal theme and sizes. Reduced motion is
+  moot (Arbor never animates).
+- **What users lose:** someone who turned on increased contrast or larger text gets Arbor's
+  default greys (secondary text, dimmed rows, the grey selection of the inactive pane) and
+  13 pt text, unlike native apps.
+- **Suggested Rune change:** `Cx::increased_contrast()` and `Cx::text_scale()` (re-running the
+  view on change), and a contrast variant in `tok::theme`.
+
 ## Opening folders from Finder: no "open documents" hook
 
 - **Feature:** Arbor as the place folders open (NORTHSTAR scope: "the default handler for
