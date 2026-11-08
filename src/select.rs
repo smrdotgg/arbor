@@ -469,7 +469,7 @@ mod tests {
     /// follows the rows Enter will act on, before Enter.
     #[test]
     fn the_count_follows_a_listing_that_refreshes_while_open() {
-        let d = folder("refresh", &["a.jpg", "notes.txt"]);
+        let d = folder("refresh-count", &["a.jpg", "notes.txt"]);
         let mut s = crate::app::tests::state_in(&d);
         let mut tx = Tx::default();
         s.run(Cmd::SelectPattern, &mut tx);
