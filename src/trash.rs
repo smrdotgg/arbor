@@ -348,13 +348,17 @@ pub fn precheck(root: &str, kind: u32) -> Option<String> {
 /// What Windows' registry says about the Recycle Bin of one volume: the per-volume key
 /// `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{GUID}`
 /// (`NukeOnDelete`, and `MaxCapacity` in MB), the parent `BitBucket` key's `NukeOnDelete` for a
-/// volume without its own, and the Explorer policies in HKCU and HKLM (`NoRecycleFiles`,
-/// `RecycleBinSize` in MB).
+/// volume without its own, and the Explorer policies in HKCU and HKLM (`NoRecycleFiles`, and
+/// `RecycleBinSize`, a percentage of each drive).
 #[cfg(any(windows, test))]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BinSettings {
     pub policy_off: bool,
-    pub policy_max_mb: Option<u64>,
+    /// The `RecycleBinSize` policy: the most each drive's bin may hold, as a percentage of the
+    /// drive (Microsoft's policy reference), not megabytes.
+    pub policy_percent: Option<u64>,
+    /// The volume's size in bytes, which the percentage is of (read only when it's set).
+    pub volume_bytes: Option<u64>,
     /// The volume has a key of its own.
     pub volume_key: bool,
     pub nuke: Option<u32>,
@@ -383,17 +387,22 @@ pub fn bin_verdict(s: &BinSettings, size: Option<u64>, place: &str, removable: b
         Some(_) => return Err(format!("the {BIN} on {place} is set to remove files immediately")),
         None => return Err(format!("Windows doesn't say whether the {BIN} on {place} keeps files")),
     }
-    let max = match (s.max_mb, s.policy_max_mb) {
+    let policy = match (s.policy_percent, s.volume_bytes) {
+        (None, _) => None,
+        (Some(pct), Some(volume)) => Some((u128::from(volume) * u128::from(pct.min(100)) / 100) as u64),
+        (Some(_), None) => return Err(format!("Windows doesn't say how big {place} is, and a policy sizes its {BIN} as a share of it")),
+    };
+    let max = match (s.max_mb.map(|m| m.saturating_mul(1 << 20)), policy) {
         (Some(a), Some(b)) => a.min(b),
         (Some(m), None) | (None, Some(m)) => m,
         (None, None) => return Err(format!("Windows doesn't say how big the {BIN} on {place} is")),
     };
     let Some(size) = size else { return Err(format!("Arbor couldn't read all of it to check that it fits in the {BIN}")) };
-    if size > max.saturating_mul(1 << 20) {
+    if size > max {
         return Err(format!(
             "it's bigger ({}) than the {BIN} on {place} can hold ({})",
             crate::fs::fmt_size(size),
-            crate::fs::fmt_size(max.saturating_mul(1 << 20))
+            crate::fs::fmt_size(max)
         ));
     }
     Ok(())
@@ -559,7 +568,7 @@ mod win {
         let policy = |name: &str| dword(HKEY_CURRENT_USER, POLICIES, name).or_else(|| dword(HKEY_LOCAL_MACHINE, POLICIES, name));
         let mut s = super::BinSettings {
             policy_off: policy("NoRecycleFiles").is_some_and(|v| v != 0),
-            policy_max_mb: policy("RecycleBinSize").map(u64::from),
+            policy_percent: policy("RecycleBinSize").map(u64::from),
             global_nuke: dword(HKEY_CURRENT_USER, BITBUCKET, "NukeOnDelete"),
             ..Default::default()
         };
@@ -576,7 +585,20 @@ mod win {
         s.volume_key = key_exists(HKEY_CURRENT_USER, &key);
         s.nuke = dword(HKEY_CURRENT_USER, &key, "NukeOnDelete");
         s.max_mb = dword(HKEY_CURRENT_USER, &key, "MaxCapacity").map(u64::from);
+        if s.policy_percent.is_some() {
+            s.volume_bytes = volume_bytes(root);
+        }
         s
+    }
+
+    /// The size of the volume at `root`, for the percentage policy.
+    fn volume_bytes(root: &str) -> Option<u64> {
+        use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+        let path = wide(std::ffi::OsStr::new(root));
+        let mut total = 0u64;
+        // SAFETY: a NUL-terminated root path; only the total is asked for.
+        let ok = unsafe { GetDiskFreeSpaceExW(path.as_ptr(), std::ptr::null_mut(), &mut total, std::ptr::null_mut()) } != 0;
+        (ok && total > 0).then_some(total)
     }
 
     fn dword(root: windows_sys::Win32::System::Registry::HKEY, key: &str, value: &str) -> Option<u32> {
@@ -1138,8 +1160,21 @@ mod tests {
         assert_eq!(bin_verdict(&ok, Some(1), "drive E:", true), Ok(()), "a removable drive with a bin");
         // Policies: off, or a smaller limit.
         assert!(why(&BinSettings { policy_off: true, ..ok.clone() }, Some(1)).contains("policy"));
-        assert!(why(&BinSettings { policy_max_mb: Some(1), ..ok.clone() }, Some(2 * mb)).contains("bigger"));
-        assert_eq!(bin_verdict(&BinSettings { max_mb: None, policy_max_mb: Some(5), ..ok.clone() }, Some(mb), "drive C:", false), Ok(()));
+        // RecycleBinSize is a percentage of the drive (the review: 10 was read as 10 MB).
+        let gb = 1u64 << 30;
+        let ten_percent = BinSettings { max_mb: None, policy_percent: Some(10), volume_bytes: Some(500 * gb), ..ok.clone() };
+        assert_eq!(bin_verdict(&ten_percent, Some(20 * mb), "drive C:", false), Ok(()), "20 MB fits in 10% of 500 GB");
+        assert_eq!(bin_verdict(&ten_percent, Some(50 * gb), "drive C:", false), Ok(()));
+        assert!(why(&ten_percent, Some(50 * gb + 1)).contains("bigger"));
+        // The smaller of the two limits counts.
+        assert!(why(&BinSettings { max_mb: Some(100), ..ten_percent.clone() }, Some(200 * mb)).contains("can hold (105 MB)"));
+        assert!(why(&BinSettings { policy_percent: Some(1), volume_bytes: Some(gb), ..ok.clone() }, Some(20 * mb)).contains("bigger"));
+        assert!(
+            why(&BinSettings { policy_percent: Some(0), volume_bytes: Some(gb), ..ok.clone() }, Some(1)).contains("bigger"),
+            "0%: no bin"
+        );
+        // A percentage of a drive whose size is unknown: unknown, so it asks.
+        assert!(why(&BinSettings { volume_bytes: None, ..ten_percent }, Some(1)).contains("share of it"));
         assert_eq!(place_of(r"C:\"), "drive C:");
         assert_eq!(place_of(r"\\nas\photos\"), "“\\\\nas\\photos”");
     }
