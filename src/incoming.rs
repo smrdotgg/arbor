@@ -53,6 +53,7 @@ pub fn classify(paths: Vec<PathBuf>, items: bool) -> Vec<Show> {
     out
 }
 
+#[cfg_attr(not(any(test, all(unix, not(target_os = "macos")))), allow(dead_code))]
 /// The local path a `file://` URI names (`file:///a%20b` → `/a b`), or `None` for another
 /// scheme or host.
 pub fn file_uri_path(uri: &str) -> Option<PathBuf> {
