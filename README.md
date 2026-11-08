@@ -355,7 +355,9 @@ since nothing permanent has happened yet and only the disk can say which items i
 Cancel has the focus, and Esc keeps them.
 
 - **macOS:** `NSFileManager` puts the item in the Trash, or fails on a disk without one (many
-  network shares, some FAT, exFAT and NTFS disks); that failure is the question.
+  network shares, some FAT, exFAT and NTFS disks); that failure is the question. A write or
+  permission failure (which a disk without a usable Trash also gives, but so do other causes) is
+  the question too, with macOS's own reason rather than a claim about the disk.
 - **Linux:** the freedesktop.org trash: the home trash (`~/.local/share/Trash`) for items on its
   disk; on another disk its own `$top/.Trash/$uid` (only if `.Trash` is a sticky folder, not a
   link) or `$top/.Trash-$uid` (made if missing). An item is only ever renamed into a trash on its

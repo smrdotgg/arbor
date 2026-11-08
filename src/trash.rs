@@ -57,23 +57,35 @@ pub fn trash(path: &Path) -> Result<Option<PathBuf>, TrashError> {
         Ok(()) => Ok(out.and_then(|u| u.to_file_path())),
         Err(e) => {
             let deletable = path.parent().is_some_and(writable);
-            Err(classify_mac(&e.domain().to_string(), e.code() as i64, deletable, e.localizedDescription().to_string()))
+            let reason = e.localizedFailureReason().map(|r| r.to_string());
+            Err(classify_mac(&e.domain().to_string(), e.code() as i64, deletable, e.localizedDescription().to_string(), reason))
         }
     }
 }
 
 /// What a failed `trashItemAtURL` means. `NSFeatureUnsupportedError` (3328) is its answer on a
-/// volume with no trash (many SMB and NFS shares, some FAT, exFAT and NTFS disks); a write
-/// error (512, 513) comes from a volume whose `.Trashes` can't be made. Either is a disk with
-/// no usable trash, but only when the item's own folder can be changed: otherwise a permanent
-/// delete couldn't remove it either, and offering one would only fail.
+/// volume with no trash (many SMB and NFS shares, some FAT, exFAT and NTFS disks). A write
+/// error (512, 513) often comes from a volume whose `.Trashes` can't be made, but it's a generic
+/// write or permission failure, not proof the disk has no Trash, so the words keep macOS's own
+/// reason. Either way the item stays and the permanent-delete question is offered, but only when
+/// the item's own folder can be changed: otherwise a permanent delete couldn't remove it either,
+/// and offering one would only fail.
 #[cfg(any(target_os = "macos", test))]
-pub fn classify_mac(domain: &str, code: i64, folder_writable: bool, message: String) -> TrashError {
+pub fn classify_mac(domain: &str, code: i64, folder_writable: bool, message: String, reason: Option<String>) -> TrashError {
     const FEATURE_UNSUPPORTED: i64 = 3328;
     const WRITE_UNKNOWN: i64 = 512;
     const WRITE_NO_PERMISSION: i64 = 513;
-    let no_trash = domain == "NSCocoaErrorDomain" && matches!(code, FEATURE_UNSUPPORTED | WRITE_UNKNOWN | WRITE_NO_PERMISSION);
-    if no_trash && folder_writable { TrashError::NoTrash("the disk it's on has no Trash".into()) } else { TrashError::Failed(message) }
+    if domain != "NSCocoaErrorDomain" || !folder_writable {
+        return TrashError::Failed(message);
+    }
+    match code {
+        FEATURE_UNSUPPORTED => TrashError::NoTrash("the disk it's on has no Trash".into()),
+        WRITE_UNKNOWN | WRITE_NO_PERMISSION => {
+            let why = reason.filter(|r| !r.trim().is_empty()).unwrap_or(message);
+            TrashError::NoTrash(format!("macOS couldn't move it there ({})", why.trim().trim_end_matches('.')))
+        }
+        _ => TrashError::Failed(message),
+    }
 }
 
 /// Whether this process may add and remove entries in folder `dir` (a read-only disk isn't).
@@ -860,13 +872,26 @@ mod tests {
     #[test]
     fn mac_failures_offer_a_permanent_delete_only_for_a_disk_with_no_trash() {
         let msg = || "nope".to_string();
-        assert!(matches!(classify_mac("NSCocoaErrorDomain", 3328, true, msg()), TrashError::NoTrash(_)));
-        assert!(matches!(classify_mac("NSCocoaErrorDomain", 513, true, msg()), TrashError::NoTrash(_)));
+        assert_eq!(
+            classify_mac("NSCocoaErrorDomain", 3328, true, msg(), None),
+            TrashError::NoTrash("the disk it's on has no Trash".into())
+        );
+        // A write error isn't proof the disk has no Trash: macOS's own reason, and still the
+        // question.
+        let why = Some("You don't have permission to access it.".to_string());
+        assert_eq!(
+            classify_mac("NSCocoaErrorDomain", 513, true, msg(), why),
+            TrashError::NoTrash("macOS couldn't move it there (You don't have permission to access it)".into())
+        );
+        assert_eq!(
+            classify_mac("NSCocoaErrorDomain", 512, true, msg(), None),
+            TrashError::NoTrash("macOS couldn't move it there (nope)".into())
+        );
         // Its folder can't be changed: a delete would fail too.
-        assert_eq!(classify_mac("NSCocoaErrorDomain", 3328, false, msg()), TrashError::Failed(msg()));
+        assert_eq!(classify_mac("NSCocoaErrorDomain", 3328, false, msg(), None), TrashError::Failed(msg()));
         // Not there any more, or another domain: just the error.
-        assert_eq!(classify_mac("NSCocoaErrorDomain", 4, true, msg()), TrashError::Failed(msg()));
-        assert_eq!(classify_mac("NSPOSIXErrorDomain", 3328, true, msg()), TrashError::Failed(msg()));
+        assert_eq!(classify_mac("NSCocoaErrorDomain", 4, true, msg(), None), TrashError::Failed(msg()));
+        assert_eq!(classify_mac("NSPOSIXErrorDomain", 3328, true, msg(), None), TrashError::Failed(msg()));
     }
 
     /// Only a fixed local disk goes on to the shell; everything else is refused up front.
