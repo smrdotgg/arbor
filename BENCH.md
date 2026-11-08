@@ -25,6 +25,83 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-08, milestone 5 review fixes and Jump ranking
+
+### MacBook Pro, Apple M4 Pro, macOS 27.2 (60 Hz display), at 6932cf2, run by the owner
+
+`scripts/bench.sh 11 10 --tabs 5 --preview 5 --jump 5`, submission proxy. Measured before the
+fixes below (they came after this commit).
+
+| Measure (median / p95) | Result |
+| --- | --- |
+| Cold start (spawn → first frame) | 134.3 / 143.3 ms (`main` → first frame 125.6 ms) |
+| Listing visible (10k) | 36.8 / 37.4 ms |
+| Key → frame (synthetic ↓) | 0.7 / 0.8 ms |
+| Tab switch to 10k | 36.3 / 37.3 ms |
+| Preview 256 KB text (Space → frame) | 17.8 / 58.4 ms |
+| Preview 12 MP JPEG | 83.8 / 83.9 ms |
+| Key → frame, preview open | 0.2 / 0.5 ms (0.2 / 0.3 while the JPEG decodes) |
+| Jump open, 5k history, cold | 10.1 / 10.9 ms |
+| Jump open, 5k history, warm | 2.8 / **10.7 ms (p95 over 8 ms)** |
+| Key → frame, typing in Jump (5k) | 2.2 / **8.7 ms (p95 over 8 ms)** |
+
+Three of six preview runs were INVALID (80 keys, 10 photo previews, but 9 text previews). That
+was the timing harness, not the app: `timing::frame` took what had landed before checking that
+the frame was drawn, so a preview landing in a `Skipped` frame (no drawable in time) was never
+logged, though the bench saw it land and moved on, and the next drawn frame showed it. Fixed in
+eb14848: what lands waits for the next drawn frame. The skipped frame is most likely each
+run's first text preview, whose frame loads the system's monospaced font; that same first
+showing is the text preview's p95 (58 ms against 17.8), as on Linux.
+
+Jump's p95: on the Mac, Jump frames' `update_ms` reached 7.9 ms with encoding under 0.4 ms.
+Measured on tabot-dev, the ranking handler is only part of it (about 1 ms of a 3.3 ms update
+on a 5k history); the rest is the view: Rune reading every row key again when the number of
+rows changes, and the box's visible rows built again with their bold matches. 3d60593 cuts
+both: a key that extends the query ranks only the last query's matches, rows share their
+folder's strings instead of copying them, the bold ranges are worked out only for the rows
+built, and the box ranks 200 rows instead of 500. Handlers (`rank_speed`, `open_speed`, 5k
+history, tabot-dev under load 4.5):
+
+| Work | Before | After |
+| --- | --- | --- |
+| Open (warm) | 0.50 ms | 0.17 ms |
+| Rank, nothing typed | 0.67 ms | 0.08 ms |
+| Type `a` / then `r` | 0.9 / 0.95 ms | 0.5 / 0.46 ms |
+
+Under Xvfb, with the machine at load 5.5, typing's `update_ms` was lower in both alternating
+pairs (median 3.1 and 6.2 ms against 3.7 and 6.7) and the warm open's too (3.9 and 6.1 against
+6.1 and 6.6): too noisy to quote as a gain beyond "lower". **The Mac needs re-measuring**; it's
+the number that decides the budget. If Jump is still over there, ranking can move to a worker
+with the last rows shown until the new ones land.
+
+### Preview: work after a cancel (tabot-dev)
+
+`cargo test --release -- --ignored --nocapture gif_cancel_latency webp_decode_speed`:
+
+| Work | Before | After |
+| --- | --- | --- |
+| 24 MP GIF told to stop 12 ms in: work after the stop | 191 ms (the review's measurement) | 0.17 ms median, 0.71 max (0.69 / 0.92 interlaced) |
+| 24 MP GIF, whole decode | about 200 ms | 172 ms (269 interlaced) |
+| WebP, slowest allowed (can't be stopped) | 24 MP allowed: 136 ms after a cancel in the review; 1,086 ms for a noisy lossy 24 MP here | 0.45 MP lossy with alpha: 30.4 ms; 1.7 MP lossless: 31.7 ms |
+
+WebP decode cost per megapixel, measured (image-webp 0.2.4): lossy photo-like 44 ms, lossy
+random pixels 63–67 ms (with alpha the slowest), lossless 8–11 ms photo-like, 17 ms random,
+3 ms for a flat image. The caps are set from the slowest.
+
+### Select by Pattern: the complex-glob benchmark (tabot-dev)
+
+The earlier `match_speed` numbers (1.4 / 1.6 / 3.0 ms) fed uppercase names to a
+case-insensitive pattern without lowercasing them, so `IMG_*1*.{png,jpg}` matched nothing and
+looked fast. With lowercased names (as a listing's are) and each count checked, it matches
+15,844 names and took 6.4 ms with the general matcher; anchored star patterns now match in one
+pass (8522d0c). Best of 20, 50,000 names:
+
+| Pattern | Matches | Time |
+| --- | --- | --- |
+| `*.jpg` | 16,667 | 0.41 ms |
+| `IMG_*1*.{png,jpg}` | 15,844 | 1.02 ms (6.4 ms before) |
+| `*a*b*c*d*` | 0 | 1.30 ms |
+
 ## 2026-11-08, recursive search (milestone 6)
 
 What changed on the measured path: nothing runs until ⌘F. Each key and frame makes one more
@@ -143,7 +220,7 @@ Measured directly (`cargo test --release -- --ignored --nocapture rank_speed ope
 | --- | --- | --- |
 | Add up a 5,000-line history log | 10–15 ms | the history's writer thread, first open only |
 | Rank 5,000 folders for "a" / "proj arb" / nothing typed | 1.2 / 0.5 / 0.6 ms | each key while Jump is open |
-| Count a 50,000-name folder's matches for `*.jpg` / `IMG_*1*.{png,jpg}` / `*a*b*c*d*` | 1.4 / 1.6 / 3.0 ms | each key while Select by Pattern is open |
+| Count a 50,000-name folder's matches for `*.jpg` / `IMG_*1*.{png,jpg}` / `*a*b*c*d*` | 1.4 / 1.6 / 3.0 ms (the middle one matched nothing: see the review fixes above) | each key while Select by Pattern is open |
 
 Binary: release 37.39 → 37.65 MB unstripped, 28.24 → 28.46 MB stripped (+0.21 MB). No new crates.
 
