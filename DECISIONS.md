@@ -9,6 +9,15 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-09 · Windows full thumbnail generation stays OFF until you decide (Review).**
+  Windows previews of PDF and video only show thumbnails the shell already has cached (1–8 ms).
+  Generating a new one (`IShellItemImageFactory`) can't be cancelled once started: 541 ms for a
+  1080p MP4 and 174 ms for a 4K MP4 on the CI runner, and the next preview waits behind it.
+  Turning it on (`UNCANCELLABLE_WINDOWS_THUMBNAILS` in `src/thumb.rs:43`) breaks NORTHSTAR's
+  view-triggered-work rule, so it needs an Exceptions-log entry with your sign-off; AGENTS.md
+  forbids the agent adding one. Recommendation: approve it like WebP (similar cost, UI never
+  affected). To approve: flip the flag and add the exception entry.
+
 - **2026-11-08 · Windows previews show only thumbnails the shell already cached (Review).** Full
   generation (`IShellItemImageFactory::GetImage` without `SIIGBF_INCACHEONLY`) can't be
   cancelled once it starts, so it's behind `UNCANCELLABLE_WINDOWS_THUMBNAILS` in `src/thumb.rs`,
@@ -21,6 +30,19 @@ Format: date · decision · why · how to undo.
   recommendations rather than wait. Why: on an M4 Pro, Arbor's median is ~134 ms, of which ~15 ms
   is exec and 65–80 ms is AppKit plus Rune start-up before Arbor's code runs. Arbor's own share is
   about 3 ms. Undo: revert the NORTHSTAR.md line.
+
+- **2026-11-09 · Codex QA on the Mac runs with `danger-full-access` (Review).** Codex's
+  `workspace-write` sandbox (macOS seatbelt) blocks the window server, so it couldn't launch
+  Arbor. It now runs from Terminal.app (started with `open -a Terminal`) in the GUI session with
+  full access, confined only by its instructions: operate only the "Arbor QA" app and one Finder
+  window, stay in `~/arbor-qa/play`, never empty the Trash. Arbor is wrapped in a throwaway,
+  ad-hoc-signed bundle `~/arbor-qa/Arbor-QA.app` (`gg.smr.arbor.qa`) because computer use
+  addresses apps by bundle id; `RUNE_DIRS_ROOT` keeps its settings and Jump history in
+  `~/arbor-qa/dirs`. Undo: delete `~/arbor-qa`; revoke computer-use access to "Arbor QA".
+- **2026-11-09 · Windows trash pre-checks the Recycle Bin's registry settings.** NukeOnDelete,
+  MaxCapacity versus item size, or unknown → Arbor's permanent-delete confirm instead of the shell.
+  Why: `TSF_DELETE_RECYCLE_IF_POSSIBLE` only means "if possible"; oversized items can be deleted
+  permanently with no UI. Undo: drop the pre-check in `src/trash.rs` (not recommended).
 
 ## Made with the owner's answer
 
