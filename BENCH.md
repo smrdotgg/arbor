@@ -31,7 +31,8 @@ does no disk I/O for it), and `State::new` builds an empty history (no read). No
 until ⌘J or ⌘S. Before is be544e2, after is 1c22c98, both driven by the new bench (which now
 gives every run its own empty settings folder through `RUNE_DIRS_ROOT`, so the navigations don't
 land in a real history), alternating. New rows (`--jump 5`: five more cold starts, 10 rounds
-each, with a history of 5,000 folders, 16 levels of words, one line each):
+each, with a history of 5,000 folders, each `<root>/home/<word>/<word>-<n>/<word>`, one line
+each):
 
 - **jump open, cold**: ⌘J to the frame showing the ranked folders, the first open of a run: the
   writer reads the 380 KB log and adds it up (about 10 ms on an idle core, more under load);
@@ -115,6 +116,12 @@ three more alternating pairs of 21 cold starts (before 129.6, 134.1, 131.8 ms; a
 by one, reading the first frame's own split: `main` → first frame 136.0 ms before and 136.2 ms
 after, view build 8.96 and 9.11 ms, `State::new` 0.11 and 0.13 ms. No regression: the gap was
 drift between passes. Listing and key times are within noise.
+
+A later review (2026-11-08) held ↓ at 40 Hz for 5 s in a folder of 200 24 MP JPEGs with the
+preview open, which keeps the worker decoding the whole time: key → frame median 21.4 ms, p95
+35.4 ms under Xvfb and lavapipe on this loaded 4-core machine. That's software rendering under
+heavy decode load, so it isn't representative, but it isn't a pass of the 8 ms budget either;
+and none of these times are pixels on screen, which no measurement here has verified.
 
 The text preview's p95 is its first showing in each run: that frame loads the system's
 monospaced font (Rune runs `fc-match` on Linux), about 8 ms of view build once per session;
