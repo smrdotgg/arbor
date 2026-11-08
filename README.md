@@ -105,7 +105,8 @@ Typing, outside the palette:
 - Tab switches to the other pane (Tab in go-to mode is reserved for path completion).
 
 Off macOS, ⌘ is Ctrl. Mouse: click to select, ⇧-click and ⌘-click to select several,
-double-click to open, click a breadcrumb or place to jump there, click a column header to sort
+double-click to open, click a breadcrumb or place to jump there (in a narrow pane the
+leading folders fold into “…”, which opens the deepest hidden one), click a column header to sort
 (click again to reverse). Right-click opens a native context menu (macOS and Windows). Drag rows
 out to Finder or other apps (macOS). Drop files on a folder row or on the list: same disk moves,
 another disk copies, and ⌥ forces a copy.

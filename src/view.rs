@@ -97,6 +97,8 @@ struct Ctx {
     /// Selection in the accent colour: the active pane, or the only one.
     focused: bool,
     split: Option<Panes>,
+    /// The pane's laid-out width (`f32::MAX` before the first layout).
+    w: f32,
 }
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
@@ -121,8 +123,8 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         if ix > 0 {
             panes = panes.child(el().w(1.0).h_full().fill(l.t.separator));
         }
-        let cols = Cols::for_width(cx.layout_size(&format!("pane-{}", p.id())).map_or(f32::MAX, |[w, _]| w));
-        let c = Ctx { id: p.id(), l, cols, focused: ix == s.active || split.is_none(), split };
+        let w = cx.layout_size(&format!("pane-{}", p.id())).map_or(f32::MAX, |[w, _]| w);
+        let c = Ctx { id: p.id(), l, cols: Cols::for_width(w), focused: ix == s.active || split.is_none(), split, w };
         panes = panes.child(pane(s, p, c));
     }
     let window = row()
@@ -185,7 +187,7 @@ fn pane(s: &State, p: &Pane, c: Ctx) -> El {
             tx.instant();
             s.activate_id(id, tx);
         })
-        .child(pathbar(f, l));
+        .child(pathbar(f, l, c.w));
     if p.tabs.len() > 1 {
         col = col.child(hr(l)).child(tabbar(p, l));
     }
@@ -212,7 +214,7 @@ fn in_pane(s: &mut State, id: u64, tx: &mut rune::Tx) -> bool {
     s.activate_id(id, tx)
 }
 
-fn pathbar(f: &Folder, l: Look) -> El {
+fn pathbar(f: &Folder, l: Look, width: f32) -> El {
     let id = f.id;
     let nav = |label: &'static str, key: &'static str, on: bool, go: fn(&mut State)| {
         text(label)
@@ -231,42 +233,42 @@ fn pathbar(f: &Folder, l: Look) -> El {
                 }
             })
     };
-    let mut crumbs = row().key("crumbs").grow(1.0).min_w(0.0).center_y().gap(2.0);
-    let mut acc = PathBuf::new();
-    let comps: Vec<Component> = f.cwd.components().collect();
-    let n = comps.len();
-    for (i, comp) in comps.iter().enumerate() {
-        acc.push(comp.as_os_str());
-        if matches!(comp, Component::RootDir) && i > 0 {
-            continue; // Windows: `C:` then `\`
+    let mut crumbs = row().key("crumbs").grow(1.0).min_w(0.0).center_y().gap(CRUMB_GAP);
+    let all = crumbs_of(&f.cwd);
+    let n = all.len();
+    let sep = || text("›").font(CRUMB).color(l.t.text_secondary.alpha(0.5));
+    let crumb = |label: String, key: String, target: PathBuf, last: bool| {
+        text(label)
+            .key(key)
+            .font(CRUMB)
+            .color(if last { l.t.text } else { l.t.text_secondary })
+            .px(CRUMB_PAD)
+            .py(2.0)
+            .radius(4.0)
+            .hover(l.t.hover)
+            .cursor(Cursor::Pointer)
+            .truncate()
+            .on_press_tx(move |s: &mut State, tx| {
+                if in_pane(s, id, tx) {
+                    s.go_to(target.clone());
+                }
+            })
+    };
+    let shown = shown_crumbs(&all, width - PATHBAR_CHROME, measure_crumb);
+    if let Shown::From { first, ellipsis: true } = shown {
+        // The deepest hidden folder: one click up from the first crumb shown.
+        let up = all[first - 1].target.clone();
+        crumbs = crumbs.child(crumb("…".into(), "crumb-more".into(), up.clone(), false).help(fs::pretty(&up))).child(sep());
+    }
+    let first = match shown {
+        Shown::All => 0,
+        Shown::From { first, .. } => first,
+    };
+    for (i, c) in all.into_iter().enumerate().skip(first) {
+        if c.sep && i > first {
+            crumbs = crumbs.child(sep());
         }
-        let label = match comp {
-            Component::RootDir => std::path::MAIN_SEPARATOR.to_string(),
-            c => c.as_os_str().to_string_lossy().into_owned(),
-        };
-        let last = i + 1 == n;
-        let target = acc.clone();
-        if i > 0 && !matches!(comps[i - 1], Component::RootDir | Component::Prefix(_)) {
-            crumbs = crumbs.child(text("›").font(CRUMB).color(l.t.text_secondary.alpha(0.5)));
-        }
-        crumbs = crumbs.child(
-            text(label)
-                .key(format!("crumb-{i}"))
-                .font(CRUMB)
-                .color(if last { l.t.text } else { l.t.text_secondary })
-                .px(4.0)
-                .py(2.0)
-                .radius(4.0)
-                .hover(l.t.hover)
-                .cursor(Cursor::Pointer)
-                .truncate()
-                .min_w(if last { 0.0 } else { 12.0 })
-                .on_press_tx(move |s: &mut State, tx| {
-                    if in_pane(s, id, tx) {
-                        s.go_to(target.clone());
-                    }
-                }),
-        );
+        crumbs = crumbs.child(crumb(c.label, format!("crumb-{i}"), c.target, i + 1 == n));
     }
     row()
         .key("pathbar")
@@ -281,6 +283,100 @@ fn pathbar(f: &Folder, l: Look) -> El {
         .child(nav("↑", "nav-up", f.cwd.parent().is_some(), State::parent))
         .child(el().w(6.0))
         .child(crumbs)
+}
+
+/// Space between breadcrumbs (and their separators), and each crumb's padding on either side.
+const CRUMB_GAP: f32 = 2.0;
+const CRUMB_PAD: f32 = 4.0;
+/// What the path bar spends besides the crumbs: its padding, three 24 pt buttons, a 6 pt
+/// spacer, and the gaps between those five.
+const PATHBAR_CHROME: f32 = 2.0 * 8.0 + 3.0 * 24.0 + 6.0 + 4.0 * 2.0;
+
+/// One breadcrumb: its label, the folder it opens, and whether a "›" goes before it (not
+/// after the root or a Windows drive).
+struct Crumb {
+    label: String,
+    target: PathBuf,
+    sep: bool,
+}
+
+fn crumbs_of(path: &std::path::Path) -> Vec<Crumb> {
+    let comps: Vec<Component> = path.components().collect();
+    let mut acc = PathBuf::new();
+    let mut out = Vec::new();
+    for (i, comp) in comps.iter().enumerate() {
+        acc.push(comp.as_os_str());
+        if matches!(comp, Component::RootDir) && i > 0 {
+            continue; // Windows: `C:` then `\`
+        }
+        let label = match comp {
+            Component::RootDir => std::path::MAIN_SEPARATOR.to_string(),
+            c => c.as_os_str().to_string_lossy().into_owned(),
+        };
+        let sep = i > 0 && !matches!(comps[i - 1], Component::RootDir | Component::Prefix(_));
+        out.push(Crumb { label, target: acc.clone(), sep });
+    }
+    out
+}
+
+/// Which breadcrumbs fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    All,
+    /// From crumb `first` on, after one "…" crumb standing for the ones before (when there's
+    /// room for it).
+    From {
+        first: usize,
+        ellipsis: bool,
+    },
+}
+
+/// Which crumbs fit in `avail` points, `width` giving a label's width in points. Rune can't be
+/// told which children to shrink first (no flex-shrink weights), so left to itself every crumb
+/// truncates, the current folder too (see `RUNE-GAPS.md`). Instead the leading crumbs fold into
+/// one "…" crumb until the rest fit whole. The last (the current folder) is always shown, and
+/// truncates only when it doesn't fit even alone.
+fn shown_crumbs(crumbs: &[Crumb], avail: f32, width: impl Fn(&str) -> f32) -> Shown {
+    let n = crumbs.len();
+    // A cheap bound first: no glyph in a 13 pt UI font is wider than 1.3 em, so a wide pane
+    // measures nothing.
+    let bound: f32 = crumbs.iter().map(|c| c.label.chars().count() as f32 * CRUMB.size * 1.3 + 2.0 * CRUMB_PAD + 3.0 * CRUMB.size).sum();
+    if bound <= avail || n < 2 {
+        return Shown::All;
+    }
+    // Room to spare for rounding, so the last crumb is never cut by a fraction of a point.
+    let avail = avail - 2.0;
+    let item = |w: f32| w + 2.0 * CRUMB_PAD;
+    let sep = width("›") + 2.0 * CRUMB_GAP;
+    let widths: Vec<f32> = crumbs.iter().map(|c| item(width(&c.label))).collect();
+    // Crumbs `k..` with a "›" before each but the first, and the gaps between them.
+    let tail = |k: usize| -> f32 {
+        (k..n)
+            .map(|i| {
+                widths[i]
+                    + if i > k && crumbs[i].sep {
+                        sep
+                    } else if i > k {
+                        CRUMB_GAP
+                    } else {
+                        0.0
+                    }
+            })
+            .sum()
+    };
+    if tail(0) <= avail {
+        return Shown::All;
+    }
+    let more = item(width("…")) + sep;
+    match (1..n).find(|&k| more + tail(k) <= avail) {
+        Some(first) => Shown::From { first, ellipsis: true },
+        None => Shown::From { first: n - 1, ellipsis: false },
+    }
+}
+
+/// A breadcrumb label's width in points, as Rune will lay it out.
+fn measure_crumb(label: &str) -> f32 {
+    rune::text::measure(label, &[], CRUMB, None).0
 }
 
 /// The pane's tabs, only when it has two or more: each shows its folder's name (the whole
@@ -705,5 +801,54 @@ fn palette_row(h: &palette::Hit, on: bool, l: Look) -> El {
         r.fill(l.t.control_off)
     } else {
         r.hover(l.t.hover)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// 7 pt a character, standing in for text measurement.
+    fn seven(s: &str) -> f32 {
+        s.chars().count() as f32 * 7.0
+    }
+
+    const DEEP: &str = "/home/smr/arbor-smoke/m3demo/Photos";
+
+    #[cfg(unix)]
+    #[test]
+    fn crumbs_are_the_path_with_separators_after_the_root() {
+        let c = crumbs_of(Path::new(DEEP));
+        assert_eq!(c.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["/", "home", "smr", "arbor-smoke", "m3demo", "Photos"]);
+        assert_eq!(c.iter().map(|c| c.sep).collect::<Vec<_>>(), [false, false, true, true, true, true]);
+        assert_eq!(c[2].target, Path::new("/home/smr"));
+    }
+
+    /// A narrow pane folds the leading crumbs into "…" rather than truncating every crumb,
+    /// and the current folder stays whole until it alone doesn't fit.
+    #[test]
+    fn narrow_breadcrumbs_fold_from_the_left_and_keep_the_current_folder_whole() {
+        let c = crumbs_of(Path::new(DEEP));
+        let shown = |avail| shown_crumbs(&c, avail, seven);
+        assert_eq!(shown(2000.0), Shown::All);
+        assert_eq!(shown(313.0), Shown::All); // 311 pt of crumbs, 2 pt of slack
+        // The right pane of a split 980 pt window: 404 pt, 302 of them for crumbs.
+        assert_eq!(shown(302.0), Shown::From { first: 2, ellipsis: true });
+        assert_eq!(shown(100.0), Shown::From { first: 5, ellipsis: true });
+        // Not even "…" and the current folder: just the folder, which truncates.
+        assert_eq!(shown(60.0), Shown::From { first: 5, ellipsis: false });
+    }
+
+    /// With Rune's own measurement: in that same pane, the crumbs shown fit whole.
+    #[test]
+    fn measured_breadcrumbs_fit_a_split_pane() {
+        let c = crumbs_of(Path::new(DEEP));
+        let avail = 404.0 - PATHBAR_CHROME;
+        let Shown::From { first, ellipsis: true } = shown_crumbs(&c, avail, measure_crumb) else { panic!("should fold") };
+        let sep = measure_crumb("›") + 2.0 * CRUMB_GAP;
+        let used: f32 = measure_crumb("…") + c[first..].iter().map(|c| measure_crumb(&c.label) + 2.0 * CRUMB_PAD + sep).sum::<f32>();
+        assert!(used + 2.0 * CRUMB_PAD <= avail, "{used} of {avail}");
+        assert!(measure_crumb("Photos") > 20.0);
     }
 }

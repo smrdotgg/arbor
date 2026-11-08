@@ -16,6 +16,26 @@ Newest first.
 
 ---
 
+## Breadcrumbs: no way to say which children shrink first
+
+- **Feature:** the path bar's breadcrumbs, in split view and narrow windows (NORTHSTAR: the
+  same app at every size; you always see where you are).
+- **What Rune is missing:** flex-shrink weights (or a shrink order). An element either shrinks
+  (`shrink()`, `truncate()`: CSS `flex-shrink: 1`) or doesn't, so when a row of crumbs is too
+  wide every crumb is cut in proportion to its width, the current folder included ("ho…",
+  "s…", "m3de…", "Pho…").
+- **What we did instead:** the view measures each label with `rune::text::measure` against the
+  pane's laid-out width (`shown_crumbs` in `src/view.rs`) and folds the leading crumbs into one
+  "…" crumb (which opens the deepest hidden folder) until the rest fit whole. The current
+  folder truncates only when it alone doesn't fit. A cheap length bound skips measuring when
+  the pane is clearly wide enough.
+- **What users lose:** little. Hidden ancestors are a click on "…" away (one level at a time;
+  there's no menu of them). The fit is computed from constants that mirror the path bar's
+  layout (padding, button sizes), so a layout change there has to update `PATHBAR_CHROME` too.
+- **Suggested Rune change:** `El::shrink_weight(f32)` (CSS `flex-shrink: n`), or a
+  `shrink_order(i32)` that cuts lower-order children to their minimum before touching higher
+  ones. With either, the crumbs could stay one plain row.
+
 ## Drag between panes: a system drag can't land in the window it came from
 
 - **Feature:** split view (NORTHSTAR Core): dragging rows from one pane onto the other copies or
