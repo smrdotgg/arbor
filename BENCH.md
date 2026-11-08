@@ -5,6 +5,7 @@ Arbor against the speed budgets in [`NORTHSTAR.md`](NORTHSTAR.md). Newest first.
 ```sh
 scripts/bench.sh 11 10                         # 11 cold starts, 10 rounds each (opens windows: leave the machine alone)
 scripts/bench.sh 11 10 --tabs 5                # plus 5 cold starts timing a tab switch to the 10k folder
+scripts/bench.sh 11 10 --jump 5                # plus 5 cold starts opening Jump with a 5k-folder history
 xvfb-run -a scripts/bench.sh 11 10             # Linux without a display
 cargo test --release -- --ignored --nocapture list_10k   # read + sort only, no window
 ```
@@ -21,6 +22,63 @@ runs two to three frames behind submission (`frame/present_time.rs`). Rune doesn
 frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below means the
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
+
+## 2026-11-08, Jump to Folder and Select by Pattern (milestone 5)
+
+What changed on the measured path: each navigation that lands now sends its folder to the Jump
+history's writer thread (one channel send; the thread starts on the first one, and the window
+does no disk I/O for it), and `State::new` builds an empty history (no read). Nothing else runs
+until ⌘J or ⌘S. Before is be544e2, after is 1c22c98, both driven by the new bench (which now
+gives every run its own empty settings folder through `RUNE_DIRS_ROOT`, so the navigations don't
+land in a real history), alternating. New rows (`--jump 5`: five more cold starts, 10 rounds
+each, with a history of 5,000 folders, 16 levels of words, one line each):
+
+- **jump open, cold**: ⌘J to the frame showing the ranked folders, the first open of a run: the
+  writer reads the 380 KB log and adds it up (about 10 ms on an idle core, more under load);
+  the box waits 8 ms for it, then shows "Loading history…" and the rows land in a later frame.
+- **jump open, warm**: later opens, which rank what's in memory.
+- **key → frame, typing in Jump**: `a`, then `r`, each ranking all 5,000 folders again.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+Load average 3.5–4.2 (another job compiling). Order: before, after, after, before.
+
+| Measure (median / p95, submission proxy) | Before (2 passes) | After (2 passes) |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 133.9 / 142.9, 132.0 / 159.0 ms | 134.6 / 142.7, 136.7 / 145.2 ms |
+| Listing visible (10k) | 40.3 / 45.6, 40.9 / 47.1 ms | 40.9 / 45.7, 40.3 / 45.9 ms |
+| Key → frame (synthetic ↓) | 6.4 / 7.0, 6.2 / 8.4 ms | 6.4 / 7.2, 6.2 / 7.0 ms |
+| **Jump open, 5k history, cold** | — | **49.7 / 51.4, 49.8 / 51.3 ms** |
+| **Jump open, 5k history, warm** | — | **11.4 / 12.5, 12.1 / 13.0 ms** |
+| **Key → frame, typing in Jump (5k)** | — | **10.8 / 13.0, 11.4 / 13.4 ms** |
+
+The cold-start medians differ by up to 4.7 ms between passes, so they were checked with three
+more alternating pairs of 21 cold starts once the machine was quieter (load 1.6): before 135.2,
+136.3 and 134.8 ms, after 136.3, 135.2 and 134.2 ms (p95 140.0–143.3 ms for both), key → frame
+6.4–6.7 ms for both. No regression.
+
+Jump on lavapipe is over the 8 ms key budget, and it's the drawing: with the machine idle,
+`ARBOR_TIMING` splits a key typed in Jump into about 2.2 ms of update (the handler ranking 5,000
+folders, about 1 ms, plus the view, layout and paint) and about 8 ms of lavapipe encoding the
+frame, against 1.6 and 4.9 ms for a ↓ without the box. The extra encoding is the overlay card
+(its large soft shadow, drawn on the CPU here); the command palette's card costs the same. On a
+real GPU encoding is a fraction of a millisecond (0.7 ms for a whole ↓ frame on the Mac). The
+Mac was offline, so Jump hasn't been measured there yet; that's the number that decides the
+budget.
+
+Cold open: 50 ms, of which the log's read and aggregation on the writer are about 10 ms when a
+core is free; the rest is the box's first frames on lavapipe (the open frame showing "Loading
+history…", then the frame with the rows). Once per session.
+
+Measured directly (`cargo test --release -- --ignored --nocapture rank_speed open_speed match_speed`):
+
+| Work | Time | Where it runs |
+| --- | --- | --- |
+| Add up a 5,000-line history log | 10–15 ms | the history's writer thread, first open only |
+| Rank 5,000 folders for "a" / "proj arb" / nothing typed | 1.2 / 0.5 / 0.6 ms | each key while Jump is open |
+| Count a 50,000-name folder's matches for `*.jpg` / `IMG_*1*.{png,jpg}` / `*a*b*c*d*` | 1.4 / 1.6 / 3.0 ms | each key while Select by Pattern is open |
+
+Binary: release 37.39 → 37.65 MB unstripped, 28.24 → 28.46 MB stripped (+0.21 MB). No new crates.
 
 ## 2026-11-08, quick preview (milestone 4)
 

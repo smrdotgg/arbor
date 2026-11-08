@@ -45,15 +45,17 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 10,100 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
+About 13,200 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
 `ops.rs` (copy, move, trash and undo on a worker), `noclobber.rs` (moves, copies and file ids
 that never replace anything), `trash.rs` (each platform's trash), `app.rs`
 (state, startup, key dispatch, what each command does), `folder.rs` (one folder on screen: its
 listing, selection, filter, sort and history, and what a hidden tab keeps), `panes.rs` (tabs and
 split view), `commands.rs` (the command table and keymap), `palette.rs` (the command palette),
 `config.rs` (the settings file), `actions.rs` (clipboard, rename, drag and drop, context menu),
-`preview.rs` (quick preview: reading, sniffing and decoding on a worker), `view.rs` (UI) and
-`timing.rs` (opt-in speed measurement).
+`preview.rs` (quick preview: reading, sniffing and decoding on a worker), `jump.rs` (Jump to
+Folder: the history's writer thread, frecency and ranking), `pattern.rs` (globs), `select.rs`
+(Select by Pattern and the other selection commands), `view.rs` (UI) and `timing.rs` (opt-in
+speed measurement).
 
 ## Run
 
@@ -182,6 +184,46 @@ the read in flight (every read call and decoded row checks) and its result is dr
 per item, no watching, nothing kept: coming back to a file reads it again. All of it runs on one
 worker, so a slow or hung disk slows previews, never the list or other folders.
 
+### Jump to Folder
+
+**⌘J** opens a box over the window. Type parts of a folder's path and it ranks the folders
+you've been to, best first, with the matched letters in bold; ↑↓ move, Enter (or a click) goes
+there in the active pane, Esc closes. Each word must appear in the path in order, case aside,
+and the last word should be in the folder's own name: "proj arb" finds `~/projects/arbor`
+before `~/projects/arbor/src`. Among matches, folders you go to often and lately come first
+(frecency, as zoxide does: every visit adds 1, weighted ×4 within the hour, ×2 within the day,
+×½ within the week, ×¼ after; when the total passes 10,000, all shrink to 90% and folders
+under 1 are forgotten). Typing a path (`/…`, `~/…`, or `C:\…` on Windows) works as go-to does:
+Enter goes there, and the folders below it you've visited are listed under it.
+
+The history is user data, kept in `history.log` beside the settings file, and costs nothing
+until Jump opens:
+
+- Each navigation that lands (opening a folder, back, forward, a sidebar place, Jump itself;
+  not reloads or tab switches) sends its folder to one writer thread, which appends a line.
+  The window does no disk I/O for it, and nothing is read at startup.
+- The first time Jump opens, the writer reads and adds up the log. The box waits at most 8 ms
+  for it, then says "Loading history…" until it lands. It then stays in memory for the session.
+  Past 10,000 lines the writer rewrites the log as one line for each of the top 5,000 folders.
+- Nothing checks that the folders still exist. Going to one that's gone says so and forgets it.
+- `[jump] enabled = false` stops recording and reading it (and Jump says it's off);
+  `[jump] exclude` lists globs of folders never recorded. "Clear Jump History" forgets it all:
+  it can't be undone, so the first run asks and running it again right after clears.
+
+### Select by Pattern
+
+**⌘S** opens a small box: type a glob and it counts the matches as you type ("14 of 27
+match") without changing the selection. **Enter** selects the matches, **⇧Enter** adds them to
+the selection, **⌥Enter** takes them out. `*` is any run of characters, `?` one, `[abc]`,
+`[a-z]` and `[!abc]` one from (or not from) a set, and `{png,jpg}` either; a name has to match
+whole (`IMG_*`, `*.jpg`, `*.{png,jpg}`). It matches the rows on screen: hidden files only while
+they're shown, and only what the filter lets through. Capitals count on Linux and don't on macOS
+and Windows, as their usual file systems do; `[select] case_sensitive` changes that (the box
+shows "Aa" or "aA"). Glob only: regular expressions would need a new crate.
+**⇧⌘I** inverts the selection, and "Select All of This Kind" (palette) selects every row with
+the cursor row's extension (or every folder). The selection is a set of names, so a listing that
+refreshes keeps it.
+
 Every command, with its default keys (generated from `src/commands.rs`; a test keeps it in sync,
 `ARBOR_WRITE_README=1 cargo test readme` rewrites it):
 
@@ -277,6 +319,13 @@ sort_descending = false    # default: size and modified sort largest and newest 
 start_folder = "~"         # when none is given on the command line
 places = ["~", "~/Projects", "/"]   # sidebar places, replacing the automatic list
 
+[jump]
+enabled = true                              # remember visited folders for Jump (⌘J)
+exclude = ["/tmp/**", "**/node_modules"]    # never remembered; "dir/**" is dir and all in it
+
+[select]
+case_sensitive = false     # Select by Pattern; default true on Linux, false on macOS and Windows
+
 [keys]
 "file.trash" = ["cmd+backspace", "delete"]   # replaces the command's default keys
 "file.duplicate" = []                        # unbinds it
@@ -320,6 +369,6 @@ the item went, so restore it from the Recycle Bin there.
 
 Permanent delete (on purpose, for now), file watching (use ⌘R), previews of PDF, video, audio
 and office documents (they need each platform's preview API), syntax highlighting in the text
-preview, Tab-completion in go-to mode, redo, more than one operation
+preview, regular expressions in Select by Pattern, Tab-completion in go-to mode, redo, more than one operation
 at a time, a context menu on Linux, reordering tabs or dragging them between panes, and
 dragging rows out to Finder while the window is split on macOS (see `RUNE-GAPS.md`).
