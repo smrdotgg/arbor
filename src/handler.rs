@@ -770,7 +770,12 @@ pub(crate) mod mac {
 
     /// The default viewer for `public.folder`, as far as this needs it.
     pub trait Handlers {
+        /// What LaunchServices answers now. Without a choice of the user's, that's a guess
+        /// among the apps that declare folders (Archive Utility, an editor), never Finder,
+        /// which handles folders without declaring them.
         fn current(&self) -> Option<String>;
+        /// The viewer the user (or an app) chose explicitly, if any: the one worth putting back.
+        fn chosen(&self) -> Option<String>;
         fn set(&mut self, bundle_id: &str) -> Result<(), String>;
     }
 
@@ -783,7 +788,7 @@ pub(crate) mod mac {
                 }
                 if Backup::read(backup)?.is_none() {
                     let mut b = Backup::default();
-                    b.put(BEFORE, ls.current().filter(|c| !c.eq_ignore_ascii_case(BUNDLE_ID)).as_deref().map(str::as_bytes));
+                    b.put(BEFORE, ls.chosen().filter(|c| !c.eq_ignore_ascii_case(BUNDLE_ID)).as_deref().map(str::as_bytes));
                     b.write(backup)?;
                 }
                 ls.set(BUNDLE_ID)?;
@@ -848,8 +853,58 @@ pub(crate) mod mac {
         }
     }
 
+    /// The `public.folder` viewer in LaunchServices' own record of explicit choices
+    /// (`LSHandlers` in `com.apple.launchservices.secure.plist`). Read only.
+    #[cfg(target_os = "macos")]
+    fn chosen_viewer() -> Option<String> {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        use objc2_foundation::NSString;
+        let home = std::env::var("HOME").ok()?;
+        let file = format!("{home}/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist");
+        objc2::rc::autoreleasepool(|_| {
+            let string = |o: *mut AnyObject| -> Option<String> {
+                // SAFETY: `o` is nil or an object; it's read only if it's an NSString.
+                unsafe {
+                    let o = o.as_ref()?;
+                    let is: bool = msg_send![o, isKindOfClass: objc2::class!(NSString)];
+                    is.then(|| (*(o as *const AnyObject).cast::<NSString>()).to_string())
+                }
+            };
+            let key = |k: &str| NSString::from_str(k);
+            // SAFETY: Foundation reads of a property list; every object is checked before use.
+            unsafe {
+                let dict: *mut AnyObject = msg_send![objc2::class!(NSDictionary), dictionaryWithContentsOfFile: &*key(&file)];
+                let dict = dict.as_ref()?;
+                let handlers: *mut AnyObject = msg_send![dict, objectForKey: &*key("LSHandlers")];
+                let handlers = handlers.as_ref()?;
+                let is_array: bool = msg_send![handlers, isKindOfClass: objc2::class!(NSArray)];
+                if !is_array {
+                    return None;
+                }
+                let n: usize = msg_send![handlers, count];
+                for i in 0..n {
+                    let h: *mut AnyObject = msg_send![handlers, objectAtIndex: i];
+                    let Some(h) = h.as_ref() else { continue };
+                    let is_dict: bool = msg_send![h, isKindOfClass: objc2::class!(NSDictionary)];
+                    if !is_dict || string(msg_send![h, objectForKey: &*key("LSHandlerContentType")]).as_deref() != Some(FOLDER_TYPE) {
+                        continue;
+                    }
+                    return string(msg_send![h, objectForKey: &*key("LSHandlerRoleViewer")])
+                        .or_else(|| string(msg_send![h, objectForKey: &*key("LSHandlerRoleAll")]))
+                        .filter(|v| v != "-");
+                }
+                None
+            }
+        })
+    }
+
     #[cfg(target_os = "macos")]
     impl Handlers for LaunchServices {
+        fn chosen(&self) -> Option<String> {
+            chosen_viewer()
+        }
+
         fn current(&self) -> Option<String> {
             use objc2_foundation::NSString;
             let ty = NSString::from_str(FOLDER_TYPE);
@@ -1204,13 +1259,18 @@ mod tests {
 
     // ---- macOS ----
 
-    struct FakeLs(Option<String>);
+    /// LaunchServices: what it answers now, and whether that was chosen (or is its guess).
+    struct FakeLs(Option<String>, bool);
     impl mac::Handlers for FakeLs {
         fn current(&self) -> Option<String> {
             self.0.clone()
         }
+        fn chosen(&self) -> Option<String> {
+            self.0.clone().filter(|_| self.1)
+        }
         fn set(&mut self, id: &str) -> Result<(), String> {
             self.0 = Some(id.into());
+            self.1 = true;
             Ok(())
         }
     }
@@ -1219,7 +1279,7 @@ mod tests {
     fn mac_make_needs_the_bundle_and_restore_puts_back_the_old_viewer() {
         let d = tmp("mac");
         let backup = d.join(BACKUP_FILE);
-        let mut ls = FakeLs(Some("com.cocoatech.PathFinder".into()));
+        let mut ls = FakeLs(Some("com.cocoatech.PathFinder".into()), true);
         let e = mac::run(Change::Make, &mut ls, None, &backup).unwrap_err();
         assert!(e.starts_with("Only Arbor.app can be the default for folders"), "{e}");
         assert_eq!(ls.0.as_deref(), Some("com.cocoatech.PathFinder"), "nothing changed");
@@ -1231,8 +1291,13 @@ mod tests {
             "Folders open in com.cocoatech.PathFinder again"
         );
         assert_eq!(ls.0.as_deref(), Some("com.cocoatech.PathFinder"));
-        // Nothing saved (Finder was the default): Finder.
-        let mut ls = FakeLs(None);
+        // Only LaunchServices' guess (Archive Utility, as on the Mac here): Finder, never the guess.
+        let mut ls = FakeLs(Some("com.apple.archiveutility".into()), false);
+        mac::run(Change::Make, &mut ls, Some(mac::BUNDLE_ID), &backup).unwrap();
+        assert_eq!(mac::run(Change::Restore, &mut ls, Some(mac::BUNDLE_ID), &backup).unwrap(), "Folders open in Finder again");
+        assert_eq!(ls.0.as_deref(), Some(mac::FINDER));
+        // Nothing at all: Finder.
+        let mut ls = FakeLs(None, false);
         mac::run(Change::Make, &mut ls, Some(mac::BUNDLE_ID), &backup).unwrap();
         assert_eq!(mac::run(Change::Restore, &mut ls, Some(mac::BUNDLE_ID), &backup).unwrap(), "Folders open in Finder again");
         assert_eq!(ls.0.as_deref(), Some(mac::FINDER));
@@ -1250,7 +1315,6 @@ mod tests {
     #[test]
     fn mac_reads_the_current_folder_viewer() {
         use mac::Handlers;
-        let now = mac::LaunchServices.current();
-        eprintln!("public.folder viewer: {now:?}");
+        eprintln!("public.folder viewer: {:?}, chosen: {:?}", mac::LaunchServices.current(), mac::LaunchServices.chosen());
     }
 }
