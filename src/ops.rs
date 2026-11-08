@@ -856,10 +856,23 @@ impl<'a> Worker<'a> {
             let mut made = Vec::new();
             match self.copy_tree(src, &to, Path::new(""), &mut tree, &mut made, false) {
                 Ok(()) => {
-                    let mut print = Print::of(&to, &to.symlink_metadata().map_err(|e| e.to_string())?);
-                    if print.kind == Kind::Folder {
-                        print.tree = tree;
-                    }
+                    // The record undo checks against: a file as the copy knew it (by its handle,
+                    // never by its name, which another app may have taken over while the copy
+                    // stalled); a folder read now that its contents are in, but only while it's
+                    // still the folder the copy made.
+                    let first = made.first().and_then(|m| m.made.clone());
+                    let print = match first {
+                        Some(file) if file.kind != Kind::Folder => file,
+                        made_dir => {
+                            let mut print = Print::of(&to, &to.symlink_metadata().map_err(|e| e.to_string())?);
+                            if made_dir.is_none_or(|d| d.id.is_none() || d.id != print.id) {
+                                let why = format!("something else took the place of “{}” during the copy", name_of(&to));
+                                return Err(with_kept(why, unmake(&made)));
+                            }
+                            print.tree = tree;
+                            print
+                        }
+                    };
                     return Ok((to, print));
                 }
                 // Taken since `free_name` looked: try the next free name.
@@ -1966,26 +1979,27 @@ mod tests {
     }
 
     /// The reviewer's case, for real: the source is a FIFO, so the copy stalls inside the byte
-    /// copy until something writes to it.
+    /// copy until something writes to it. Meanwhile another app moves Arbor's half-written file
+    /// aside and puts its own at the name. The copy's record is of the file Arbor wrote, so
+    /// undo refuses instead of sending the other app's file to the Trash.
     #[cfg(unix)]
     #[test]
-    fn a_file_replaced_during_a_stalled_copy_is_kept() {
+    fn a_file_replaced_during_a_stalled_copy_is_never_taken_for_arbors() {
         use std::io::Write;
         let d = tmp("stalled-copy");
-        let (src, into) = (d.join("src"), d.join("into"));
-        fs::create_dir(&src).unwrap();
+        let into = d.join("into");
         fs::create_dir(&into).unwrap();
-        let gate = src.join("gate");
+        let gate = d.join("gate");
         let c = std::ffi::CString::new(gate.as_os_str().as_encoded_bytes()).unwrap();
         // SAFETY: a valid NUL-terminated path.
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
-        fs::write(src.join("last"), "last").unwrap();
-        let progress = Arc::new(Progress::default());
-        let p = progress.clone();
-        let dst = into.join("src/gate");
-        let op = Op::Copy { sources: vec![src], dest: into };
-        let worker = std::thread::spawn(move || Worker::new(&p, None, fake_trash).run(op));
-        // Opening the FIFO's writing end waits for the copy to open its reading end.
+        let p = Arc::new(Progress::default());
+        let pp = p.clone();
+        let dst = into.join("gate");
+        let op = Op::Copy { sources: vec![gate.clone()], dest: into.clone() };
+        let worker = std::thread::spawn(move || Worker::new(&pp, None, fake_trash).run(op));
+        // Opening the FIFO's writing end waits for the copy to open its reading end; the copy
+        // makes its file next, then waits for bytes.
         let mut writer = fs::OpenOptions::new().write(true).open(&gate).unwrap();
         let until = Instant::now() + Duration::from_secs(5);
         while !dst.exists() && Instant::now() < until {
@@ -1993,13 +2007,38 @@ mod tests {
         }
         fs::rename(&dst, d.join("aside")).unwrap();
         fs::write(&dst, "OTHER APP DATA").unwrap();
-        progress.cancel.store(true, Relaxed);
         writer.write_all(b"gate").unwrap();
         drop(writer);
         let o = worker.join().unwrap();
-        assert!(o.cancelled);
-        assert_eq!(fs::read_to_string(&dst).unwrap(), "OTHER APP DATA");
-        assert!(o.errors[0].contains("it changed after Arbor made it"), "{:?}", o.errors);
+        assert_eq!(o.results, std::slice::from_ref(&dst), "{:?}", o.errors);
+        assert_eq!(fs::read_to_string(d.join("aside")).unwrap(), "gate", "what Arbor wrote went where the other app put it");
+        let u = run_now(Op::Undo(o.undo.unwrap()));
+        assert!(u.refused.is_some(), "the file at the name isn't the one Arbor made");
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "OTHER APP DATA", "never trashed");
+    }
+
+    /// A copied folder replaced by another before the copy finished isn't recorded as the copy.
+    #[test]
+    fn a_folder_replaced_during_its_copy_is_not_recorded_as_the_copy() {
+        let d = tmp("replaced-folder");
+        fs::create_dir_all(d.join("src")).unwrap();
+        fs::write(d.join("src/a"), "a").unwrap();
+        fs::create_dir(d.join("into")).unwrap();
+        let p = Progress::default();
+        let dd = d.clone();
+        let hook = Box::new(move |dst: &Path| {
+            // The folder's only file is in: swap the folder for another.
+            let top = dst.parent().unwrap();
+            fs::rename(top, dd.join("aside")).unwrap();
+            fs::create_dir(top).unwrap();
+            fs::write(top.join("a"), "theirs").unwrap();
+        });
+        let mut w = Worker::new(&p, None, fake_trash);
+        w.hooks = Hooks { copied: Some(hook), ..Hooks::default() };
+        let o = w.run(Op::Copy { sources: vec![d.join("src")], dest: d.join("into") });
+        assert!(o.undo.is_none() && o.results.is_empty());
+        assert!(o.errors[0].contains("something else took the place of “src”"), "{:?}", o.errors);
+        assert_eq!(fs::read_to_string(d.join("into/src/a")).unwrap(), "theirs", "the other folder stays, with what's in it");
     }
 
     // ---- known limits -----------------------------------------------------------------------
