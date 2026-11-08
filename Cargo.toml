@@ -6,7 +6,7 @@ license = "MIT"
 description = "A fast, small, cross-platform file manager"
 
 [dependencies]
-# Pinned via vendor/rune (anomalyco/rune @ 78d22ed). Lean feature set: no audio, no SVG.
+# anomalyco/rune, checked out into vendor/rune at the commit in RUNE_REV. Lean feature set: no audio, no SVG.
 rune = { path = "vendor/rune/crates/rune", default-features = false, features = [
     "accessibility",
     "dbus",

@@ -1,6 +1,6 @@
 # Rune gaps
 
-Arbor uses Rune exactly as it is (pinned in `Cargo.toml`). We don't patch it. When a feature ends
+Arbor uses Rune exactly as it is (pinned to the commit in `RUNE_REV`). We don't patch it. When a feature ends
 up worse than it should be because Rune is missing something, it gets an entry here. The owner
 reviews this file with the Rune team at Anomaly.
 

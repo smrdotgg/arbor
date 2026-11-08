@@ -1,24 +1,34 @@
 #!/usr/bin/env bash
 # Refresh vendor/rune and vendor/crates on a machine with a fast connection, then pull them back.
-# The Mac then builds fully offline (.cargo/config.toml).
+# The Mac then builds fully offline (.cargo/config.toml). Rune's pinned commit lives in RUNE_REV
+# (CI reads it too).
 #
-#   scripts/vendor.sh                 # uses smr@tabot-dev, rune @ dev HEAD
-#   HOST=me@box REV=<sha> scripts/vendor.sh
+#   scripts/vendor.sh                     # smr@tabot-dev, rune @ RUNE_REV
+#   REV=origin/dev scripts/vendor.sh      # move the pin to rune's dev HEAD (rewrites RUNE_REV)
+#   HOST=me@box scripts/vendor.sh         # another machine; HOST=local (or running on it) skips ssh
 set -euo pipefail
 
-HOST="${HOST:-smr@tabot-dev}"
-REV="${REV:-}"
 cd "$(dirname "$0")/.."
+HOST="${HOST:-smr@tabot-dev}"
+REV="${REV:-$(cat RUNE_REV)}"
+[ "${HOST#*@}" = "$(hostname -s)" ] && HOST=local
+if [ "$HOST" = local ]; then
+  [ "$PWD" != "$HOME/arbor" ] || { echo "~/arbor is the staging copy; run from another checkout" >&2; exit 1; }
+  run() { bash -c "$1"; }; R="$HOME/"
+else
+  run() { ssh "$HOST" "$1"; }; R="$HOST:"
+fi
 
-ssh "$HOST" "set -e
-  export PATH=\$HOME/.cargo/bin:\$PATH
+run "set -e
   mkdir -p ~/arbor-deps && cd ~/arbor-deps
-  [ -d rune ] || git clone https://github.com/anomalyco/rune
-  cd rune && git fetch -q origin && git checkout -q ${REV:-origin/dev} && git log -1 --format='rune %h %cd'"
+  [ -d rune ] || git clone -q https://github.com/anomalyco/rune
+  cd rune && git fetch -q origin && git checkout -q $REV && git log -1 --format='rune %h %cd' >&2"
+sha=$(run "git -C ~/arbor-deps/rune rev-parse HEAD") && echo "$sha" > RUNE_REV
 
-rsync -az --delete --exclude .git --exclude demo "$HOST:arbor-deps/rune/" vendor/rune/
-rsync -az --delete --exclude target --exclude vendor/crates --exclude .cargo ./ "$HOST:arbor/"
-ssh "$HOST" "set -e; export PATH=\$HOME/.cargo/bin:\$PATH; cd ~/arbor && cargo update -w -q && cargo vendor -q --versioned-dirs vendor/crates >/dev/null"
-rsync -az --delete "$HOST:arbor/vendor/crates/" vendor/crates/
-rsync -az "$HOST:arbor/Cargo.lock" Cargo.lock
-echo "vendored; build with: cargo build --release"
+rsync -az --delete --exclude .git --exclude demo "${R}arbor-deps/rune/" vendor/rune/
+# Vendor in a copy without .cargo/, so cargo reads crates.io rather than vendor/crates.
+rsync -az --delete --exclude target --exclude vendor/crates --exclude .cargo ./ "${R}arbor/"
+run "set -e; export PATH=\$HOME/.cargo/bin:\$PATH; cd ~/arbor && cargo update -w -q && cargo vendor -q --versioned-dirs vendor/crates >/dev/null"
+rsync -az --delete "${R}arbor/vendor/crates/" vendor/crates/
+rsync -az "${R}arbor/Cargo.lock" Cargo.lock
+echo "vendored rune $(cut -c1-7 RUNE_REV); build with: cargo build --release"
