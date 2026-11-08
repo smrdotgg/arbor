@@ -194,11 +194,15 @@ pub fn places() -> Vec<(String, PathBuf)> {
             }
         }
     }
+    // One bitmask call: stat'ing each drive root can stall startup on a disconnected network drive.
     #[cfg(windows)]
-    for letter in b'A'..=b'Z' {
-        let p = PathBuf::from(format!("{}:\\", letter as char));
-        if p.exists() {
-            v.push((format!("{}:", letter as char), p));
+    {
+        // SAFETY: takes no arguments and only returns a bitmask.
+        let drives = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
+        for (i, letter) in ('A'..='Z').enumerate() {
+            if drives & (1 << i) != 0 {
+                v.push((format!("{letter}:"), PathBuf::from(format!("{letter}:\\"))));
+            }
         }
     }
     #[cfg(not(windows))]
@@ -260,9 +264,13 @@ pub fn reveal(p: &Path) -> Result<(), String> {
     let cmd = Command::new("open").arg("-R").arg(p).spawn();
     #[cfg(windows)]
     let cmd = {
-        let mut arg = OsString::from("/select,");
-        arg.push(p.as_os_str());
-        Command::new("explorer").arg(arg).spawn()
+        // Explorer wants `/select,"C:\a b\c"`: Rust's quoting of the whole argument breaks it, so
+        // pass it raw. Windows paths can't contain `"`. `absolute` also turns `/` into `\`.
+        use std::os::windows::process::CommandExt;
+        let mut arg = OsString::from("/select,\"");
+        arg.push(std::path::absolute(p).as_deref().unwrap_or(p));
+        arg.push("\"");
+        Command::new("explorer").raw_arg(arg).spawn()
     };
     #[cfg(all(unix, not(target_os = "macos")))]
     let cmd = Command::new("xdg-open").arg(p.parent().unwrap_or(p)).spawn();

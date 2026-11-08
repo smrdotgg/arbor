@@ -82,6 +82,9 @@ pub fn trash(path: &Path) -> Result<Option<PathBuf>, String> {
     const FOF_NOCONFIRMATION: u16 = 0x10;
     const FOF_ALLOWUNDO: u16 = 0x40;
     const FOF_NOERRORUI: u16 = 0x400;
+    // Without it, FOF_NOCONFIRMATION silently deletes for good whatever can't be recycled (too
+    // big, or a drive with no Recycle Bin). With it, Windows asks first.
+    const FOF_WANTNUKEWARNING: u16 = 0x4000;
     let abs = std::path::absolute(path).map_err(|e| e.to_string())?;
     // Double-NUL-terminated list of one path.
     let mut from: Vec<u16> = abs.as_os_str().encode_wide().collect();
@@ -91,7 +94,7 @@ pub fn trash(path: &Path) -> Result<Option<PathBuf>, String> {
         wFunc: FO_DELETE,
         pFrom: from.as_ptr(),
         pTo: std::ptr::null(),
-        fFlags: FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI,
+        fFlags: FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING | FOF_SILENT | FOF_NOERRORUI,
         fAnyOperationsAborted: 0,
         hNameMappings: std::ptr::null_mut(),
         lpszProgressTitle: std::ptr::null(),
