@@ -717,7 +717,7 @@ fn the_list_grows_only_so_far_while_the_walk_goes_on() {
 /// different folders are no clash, and the results show the new names (and stay selected).
 #[test]
 fn batch_rename_renames_results_in_their_own_folders() {
-    let d = tree("batch", &["one/report.txt", "two/report.txt", "two/report-old.txt", "x.md"]);
+    let d = tree("batch-rename", &["one/report.txt", "two/report.txt", "two/report-old.txt", "x.md"]);
     let mut s = state_in(&d);
     search(&mut s, "report");
     finish_walk(&mut s);
