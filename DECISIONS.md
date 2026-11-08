@@ -9,6 +9,23 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-09 · Packages are unsigned (Review).** `Arbor.app` is signed ad hoc and not
+  notarized, and `arbor.exe` isn't signed: notarizing needs an Apple Developer account and
+  signing on Windows a code-signing certificate, both yours to get. The README tells users how
+  to open them the first time (right-click → Open; SmartScreen's More info → Run anyway). To
+  change: add the identity to `scripts/package.sh` (`codesign --sign "Developer ID…"`, then
+  `notarytool`) and a signing step for Windows in CI.
+- **2026-11-09 · Releases wait for your first tag (Review).** CI uploads the three packages on
+  every push (artifacts `arbor-macOS`, `arbor-Linux`, `arbor-Windows`); a pushed `v*` tag also
+  publishes them as a GitHub Release (the `release` job, with `gh release create`). No tag or
+  release was made. To release: `git tag v0.1.0 && git push origin v0.1.0`.
+- **2026-11-09 · Windows: the default-folder registry plan is untested on a real machine
+  (Review).** CI writes and restores it under a test-only key (`windows_round_trip_in_the_real_registry_under_a_test_key`), and
+  the README has a hand check. Folders (`Directory`), drives (`Drive`) and Win+E (This PC's
+  `opennewwindow`) only, as a new "Open in Arbor" verb made the default, not the `Folder` class
+  (Control Panel and other virtual folders would stop opening) and not Explorer's own `open`
+  verb (so Restore only has to take Arbor's verb away). Undo: `handler::windows::plan`.
+
 - **2026-11-09 · Windows full thumbnail generation stays OFF until you decide (Review).**
   Windows previews of PDF and video only show thumbnails the shell already has cached (1–8 ms).
   Generating a new one (`IShellItemImageFactory`) can't be cancelled once started: 541 ms for a
@@ -65,6 +82,54 @@ Format: date · decision · why · how to undo.
   12 MP led to 4 MP.
 
 ## Made by the agent (owner said "I trust your judgment")
+
+- **2026-11-09 · Linux: the folder default is written into `~/.config/mimeapps.list` by Arbor,
+  not with `xdg-mime`.** It's the freedesktop.org file `xdg-mime` and `gio` write; editing it
+  directly lets Restore put back the user's exact line (or remove Arbor's), and works without
+  xdg-utils (not installed on tabot-dev). Undo: `handler::linux`.
+- **2026-11-09 · Linux: the D-Bus activation file is written by "Make Arbor the Default for
+  Folders", not by `install.sh`.** Installing shouldn't change where "Show in folder" goes (the
+  task asked for the install script to install it; opting in is NORTHSTAR's rule). Arbor serves
+  `org.freedesktop.FileManager1` only while that file is its own, and asks the session bus to
+  reload after writing or removing it (a bus started before `~/.local/share/dbus-1/services`
+  existed doesn't watch it; found under Xvfb, where the system's Thunar kept being started).
+  Undo: `install.sh` could copy the file, and `incoming::linux::spawn` drop its check.
+- **2026-11-09 · macOS: only a viewer the user chose is backed up; otherwise Restore sets
+  Finder.** LaunchServices' answer without a choice is a guess among apps declaring folders
+  (`com.apple.archiveutility` on the M4 Pro), and restoring it would hand folders to Archive
+  Utility. The choice is read from `LSHandlers` in `com.apple.launchservices.secure.plist`.
+  `Arbor.app` declares folders at rank Alternate so installing it never makes it the default.
+  Undo: `handler::mac`.
+- **2026-11-09 · Restore never overwrites what changed since.** Each setting goes back only if
+  it still holds what Arbor wrote; the rest are named in the status bar. Making Arbor the default
+  again keeps the first backup. A damaged backup file is an error, not a guess. Undo:
+  `handler::{linux, windows, mac}::restore`.
+- **2026-11-09 · Single instance: macOS and Linux get it from the platform, Windows later.**
+  macOS sends folders to the running app (open-documents events) and Linux's FileManager1
+  requests reach the running Arbor; each opens a tab. On Windows each folder opened from Explorer
+  starts a new Arbor: a named-pipe listener would do it without polling, but nothing can be run
+  on Windows here to check it. `xdg-open` on a folder also starts a new Arbor (it runs the
+  desktop file's `Exec`). Undo: n/a (later: a pipe in `incoming.rs`).
+- **2026-11-09 · The first folder another app sends replaces the window's first tab while it's
+  untouched** (one tab, nothing navigated, picked, filtered or searched): launching Arbor for a
+  folder shows just that folder, not Home plus a tab. Its history starts there (`Nav::Fresh`).
+  Undo: `State::untouched` returning false.
+- **2026-11-09 · No new crates.** `build.rs` writes the Windows `.res` (icon group, PNG icons,
+  `VS_VERSIONINFO`) itself and hands it to MSVC's linker, instead of `winresource` or
+  `embed-resource` (which need `rc.exe`); Linux's D-Bus uses the zbus 6 and Tokio Rune's `dbus`
+  feature already builds. Undo: `build.rs`.
+- **2026-11-09 · Release builds on Windows are windowed programs** (`windows_subsystem =
+  "windows"`), so no console opens with Arbor from Explorer; debug builds keep the console.
+  Timing logs still reach a pipe (the bench). Undo: the attribute in `src/main.rs`.
+- **2026-11-09 · The icon** is an original tree glyph (trunk, two branches, three round crowns)
+  on a green rounded square, drawn by `scripts/icon.py` with signed distances (no PIL), in
+  Apple's icon grid for macOS. The Mac package is Apple silicon only (CI's runner); a universal
+  build is later. Undo: edit `STROKES`/`CROWNS` in the script and rerun it (and
+  `scripts/package.sh --icns` on a Mac).
+- **2026-11-09 · The dialog's action button is the accent colour, not red, for the folder-default
+  commands**: red stays for what can't be undone. Undo: `confirm_view` in `src/view.rs`.
+- **2026-11-09 · `arbor --restore-folder-default`** restores without a window, for uninstall
+  scripts (`uninstall.sh` runs it first and stops if it fails). Undo: the check in `main`.
 
 - **2026-11-09 · Text preview: horizontal scrolling, not soft wrap** (it already scrolled
   sideways; checked under X11 with a horizontal wheel and with Shift+wheel). Code and logs keep

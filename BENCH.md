@@ -27,6 +27,25 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-09, milestone 10 (packages, the folder default, requests from other apps)
+
+What could cost start-up time: on Linux a thread started in `main` that reads one file (whether
+Arbor's D-Bus activation file is there) and ends; on macOS an Apple-event handler installed when
+AppKit finishes launching; `rune::set_app_id`. The previous commit (c04e467) and this one,
+alternated, `xvfb-run target/release/examples/bench 11 10 --bin …`, two passes each:
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+| Measure (median / p95) | c04e467, pass 1 | this, pass 1 | c04e467, pass 2 | this, pass 2 |
+| --- | --- | --- | --- | --- |
+| Cold start (spawn → first frame) | 136.1 / 143.1 ms | 134.9 / 140.0 ms | 133.4 / 139.8 ms | 131.9 / 141.0 ms |
+| Listing visible (10k, nav → frame) | 40.0 / 45.7 ms | 39.8 / 44.5 ms | 39.7 / 46.0 ms | 40.8 / 45.2 ms |
+| Key → frame (synthetic ↓) | 6.2 / 6.8 ms | 6.2 / 6.9 ms | 6.2 / 6.7 ms | 6.2 / 6.8 ms |
+
+No change beyond noise. When Arbor is started by D-Bus activation, the bus thread takes the name
+before the window opens, so the request lands with the first listings (the activating call
+returned in 7 ms under Xvfb).
+
 ## 2026-11-09, the Mac's floor, Batch Rename on the Mac, Jump's long paths, the bench's hangs
 
 From the owner's Mac investigation (MacBook Pro, M4 Pro, macOS 27.2, external 60 Hz display

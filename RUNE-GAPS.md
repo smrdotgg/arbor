@@ -16,6 +16,29 @@ Newest first.
 
 ---
 
+## Opening folders from Finder: no "open documents" hook
+
+- **Feature:** Arbor as the place folders open (NORTHSTAR scope: "the default handler for
+  opening and revealing folders"): "Open With → Arbor" in Finder, `open -a Arbor dir`, and
+  Arbor as the default for folders.
+- **What Rune is missing:** a hook for the files and folders macOS opens with the app. macOS
+  sends them as an "open documents" Apple event (`kAEOpenDocuments`), to the running app or the
+  one it launched for them (the path isn't in `argv`). Rune handles only the "open URL" event
+  (`App::on_open_url`, `open_url/incoming.rs`), and winit 0.30 has no `application:openURLs:`.
+- **What we did instead:** Arbor installs its own handler for the event (`src/incoming.rs`,
+  `mac`): an Objective-C object registered with `NSAppleEventManager` when
+  `NSApplicationWillFinishLaunchingNotification` arrives (AppKit installs its own handler while
+  it launches, so earlier would be overwritten; the launch's event comes after). It reads the
+  event's file URLs, sorts folders from files on a thread, and hands them to the window through
+  `AppHandle::update` (and `AppHandle::open`). Checked on the M4 Pro: the folder Arbor is
+  launched for, and one sent to it while running.
+- **What users lose:** nothing today. The cost is that Arbor carries Objective-C runtime code
+  for something every document-opening Rune app needs, and depends on AppKit's launch order.
+- **Suggested Rune change:** `App::on_open_files(|s, paths: &[PathBuf], tx|)` on macOS, fed
+  from the same Apple-event inbox as `on_open_url` (with the launch's files kept until a window
+  listens). Windows and Linux could pass the files from `argv` to the same hook, so apps handle
+  one path everywhere.
+
 ## Wakes: one raised while Rune drains wakes is handled in the same run-loop turn
 
 - **Feature:** the speed bench (`ARBOR_BENCH`, `src/timing.rs`), which drives Arbor one step per

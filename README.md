@@ -48,7 +48,7 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 23,900 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
+About 27,000 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
 `ops.rs` (copy, move, trash, permanent delete, batch rename and undo on a worker), `noclobber.rs` (moves, copies and file ids
 that never replace anything), `trash.rs` (each platform's trash, and telling a disk with none),
 `delete.rs` (deleting permanently without following links), `confirm.rs` (Arbor's one dialog), `app.rs`
@@ -56,7 +56,8 @@ that never replace anything), `trash.rs` (each platform's trash, and telling a d
 listing, selection, filter, sort and history, and what a hidden tab keeps), `panes.rs` (tabs and
 split view), `commands.rs` (the command table and keymap), `palette.rs` (the command palette),
 `config.rs` (the settings file), `actions.rs` (clipboard, rename, drag and drop, context menu),
-`menu.rs` (the context menu in the window, on Linux),
+`menu.rs` (the context menu in the window, on Linux), `handler.rs` (making Arbor the default for
+folders, and putting the old default back), `incoming.rs` (folders other apps ask Arbor to show),
 `preview.rs` (quick preview: reading, sniffing and decoding on a worker), `thumb.rs` (the OS's
 thumbnails for the preview: Quick Look, the Windows shell), `jump.rs` (Jump to
 Folder: the history's writer thread, frecency and ranking), `search.rs` (Search in This Folder:
@@ -64,6 +65,77 @@ the walk, its threads and the results), `pattern.rs` (globs), `select.rs`
 (Select by Pattern and the other selection commands), `rename.rs` (Batch Rename's rules: tokens,
 case, and what's wrong with a name on each platform), `batch.rs` (the Batch Rename dialog), `view.rs` (UI) and `timing.rs` (opt-in
 speed measurement).
+
+## Install
+
+`scripts/package.sh` builds the package for the platform it runs on into `dist/`, and CI builds
+all three on every push to `main`: they're the run's artifacts (`arbor-macOS`, `arbor-Linux`,
+`arbor-Windows`). A tag starting with `v` also publishes them as a GitHub Release.
+
+- **macOS** (Apple silicon, macOS 11 or later): unzip `Arbor-<version>-macos-arm64.zip` and move
+  `Arbor.app` to Applications. It's signed ad hoc, not notarized (that needs an Apple Developer
+  account), so the first time, right-click it, choose Open, and Open again (or run
+  `xattr -d com.apple.quarantine /Applications/Arbor.app`). Finder then lists it under "Open
+  With" for folders.
+- **Windows** (x64): unzip `arbor-<version>-windows-x86_64.zip` into a folder that stays put
+  (`%LOCALAPPDATA%\Arbor`, say) and run `arbor.exe`. It isn't signed, so SmartScreen may say
+  "Windows protected your PC": choose More info, then Run anyway.
+- **Linux** (x86-64): `tar xzf arbor-<version>-linux-x86_64.tar.gz`, then `./install.sh` in the
+  folder it made. It installs for you only, no root: `~/.local/bin/arbor`, `arbor.desktop` in
+  `~/.local/share/applications` (so menus list it) and its icons. `./uninstall.sh` removes them
+  (putting back the folder default first, if Arbor has it). Running under X11 needs
+  `libxkbcommon-x11` (see [Platform notes](#platform-notes)).
+
+Installing never makes Arbor the default for anything. That's a command:
+
+### Make Arbor the default for folders
+
+**"Make Arbor the Default for Folders…"** (in the palette) has other apps open folders in Arbor,
+and **"Restore the System Default for Folders…"** undoes it. Both ask first, in Arbor's dialog,
+saying what changes and how to undo it. Before the first change, whatever it replaces is saved in
+`folder-handler-backup.txt` beside the settings file; Restore puts exactly that back, but only
+where the setting is still Arbor's (anything changed since is left alone, and the status bar says
+so), then deletes the backup. Without a backup, Restore still takes back what Arbor wrote.
+`arbor --restore-folder-default` does the same without opening a window (the uninstall script
+runs it).
+
+Folders other apps send open in the running Arbor where the platform passes them to it (macOS,
+and Linux through D-Bus): each in a new tab of the active pane, or, when Arbor was started for
+it and nobody has used the window yet, in its first tab. "Show item" requests open the item's
+folder with the item selected.
+
+- **macOS:** LaunchServices' viewer for folders (`public.folder`) becomes `gg.smr.arbor`, which
+  only works from `Arbor.app` (the bare program says so). Restore sets back the viewer you had
+  chosen, or Finder: LaunchServices' answer when nobody chose one is a guess among apps that
+  declare folders (Archive Utility on the Mac here), so that isn't kept. In Arbor: `open ~/dir`,
+  Open With, and apps that open a folder through macOS. **Still Finder** (macOS doesn't let
+  another app take these): double-clicking in Finder and on the desktop, the Dock's folders,
+  "Show in Finder" or "Reveal in Finder" from other apps (`activateFileViewerSelectingURLs`),
+  and Arbor's own Show in Finder.
+- **Linux:** `inode/directory=arbor.desktop` in `~/.config/mimeapps.list` (the freedesktop.org
+  file `xdg-mime` and `gio` write), and a D-Bus activation file,
+  `~/.local/share/dbus-1/services/org.freedesktop.FileManager1.service`, after which the session
+  bus is asked to reload. In Arbor: `xdg-open` and `gio open` on a folder, and "Show in folder"
+  (or "Open containing folder") in browsers, editors and other apps that ask
+  `org.freedesktop.FileManager1` (ShowFolders, ShowItems; ShowItemProperties selects the item,
+  since Arbor has no properties window). While Arbor runs it owns that name and opens a tab; when
+  it doesn't, the bus starts it. **Limits:** a desktop's own list (`gnome-mimeapps.list`, say)
+  wins over `mimeapps.list` (Make says so when it finds one); a file manager already running
+  that holds the D-Bus name and won't give it up (Nautilus running in the background on GNOME)
+  keeps it until it exits; `xdg-open` on a folder starts a new Arbor window rather than a tab; and
+  Arbor's own Show in File Manager opens the default, Arbor itself once it is.
+- **Windows:** under `HKEY_CURRENT_USER\Software\Classes` only (no administrator rights, no
+  other accounts): folders (`Directory`) and drives (`Drive`) get an "Open in Arbor" verb as
+  their default (`"arbor.exe" "%1"`), and Win+E runs Arbor (This PC's `opennewwindow` verb, with
+  an empty `DelegateExecute`), as Explorer replacements do. Not the `Folder` class: it also
+  covers Control Panel, the Recycle Bin and other virtual folders Arbor can't show. Restore
+  writes every saved value back exactly, type included, and removes the keys Arbor made once
+  they're empty. In Arbor: opening a folder or drive in Explorer or on the desktop, Win+E, and
+  apps that open a folder through the shell; each opens a new Arbor window (no single instance
+  yet). **Still Explorer:** "Show in folder" from apps that call `SHOpenFolderAndSelectItems`,
+  Explorer's own navigation pane, and Arbor's own Show in Explorer. Moving or deleting `arbor.exe`
+  while it's the default stops folders opening: restore first. Never run on a real Windows machine
+  yet; CI writes and restores the same plan under a test-only key.
 
 ## Run
 
@@ -75,13 +147,18 @@ cargo build --profile dist          # stripped, LTO build: target/dist/arbor
 
 Builds are fully offline. Dependencies are vendored in `vendor/` (see `.cargo/config.toml`).
 `vendor/` is gitignored because it's about 550 MB, so a fresh clone runs `scripts/vendor.sh` first.
+`scripts/package.sh` makes the package (see [Install](#install)). The icon is drawn by
+`scripts/icon.py` (an original tree glyph; pure Python) into `assets/icon/`, and
+`scripts/package.sh --icns` turns it into `Arbor.icns` on a Mac. On Windows, `build.rs` writes
+the icon and version information into a resource file the linker takes (no resource compiler,
+no extra crate). Release builds on Windows are windowed programs, so no console opens with them.
 `scripts/vendor.sh` refreshes them through a fast remote machine (default `smr@tabot-dev`) and
 syncs them back. When it runs on that machine itself (or with `HOST=local`) it skips ssh. Rune's
 commit is pinned in `RUNE_REV`; `REV=origin/dev scripts/vendor.sh` moves the pin.
 
 CI (`.github/workflows/ci.yml`) runs on every push and pull request on macOS, Linux and Windows:
 `cargo build --release --locked`, `cargo test --release --locked` and `cargo clippy -D warnings`,
-plus `cargo fmt --check` on Linux. It clones Rune at `RUNE_REV` and gets crates from crates.io
+plus `cargo fmt --check` on Linux, then builds, checks and uploads each package. It clones Rune at `RUNE_REV` and gets crates from crates.io
 instead of `vendor/`.
 
 ## Measuring speed
@@ -614,10 +691,19 @@ All three build, pass tests and pass clippy in CI. How much has been run for rea
   presses (XTest) filter, move the selection and drive the command palette and settings reload.
   Under Xvfb too: the in-window context menu, Delete Permanently, and a trash on a disk with no
   usable trash (a folder on `/`, which this user can't write, with the home trash on another
-  disk) asking before it deletes. Not yet checked: Wayland, a real GPU, a real keyboard and
+  disk) asking before it deletes. Also under Xvfb, from the tarball installed into a fresh home:
+  the desktop file's `Exec` opens the folder, "Make Arbor the Default for Folders…" through the
+  palette and its dialog, a ShowItems call starting Arbor through D-Bus activation with the item
+  selected, a second call opening a tab in it, and `--restore-folder-default`. Not yet checked: Wayland, a real GPU, a real keyboard and
   input methods, drag and drop, clipboard, undoing a trash, `xdg-open`.
 - **Windows**: drive letters, hidden attribute, Recycle Bin, `explorer /select,`. Compiles and
   passes tests in CI but **has never been run**: everything at runtime is unchecked.
+- **macOS packaging**, checked on the M4 Pro: `Arbor.app` passes `plutil -lint` and `codesign
+  --verify`, its icon has every size, it launches with `open` and quits, a folder passed at
+  launch (`open -a Arbor.app dir`) opens in its first tab, and one sent to the running app opens
+  a new tab. Making it the default wasn't tried there (it would change the Mac's real setting);
+  the logic is tested with a stand-in for LaunchServices, and reading the current viewer is
+  tested for real.
 
 Trash uses NSFileManager on macOS, the freedesktop.org spec on Linux, and the Recycle Bin on
 Windows (see [Trash and Delete Permanently](#trash-and-delete-permanently)). Undoing a trash puts
@@ -640,11 +726,18 @@ one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine
 - [ ] Shift+Delete asks, names the items, and deletes; a read-only file and a folder with a
       junction inside (the junction's target stays) go too.
 - [ ] Right-click opens the native menu with the same items as on macOS.
+- [ ] `arbor.exe` shows its icon in Explorer and the taskbar, and Properties → Details shows
+      Arbor and its version; no console window opens with it.
+- [ ] "Make Arbor the Default for Folders…": double-clicking a folder in Explorer, a drive in
+      This PC and Win+E open Arbor; "Restore the System Default for Folders…" brings Explorer
+      back for all three, and `reg query HKCU\Software\Classes\Directory\shell` is as before.
 
 ## Not yet
 
 Emptying the Trash, file watching (use ⌘R), rich previews (PDF, video, documents) on Linux and
 new (uncached) thumbnails on Windows (see Quick preview), syntax highlighting in the text
 preview, regular expressions in Select by Pattern, Tab-completion in go-to mode, redo, more than one operation
-at a time, reordering tabs or dragging them between panes, and
+at a time, reordering tabs or dragging them between panes, a single Arbor on Windows (a folder
+opened from Explorer starts a new window), a universal (Intel and Apple silicon) Mac build,
+notarized and signed packages, and
 dragging rows out to Finder while the window is split on macOS (see `RUNE-GAPS.md`).
