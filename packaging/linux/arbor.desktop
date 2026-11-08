@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Arbor
+GenericName=File Manager
+Comment=Browse and manage files, fast
+Exec=arbor %F
+TryExec=arbor
+Icon=arbor
+Terminal=false
+StartupNotify=true
+StartupWMClass=arbor
+Categories=System;FileTools;FileManager;Utility;
+Keywords=files;folders;file manager;explorer;finder;
+MimeType=inode/directory;

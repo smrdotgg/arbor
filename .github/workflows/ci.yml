@@ -60,6 +60,69 @@ jobs:
       - name: Clippy
         run: cargo clippy --release --locked --all-targets -- -D warnings
 
+      # The installable package for this platform (scripts/package.sh), from the stripped `dist`
+      # build: Arbor.app and its zip on macOS, the tarball on Linux, the zip on Windows. Every
+      # run uploads it; a v* tag also publishes it as a GitHub Release (the release job).
+      - name: Package
+        run: scripts/package.sh
+
+      - name: Check the package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          t=$(mktemp -d) && tar -C "$t" -xzf dist/arbor-*-linux-*.tar.gz
+          env -i HOME="$t/home" PATH=/usr/bin:/bin sh "$t"/arbor-*/install.sh
+          test -x "$t/home/.local/bin/arbor"
+          grep -q "^Exec=$t/home/.local/bin/arbor %F$" "$t/home/.local/share/applications/arbor.desktop"
+          grep -q "^MimeType=inode/directory;$" "$t/home/.local/share/applications/arbor.desktop"
+          test -f "$t/home/.local/share/icons/hicolor/256x256/apps/arbor.png"
+          # Runs, without a window: nothing to restore in a fresh home.
+          env -i HOME="$t/home" PATH=/usr/bin:/bin "$t/home/.local/bin/arbor" --restore-folder-default
+          env -i HOME="$t/home" PATH=/usr/bin:/bin sh "$t"/arbor-*/uninstall.sh
+          test ! -e "$t/home/.local/bin/arbor"
+
+      - name: Check the package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = (Get-Item target/dist/arbor.exe).VersionInfo
+          $v | Format-List ProductName, FileDescription, FileVersion, ProductVersion, OriginalFilename
+          if ($v.ProductName -ne 'Arbor' -or -not $v.FileVersion) { throw 'arbor.exe has no version information' }
+
+      - name: Check the package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          plutil -p dist/Arbor.app/Contents/Info.plist
+          codesign -dv dist/Arbor.app 2>&1 | grep -E "Identifier|Signature"
+          sips -g pixelWidth -g pixelHeight dist/Arbor.app/Contents/Resources/Arbor.icns
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arbor-${{ runner.os }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  # A v* tag: the three packages become a GitHub Release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: arbor-*
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Arbor ${GITHUB_REF_NAME#v}" --generate-notes
+
       # Numbers for the owner's decision on full Windows thumbnail generation, which can't be
       # cancelled (src/thumb.rs, UNCANCELLABLE_WINDOWS_THUMBNAILS): how long the shell takes for
       # a PDF and for videos, cache-only and full. A measurement, not a check.
