@@ -387,12 +387,18 @@ impl Folder {
         self.version = next_version();
     }
 
-    /// The selection by name: the cursor's first, then the rest, sorted.
+    /// The selection by name, for a reload to put back: the cursor first when it's selected (or
+    /// nothing is marked), then the rest, sorted. A cursor the user deselected (⌘-click) isn't
+    /// in it: the first selected item takes the cursor when it lands, so what an action acts on
+    /// stays exactly what it was.
     pub fn picked(&self) -> Vec<OsString> {
         let cursor = self.cursor_name();
+        if self.marked.is_empty() {
+            return cursor.into_iter().collect();
+        }
         let mut rest: Vec<OsString> = self.marked.iter().filter(|n| Some(*n) != cursor.as_ref()).cloned().collect();
         rest.sort();
-        cursor.into_iter().chain(rest).collect()
+        cursor.filter(|c| self.marked.contains(c)).into_iter().chain(rest).collect()
     }
 
     pub fn cursor_name(&self) -> Option<OsString> {

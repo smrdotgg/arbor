@@ -1462,6 +1462,33 @@ pub(crate) mod tests {
         assert!(s.rename.is_some());
     }
 
+    /// The review's case: a reload on its way, Select All, then ⌘-click the cursor's item off.
+    /// The landing used to select it again, so the next trash, cut or move took it too.
+    #[test]
+    fn a_reload_never_selects_an_item_the_user_deselected() {
+        let d = folder("reload-deselect", 3);
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        s.reload();
+        s.cur_mut().select_all();
+        let cursor = s.cur().sel;
+        s.cur_mut().toggle_mark(cursor);
+        let want = s.cur().target_paths();
+        assert_eq!(want.len(), 2);
+        settle_all(&mut s);
+        assert_eq!(s.cur().target_paths(), want, "the deselected item isn't a target");
+        // One left selected, the cursor on one deselected: still exactly that one.
+        s.reload();
+        let f = s.cur_mut();
+        f.select(0);
+        f.toggle_mark(1);
+        f.toggle_mark(1);
+        let want = s.cur().target_paths();
+        assert_eq!(want, [d.join("f0")]);
+        settle_all(&mut s);
+        assert_eq!(s.cur().target_paths(), want);
+    }
+
     #[test]
     fn file_operations_are_unavailable_while_one_runs() {
         let d = folder("busy", 2);
