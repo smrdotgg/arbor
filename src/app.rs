@@ -1098,6 +1098,17 @@ impl State {
         self.history.exclude = crate::jump::exclude_globs(&s.jump_exclude);
     }
 
+    /// The window is closing: every search walk and recheck stops where it is, and Batch
+    /// Rename's folder read, before the last moment given to the Jump history's writer.
+    pub fn stop_background(&mut self) {
+        for p in &mut self.panes {
+            if let Some(s) = p.f.search.as_mut() {
+                s.stop_all();
+            }
+        }
+        self.close_batch(&mut Tx::default());
+    }
+
     /// Closes the palette, Jump, Select by Pattern and Batch Rename (at most one is open).
     pub fn close_overlays(&mut self, tx: &mut Tx) {
         self.asking = None;

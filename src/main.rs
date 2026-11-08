@@ -52,8 +52,12 @@ fn main() {
     // macOS: content runs under a transparent titlebar; the traffic lights sit in the sidebar's
     // top band and the path bar is the drag region. Other platforms keep their native frame.
     let chrome = Chrome { full_size_content: true, traffic_lights: Some((14.0, view::BAR_H / 2.0 - 7.0)), drag_regions: true };
-    // The last visits for Jump, still queued for the history's writer, get a moment to land.
-    let mut app = App::new(spec).chrome(chrome).on_close(|_, _| jump::drain_at_exit());
+    // Searches stop first; then the last visits for Jump, still queued for the history's
+    // writer, get a moment to land.
+    let mut app = App::new(spec).chrome(chrome).on_close(|s, _| {
+        s.stop_background();
+        jump::drain_at_exit();
+    });
     if timing::benching() {
         app = app.open_inactive(); // the bench never takes focus from what the user is doing
     }

@@ -562,6 +562,35 @@ pub(crate) mod hook {
     }
 
     pub(crate) static GATES: Mutex<Vec<Gate>> = Mutex::new(Vec::new());
+    /// Holds the first path a recheck looks at under `dir` until told, then counts the paths
+    /// under `dir` that rechecks look at after that.
+    pub(crate) struct RecheckGate {
+        pub dir: PathBuf,
+        pub started: Sender<()>,
+        pub go: Option<Receiver<()>>,
+        pub after: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    pub(crate) static RECHECK: Mutex<Vec<RecheckGate>> = Mutex::new(Vec::new());
+
+    pub(super) fn recheck(path: &Path) {
+        let go = {
+            let mut g = RECHECK.lock().unwrap();
+            let Some(gate) = g.iter_mut().find(|g| path.starts_with(&g.dir)) else { return };
+            match gate.go.take() {
+                Some(go) => {
+                    let _ = gate.started.send(());
+                    go
+                }
+                None => {
+                    gate.after.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+            }
+        };
+        let _ = go.recv_timeout(std::time::Duration::from_secs(5));
+    }
+
     /// Holds the device lookup for a root until told (or a few seconds pass).
     pub(crate) static DEVICES: Mutex<Vec<(PathBuf, Receiver<()>)>> = Mutex::new(Vec::new());
 
@@ -629,8 +658,24 @@ pub struct Search {
     /// How many of the results (`Folder::entries`, in order) the list has taken in: all of
     /// them once the walk is over, at most [`LIVE_ROWS`] while it goes on.
     pub upto: usize,
-    /// Re-checks of results after a file operation, on a worker.
+    /// Re-checks of results after a file operation, on a worker, and the stop flag of the one
+    /// in flight: set when a newer one replaces it, the query changes, or the search ends.
     recheck: Latest<Recheck>,
+    recheck_stop: Arc<AtomicBool>,
+}
+
+impl Search {
+    /// Stops the walk and any recheck where they are.
+    pub fn stop_all(&mut self) {
+        self.walk = None;
+        self.recheck_stop.store(true, Relaxed);
+    }
+}
+
+impl Drop for Search {
+    fn drop(&mut self) {
+        self.recheck_stop.store(true, Relaxed);
+    }
 }
 
 impl Search {
@@ -658,6 +703,7 @@ impl Search {
             generation: 0,
             upto: 0,
             recheck,
+            recheck_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -833,10 +879,19 @@ impl Folder {
             return;
         }
         let Some(s) = self.search.as_mut() else { return };
-        s.recheck.request((look, new), move |(look, new)| {
+        // A newer recheck replaces the one in flight: that one stops where it is.
+        s.recheck_stop.store(true, Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        s.recheck_stop = stop.clone();
+        s.recheck.request_opt((look, new), move |(look, new)| {
             let mut out = Recheck { generation, gone: HashSet::new(), changed: Vec::new(), added: Vec::new() };
             let mut seen: HashMap<PathBuf, bool> = HashMap::new();
             for (key, path, own) in look {
+                #[cfg(test)]
+                hook::recheck(&path);
+                if stop.load(Relaxed) {
+                    return None;
+                }
                 if own {
                     match path.symlink_metadata() {
                         Ok(m) => {
@@ -854,11 +909,14 @@ impl Folder {
                 }
             }
             for p in new {
+                if stop.load(Relaxed) {
+                    return None;
+                }
                 if let Some(e) = entry_at(&root, &p, show_hidden) {
                     out.added.push(e);
                 }
             }
-            out
+            Some(out)
         });
     }
 
@@ -993,7 +1051,7 @@ impl State {
         let f = &mut self.panes[ix].f;
         let root = f.cwd.clone();
         let Some(s) = f.search.as_mut() else { return };
-        s.walk = None;
+        s.stop_all();
         s.query = s.edit.text.trim().to_string();
         s.generation += 1;
         (s.visited, s.unreadable, s.capped, s.error, s.took, s.stopped, s.sorted) = (0, 0, false, None, None, false, false);

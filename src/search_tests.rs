@@ -804,3 +804,45 @@ fn select_by_pattern_counts_results_that_stream_in() {
     assert_eq!(s.cur().visible.len(), 2);
     assert_eq!(s.pick.as_ref().unwrap().count, Ok((2, 2)), "counted again when results arrived");
 }
+
+/// A recheck after a file operation stops where it is when the query changes (or the search
+/// ends, or a newer recheck replaces it): it used to go on looking at every result it had.
+#[test]
+fn a_recheck_stops_when_the_query_changes() {
+    let names: Vec<String> = (0..30).map(|i| format!("hit-{i:02}")).collect();
+    let d = tree("recheck-stop", &names.iter().map(String::as_str).collect::<Vec<_>>());
+    let mut s = state_in(&d);
+    search(&mut s, "hit");
+    finish_walk(&mut s);
+    assert_eq!(results(&s).len(), 30);
+    let (started, started_rx) = channel();
+    let (go, go_rx) = channel();
+    let after = Arc::new(AtomicUsize::new(0));
+    hook::RECHECK.lock().unwrap().push(hook::RecheckGate { dir: d.clone(), started, go: Some(go_rx), after: after.clone() });
+    // As a finished operation in the root does.
+    s.refresh(&[(d.clone(), None)], &[]);
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    search(&mut s, "other");
+    go.send(()).unwrap();
+    frames(&mut s, 10);
+    hook::RECHECK.lock().unwrap().retain(|g| g.dir != d);
+    assert_eq!(after.load(Relaxed), 0, "looked at results after the query changed");
+    // Leaving the search stops one too.
+    search(&mut s, "hit");
+    finish_walk(&mut s);
+    let (started, started_rx) = channel();
+    let (go, go_rx) = channel();
+    let after = Arc::new(AtomicUsize::new(0));
+    hook::RECHECK.lock().unwrap().push(hook::RecheckGate { dir: d.clone(), started, go: Some(go_rx), after: after.clone() });
+    s.refresh(&[(d.clone(), None)], &[]);
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    s.leave_search(s.active, &mut tx());
+    go.send(()).unwrap();
+    frames(&mut s, 10);
+    hook::RECHECK.lock().unwrap().retain(|g| g.dir != d);
+    assert_eq!(after.load(Relaxed), 0, "looked at results after the search ended");
+    // And the close hook stops walks and rechecks.
+    search(&mut s, "hit");
+    s.stop_background();
+    assert!(!s.cur().search.as_ref().unwrap().walking());
+}
