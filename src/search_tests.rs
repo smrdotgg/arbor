@@ -865,7 +865,8 @@ fn the_cap_holds_inside_one_big_folder() {
 
 /// A folder reached twice by different paths (a bind mount of a folder on the same disk has
 /// its identity) is walked once. Here `mirror` reports `photos`'s identity, as a bind mount of
-/// it would.
+/// it would. Unix only: Windows walks never enter junctions or mounted folders (they're links).
+#[cfg(unix)]
 #[test]
 fn a_folder_reached_twice_is_walked_once() {
     let d = tree("bind", &["photos/hit-a.jpg", "photos/deep/hit-b.jpg", "mirror/hit-a.jpg", "mirror/deep/hit-b.jpg"]);
@@ -884,6 +885,15 @@ fn replace(p: &Path) {
     std::fs::rename(p, &aside).unwrap();
     std::fs::write(p, "SOMEONE ELSE'S FILE").unwrap();
     std::fs::remove_file(&aside).unwrap();
+    // NTFS gives a file made under a name within 15 s of one leaving it that one's creation
+    // time (the documented limit); a replacement later than that has its own.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTimesExt;
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(3600);
+        f.set_times(std::fs::FileTimes::new().set_created(later)).unwrap();
+    }
 }
 
 /// The review's case: results of a folder read while Arbor renamed that folder arrive with the
