@@ -7,6 +7,7 @@ mod actions;
 mod app;
 mod fs;
 mod ops;
+mod timing;
 mod trash;
 mod view;
 
@@ -15,15 +16,24 @@ use rune::{App, AppSpec, Chrome};
 use app::State;
 
 fn main() {
-    let spec = AppSpec::<State> {
+    // ARBOR_TIMING / ARBOR_BENCH, read once. Off, Rune gets the plain callbacks and no frame hook.
+    let timed = timing::init();
+    let mut spec = AppSpec::<State> {
         min_size: Some((520.0, 320.0)),
         setup: Some(|s, waker| s.setup(waker)),
         poll: Some(|s, _, tx| s.poll(tx)),
         on_key: Some(|s, ev, tx| s.on_key(ev, tx)),
         ..AppSpec::new("Arbor", (980.0, 620.0), State::new, view::view)
     };
+    if timed {
+        spec.init = timing::init_state;
+        spec.setup = Some(timing::setup);
+        spec.poll = Some(timing::poll);
+        spec.on_key = Some(timing::on_key);
+    }
     // macOS: content runs under a transparent titlebar; the traffic lights sit in the sidebar's
     // top band and the path bar is the drag region. Other platforms keep their native frame.
     let chrome = Chrome { full_size_content: true, traffic_lights: Some((14.0, view::BAR_H / 2.0 - 7.0)), drag_regions: true };
-    App::new(spec).chrome(chrome).run();
+    let app = App::new(spec).chrome(chrome);
+    if timed { app.on_frame_encoded(timing::frame).run() } else { app.run() }
 }

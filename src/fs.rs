@@ -345,6 +345,36 @@ mod tests {
         assert_eq!(fmt_size(25_000_000), "25 MB");
     }
 
+    /// Reading and sorting a 10k-entry folder, the part of "listing visible" that isn't drawing.
+    /// `cargo test --release -- --ignored --nocapture list_10k`
+    #[test]
+    #[ignore = "benchmark: makes 10,000 files"]
+    fn list_10k() {
+        let d = std::env::temp_dir().join(format!("arbor-list-10k-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for i in 0..10_000 {
+            std::fs::write(d.join(format!("file {i} v{}.txt", i % 7)), b"x").unwrap();
+        }
+        let sort = Sort { key: SortKey::Name, desc: false };
+        let mut times: Vec<f64> = (0..30)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                let l = list(d.clone(), sort);
+                assert_eq!(l.result.map(|v| v.len()).unwrap(), 10_000);
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        times.sort_by(f64::total_cmp);
+        let mut v = list(d.clone(), sort).result.unwrap();
+        let t = std::time::Instant::now();
+        sort_entries(&mut v, Sort { key: SortKey::Modified, desc: true });
+        let resort = t.elapsed().as_secs_f64() * 1000.0;
+        let _ = std::fs::remove_dir_all(&d);
+        eprintln!("read+sort 10k: median {:.1} ms, p95 {:.1} ms; re-sort only {resort:.1} ms", times[15], times[28]);
+        assert!(times[15] < 50.0, "over the 50 ms listing budget before drawing anything");
+    }
+
     #[test]
     fn lists_a_folder() {
         let l = list(PathBuf::from(env!("CARGO_MANIFEST_DIR")), Sort { key: SortKey::Name, desc: false });

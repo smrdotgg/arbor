@@ -175,6 +175,11 @@ impl State {
         self.pending.is_some()
     }
 
+    /// The folder being loaded, if any.
+    pub fn pending_path(&self) -> Option<&Path> {
+        self.pending.as_ref().map(|p| p.path.as_path())
+    }
+
     // ---- navigation -------------------------------------------------------------------------
 
     pub(crate) fn go_full(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, rename: bool) {
