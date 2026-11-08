@@ -1180,16 +1180,17 @@ fn confirm_view(a: &crate::confirm::Ask, l: Look) -> El {
     let button = |label: &'static str, key: &'static str, which: Button| {
         let focused = a.focus == which;
         let yes = which == Button::Action;
-        let b = text(label)
+        // The label is a child of a row that centres it: a text element given a height draws
+        // its line at the top of it, a few points above the middle.
+        let b = row()
             .key(key)
-            .font(TextStyle::new(13.0, 500.0))
-            .color(if yes { Color::WHITE } else { l.t.text })
             .px(14.0)
             .h(28.0)
             .center_y()
             .radius(6.0)
             .cursor(Cursor::Pointer)
-            .on_press_tx(move |s: &mut State, tx| s.answer(yes, tx));
+            .on_press_tx(move |s: &mut State, tx| s.answer(yes, tx))
+            .child(text(label).font(TextStyle::new(13.0, 500.0)).color(if yes { Color::WHITE } else { l.t.text }));
         let b = if yes { b.fill(red) } else { b.fill(l.t.control_off).hover(l.t.hover) };
         if focused { b.border(2.0, l.accent) } else { b }
     };
