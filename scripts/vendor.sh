@@ -25,10 +25,13 @@ run "set -e
   cd rune && git fetch -q origin && git checkout -q $REV && git log -1 --format='rune %h %cd' >&2"
 sha=$(run "git -C ~/arbor-deps/rune rev-parse HEAD") && echo "$sha" > RUNE_REV
 
+mkdir -p vendor # a fresh clone has none, and rsync won't make two levels
 rsync -az --delete --exclude .git --exclude demo "${R}arbor-deps/rune/" vendor/rune/
-# Vendor in a copy without .cargo/, so cargo reads crates.io rather than vendor/crates.
+# Vendor in a copy without .cargo/, so cargo reads crates.io rather than vendor/crates. The
+# exclude also shields the staging side from --delete, so remove a stale offline config there
+# (only that file, only in the staging copy) before cargo runs.
 rsync -az --delete --exclude target --exclude vendor/crates --exclude .cargo ./ "${R}arbor/"
-run "set -e; export PATH=\$HOME/.cargo/bin:\$PATH; cd ~/arbor && cargo update -w -q && cargo vendor -q --versioned-dirs vendor/crates >/dev/null"
+run "set -e; export PATH=\$HOME/.cargo/bin:\$PATH; cd ~/arbor && rm -f .cargo/config.toml && cargo update -w -q && cargo vendor -q --versioned-dirs vendor/crates >/dev/null"
 rsync -az --delete "${R}arbor/vendor/crates/" vendor/crates/
 rsync -az "${R}arbor/Cargo.lock" Cargo.lock
 echo "vendored rune $(cut -c1-7 RUNE_REV); build with: cargo build --release"
