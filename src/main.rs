@@ -18,6 +18,8 @@ mod config;
 mod confirm;
 mod delete;
 mod folder;
+#[cfg(test)]
+mod frame_bench;
 mod fs;
 mod handler;
 mod incoming;
@@ -55,6 +57,12 @@ fn main() {
     }
     // ARBOR_TIMING / ARBOR_BENCH, read once. Off, Rune gets the plain callbacks and no frame hook.
     let timed = timing::init();
+    // Windows: `arbor.exe <folder>` with an Arbor already running hands it the folder (a new
+    // tab there) and exits before any window.
+    #[cfg(windows)]
+    if !timing::benching() && rune::tooling::headless_run().is_none() && incoming::windows::hand_off_args() {
+        return;
+    }
     // Both overlap the platform's app launch (about 80 ms on macOS before the window is made):
     // the GPU device and shaders, and the first folder's read.
     rune::prewarm_gpu();
