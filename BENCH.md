@@ -26,6 +26,32 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-08, milestone 6 review fixes (search)
+
+What changed on the measured path: results carry the identity from the `lstat` the walk
+already did (no new call), a big folder hands its matches over 256 at a time, the walk takes a
+lock per folder to remember its identity (bind mounts), the root's device is looked up on the
+walk's thread instead of in the key, and a walk still going after a file operation rechecks
+the results that arrive under a changed path. Before is 931177e, after is 4908968, both driven
+by the same bench (`--search 4`: four cold starts, 3 rounds each, in the 120,000-file tree),
+alternating.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+Load average 2.2–2.4. Order: before, after, after, before.
+
+| Measure (median / p95, submission proxy) | Before (2 passes) | After (2 passes) |
+| --- | --- | --- |
+| Search 120k: key → first results | 15.0 / 33.2, 16.1 / 30.7 ms | 18.0 / 26.3, 16.1 / 26.3 ms |
+| Search 120k: key → walk done | 106.2 / 115.3, 109.8 / 162.2 ms | 107.7 / 169.5, 108.2 / 124.0 ms |
+| Key → frame, query (starts the walk) | 6.0 / 13.4, 1.3 / 8.8 ms | 1.4 / 8.9, 5.2 / 11.2 ms |
+| Key → frame while results stream | 9.5 / 13.6, 9.2 / 14.2 ms | 11.4 / 16.1, 9.0 / 16.0 ms |
+
+No change beyond noise. With a 250 ms delay injected into the root's `stat`, the reviewer saw
+six stalls typing `report`; the walk's thread now takes that delay (pinned by the test
+`starting_a_search_never_waits_for_the_disk`, which holds the lookup for 3 s and fails if the
+key waits for it).
+
 ## 2026-11-08, Batch Rename (milestone 7)
 
 What changed on the measured path: nothing runs until Batch Rename opens. Each key and frame
@@ -53,9 +79,19 @@ above the earlier tables, both builds alike. Order: before, after, after, before
 | **Rename 10k: key → preview, regex** | — | **44.8 / 60.8, 44.4 / 63.9 ms** |
 | **Key → frame, typing in rename (10k)** | — | **8.1 / 29.1, 8.1 / 31.1 ms** |
 
-No regression in cold start, listing or keys beyond this machine's noise (the after pass at
-204 ms ran at load 4.1, the other three at 2.3–4.3 and 190–192 ms; a quieter re-check is below if
-it could be had). Nothing of regex-lite or the dialog runs at startup.
+Re-checked once the machine was quieter (load 1.8–3.1), as twelve alternating passes of 21 cold
+starts: before (6cd7541) against the final code (4908968, with the search fixes below too), in
+the order before, after, after, before, before, after, then after, before, before, after,
+after, before.
+
+| Measure (median per pass, submission proxy) | Before (6 passes) | After (6 passes) |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 136.4, 130.6, 129.3, 133.1, 133.1, 134.5 ms (mean 132.8) | 133.8, 137.0, 135.1, 133.9, 134.2, 134.2 ms (mean 134.7) |
+| Key → frame (synthetic ↓) | 6.1, 6.1, 6.1, 6.2, 6.2, 6.2 ms | 6.2, 6.4, 6.2, 6.2, 6.2, 6.1 ms |
+
+No regression beyond noise: the second six passes are 0.5 ms apart on average, and the 1.9 ms
+between the twelve passes' means is well inside either build's own spread (7 ms before, 3 ms
+after). Nothing of regex-lite or the dialog runs at startup.
 
 The previews over 10,000 names land a frame or two after the key, here. `ARBOR_TIMING` splits
 them: a key typed in the dialog takes 4–5 ms of update (the view with its visible preview rows;
