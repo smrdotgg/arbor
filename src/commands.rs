@@ -8,9 +8,7 @@
 //! Keys are written as in the settings file: `cmd` is ⌘ on macOS and Ctrl elsewhere; `ctrl`,
 //! `alt`, `shift` and `super` name those keys (see [`parse_chord`]).
 
-use rune::Chord;
-#[cfg(test)]
-use rune::KeyPlatform;
+use rune::{Chord, KeyPlatform};
 
 macro_rules! commands {
     ($($var:ident $id:literal $title:expr, [$($key:literal),*];)*) => {
@@ -32,8 +30,9 @@ macro_rules! commands {
                 match self { $(Cmd::$var => $title),* }
             }
 
-            /// The keys it has when the settings file doesn't bind it, in settings syntax.
-            pub fn default_keys(self) -> &'static [&'static str] {
+            /// Its default keys as the table writes them: `mac:` before a key makes it
+            /// macOS's only, `pc:` Windows' and Linux's only (see [`Cmd::default_keys_on`]).
+            fn key_specs(self) -> &'static [&'static str] {
                 match self { $(Cmd::$var => &[$($key),*]),* }
             }
         }
@@ -44,7 +43,28 @@ impl Cmd {
     /// Commands that can't be undone. Running one asks first, in Arbor's one dialog
     /// (`confirm.rs`), and only its destructive button runs it.
     pub fn permanent(self) -> bool {
-        matches!(self, Cmd::ClearJump)
+        matches!(self, Cmd::ClearJump | Cmd::Delete)
+    }
+
+    /// The keys it has on `platform` when the settings file doesn't bind it, in settings
+    /// syntax. Most keys are the same everywhere; a few follow each platform's convention
+    /// (Delete Permanently is ⌥⌘⌫ on macOS, as in Finder, and Shift+Delete elsewhere, as in
+    /// Explorer).
+    pub fn default_keys_on(self, platform: KeyPlatform) -> Vec<&'static str> {
+        let mac = platform == KeyPlatform::Mac;
+        self.key_specs()
+            .iter()
+            .filter_map(|k| match (k.strip_prefix("mac:"), k.strip_prefix("pc:")) {
+                (Some(k), _) => mac.then_some(k),
+                (_, Some(k)) => (!mac).then_some(k),
+                _ => Some(*k),
+            })
+            .collect()
+    }
+
+    /// [`Cmd::default_keys_on`] this platform.
+    pub fn default_keys(self) -> Vec<&'static str> {
+        self.default_keys_on(KeyPlatform::current())
     }
 }
 
@@ -86,6 +106,7 @@ commands! {
     BatchRename "file.batch_rename" "Batch Rename…", [];
     NewFolder "file.new_folder" "New Folder", ["cmd+shift+n"];
     Trash "file.trash" "Move to Trash", ["cmd+backspace", "delete"];
+    Delete "file.delete" "Delete Permanently…", ["mac:cmd+alt+backspace", "pc:shift+delete"];
     Undo "file.undo" "Undo", ["cmd+z"];
     Cancel "file.cancel" "Cancel File Operation", [];
 
@@ -302,7 +323,7 @@ pub fn closest_id(id: &str) -> Option<&'static str> {
 pub fn markdown_table() -> String {
     let mut s = String::from("| Command | macOS | Windows, Linux | Id |\n| --- | --- | --- | --- |\n");
     let keys = |c: Cmd, p: KeyPlatform| -> String {
-        c.default_keys().iter().filter_map(|k| parse_chord(k).ok()).map(|c| c.label_on(p)).collect::<Vec<_>>().join(", ")
+        c.default_keys_on(p).iter().filter_map(|k| parse_chord(k).ok()).map(|c| c.label_on(p)).collect::<Vec<_>>().join(", ")
     };
     for &cmd in Cmd::ALL {
         let row = match cmd.place() {
@@ -342,7 +363,7 @@ mod tests {
         for platform in PLATFORMS {
             let mut all: Vec<(Chord, Cmd)> = Vec::new();
             for &cmd in Cmd::ALL {
-                for k in cmd.default_keys() {
+                for k in cmd.default_keys_on(platform) {
                     let c = parse_chord(k).unwrap_or_else(|e| panic!("{}: {e}", cmd.id()));
                     assert_eq!(parse_chord(&chord_spec(&c)), Ok(c), "{k} round trip");
                     if let Some((_, other)) = all.iter().find(|(o, _)| o.same_keys(&c, platform)) {
@@ -394,6 +415,24 @@ mod tests {
         assert_eq!(key(Key::Text("j".into()), Mods::default()), None);
         assert_eq!(km.label(Cmd::Trash), parse_chord("cmd+backspace").unwrap().label());
         assert_eq!(km.label(Cmd::ReloadSettings), "");
+    }
+
+    /// Delete Permanently follows each platform: ⌥⌘⌫ on macOS (Finder), Shift+Delete on
+    /// Windows and Linux (Explorer, Files, Dolphin), and nothing else on either.
+    #[test]
+    fn delete_permanently_has_each_platforms_key() {
+        let label = |p: KeyPlatform| Cmd::Delete.default_keys_on(p).iter().map(|k| parse_chord(k).unwrap().label_on(p)).collect::<Vec<_>>();
+        assert_eq!(label(KeyPlatform::Mac), ["⌥⌘⌫"]);
+        assert_eq!(label(KeyPlatform::Windows), ["Shift+Delete"]);
+        assert_eq!(label(KeyPlatform::Linux), ["Shift+Delete"]);
+        assert_eq!(Cmd::Trash.default_keys_on(KeyPlatform::Mac), Cmd::Trash.default_keys_on(KeyPlatform::Linux));
+        assert!(Cmd::Delete.permanent() && Cmd::Delete.title().ends_with('…'));
+        let km = Keymap::defaults();
+        let mods = |shift, alt, cmd| Mods { shift, alt, cmd, ..Mods::default() };
+        let (key, mods) =
+            if cfg!(target_os = "macos") { (Key::Backspace, mods(false, true, true)) } else { (Key::Delete, mods(true, false, false)) };
+        let ev = KeyEvent { key, mods };
+        assert_eq!(km.find(|c| c.matches_on(&ev, KeyPlatform::current())), Some(Cmd::Delete));
     }
 
     #[test]

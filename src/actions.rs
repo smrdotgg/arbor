@@ -258,9 +258,10 @@ impl State {
             self.job_seen = seen;
             return moved;
         };
-        let verb = job.verb;
+        let (verb, total) = (job.verb, job.progress.items_total.load(Relaxed));
         self.job = None;
-        self.undo.extend(out.undo);
+        let mut out = out;
+        self.undo.extend(out.undo.take());
         // Renamed and moved items show where they are now at once (a fresh read or a recheck
         // follows); a search still walking remembers them for the batches still to come.
         if !out.moved.is_empty() || !out.removed.is_empty() {
@@ -273,19 +274,32 @@ impl State {
                 }
             }
         }
-        let n = out.results.len();
+        // A trash and a delete have no results to select: what they did is what's gone.
+        let n = if matches!(verb, "Moving to Trash" | "Deleting") { out.removed.len() } else { out.results.len() };
+        // Items the trash left because their disk has none: one question for all of them.
+        let asks = !out.no_trash.is_empty();
+        if asks {
+            let why = out.no_trash_why.take().unwrap_or_default();
+            self.ask_next = Some(crate::confirm::Ask::delete(std::mem::take(&mut out.no_trash), Some(&why)));
+        }
         self.note = Some(if let Some(why) = out.refused {
             why
+        } else if verb == "Deleting" {
+            deleted_note(&out, n, total)
         } else if !out.errors.is_empty() {
             let more = if out.errors.len() > 1 { format!(" (+{} more)", out.errors.len() - 1) } else { String::new() };
             format!("{}{more}", out.errors[0])
         } else if out.cancelled {
             format!("Cancelled after {n} item{}", plural(n))
+        } else if verb == "Moving to Trash" {
+            match (n, asks) {
+                (0, true) => format!("Nothing was moved to the {}", crate::trash::BIN),
+                (n, _) => format!("Moved {n} item{} to the {}", plural(n), crate::trash::BIN),
+            }
         } else {
             let done = match verb {
                 "Copying" => "Copied",
                 "Moving" => "Moved",
-                "Moving to Trash" => "Moved to Trash",
                 "Renaming" => "Renamed",
                 _ => "Restored",
             };
@@ -465,6 +479,26 @@ impl State {
 /// `op`, checked against `expect` first when there's anything to check (`Op::Checked`).
 pub(crate) fn checked(op: Op, expect: Vec<(PathBuf, crate::fs::Ident)>) -> Op {
     if expect.is_empty() { op } else { Op::Checked { expect, op: Box::new(op) } }
+}
+
+/// What a permanent delete did, in words: how many items are gone (they stay gone, even after a
+/// cancel), what it left and why.
+fn deleted_note(out: &ops::Outcome, n: usize, total: usize) -> String {
+    let gone = match (n, total) {
+        (n, t) if n == t => format!("Deleted {n} item{} permanently", plural(n)),
+        (n, t) => format!("Deleted {n} of {t} item{} permanently", plural(t)),
+    };
+    let partly = out.partly.as_deref().map_or_else(String::new, |p| format!("; “{}” was partly deleted", name(p)));
+    if out.cancelled {
+        return format!("Cancelled: {gone}{partly}");
+    }
+    match out.errors.split_first() {
+        None => gone,
+        Some((first, rest)) => {
+            let more = if rest.is_empty() { String::new() } else { format!(" (+{} more)", rest.len()) };
+            format!("{gone}. {first}{more}")
+        }
+    }
 }
 
 fn name(p: &Path) -> String {

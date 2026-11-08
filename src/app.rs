@@ -126,6 +126,9 @@ pub struct State {
     /// The confirmation dialog, while it asks about a command that can't be undone
     /// (`confirm.rs`).
     pub asking: Option<crate::confirm::Ask>,
+    /// A question a finished file operation raised (items its trash couldn't take), opened by
+    /// the next `poll`.
+    pub ask_next: Option<crate::confirm::Ask>,
     /// The palette's, Jump's and Select by Pattern's late field writes after they close (see
     /// `rename_sink`).
     pub(crate) palette_sink: TextEdit,
@@ -245,6 +248,7 @@ impl State {
             history,
             jump_req: None,
             asking: None,
+            ask_next: None,
             palette_sink: TextEdit::new(""),
             rename_sink: TextEdit::new(""),
             job_seen: (0, 0),
@@ -445,6 +449,10 @@ impl State {
     pub fn poll(&mut self, tx: &mut Tx) -> bool {
         tx.instant();
         let mut changed = self.poll_job();
+        if let Some(a) = self.ask_next.take() {
+            self.ask_with(a, tx);
+            changed = true;
+        }
         changed |= self.poll_boot(tx);
         for ix in 0..self.panes.len() {
             if let Some(a) = self.panes[ix].f.loader.take() {
@@ -815,7 +823,7 @@ impl State {
         let searching = f.searching();
         match cmd {
             // Start a file operation.
-            Trash => when(busy, BUSY).or(when(nothing, "Select an item first")),
+            Trash | Delete => when(busy, BUSY).or(when(nothing, "Select an item first")),
             // A duplicate goes beside its original, so all of them must be in one folder.
             Duplicate => when(busy, BUSY).or(when(nothing, "Select an item first")).or(when(
                 searching && f.target_paths().iter().map(|p| p.parent()).collect::<std::collections::HashSet<_>>().len() > 1,
@@ -973,6 +981,8 @@ impl State {
             BatchRename => self.open_batch(tx),
             NewFolder => self.new_folder(),
             Trash => self.trash_selected(),
+            // Runs from the dialog (`State::answer`), with the items it named.
+            Delete => {}
             Undo => self.undo_last(),
             Cancel => {
                 if let Some(job) = &self.job {

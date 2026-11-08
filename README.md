@@ -408,6 +408,7 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Batch Rename… |  |  | `file.batch_rename` |
 | New Folder | ⇧⌘N | Ctrl+Shift+N | `file.new_folder` |
 | Move to Trash | ⌘⌫, ⌦ | Ctrl+Backspace, Delete | `file.trash` |
+| Delete Permanently… | ⌥⌘⌫ | Shift+Delete | `file.delete` |
 | Undo | ⌘Z | Ctrl+Z | `file.undo` |
 | Cancel File Operation |  |  | `file.cancel` |
 | Move Up | ↑ | ↑ | `select.up` |

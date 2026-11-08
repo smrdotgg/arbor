@@ -1,4 +1,4 @@
-//! File operations: copy, move, trash, and undo. Each runs on its own worker thread and reports
+//! File operations: copy, move, trash, permanent delete, and undo. Each runs on its own worker thread and reports
 //! progress through atomics; the UI reads them in `poll`.
 //!
 //! Safety rules: nothing is ever overwritten. Every move, rename and copy uses the no-replace
@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::noclobber;
+use crate::trash::TrashError;
 
 /// How many free names an operation tries for one item when each is taken before it can be
 /// used (another app creating files there at the same moment).
@@ -34,6 +35,12 @@ pub enum Op {
     },
     Trash {
         sources: Vec<PathBuf>,
+    },
+    /// Delete permanently, confirmed first in Arbor's one dialog: each item (a folder with
+    /// everything in it, links not followed) only while it's still the item the user chose,
+    /// checked right before it goes ([`Doomed::id`]).
+    Delete {
+        items: Vec<Doomed>,
     },
     /// Batch rename: every item gets its new name in its own folder, or none does (see
     /// [`Worker::rename_all`]).
@@ -59,6 +66,7 @@ impl Op {
             Op::Copy { dest, .. } => vec![dest.clone()],
             Op::Move { sources, dest } => [vec![dest.clone()], parents(sources)].concat(),
             Op::Trash { sources } => parents(sources),
+            Op::Delete { items } => items.iter().filter_map(|d| d.path.parent().map(Path::to_path_buf)).collect(),
             Op::Rename { items } => items.iter().filter_map(|r| r.from.parent().map(Path::to_path_buf)).collect(),
             Op::Checked { op, .. } => return op.folders(),
             Op::Undo(u) => u
@@ -79,6 +87,7 @@ impl Op {
             Op::Copy { .. } => "Copying",
             Op::Move { .. } => "Moving",
             Op::Trash { .. } => "Moving to Trash",
+            Op::Delete { .. } => "Deleting",
             Op::Rename { .. } => "Renaming",
             Op::Undo(_) => "Undoing",
             Op::Checked { op, .. } => op.verb(),
@@ -104,6 +113,11 @@ impl Op {
                 let any = !sources.is_empty();
                 (Op::Trash { sources }, any)
             }
+            Op::Delete { mut items } => {
+                items.retain(|d| !left_out.contains(d.path.as_path()));
+                let any = !items.is_empty();
+                (Op::Delete { items }, any)
+            }
             Op::Rename { mut items } => {
                 items.retain(|r| !left_out.contains(r.from.as_path()));
                 let any = !items.is_empty();
@@ -111,6 +125,24 @@ impl Op {
             }
             op => (op, true),
         }
+    }
+}
+
+/// An item to delete permanently: where it is, what it was when the user chose it (its
+/// [`crate::fs::ident`], `None` when that couldn't be read), and whether it's a folder (the
+/// dialog says "with everything in it").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Doomed {
+    pub path: PathBuf,
+    pub id: Option<crate::fs::Ident>,
+    pub dir: bool,
+}
+
+impl Doomed {
+    /// `path` as it is now (one lstat).
+    pub fn now(path: &Path) -> Doomed {
+        let m = path.symlink_metadata().ok();
+        Doomed { path: path.to_path_buf(), id: m.as_ref().and_then(crate::fs::ident), dir: m.is_some_and(|m| m.is_dir()) }
     }
 }
 
@@ -374,8 +406,15 @@ pub struct Outcome {
     /// Items that moved or got a new name: `(from, to)`, so panes and searches can show them
     /// where they are now at once.
     pub moved: Vec<(PathBuf, PathBuf)>,
-    /// Items that went to the Trash (or are gone from where they were).
+    /// Items that went to the Trash, or were deleted (or are gone from where they were).
     pub removed: Vec<PathBuf>,
+    /// Items a trash left where they were because their disk has no trash that takes them
+    /// ([`TrashError::NoTrash`]), each as it was then: the UI asks whether to delete them
+    /// permanently. `no_trash_why` is the first one's reason.
+    pub no_trash: Vec<Doomed>,
+    pub no_trash_why: Option<String>,
+    /// A permanent delete stopped (cancelled or failed) inside this folder: part of it is gone.
+    pub partly: Option<PathBuf>,
     /// Each of `folders` and its canonical path (links resolved), so a search through a
     /// symlink to one of them knows them by its own paths.
     pub canon: Vec<(PathBuf, PathBuf)>,
@@ -399,7 +438,7 @@ impl Running {
     }
 }
 
-type TrashFn = fn(&Path) -> Result<Option<PathBuf>, String>;
+type TrashFn = fn(&Path) -> Result<Option<PathBuf>, TrashError>;
 
 /// The trash [`start`] uses: the platform's, or in tests a `.trash` folder beside each item, so
 /// no test fills the user's own Trash.
@@ -506,6 +545,9 @@ struct Hooks {
     fail_rename: Option<PathTest>,
     /// Fail removing these items (a permission error halfway through a delete).
     fail_remove: Option<PathTest>,
+    /// Cancel when a permanent delete is about to remove one of these (the user pressing Esc
+    /// midway).
+    cancel_at: Option<PathTest>,
     /// Called with each file or folder a copy makes, right after it's made: where a test
     /// replaces it or cancels.
     after_made: Option<PathHook>,
@@ -593,6 +635,17 @@ impl<'a> Worker<'a> {
     fn before_act(&mut self, _: &Path) {}
 
     #[cfg(test)]
+    fn cancel_hook(&self, at: &Path) {
+        if self.hooks.cancel_at.as_ref().is_some_and(|f| f(at)) {
+            self.p.cancel.store(true, Relaxed);
+        }
+    }
+
+    #[cfg(not(test))]
+    #[inline(always)]
+    fn cancel_hook(&self, _: &Path) {}
+
+    #[cfg(test)]
     fn after_made(&mut self, dst: &Path) {
         if let Some(h) = &mut self.hooks.after_made {
             h(dst);
@@ -654,6 +707,9 @@ impl<'a> Worker<'a> {
                 cancelled: false,
                 moved: Vec::new(),
                 removed: Vec::new(),
+                no_trash: Vec::new(),
+                no_trash_why: None,
+                partly: None,
                 canon: Vec::new(),
                 folders: Vec::new(),
             };
@@ -680,6 +736,9 @@ impl<'a> Worker<'a> {
             cancelled: false,
             moved: Vec::new(),
             removed: Vec::new(),
+            no_trash: Vec::new(),
+            no_trash_why: None,
+            partly: None,
             canon,
             folders,
         };
@@ -744,7 +803,17 @@ impl<'a> Worker<'a> {
                             restorable = false;
                             out.removed.push(src.clone());
                         }
-                        Err(e) => out.errors.push(format!("{}: {e}", name_of(src))),
+                        // Left where it was: gathered for one "delete permanently?" question.
+                        Err(TrashError::NoTrash(why)) => {
+                            out.no_trash_why.get_or_insert(why);
+                            out.no_trash.push(Doomed::now(src));
+                        }
+                        Err(TrashError::DeletedForGood) => {
+                            restorable = false;
+                            out.removed.push(src.clone());
+                            out.errors.push(format!("{}: {}", name_of(src), TrashError::DeletedForGood));
+                        }
+                        Err(TrashError::Failed(e)) => out.errors.push(format!("{}: {e}", name_of(src))),
                     }
                     self.p.items_done.fetch_add(1, Relaxed);
                     self.tick(0);
@@ -753,6 +822,7 @@ impl<'a> Worker<'a> {
                     out.undo = Undo::record(What::Trash, pairs);
                 }
             }
+            Op::Delete { items } => self.delete(items, &mut out),
             Op::Rename { items } => self.batch_rename(items, &mut out),
             Op::Undo(undo) if undo.what == What::BatchRename => self.undo_batch_rename(undo, &mut out),
             Op::Undo(undo) => self.undo(undo, &mut out),
@@ -788,6 +858,9 @@ impl<'a> Worker<'a> {
                 cancelled: false,
                 moved: Vec::new(),
                 removed: Vec::new(),
+                no_trash: Vec::new(),
+                no_trash_why: None,
+                partly: None,
                 canon: Vec::new(),
                 folders: Vec::new(),
             };
@@ -796,6 +869,55 @@ impl<'a> Worker<'a> {
         why.append(&mut out.errors);
         out.errors = why;
         out
+    }
+
+    /// [`Op::Delete`]: each item is checked right before it goes (an item replaced or gone since
+    /// the user chose it is left alone and said so), then removed whole. A cancel stops at once:
+    /// what's gone stays gone, and a folder it stopped in is partly deleted, which the outcome
+    /// says ([`Outcome::partly`]).
+    fn delete(&mut self, items: Vec<Doomed>, out: &mut Outcome) {
+        self.p.items_total.store(items.len(), Relaxed);
+        for d in &items {
+            if self.cancelled() {
+                break;
+            }
+            let name = name_of(&d.path);
+            self.before_act(&d.path);
+            let problem = match d.path.symlink_metadata() {
+                _ if d.path.parent().is_none() => Some(format!("“{}” can't be deleted", d.path.display())),
+                Err(_) => Some(format!("“{name}” was already gone")),
+                Ok(m) if d.id.is_some() && crate::fs::ident(&m) != d.id => {
+                    Some(format!("“{name}” isn't the item you chose (something else is at its path now), so it was left alone"))
+                }
+                Ok(_) => None,
+            };
+            if let Some(why) = problem {
+                out.errors.push(why);
+                self.p.items_done.fetch_add(1, Relaxed);
+                continue;
+            }
+            let mut removed = 0;
+            let w = &mut *self;
+            let mut go = |at: &Path| {
+                w.cancel_hook(at);
+                w.tick(0);
+                !w.cancelled()
+            };
+            match crate::delete::remove_tree(&d.path, &mut go, &mut removed) {
+                Ok(()) => out.removed.push(d.path.clone()),
+                Err(crate::delete::Halt::Cancelled) => {
+                    if removed > 0 {
+                        out.partly = Some(d.path.clone());
+                    }
+                }
+                Err(crate::delete::Halt::Failed { at, err }) => {
+                    let shown = d.path.parent().and_then(|p| at.strip_prefix(p).ok()).unwrap_or(&at);
+                    let part = if removed > 0 { " (the rest of it was deleted)" } else { "" };
+                    out.errors.push(format!("Couldn't delete “{}”: {err}{part}", shown.display()));
+                }
+            }
+            self.p.items_done.fetch_add(1, Relaxed);
+        }
     }
 
     /// Checks every step first and changes nothing unless all pass (no partial undo of a
@@ -1564,16 +1686,21 @@ mod tests {
 
     /// Stands in for the platform trash: moves the item to a `.trash` folder beside it, so tests
     /// never touch the real one.
-    pub(super) fn fake_trash(p: &Path) -> Result<Option<PathBuf>, String> {
+    /// An item named "notrash…" stands for one on a disk with no trash: it's left alone.
+    pub(super) fn fake_trash(p: &Path) -> Result<Option<PathBuf>, TrashError> {
+        if p.file_name().unwrap().to_string_lossy().starts_with("notrash") {
+            return Err(TrashError::NoTrash("the test disk has no trash".into()));
+        }
         let bin = p.parent().unwrap().join(".trash");
-        fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
+        let failed = |e: io::Error| TrashError::Failed(e.to_string());
+        fs::create_dir_all(&bin).map_err(failed)?;
         let at = free_name(&bin, p.file_name().unwrap(), false);
-        fs::rename(p, &at).map_err(|e| e.to_string())?;
+        fs::rename(p, &at).map_err(failed)?;
         Ok(Some(at))
     }
 
-    fn refusing_trash(_: &Path) -> Result<Option<PathBuf>, String> {
-        Err("permission denied".into())
+    fn refusing_trash(_: &Path) -> Result<Option<PathBuf>, TrashError> {
+        Err(TrashError::Failed("permission denied".into()))
     }
 
     fn run_now(op: Op) -> Outcome {
@@ -1931,8 +2058,12 @@ mod tests {
     }
 
     /// Trashes like `fake_trash`, but refuses anything named "b…".
-    fn picky_trash(p: &Path) -> Result<Option<PathBuf>, String> {
-        if p.file_name().unwrap().to_string_lossy().starts_with('b') { Err("permission denied".into()) } else { fake_trash(p) }
+    fn picky_trash(p: &Path) -> Result<Option<PathBuf>, TrashError> {
+        if p.file_name().unwrap().to_string_lossy().starts_with('b') {
+            Err(TrashError::Failed("permission denied".into()))
+        } else {
+            fake_trash(p)
+        }
     }
 
     /// A partial undo keeps a record of only what didn't go back, so a retry never repeats the
@@ -2604,5 +2735,111 @@ mod tests {
         fs::File::options().write(true).open(d.join("b")).unwrap().set_modified(t).unwrap();
         undo_ok(u);
         assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "2");
+    }
+
+    // ---- permanent delete and disks with no trash --------------------------------------------
+
+    fn doomed(paths: &[PathBuf]) -> Vec<Doomed> {
+        paths.iter().map(|p| Doomed::now(p)).collect()
+    }
+
+    /// A folder goes with everything in it, a link inside it goes without its target, and
+    /// nothing goes on the undo stack.
+    #[test]
+    fn delete_removes_folders_whole_and_records_no_undo() {
+        let d = tmp("del");
+        fs::create_dir_all(d.join("dir/sub")).unwrap();
+        fs::write(d.join("dir/sub/x"), "x").unwrap();
+        fs::create_dir(d.join("outside")).unwrap();
+        fs::write(d.join("outside/keep"), "keep").unwrap();
+        let _ = make_symlink(&d.join("outside"), &d.join("dir/link"), true);
+        fs::write(d.join("a"), "a").unwrap();
+        let o = run_now(Op::Delete { items: doomed(&[d.join("a"), d.join("dir")]) });
+        assert!(o.errors.is_empty() && !o.cancelled, "{:?}", o.errors);
+        assert_eq!(o.removed, [d.join("a"), d.join("dir")]);
+        assert!(o.undo.is_none() && o.results.is_empty());
+        assert!(!d.join("a").exists() && !d.join("dir").exists());
+        assert_eq!(fs::read_to_string(d.join("outside/keep")).unwrap(), "keep");
+        assert_eq!(o.folders.iter().map(|(p, _)| p.as_path()).collect::<Vec<_>>(), [d.as_path()]);
+    }
+
+    /// Each item is checked right before it goes: one replaced (or removed) while an earlier one
+    /// was being deleted is left alone and said so; the rest go.
+    #[test]
+    fn delete_rechecks_each_item_right_before_it_goes() {
+        let d = tmp("del-race");
+        for n in ["a", "b", "c"] {
+            fs::write(d.join(n), n).unwrap();
+        }
+        let items = doomed(&[d.join("a"), d.join("b"), d.join("c")]);
+        // While "a" is being deleted, another app replaces "b" and removes "c".
+        let (b, c) = (d.join("b"), d.join("c"));
+        let mut once = false;
+        let hook: PathHook = Box::new(move |at: &Path| {
+            if at.ends_with("a") && !std::mem::replace(&mut once, true) {
+                // Made while the old one still exists, so it can't reuse its inode.
+                fs::write(b.with_extension("new"), "replacement").unwrap();
+                fs::rename(b.with_extension("new"), &b).unwrap();
+                // NTFS hands a file renamed onto a name the old one's creation time (tunnelling).
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::FileTimesExt;
+                    let later = SystemTime::now() + Duration::from_secs(3600);
+                    let f = fs::File::options().write(true).open(&b).unwrap();
+                    f.set_times(fs::FileTimes::new().set_created(later)).unwrap();
+                }
+                fs::remove_file(&c).unwrap();
+            }
+        });
+        let o = run_hooked(Op::Delete { items }, fake_trash, Hooks { before_act: Some(hook), ..Hooks::default() });
+        assert_eq!(o.removed, [d.join("a")]);
+        assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "replacement", "the replacement is never deleted");
+        assert_eq!(o.errors.len(), 2, "{:?}", o.errors);
+        assert!(o.errors[0].contains("“b” isn't the item you chose"), "{}", o.errors[0]);
+        assert!(o.errors[1].contains("“c” was already gone"), "{}", o.errors[1]);
+    }
+
+    /// Esc midway: what's gone stays gone (nothing can bring it back), the folder it stopped in
+    /// is said to be partly deleted, and later items are untouched.
+    #[test]
+    fn delete_cancelled_midway_keeps_what_it_removed() {
+        let d = tmp("del-cancel");
+        fs::create_dir(d.join("big")).unwrap();
+        for i in 0..20 {
+            fs::write(d.join(format!("big/{i:02}")), "x").unwrap();
+        }
+        fs::write(d.join("first"), "x").unwrap();
+        fs::write(d.join("later"), "x").unwrap();
+        let items = doomed(&[d.join("first"), d.join("big"), d.join("later")]);
+        let stop: PathTest = Box::new(|at: &Path| at.ends_with("big/10"));
+        let o = run_hooked(Op::Delete { items }, fake_trash, Hooks { cancel_at: Some(stop), ..Hooks::default() });
+        assert!(o.cancelled);
+        assert_eq!(o.removed, [d.join("first")]);
+        assert_eq!(o.partly.as_deref(), Some(d.join("big").as_path()));
+        let left = fs::read_dir(d.join("big")).unwrap().count();
+        assert!(left > 0 && left < 20, "{left} left");
+        assert!(d.join("later").exists() && !d.join("first").exists());
+    }
+
+    /// A trash of items some of which can't go to the trash: the others go (and can be undone);
+    /// the rest stay where they were, each with its identity, for one question.
+    #[test]
+    fn trash_leaves_what_its_disk_cant_take_for_one_question() {
+        let d = tmp("no-trash");
+        for n in ["a", "notrash-b", "c", "notrash-d"] {
+            fs::write(d.join(n), n).unwrap();
+        }
+        fs::create_dir(d.join("notrash-dir")).unwrap();
+        let sources: Vec<PathBuf> = ["a", "notrash-b", "c", "notrash-d", "notrash-dir"].iter().map(|n| d.join(n)).collect();
+        let o = run_now(Op::Trash { sources });
+        assert!(o.errors.is_empty(), "{:?}", o.errors);
+        assert_eq!(o.removed, [d.join("a"), d.join("c")]);
+        assert_eq!(o.no_trash, doomed(&[d.join("notrash-b"), d.join("notrash-d"), d.join("notrash-dir")]));
+        assert!(o.no_trash.iter().all(|x| x.path.exists() && x.id.is_some()));
+        assert!(o.no_trash[2].dir && !o.no_trash[0].dir);
+        assert_eq!(o.no_trash_why.as_deref(), Some("the test disk has no trash"));
+        assert_eq!(o.undo.as_ref().map(|u| u.steps.len()), Some(2), "the two that went can be undone");
+        undo_ok(o.undo.unwrap());
+        assert!(d.join("a").exists() && d.join("c").exists());
     }
 }

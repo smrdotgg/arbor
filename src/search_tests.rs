@@ -928,6 +928,34 @@ fn a_stale_result_never_acts_on_what_took_its_path() {
     assert_eq!(std::fs::read_to_string(d.join("hit-moved/hit.txt")).unwrap(), "contents of hit-dir/hit.txt");
 }
 
+/// Delete Permanently on a result replaced since the walk found it: it asks, and the button
+/// still leaves the newcomer alone (the delete checks each item's identity right before it goes);
+/// the row then drops, since it isn't the item found any more.
+#[test]
+fn delete_permanently_leaves_a_replaced_result_alone() {
+    let d = tree("replaced-delete", &["a/report.txt", "b/report.txt"]);
+    let mut s = state_in(&d);
+    search(&mut s, "report");
+    finish_walk(&mut s);
+    let target = d.join("a/report.txt");
+    replace(&target);
+    s.run(Cmd::SelectAll, &mut tx());
+    s.run(Cmd::Delete, &mut tx());
+    assert!(s.asking.as_ref().is_some_and(|a| a.body.contains("will be deleted permanently")));
+    s.answer(true, &mut tx());
+    finish_job(&mut s);
+    frames(&mut s, 4);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "SOMEONE ELSE'S FILE", "the newcomer was touched");
+    assert!(!d.join("b/report.txt").exists(), "the one still found was deleted");
+    assert!(
+        s.note
+            .as_deref()
+            .is_some_and(|n| n.contains("Deleted 1 of 2 items permanently") && n.contains("“report.txt” isn't the item you chose")),
+        "{:?}",
+        s.note
+    );
+}
+
 /// A result replaced by another app after the walk found it: every action that moves,
 /// renames or removes it refuses, saying why, and leaves the newcomer alone.
 #[test]

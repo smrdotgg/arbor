@@ -36,7 +36,8 @@ image-webp = { version = "0.2", default-features = false }
 # are ASCII only.
 regex-lite = "0.1"
 
-# Trash: NSFileManager on macOS, the shell's Recycle Bin on Windows (Linux follows the XDG spec).
+# Trash: NSFileManager on macOS, the shell's Recycle Bin on Windows through IFileOperation (COM, hence
+# Win32_System_Com), and Linux follows the XDG spec.
 # windows-sys also lists the drive letters, and does no-replace moves and copies and reads file ids.
 # No-replace renames and clones (renameat2, renamex_np, clonefile). Already in the lock file through Rune.
 [dev-dependencies]
@@ -52,7 +53,7 @@ libc = "0.2"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_Shell"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_Shell"] }
 
 [profile.dev.package."*"]
 opt-level = 2

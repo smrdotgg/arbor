@@ -205,6 +205,15 @@ impl Folder {
         self.targets().into_iter().map(|e| self.cwd.join(&e.os)).collect()
     }
 
+    /// The targets as items to delete permanently, each with the identity its listing (or the
+    /// search's walk) read, so the delete leaves alone anything put at its path since.
+    pub fn doomed(&self) -> Vec<crate::ops::Doomed> {
+        self.targets()
+            .into_iter()
+            .map(|e| crate::ops::Doomed { path: self.cwd.join(&e.os), id: e.id, dir: e.is_dir && !e.is_link })
+            .collect()
+    }
+
     /// Files a drag out of row `i` carries: the whole selection if the row is in it, else the row.
     pub fn drag_paths(&self, i: usize) -> Vec<PathBuf> {
         if self.is_selected(i) {

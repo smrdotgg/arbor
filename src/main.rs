@@ -9,6 +9,7 @@ mod batch;
 mod commands;
 mod config;
 mod confirm;
+mod delete;
 mod folder;
 mod fs;
 mod jump;
