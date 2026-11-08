@@ -450,6 +450,9 @@ fn palette_view(s: &State, l: Look) -> El {
         .color(l.t.text)
         .caret(l.accent, l.accent.alpha(0.35))
         .on_edit(|s: &mut State| s.palette_edit())
+        .on_input_change(|s: &mut State, tx| {
+            s.palette_follow(tx);
+        })
         .on_input_key(|s: &mut State, ev, tx| s.palette_field_key(ev, tx))
         .grow(1.0)
         .min_w(0.0);

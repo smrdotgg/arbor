@@ -26,6 +26,8 @@ pub struct Palette {
     sel_for: String,
     /// Why the chosen command can't run, shown under the list while the query is `sel_for`.
     why: Option<&'static str>,
+    /// The query the list was last scrolled for (`State::palette_follow`).
+    shown_for: String,
 }
 
 /// One row: a command that matches the query.
@@ -40,7 +42,7 @@ impl State {
     pub fn open_palette(&mut self) {
         let mut edit = TextEdit::new("");
         edit.focused = true;
-        self.palette = Some(Palette { edit, sel: 0, sel_for: String::new(), why: None });
+        self.palette = Some(Palette { edit, sel: 0, sel_for: String::new(), why: None, shown_for: String::new() });
     }
 
     pub fn close_palette(&mut self, tx: &mut Tx) {
@@ -77,6 +79,25 @@ impl State {
     pub fn palette_sel(&self, hits: &[Hit]) -> usize {
         let Some(p) = &self.palette else { return 0 };
         if p.sel_for == p.edit.text { p.sel.min(hits.len().saturating_sub(1)) } else { hits.iter().position(|h| h.enabled).unwrap_or(0) }
+    }
+
+    /// After the query changed (the field's `on_input_change`, or a key typed while the field
+    /// lost focus): the cursor has started over on the best match, so reveal its row. The list
+    /// would otherwise keep its scroll from the last query, and Enter could run a row out of
+    /// sight. Returns the row revealed (none when the query is what was last revealed).
+    pub fn palette_follow(&mut self, tx: &mut Tx) -> Option<Cmd> {
+        let p = self.palette.as_ref()?;
+        if p.shown_for == p.edit.text {
+            return None;
+        }
+        let hits = self.palette_hits();
+        let sel = self.palette_sel(&hits);
+        if let Some(p) = &mut self.palette {
+            p.shown_for.clone_from(&p.edit.text);
+        }
+        let cmd = hits.get(sel)?.cmd;
+        tx.scroll_into_view_in("palette-list", row_key(cmd));
+        Some(cmd)
     }
 
     /// Why the chosen command couldn't run, if that's still the latest news.
@@ -143,6 +164,7 @@ impl State {
         {
             p.edit.insert(t);
             p.edit.focused = true;
+            self.palette_follow(tx);
         }
         true
     }
@@ -181,4 +203,31 @@ impl State {
 /// A row's key in the palette's list.
 pub fn row_key(cmd: Cmd) -> String {
     format!("pc-{}", cmd.id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// After paging down, a new query starts the cursor over at the best match, and its row is
+    /// revealed; the same query again reveals nothing.
+    #[test]
+    fn a_new_query_reveals_the_cursor() {
+        let d = std::env::temp_dir().join(format!("arbor-palette-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let mut s = crate::app::tests::state_in(&d);
+        let mut tx = Tx::default();
+        s.open_palette();
+        for _ in 0..3 {
+            s.palette_move(PAGE as isize, &mut tx);
+        }
+        assert_eq!(s.palette_follow(&mut tx), None, "moving reveals its own row");
+        s.palette_edit().insert("s");
+        let hits = s.palette_hits();
+        let best = hits[s.palette_sel(&hits)].cmd;
+        assert_eq!(s.palette_follow(&mut tx), Some(best));
+        assert_eq!(s.palette_follow(&mut tx), None);
+        s.palette_edit().insert("o");
+        assert!(s.palette_follow(&mut tx).is_some());
+    }
 }

@@ -917,7 +917,7 @@ fn now() -> rune::LocalTime {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
@@ -989,7 +989,7 @@ mod tests {
         assert!(s.back.is_empty(), "the first folder isn't a navigation");
     }
 
-    fn state_in(d: &Path) -> State {
+    pub(crate) fn state_in(d: &Path) -> State {
         let dir = d.to_path_buf();
         State::boot(Booting::spawn(Duration::ZERO, move || settings_for(dir, Settings::default())), Duration::from_secs(5))
     }
