@@ -193,15 +193,18 @@ fn hr(l: Look) -> El {
 }
 
 fn sidebar(s: &State, l: Look, under_titlebar: bool) -> El {
-    let mut c = col().key("sidebar").w(SIDEBAR_W).h_full().fill(l.sidebar).pb(10.0).px(8.0).gap(1.0);
+    // A source list: each place is an option, the folder on screen the selected one.
+    let mut c = col().key("sidebar").role("listbox").label("Places").w(SIDEBAR_W).h_full().fill(l.sidebar).pb(10.0).px(8.0).gap(1.0);
     c = c.child(el().key("sidebar-drag").w_full().h(if under_titlebar { BAR_H } else { 10.0 }).window_drag());
-    c = c.child(text("Places").font(SMALL).color(l.t.text_secondary).px(8.0).pb(4.0));
+    c = c.child(text("Places").font(SMALL).color(l.t.text_secondary).px(8.0).pb(4.0).a11y_hidden());
     let cwd = &s.cur().cwd;
     for (i, (name, path)) in s.places.iter().enumerate() {
         let here = path == cwd;
         let p = path.clone();
         let mut item = row()
             .key(format!("place-{i}"))
+            .role("option")
+            .focus_selected(here)
             .h(26.0)
             .px(8.0)
             .center_y()
@@ -216,7 +219,8 @@ fn sidebar(s: &State, l: Look, under_titlebar: bool) -> El {
         if let Some(&cmd) = hint {
             let label = s.keymap.label(cmd);
             if !label.is_empty() {
-                item = item.child(text(label).font(SMALL).color(l.t.text_secondary.alpha(0.6)));
+                // Read as the place's shortcut, not as part of its name.
+                item = item.child(text(label.clone()).font(SMALL).color(l.t.text_secondary.alpha(0.6)).a11y_hidden()).shortcut_hint(label);
             }
         }
         item = if here { item.fill(l.t.control_off) } else { item.hover(l.t.hover) };
@@ -229,8 +233,16 @@ fn sidebar(s: &State, l: Look, under_titlebar: bool) -> El {
 /// first, so the command acts on the pane that was clicked.
 fn pane(s: &State, p: &Pane, c: Ctx) -> El {
     let (id, l, f) = (c.id, c.l, &p.f);
+    // A region, not the button its press handler would make it.
+    let region = match (c.split.is_some(), s.panes.first().is_some_and(|p| p.id() == id)) {
+        (false, _) => "Files",
+        (true, true) => "Left pane",
+        (true, false) => "Right pane",
+    };
     let mut col = col()
         .key(format!("pane-{id}"))
+        .role("region")
+        .label(region)
         .grow(1.0)
         .min_w(0.0)
         .h_full()
@@ -245,7 +257,7 @@ fn pane(s: &State, p: &Pane, c: Ctx) -> El {
     if let Some(search) = &f.search {
         col = col.child(hr(l)).child(search_bar(f, search, c));
     }
-    col = col.child(hr(l)).child(header(f, c)).child(hr(l)).child(list(f, c));
+    col = col.child(hr(l)).child(header(f, c)).child(hr(l)).child(list(f, c, active_row(s)));
     if c.split.is_some() {
         // The active pane: a thin accent line along its top (its selection is in the accent
         // colour too, the other pane's in grey).
@@ -274,6 +286,9 @@ fn pathbar(f: &Folder, l: Look, width: f32) -> El {
     let nav = |label: &'static str, key: &'static str, on: bool, cmd: Cmd| {
         text(label)
             .key(key)
+            .role("button")
+            .label(cmd.title())
+            .disabled(!on)
             .font(TextStyle::new(16.0, 500.0))
             .color(if on { l.t.text } else { l.t.text_secondary.alpha(0.4) })
             .w(24.0)
@@ -288,13 +303,14 @@ fn pathbar(f: &Folder, l: Look, width: f32) -> El {
                 }
             })
     };
-    let mut crumbs = row().key("crumbs").grow(1.0).min_w(0.0).center_y().gap(CRUMB_GAP);
+    let mut crumbs = row().key("crumbs").role("navigation").label("Path").grow(1.0).min_w(0.0).center_y().gap(CRUMB_GAP);
     let all = crumbs_of(&f.cwd);
     let n = all.len();
-    let sep = || text("›").font(CRUMB).color(l.t.text_secondary.alpha(0.5));
+    let sep = || text("›").font(CRUMB).color(l.t.text_secondary.alpha(0.5)).a11y_hidden();
     let crumb = |label: String, key: String, target: PathBuf, last: bool| {
         text(label)
             .key(key)
+            .role("link")
             .font(CRUMB)
             .color(if last { l.t.text } else { l.t.text_secondary })
             .px(CRUMB_PAD)
@@ -313,7 +329,9 @@ fn pathbar(f: &Folder, l: Look, width: f32) -> El {
     if let Shown::From { first, ellipsis: true } = shown {
         // The deepest hidden folder: one click up from the first crumb shown.
         let up = all[first - 1].target.clone();
-        crumbs = crumbs.child(crumb("…".into(), "crumb-more".into(), up.clone(), false).help(fs::pretty(&up))).child(sep());
+        crumbs = crumbs
+            .child(crumb("…".into(), "crumb-more".into(), up.clone(), false).label("Enclosing folders").help(fs::pretty(&up)))
+            .child(sep());
     }
     let first = match shown {
         Shown::All => 0,
@@ -327,6 +345,8 @@ fn pathbar(f: &Folder, l: Look, width: f32) -> El {
     }
     row()
         .key("pathbar")
+        .role("toolbar")
+        .label("Navigation")
         .w_full()
         .h(BAR_H)
         .window_drag()
@@ -504,12 +524,13 @@ fn tab_window(n: usize, active: usize, avail: f32) -> std::ops::Range<usize> {
 /// for how many are hidden on each side (a click shows the nearest of them); "+" stays.
 fn tabbar(p: &Pane, l: Look, width: f32) -> El {
     let id = p.id();
-    let mut bar = row().key("tabs").w_full().h(TABS_H).px(6.0).gap(TAB_GAP).center_y();
+    let mut bar = row().key("tabs").role("tablist").label("Tabs").w_full().h(TABS_H).px(6.0).gap(TAB_GAP).center_y();
     let n = p.tabs.len();
     let shown = tab_window(n, p.tab, width - TABBAR_CHROME);
     let more = |label: String, key: &'static str, to: usize, hidden: usize| {
         text(label)
             .key(key)
+            .role("button")
             .font(TAB)
             .color(l.t.text_secondary)
             .w(TAB_MORE)
@@ -535,6 +556,8 @@ fn tabbar(p: &Pane, l: Look, width: f32) -> El {
         let on = j == p.tab;
         let t = row()
             .key(format!("tab-{j}"))
+            .role("tab")
+            .focus_selected(on)
             .h(22.0)
             .px(10.0)
             .grow(1.0)
@@ -564,6 +587,9 @@ fn tabbar(p: &Pane, l: Look, width: f32) -> El {
     bar.child(
         text("+")
             .key("tab-new")
+            .role("button")
+            .label("New Tab")
+            .description("")
             .font(TextStyle::new(15.0, 500.0))
             .color(l.t.text_secondary)
             .w(22.0)
@@ -586,6 +612,8 @@ fn search_bar(f: &Folder, s: &Search, c: Ctx) -> El {
     let (id, l) = (c.id, c.l);
     let field = text_input(&s.edit, BODY)
         .key("search-field")
+        .role("searchbox")
+        .label("Search names")
         .single_line()
         .placeholder(format!("Search names in {}", tab_label(&f.cwd)), l.t.text_secondary.alpha(0.7))
         .color(l.t.text)
@@ -609,9 +637,9 @@ fn search_bar(f: &Folder, s: &Search, c: Ctx) -> El {
         .px(12.0)
         .gap(10.0)
         .center_y()
-        .child(text("Search").font(SMALL).color(l.accent))
+        .child(text("Search").font(SMALL).color(l.accent).a11y_hidden())
         .child(field)
-        .child(text(state).font(SMALL).color(l.t.text_secondary))
+        .child(text(state).font(SMALL).color(l.t.text_secondary).role("status"))
 }
 
 /// The search bar's height.
@@ -634,6 +662,9 @@ fn header(f: &Folder, c: Ctx) -> El {
         };
         let mut t = text(format!("{label}{arrow}"))
             .key(format!("sort-{label}"))
+            .role("columnheader")
+            .label(label)
+            .sorted(on.then_some(!f.sort.desc))
             .font(SMALL)
             .color(if on { l.t.text } else { l.t.text_secondary })
             .align(align)
@@ -653,7 +684,7 @@ fn header(f: &Folder, c: Ctx) -> El {
     let mut h =
         row().key("header").w_full().h(24.0).px(12.0).gap(12.0).center_y().child(col_head("Name", SortKey::Name, None, Align::Start));
     if f.searching() {
-        let head = text("Folder").key("head-folder").font(SMALL).color(l.t.text_secondary).min_w(0.0);
+        let head = text("Folder").key("head-folder").role("columnheader").font(SMALL).color(l.t.text_secondary).min_w(0.0);
         h = h.child(match c.folder_w() {
             Some(w) => head.w(w),
             None => head.grow(FOLDER_GROW),
@@ -668,12 +699,28 @@ fn header(f: &Folder, c: Ctx) -> El {
     h
 }
 
-fn list(f: &Folder, c: Ctx) -> El {
+/// The active pane's cursor row, as a key path any list can name for assistive technology
+/// (`El::active_descendant`): the row a screen reader reads while either list keeps focus, so
+/// it follows the keys (Tab switches panes without moving Rune's focus).
+fn active_row(s: &State) -> Option<String> {
+    let f = s.cur();
+    f.selected().map(|e| format!("{}/{}", f.rows_key(), e.key))
+}
+
+fn list(f: &Folder, c: Ctx, active: Option<String>) -> El {
     let id = c.id;
     // The list itself is a drop target for its folder, and right-clicking empty space opens
-    // the menu with Paste and New Folder.
-    let base = col()
+    // the menu with Paste and New Folder. For assistive technology it's a list box of the
+    // folder's items, the selected ones selected; it can hold keyboard focus (a click or Tab
+    // puts it there), and then hands every key to the window's own handler, so keys work the
+    // same focused or not. Its selection shows focus, as in AppKit's tables: no ring.
+    let mut base = col()
         .key(f.list_key())
+        .role("listbox")
+        .label(format!("Files in {}", tab_label(&f.cwd)))
+        .focusable(true)
+        .no_focus_ring()
+        .on_key(|s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx| crate::timing::key(s, ev, tx))
         .grow(1.0)
         .min_h(0.0)
         .w_full()
@@ -694,6 +741,9 @@ fn list(f: &Folder, c: Ctx) -> El {
                 s.context_menu(None, press, tx);
             }
         });
+    if let Some(row) = active {
+        base = base.active_descendant(row);
+    }
     if f.visible.is_empty() {
         // A tab whose fresh read hasn't landed yet: its path, and an empty list until it does.
         let msg = if f.is_loading() {
@@ -773,7 +823,12 @@ fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
             text(name).font(BODY).color(name_color).truncate_middle().grow(1.0).min_w(0.0)
         }
     };
+    // For assistive technology an option of the list box, named from its cells (name, kind,
+    // size, modified: what's on screen, at no cost until a reader asks), its place in the
+    // folder ("3 of 120") from the virtual list, and selected when it is.
     let mut r = row()
+        .role("option")
+        .focus_selected(selected)
         .w_full()
         .h(ROW_H)
         .px(12.0)
@@ -823,7 +878,10 @@ fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
                 .min_w(0.0)
                 .gap(6.0)
                 .center_y()
-                .child(text(glyph).font(BODY).color(if selected && c.focused { fg } else { l.accent }).w(10.0))
+                .child(folder_mark(
+                    text(glyph).font(BODY).color(if selected && c.focused { fg } else { l.accent }).w(10.0),
+                    e.is_dir && !cols.kind,
+                ))
                 .child(name_el),
         );
     if renaming.is_none() {
@@ -888,7 +946,9 @@ fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
     } else if cols.kind {
         r = r.child(text(fs::kind(e).to_string()).font(NUM).color(dim).truncate().w(KIND_W));
     }
-    r = r.child(text(if e.is_dir { "—".to_string() } else { fs::fmt_size(e.size) }).font(NUM).color(dim).align(Align::End).w(SIZE_W));
+    let size = text(if e.is_dir { "—".to_string() } else { fs::fmt_size(e.size) }).font(NUM).color(dim).align(Align::End).w(SIZE_W);
+    // A folder's "—" says nothing to a reader.
+    r = r.child(if e.is_dir { size.a11y_hidden() } else { size });
     if cols.date {
         r = r.child(text(fs::fmt_time(e.mtime_ms, f.now)).font(NUM).color(dim).w(DATE_W));
     }
@@ -908,19 +968,35 @@ fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
     r
 }
 
+/// The ▸ before a folder's name: read as "Folder" only while the Kind column (which says so)
+/// is hidden; otherwise left out of what a reader hears.
+fn folder_mark(glyph: El, say: bool) -> El {
+    if say { glyph.label("Folder") } else { glyph.a11y_hidden() }
+}
+
 fn status(s: &State, l: Look) -> El {
     let f = s.cur();
     let mut bar = row().key("status").w_full().h(28.0).px(12.0).gap(10.0).center_y();
     if !f.filter.is_empty() {
         let label = if f.path_mode() { "Go to" } else { "Filter" };
-        bar = bar
-            .child(text(label).font(SMALL).color(l.accent))
-            .child(text(format!("{}▏", f.filter)).font(MONO).color(l.t.text).truncate_head().min_w(0.0).shrink());
+        bar = bar.child(text(label).font(SMALL).color(l.accent).a11y_hidden()).child(
+            text(format!("{}▏", f.filter))
+                .key("filter")
+                .label(format!("{label}: {}", f.filter))
+                .font(MONO)
+                .color(l.t.text)
+                .truncate_head()
+                .min_w(0.0)
+                .shrink(),
+        );
     }
+    // Progress isn't announced (it changes many times a second); the result is: a note is a
+    // live region, polite, or assertive for an error (`State::alert`).
     if let Some(job) = s.job_status() {
-        bar = bar.child(text(job).font(NUM).color(l.accent).truncate().min_w(0.0).shrink());
+        bar = bar.child(text(job).key("progress").font(NUM).color(l.accent).truncate().min_w(0.0).shrink());
     } else if let Some(n) = &s.note {
-        bar = bar.child(text(n.clone()).font(SMALL).color(l.t.text_secondary).truncate().min_w(0.0).shrink());
+        let role = if s.alert.as_ref() == Some(n) { "alert" } else { "status" };
+        bar = bar.child(text(n.clone()).key("note").role(role).font(SMALL).color(l.t.text_secondary).truncate().min_w(0.0).shrink());
     }
     bar = bar.child(el().grow(1.0));
     if f.is_loading() {
@@ -930,7 +1006,7 @@ fn status(s: &State, l: Look) -> El {
         let picked = if f.marked.len() > 1 { format!("{} selected · ", f.marked.len()) } else { String::new() };
         let hint = if s.show_hidden { "hidden shown" } else { "" };
         return bar
-            .child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)))
+            .child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)).a11y_hidden())
             .child(text(format!("{picked}{line}")).font(NUM).color(l.t.text_secondary).truncate().min_w(0.0).shrink());
     }
     let hidden = f.entries.len() - f.entries.iter().filter(|e| !e.hidden).count();
@@ -941,7 +1017,7 @@ fn status(s: &State, l: Look) -> El {
     };
     let picked = if f.marked.len() > 1 { format!("{} selected · ", f.marked.len()) } else { String::new() };
     let hint = if s.show_hidden { "hidden shown" } else { "" };
-    bar.child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)))
+    bar.child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)).a11y_hidden())
         .child(text(format!("{picked}{count}")).font(NUM).color(l.t.text_secondary))
 }
 
@@ -1005,7 +1081,7 @@ const LINE_PAD: f32 = 12.0;
 /// its contents when the worker has them (see `preview.rs`). `width`: docked beside one pane;
 /// `None` takes the other pane's place.
 fn preview_panel(s: &State, p: &Preview, l: Look, cx: &mut Cx<State>, width: Option<f32>) -> El {
-    let mut panel = col().key("preview").h_full().min_w(0.0).fill(l.t.bg);
+    let mut panel = col().key("preview").role("complementary").label("Preview").h_full().min_w(0.0).fill(l.t.bg);
     panel = match width {
         Some(w) => panel.w(w),
         None => panel.grow(1.0),
@@ -1033,12 +1109,18 @@ fn preview_panel(s: &State, p: &Preview, l: Look, cx: &mut Cx<State>, width: Opt
         meta.push(fs::fmt_size(t.size));
     }
     meta.push(fs::fmt_time(t.mtime_ms, s.cur().now));
-    let mut title = row()
-        .gap(8.0)
-        .center_y()
-        .child(text(t.name.clone()).font(TextStyle::new(13.0, 600.0)).color(l.t.text).truncate_middle().grow(1.0).min_w(0.0));
+    let mut title = row().gap(8.0).center_y().child(
+        text(t.name.clone())
+            .role("heading")
+            .level(2)
+            .font(TextStyle::new(13.0, 600.0))
+            .color(l.t.text)
+            .truncate_middle()
+            .grow(1.0)
+            .min_w(0.0),
+    );
     if p.is_loading() {
-        title = title.child(text("Loading…").font(SMALL).color(l.t.text_secondary));
+        title = title.child(text("Loading…").font(SMALL).color(l.t.text_secondary).role("status"));
     }
     let mut head = col()
         .key("preview-head")
@@ -1068,7 +1150,14 @@ fn preview_panel(s: &State, p: &Preview, l: Look, cx: &mut Cx<State>, width: Opt
             let (iw, ih) = (img.shown[0] as f32 / scale, img.shown[1] as f32 / scale);
             let own = (img.width as f32 / scale).max(iw);
             let k = (bw / iw).min(bh / ih).min(own / iw);
-            body.center().child(el().key("preview-image").w((iw * k).floor().max(1.0)).h((ih * k).floor().max(1.0)).pixels(&p.pixels))
+            body.center().child(
+                el().key("preview-image")
+                    .role("img")
+                    .label(t.name.clone())
+                    .w((iw * k).floor().max(1.0))
+                    .h((ih * k).floor().max(1.0))
+                    .pixels(&p.pixels),
+            )
         }
         Body::Text(t) => {
             let mut b = body;
@@ -1097,11 +1186,61 @@ fn preview_panel(s: &State, p: &Preview, l: Look, cx: &mut Cx<State>, width: Opt
                     },
                 )
                 .virtual_rows_version(s.preview_lands);
-            // A new file starts at the top.
-            b.child(col().key(format!("preview-text-{}", s.preview_lands)).grow(1.0).min_h(0.0).w_full().scroll_xy().child(rows))
+            // A new file starts at the top. Tab reaches it (it owns its keys, so it's a Tab stop
+            // of its own), and then ↑↓, ←→, Page Up/Down, Home and End scroll it; anything else
+            // goes on to the window. Rune draws its focus ring.
+            let (lands, key) = (s.preview_lands, format!("preview-text-{}", s.preview_lands));
+            let scrolled = s.preview_scroll.clone();
+            let keys = key.clone();
+            b.child(
+                col()
+                    .key(key)
+                    .role("document")
+                    .label("Contents")
+                    .focusable(true)
+                    .on_key(move |_: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx| {
+                        // Where this file's text is scrolled to (a new one starts at the top).
+                        let (of, at) = scrolled.get();
+                        preview_scroll_key(&keys, if of == lands { at } else { [0.0; 2] }, ev, tx)
+                    })
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .w_full()
+                    .scroll_xy()
+                    .on_scroll_offset({
+                        let at = s.preview_scroll.clone();
+                        move |pos: ScrollPos| at.set((lands, pos.offset))
+                    })
+                    .child(rows),
+            )
         }
     };
     panel.child(head).child(hr(l)).child(body)
+}
+
+/// The text preview's keys while it has focus: arrows scroll three lines (or columns), Page
+/// Up/Down a page, Home and End to the ends. `at` is where it's scrolled to now.
+fn preview_scroll_key(key: &str, at: [f32; 2], ev: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
+    use rune::Key;
+    let m = ev.mods;
+    if m.cmd || m.ctrl || m.alt || m.shift {
+        return false;
+    }
+    tx.instant();
+    let step = 3.0 * LINE_H;
+    let [x, y] = at;
+    match ev.key {
+        Key::Up => tx.scroll_to_instant(key, x, (y - step).max(0.0)),
+        Key::Down => tx.scroll_to_instant(key, x, y + step),
+        Key::Left => tx.scroll_to_instant(key, (x - step).max(0.0), y),
+        Key::Right => tx.scroll_to_instant(key, x + step, y),
+        Key::PageUp => tx.scroll_page(key, -1),
+        Key::PageDown => tx.scroll_page(key, 1),
+        Key::Home => tx.scroll_to_instant(key, 0.0, 0.0),
+        Key::End => tx.scroll_to_instant(key, x, f32::MAX),
+        _ => return false,
+    }
+    true
 }
 
 /// Rows the palette shows before it scrolls.
@@ -1116,6 +1255,8 @@ fn palette_view(s: &State, l: Look) -> El {
     let sel = s.palette_sel(&hits);
     let field = text_input(&p.edit, TextStyle::new(15.0, 400.0))
         .key("palette-field")
+        .label("Command")
+        .active_descendant(hits.get(sel).map(|h| palette::row_key(h.cmd)).unwrap_or_default())
         .single_line()
         .placeholder("Type a command", l.t.text_secondary.alpha(0.7))
         .color(l.t.text)
@@ -1131,8 +1272,14 @@ fn palette_view(s: &State, l: Look) -> El {
     let count = hits.len();
     let hits = std::rc::Rc::new(hits);
     let keys = hits.clone();
-    let rows =
-        col().key("palette-rows").w_full().px(6.0).growth(GrowthSpec { spring: rune::GROWTH, edge: rune::edge::NO_MASK }).virtual_rows(
+    let rows = col()
+        .key("palette-rows")
+        .role("listbox")
+        .label("Commands")
+        .w_full()
+        .px(6.0)
+        .growth(GrowthSpec { spring: rune::GROWTH, edge: rune::edge::NO_MASK })
+        .virtual_rows(
             count,
             PALETTE_ROW_H,
             move |_: &State, i| Cow::Owned(palette::row_key(keys[i].cmd)),
@@ -1146,6 +1293,7 @@ fn palette_view(s: &State, l: Look) -> El {
     };
     let mut panel = col()
         .key("palette")
+        .label("Command Palette")
         .w_full()
         .max_w(560.0)
         .fill(l.t.card)
@@ -1157,7 +1305,8 @@ fn palette_view(s: &State, l: Look) -> El {
         .child(hr(l))
         .child(list);
     if let Some(why) = s.palette_why() {
-        panel = panel.child(hr(l)).child(text(why).font(SMALL).color(l.t.text_secondary).px(16.0).py(7.0));
+        panel =
+            panel.child(hr(l)).child(text(why).key("palette-why").role("status").font(SMALL).color(l.t.text_secondary).px(16.0).py(7.0));
     }
     col().key("palette-layer").pin(Some(0.0), Some(0.0), Some(0.0), None).items_center().px(20.0).pt(BAR_H + 6.0).child(panel)
 }
@@ -1173,9 +1322,10 @@ fn overlay_layer(key: &'static str, panel: El) -> El {
 const OVERLAY_SHADOW: (f32, f32) = (4.0, 10.0);
 
 /// An overlay box's frame: a card, modal (a click outside runs `close`).
-fn overlay_card(key: &'static str, max_w: f32, l: Look, close: fn(&mut State)) -> El {
+fn overlay_card(key: &'static str, name: &'static str, max_w: f32, l: Look, close: fn(&mut State)) -> El {
     col()
         .key(key)
+        .label(name)
         .w_full()
         .max_w(max_w)
         .fill(l.t.card)
@@ -1190,6 +1340,8 @@ fn jump_view(s: &State, l: Look, card_w: f32) -> El {
     let Some(j) = &s.jump else { return el() };
     let field = text_input(&j.edit, TextStyle::new(15.0, 400.0))
         .key("jump-field")
+        .label("Folder")
+        .active_descendant(if j.hits.is_empty() { String::new() } else { crate::jump::row_key(j.sel()) })
         .single_line()
         .placeholder("Jump to a folder you've been to, or type a path", l.t.text_secondary.alpha(0.7))
         .color(l.t.text)
@@ -1202,7 +1354,8 @@ fn jump_view(s: &State, l: Look, card_w: f32) -> El {
     let count = j.hits.len();
     let sel = j.sel();
     let path_mode = j.path_mode();
-    let msg = |m: &str| col().key("jump-list").child(text(m.to_string()).font(BODY).color(l.t.text_secondary).px(16.0).py(10.0));
+    let msg =
+        |m: &str| col().key("jump-list").child(text(m.to_string()).role("status").font(BODY).color(l.t.text_secondary).px(16.0).py(10.0));
     let list = if count == 0 && j.loading {
         msg("Loading history…")
     } else if count == 0 && s.history.agg.as_ref().is_none_or(|a| a.is_empty()) {
@@ -1213,6 +1366,8 @@ fn jump_view(s: &State, l: Look, card_w: f32) -> El {
         // Only the rows in view are built.
         let rows = col()
             .key("jump-rows")
+            .role("listbox")
+            .label("Folders")
             .w_full()
             .px(6.0)
             .growth(GrowthSpec { spring: rune::GROWTH, edge: rune::edge::NO_MASK })
@@ -1230,7 +1385,7 @@ fn jump_view(s: &State, l: Look, card_w: f32) -> El {
         let h = (count as f32).min(PALETTE_ROWS) * PALETTE_ROW_H + 8.0;
         col().key("jump-list").w_full().h(h).py(4.0).scroll(ScrollSpec { stick_bottom: false }).child(rows)
     };
-    let panel = overlay_card("jump", 640.0, l, |s: &mut State| s.jump = None)
+    let panel = overlay_card("jump", "Jump to Folder", 640.0, l, |s: &mut State| s.jump = None)
         .child(row().h(44.0).px(14.0).center_y().child(field))
         .child(hr(l))
         .child(list);
@@ -1249,7 +1404,11 @@ fn jump_row(h: &crate::jump::Hit, words: &[Vec<char>], i: usize, on: bool, typed
     let (shown, cut) = fit_path(&h.shown, room);
     let spans: Vec<rune::text::Span> =
         shift_marks(&h.marks(words), cut).into_iter().map(|(a, b)| rune::text::Span::new(a, b).bold().color(mark)).collect();
+    // Read whole (the path as the history has it), not as cut to fit.
     let mut r = row()
+        .role("option")
+        .focus_selected(on)
+        .label(if typed { format!("Go to {}", h.shown) } else { h.shown.to_string() })
         .w_full()
         .h(PALETTE_ROW_H)
         .px(10.0)
@@ -1377,12 +1536,15 @@ fn menu_view(m: &crate::menu::Menu, size: Option<[f32; 2]>, l: Look) -> El {
         .radius(7.0)
         .shadow(4.0, 14.0, l.t.shadow)
         .modal(true, |s: &mut State| s.close_menu())
+        .role("menu")
+        .label("Actions")
+        .active_descendant(m.sel.map(|i| format!("menu-{i}")).unwrap_or_default())
         .focusable(true)
         .on_key(|s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx| s.menu_key(ev, tx))
         .no_focus_ring();
     for (i, it) in m.items.iter().enumerate() {
         card = card.child(match it {
-            Item::Separator => el().w_full().h(MENU_SEP_H).py(4.0).child(el().w_full().h(1.0).fill(l.t.separator)),
+            Item::Separator => el().w_full().h(MENU_SEP_H).py(4.0).a11y_hidden().child(el().w_full().h(1.0).fill(l.t.separator)),
             Item::Cmd { title, on, keys, .. } => {
                 let hi = m.sel == Some(i);
                 let (fg, dim) = match (hi, *on) {
@@ -1392,6 +1554,10 @@ fn menu_view(m: &crate::menu::Menu, size: Option<[f32; 2]>, l: Look) -> El {
                 };
                 let r = row()
                     .key(format!("menu-{i}"))
+                    .role("menuitem")
+                    .label(title.clone())
+                    .disabled(!*on)
+                    .shortcut_hint(keys.clone())
                     .w_full()
                     .h(MENU_ROW_H)
                     .px(10.0)
@@ -1423,6 +1589,7 @@ fn confirm_view(a: &crate::confirm::Ask, l: Look) -> El {
         // its line at the top of it, a few points above the middle.
         let b = row()
             .key(key)
+            .role("button")
             .px(14.0)
             .h(28.0)
             .center_y()
@@ -1443,8 +1610,15 @@ fn confirm_view(a: &crate::confirm::Ask, l: Look) -> El {
     };
     // A focusable card that owns its keys: Rune focuses it when the modal opens, and its keys
     // come before Rune's focus navigation, so Tab, ← → and Enter are the dialog's
-    // (`State::ask_key`), and the buttons aren't Tab stops of their own.
-    let panel = overlay_card("confirm", 420.0, l, |s: &mut State| s.asking = None)
+    // (`State::ask_key`), and the buttons aren't Tab stops of their own. For assistive
+    // technology it's an alert dialog named by its title and described by what it says, and
+    // the button with the dialog's focus is its active descendant, so a reader says which
+    // one Enter presses.
+    let panel = overlay_card("confirm", "", 420.0, l, |s: &mut State| s.asking = None)
+        .role("alertdialog")
+        .label(a.title.clone())
+        .description(a.body.clone())
+        .active_descendant(if a.focus == Button::Action { "confirm-action" } else { "confirm-cancel" })
         .focusable(true)
         .on_key(|s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx| s.ask_key(ev, tx))
         .no_focus_ring()
@@ -1471,6 +1645,7 @@ fn pick_view(s: &State, l: Look) -> El {
     let Some(p) = &s.pick else { return el() };
     let field = text_input(&p.edit, TextStyle::new(15.0, 400.0))
         .key("pick-field")
+        .label("Pattern")
         .single_line()
         .placeholder("Select by pattern: *.jpg, IMG_*, *.{png,jpg}", l.t.text_secondary.alpha(0.7))
         .color(l.t.text)
@@ -1499,14 +1674,16 @@ fn pick_view(s: &State, l: Look) -> El {
         .px(16.0)
         .gap(12.0)
         .center_y()
-        .child(text(count).font(NUM).color(color).truncate().grow(1.0).min_w(0.0))
+        .child(text(count).key("pick-count").role("status").font(NUM).color(color).truncate().grow(1.0).min_w(0.0))
         .child(text(hint).font(SMALL).color(l.t.text_secondary))
-        .child(text(case).font(SMALL).color(l.t.text_secondary.alpha(0.7)).help(if case == "Aa" {
-            "Capitals count (select.case_sensitive)"
-        } else {
-            "Capitals don't count (select.case_sensitive)"
-        }));
-    let panel = overlay_card("pick", 520.0, l, |s: &mut State| s.pick = None)
+        .child(
+            text(case)
+                .label(if case == "Aa" { "Capitals count" } else { "Capitals don't count" })
+                .font(SMALL)
+                .color(l.t.text_secondary.alpha(0.7))
+                .help(if case == "Aa" { "Capitals count (select.case_sensitive)" } else { "Capitals don't count (select.case_sensitive)" }),
+        );
+    let panel = overlay_card("pick", "Select by Pattern", 520.0, l, |s: &mut State| s.pick = None)
         .child(row().h(44.0).px(14.0).center_y().child(field))
         .child(hr(l))
         .child(foot);
@@ -1527,9 +1704,10 @@ fn red() -> Color {
 /// kept for next time).
 fn batch_view(s: &State, b: &crate::batch::BatchBox, l: Look) -> El {
     use crate::batch::Field;
-    let field = |f: Field, edit: &rune::TextEdit, key: &'static str, hint: &str, w: Option<f32>| {
+    let field = |f: Field, edit: &rune::TextEdit, key: &'static str, name: &'static str, hint: &str, w: Option<f32>| {
         let input = text_input(edit, BODY)
             .key(key)
+            .label(name)
             .single_line()
             .placeholder(hint.to_string(), l.t.text_secondary.alpha(0.6))
             .color(l.t.text)
@@ -1555,23 +1733,28 @@ fn batch_view(s: &State, b: &crate::batch::BatchBox, l: Look) -> El {
             None => r.grow(1.0).min_w(0.0),
         }
     };
-    let label = |t: &'static str| text(t).font(SMALL).color(l.t.text_secondary).w(BATCH_LABEL_W);
-    let toggle = |t: &'static str, key: &'static str, on: bool, help: &'static str, flip: fn(&mut crate::batch::BatchBox)| {
-        let r = row()
-            .key(key)
-            .h(26.0)
-            .px(8.0)
-            .center()
-            .radius(5.0)
-            .cursor(Cursor::Pointer)
-            .help(help)
-            .on_press_tx(move |s: &mut State, tx| {
-                tx.instant();
-                s.batch_set(flip);
-            })
-            .child(text(t).font(TextStyle::new(12.0, 600.0)).color(if on { Color::WHITE } else { l.t.text_secondary }));
-        if on { r.fill(l.accent) } else { r.fill(l.t.control_off).hover(l.t.hover) }
-    };
+    // The fields carry their own names; these labels would only say them again.
+    let label = |t: &'static str| text(t).font(SMALL).color(l.t.text_secondary).w(BATCH_LABEL_W).a11y_hidden();
+    let toggle =
+        |t: &'static str, key: &'static str, name: &'static str, on: bool, help: &'static str, flip: fn(&mut crate::batch::BatchBox)| {
+            let r = row()
+                .key(key)
+                .role("switch")
+                .label(name)
+                .checked(on)
+                .h(26.0)
+                .px(8.0)
+                .center()
+                .radius(5.0)
+                .cursor(Cursor::Pointer)
+                .help(help)
+                .on_press_tx(move |s: &mut State, tx| {
+                    tx.instant();
+                    s.batch_set(flip);
+                })
+                .child(text(t).font(TextStyle::new(12.0, 600.0)).color(if on { Color::WHITE } else { l.t.text_secondary }));
+            if on { r.fill(l.accent) } else { r.fill(l.t.control_off).hover(l.t.hover) }
+        };
     let find = row()
         .w_full()
         .gap(8.0)
@@ -1581,23 +1764,29 @@ fn batch_view(s: &State, b: &crate::batch::BatchBox, l: Look) -> El {
             Field::Find,
             &b.find,
             "batch-find",
+            "Find",
             if b.regex { "Regular expression, e.g. ^IMG_(\\d+)" } else { "Text to find (empty: replace the whole name)" },
             None,
         ))
-        .child(toggle(".*", "batch-regex", b.regex, "Regular expression (⌥R)", |b| b.regex = !b.regex))
-        .child(toggle("Aa", "batch-case", b.case_sensitive, "Match capitals (⌥C)", |b| b.case_sensitive = !b.case_sensitive));
+        .child(toggle(".*", "batch-regex", "Regular expression", b.regex, "Regular expression (⌥R)", |b| b.regex = !b.regex))
+        .child(toggle("Aa", "batch-case", "Match capitals", b.case_sensitive, "Match capitals (⌥C)", |b| {
+            b.case_sensitive = !b.case_sensitive
+        }));
     let replace = row().w_full().gap(8.0).center_y().child(label("Replace")).child(field(
         Field::Replace,
         &b.replace,
         "batch-replace",
+        "Replace with",
         if b.regex { "With: text, $1, {n}, {n:3}, {name}, {ext}, {parent}" } else { "With: text, {n}, {n:3}, {name}, {ext}, {parent}" },
         None,
     ));
-    let mut cases = row().key("batch-cases").gap(2.0).px(2.0).py(2.0).radius(6.0).fill(l.t.control_off);
+    let mut cases = row().key("batch-cases").role("radiogroup").label("Case").gap(2.0).px(2.0).py(2.0).radius(6.0).fill(l.t.control_off);
     for c in crate::rename::CaseMode::ALL {
         let on = b.case == c;
         let pill = row()
             .key(format!("case-{}", c.label()))
+            .role("radio")
+            .focus_selected(on)
             .h(22.0)
             .px(8.0)
             .center()
@@ -1615,6 +1804,9 @@ fn batch_view(s: &State, b: &crate::batch::BatchBox, l: Look) -> El {
     let check = if ext_on { check.fill(l.accent).child(text("✓").font(TextStyle::new(10.0, 700.0)).color(Color::WHITE)) } else { check };
     let include_ext = row()
         .key("batch-ext")
+        .role("checkbox")
+        .label("Include extension")
+        .checked(ext_on)
         .gap(6.0)
         .center_y()
         .cursor(Cursor::Pointer)
@@ -1630,12 +1822,12 @@ fn batch_view(s: &State, b: &crate::batch::BatchBox, l: Look) -> El {
         .gap(8.0)
         .center_y()
         .child(label("Number"))
-        .child(text("Start").font(SMALL).color(l.t.text_secondary))
-        .child(field(Field::Start, &b.start, "batch-start", "1", Some(64.0)))
-        .child(text("Step").font(SMALL).color(l.t.text_secondary))
-        .child(field(Field::Step, &b.step, "batch-step", "1", Some(52.0)))
+        .child(text("Start").font(SMALL).color(l.t.text_secondary).a11y_hidden())
+        .child(field(Field::Start, &b.start, "batch-start", "Number start", "1", Some(64.0)))
+        .child(text("Step").font(SMALL).color(l.t.text_secondary).a11y_hidden())
+        .child(field(Field::Step, &b.step, "batch-step", "Number step", "1", Some(52.0)))
         .child(el().w(10.0))
-        .child(text("Case").font(SMALL).color(l.t.text_secondary))
+        .child(text("Case").font(SMALL).color(l.t.text_secondary).a11y_hidden())
         .child(cases)
         .child(el().grow(1.0))
         .child(include_ext);
@@ -1644,6 +1836,8 @@ fn batch_view(s: &State, b: &crate::batch::BatchBox, l: Look) -> El {
     let count = b.items.len();
     let rows = col()
         .key("batch-rows")
+        .role("list")
+        .label("New names")
         .w_full()
         .growth(GrowthSpec { spring: rune::GROWTH, edge: rune::edge::NO_MASK })
         .virtual_rows(
@@ -1687,6 +1881,8 @@ fn batch_view(s: &State, b: &crate::batch::BatchBox, l: Look) -> El {
     let button = |label: String, key: &'static str, yes: bool, on: bool| {
         let r = row()
             .key(key)
+            .role("button")
+            .disabled(!on)
             .h(28.0)
             .px(14.0)
             .center_y()
@@ -1721,7 +1917,7 @@ fn batch_view(s: &State, b: &crate::batch::BatchBox, l: Look) -> El {
         .py(10.0)
         .gap(10.0)
         .center_y()
-        .child(text(summary).font(NUM).color(color).truncate().grow(1.0).min_w(0.0))
+        .child(text(summary).key("batch-summary").role("status").font(NUM).color(color).truncate().grow(1.0).min_w(0.0))
         .child(
             text(match &blocked {
                 Some(why) if b.error.is_none() && b.plan.problems == 0 && b.plan.changes > 0 => why.clone(),
@@ -1732,8 +1928,12 @@ fn batch_view(s: &State, b: &crate::batch::BatchBox, l: Look) -> El {
         )
         .child(button("Cancel".into(), "batch-cancel", false, true))
         .child(button(rename_label, "batch-apply", true, blocked.is_none()));
-    let title = row().w_full().px(16.0).pt(12.0).child(text("Batch Rename").font(TextStyle::new(14.0, 600.0)).color(l.t.text));
-    let panel = overlay_card("batch", 820.0, l, |s: &mut State| {
+    let title = row()
+        .w_full()
+        .px(16.0)
+        .pt(12.0)
+        .child(text("Batch Rename").role("heading").level(1).font(TextStyle::new(14.0, 600.0)).color(l.t.text));
+    let panel = overlay_card("batch", "Batch Rename", 820.0, l, |s: &mut State| {
         if let Some(b) = s.batch.take() {
             s.batch_rule = b.rule();
         }
@@ -1774,6 +1974,7 @@ fn batch_row(b: &crate::batch::BatchBox, i: usize, l: Look) -> El {
         _ => {}
     }
     let r = row()
+        .role("listitem")
         .w_full()
         .h(ROW_H)
         .px(16.0)
@@ -1781,7 +1982,7 @@ fn batch_row(b: &crate::batch::BatchBox, i: usize, l: Look) -> El {
         .center_y()
         .help(fs::pretty(&b.paths[i]))
         .child(text(item.name.clone()).font(BODY).color(old_c).truncate_middle().grow(1.0).min_w(0.0))
-        .child(text("→").font(BODY).color(dim).w(14.0))
+        .child(text("→").label("becomes").font(BODY).color(dim).w(14.0))
         .child(new_col);
     if matches!(status, Status::Problem(_)) {
         r.fill(red().alpha(0.10))
@@ -1803,6 +2004,9 @@ fn palette_row(h: &palette::Hit, on: bool, l: Look) -> El {
     };
     let cmd = h.cmd;
     let r = row()
+        .role("option")
+        .focus_selected(on)
+        .disabled(!h.enabled)
         .w_full()
         .h(PALETTE_ROW_H)
         .px(10.0)
@@ -1812,7 +2016,8 @@ fn palette_row(h: &palette::Hit, on: bool, l: Look) -> El {
         .cursor(Cursor::Pointer)
         .on_press_tx(move |s: &mut State, tx| s.palette_pick(cmd, tx))
         .child(text(h.title.to_string()).font(BODY).color(fg).truncate().grow(1.0).min_w(0.0))
-        .child(text(h.keys.clone()).font(NUM).color(dim));
+        .child(text(h.keys.clone()).font(NUM).color(dim).a11y_hidden())
+        .shortcut_hint(h.keys.clone());
     if on && h.enabled {
         r.fill(l.accent)
     } else if on {

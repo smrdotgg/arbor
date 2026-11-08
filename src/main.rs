@@ -7,6 +7,8 @@
 // keep the console for logs).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(test)]
+mod a11y_tests;
 mod actions;
 mod app;
 mod batch;

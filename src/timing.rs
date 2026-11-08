@@ -224,6 +224,12 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     keyed(s, ev, tx, t)
 }
 
+/// A key that reached a focused element owning its keys (the file list), going where the
+/// window's own `on_key` sends it: timed when timing is on.
+pub fn key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if MAIN.get().is_some() { on_key(s, ev, tx) } else { s.on_key(ev, tx) }
+}
+
 fn keyed(s: &mut State, ev: &KeyEvent, tx: &mut Tx, t: Instant) -> bool {
     measured(s, tx, t, |s, tx| s.on_key(ev, tx))
 }

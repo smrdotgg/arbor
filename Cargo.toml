@@ -45,6 +45,9 @@ regex-lite = "0.1"
 # app's own build gets just the features above).
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
 gif = { version = "0.14", default-features = false, features = ["std"] }
+# Reading the accessibility tree Rune reports (`Runtime::accessibility_json`) in tests. Already
+# in the lock file through Rune.
+serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

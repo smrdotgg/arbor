@@ -96,6 +96,10 @@ pub struct State {
     pub places: Vec<(String, PathBuf)>,
     /// The last error or note, shown in the status bar until the next action.
     pub note: Option<String>,
+    /// The note when it reports a failure (a refused undo, an operation's errors, a folder
+    /// that can't be read): assistive technology announces it at once, not when idle. Only
+    /// while `note` still says it.
+    pub alert: Option<String>,
     pub rename: Option<Rename>,
     /// The running file operation, if any.
     pub job: Option<ops::Running>,
@@ -157,6 +161,9 @@ pub struct State {
     /// Preview reads started and answers landed, for tests and timing.
     pub preview_reads: u64,
     pub preview_lands: u64,
+    /// Where the text preview is scrolled to, and for which landed preview: its keys scroll
+    /// from there (`view::preview_scroll_key`).
+    pub preview_scroll: std::rc::Rc<std::cell::Cell<(u64, [f32; 2])>>,
     /// The threads searches walk on, from the first search on (kept, idle between searches).
     pub(crate) search_pool: Option<crate::search::Pool>,
     /// A go-to's look at what's at its path (on a worker), and which go-to is waited for.
@@ -244,6 +251,7 @@ impl State {
             hidden_set: false,
             places,
             note: config.summary().or(note),
+            alert: None,
             rename: None,
             job: None,
             clip: None,
@@ -276,6 +284,7 @@ impl State {
             preview_fit: std::rc::Rc::new(std::cell::Cell::new(preview::DEFAULT_FIT)),
             preview_reads: 0,
             preview_lands: 0,
+            preview_scroll: Default::default(),
             search_pool: None,
             path_check: Latest::default(),
             going_to: None,
@@ -589,6 +598,7 @@ impl State {
             Err(_) if jumped && a.listing.missing => self.jump_missed(&p.path),
             Err(e) => {
                 self.note = Some(format!("{}: {e}", fs::pretty(&p.path)));
+                self.alert = self.note.clone();
             }
             Ok(mut entries) => {
                 self.lands += 1;

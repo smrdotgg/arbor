@@ -179,6 +179,7 @@ dependencies = [
  "png",
  "regex-lite",
  "rune",
+ "serde_json",
  "tokio",
  "toml_edit",
  "windows-sys 0.59.0",

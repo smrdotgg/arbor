@@ -326,6 +326,7 @@ impl State {
             let why = out.no_trash_why.take().unwrap_or_default();
             self.ask_next = Some(crate::confirm::Ask::delete(std::mem::take(&mut out.no_trash), Some(&why)));
         }
+        let failed = out.refused.is_some() || !out.errors.is_empty();
         self.note = Some(if let Some(why) = out.refused {
             why
         } else if verb == "Deleting" {
@@ -350,6 +351,7 @@ impl State {
             };
             format!("{done} {n} item{}", plural(n))
         });
+        self.alert = if failed { self.note.clone() } else { None };
         self.rename = None;
         self.refresh(&out.folders, &out.results, &out.canon);
         true
