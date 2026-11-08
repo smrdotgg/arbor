@@ -8,7 +8,10 @@
 //! Makes a folder of 10,000 entries in the temp dir, then cold-starts Arbor on it RUNS times
 //! (default 10) with `ARBOR_BENCH=ROUNDS` (default 10): each run logs its first frame, then
 //! ROUNDS times leaves the folder, comes back (a fresh 10k listing) and presses ↓, then quits.
-//! Prints the median and p95 of each measure against its budget.
+//! Prints the median and p95 of each measure against its budget. The first run is reported on its
+//! own and left out of the cold-start numbers: on macOS the first exec of a newly built binary
+//! spends hundreds of milliseconds before `main` (the system checks its signature), which a user
+//! pays once per install or update.
 //!
 //! "Cold start" is from just before this process spawns Arbor to Arbor's first frame being
 //! submitted, so it includes exec, dynamic linking, window and GPU setup and reading the
@@ -44,12 +47,17 @@ fn main() {
 
     let (mut cold, mut main, mut nav, mut key) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut each = Vec::new();
+    let mut first = None;
     for run in 0..runs {
         match run_once(&bin, &big, rounds) {
             Ok(r) => {
                 each.push(format!("{:.0}/{:.0}", r.cold, r.main));
-                cold.push(r.cold);
-                main.push(r.main);
+                if run == 0 && runs > 1 {
+                    first = Some((r.cold, r.main));
+                } else {
+                    cold.push(r.cold);
+                    main.push(r.main);
+                }
                 nav.extend(r.nav);
                 key.extend(r.key);
             }
@@ -63,7 +71,7 @@ fn main() {
     println!("{} {} · {runs} runs × {rounds} rounds · {ENTRIES} entries", std::env::consts::OS, std::env::consts::ARCH);
     println!("{:<34} {:>5} {:>9} {:>9} {:>8}  result", "measure", "n", "median", "p95", "budget");
     let rows: [(&str, &mut Vec<f64>, Option<f64>); 4] = [
-        ("cold start (spawn → first frame)", &mut cold, Some(100.0)),
+        ("cold start (spawn → first frame)*", &mut cold, Some(100.0)),
         ("  of which main → first frame", &mut main, None),
         ("listing visible (10k, nav → frame)", &mut nav, Some(50.0)),
         ("key → frame (synthetic ↓)", &mut key, Some(8.0)),
@@ -89,6 +97,9 @@ fn main() {
             None => (String::new(), ""),
         };
         println!("{name:<34} {:>5} {med:>6.1} ms {p95:>6.1} ms {b:>8}  {verdict}", v.len());
+    }
+    if let Some((c, m)) = first {
+        println!("* first run left out: {c:.0} ms cold, {m:.0} ms of it from main");
     }
     println!("each run, cold/main ms: {}", each.join(" "));
     println!("Times end when the frame is submitted to the GPU; it reaches the screen at the next refresh.");
