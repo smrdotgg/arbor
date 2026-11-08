@@ -92,17 +92,38 @@ pub struct State {
     pub(crate) waker: Option<rune::Waker>,
     loader: Latest<Listing>,
     pending: Option<Pending>,
+    /// The startup read, while the settings or first listing haven't landed yet.
+    boot: Option<Booting>,
 }
 
 impl State {
+    /// The first window's state. Waits at most [`FIRST_PAINT_WAIT`] for the settings and first
+    /// folder (read on the thread `main` started), then opens the window regardless: whatever
+    /// isn't in yet lands in `poll` like any other listing.
     pub fn new() -> State {
-        // The first frame already shows the first listing: read (with the settings file) on the
-        // thread `main` started, or here if it didn't.
-        let first = FIRST.lock().ok().and_then(|mut h| h.take()).and_then(|h| h.join().ok());
-        let Startup { config, listing: first, places, note } = first.unwrap_or_else(startup);
-        let sort = config.settings.sort;
+        let boot = BOOT.lock().ok().and_then(|mut b| b.take()).unwrap_or_else(Booting::start);
+        let wait = if rune::tooling::headless_run().is_some() { HEADLESS_WAIT } else { FIRST_PAINT_WAIT };
+        State::boot(boot, wait)
+    }
+
+    fn boot(boot: Booting, wait: std::time::Duration) -> State {
+        let deadline = std::time::Instant::now() + wait;
+        let (mut start, mut listing) = (None, None);
+        while start.is_none() || listing.is_none() {
+            match boot.rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+                Ok(Boot::Start(s)) => start = Some(s),
+                Ok(Boot::Listing(l)) => listing = Some(l),
+                Err(_) => break,
+            }
+        }
+        // Without the settings yet: the defaults, in the folder Arbor was started in, until
+        // they land (`land_start`).
+        let (config, cwd, places, note) = match start {
+            Some(s) => (s.config, s.start, s.places, s.note),
+            None => (Config::default(), std::env::current_dir().unwrap_or_else(|_| fs::home()), Vec::new(), None),
+        };
         let mut s = State {
-            cwd: first.path,
+            cwd,
             entries: Vec::new(),
             visible: Vec::new(),
             sel: 0,
@@ -110,7 +131,7 @@ impl State {
             anchor: 0,
             filter: String::new(),
             show_hidden: config.settings.show_hidden,
-            sort,
+            sort: config.settings.sort,
             back: Vec::new(),
             fwd: Vec::new(),
             places,
@@ -132,10 +153,18 @@ impl State {
             waker: None,
             loader: Latest::default(),
             pending: None,
+            boot: None,
         };
-        match first.result {
-            Ok(v) => s.entries = v,
-            Err(e) => s.note = Some(s.note.take().map_or(e.clone(), |n| format!("{e} · {n}"))),
+        match listing {
+            Some(first) => match first.result {
+                Ok(v) => s.entries = v,
+                Err(e) => s.note = Some(s.note.take().map_or(e.clone(), |n| format!("{e} · {n}"))),
+            },
+            // The folder is slow: open on an empty list showing "Loading…", like any navigation.
+            None => {
+                s.pending = Some(Pending { path: s.cwd.clone(), nav: Nav::Reload, select: Vec::new(), rename: false });
+                s.boot = Some(boot);
+            }
         }
         s.refilter(None);
         s
@@ -143,6 +172,11 @@ impl State {
 
     pub fn setup(&mut self, waker: rune::Waker) {
         self.loader.set_waker(waker.clone());
+        if let Some(b) = &self.boot
+            && let Ok(mut w) = b.waker.lock()
+        {
+            *w = Some(waker.clone());
+        }
         self.waker = Some(waker);
     }
 
@@ -271,9 +305,56 @@ impl State {
     /// needs to change.
     pub fn poll(&mut self, tx: &mut Tx) -> bool {
         tx.instant();
-        let job = self.poll_job();
-        let Some(listing) = self.loader.take() else { return job };
-        let Some(p) = self.pending.take_if(|p| p.path == listing.path) else { return job };
+        let mut changed = self.poll_job();
+        if let Some(listing) = self.poll_boot() {
+            changed = true;
+            self.land(listing, tx);
+        }
+        if let Some(listing) = self.loader.take() {
+            changed |= self.land(listing, tx);
+        }
+        changed
+    }
+
+    /// What the startup read sent since the window opened: the settings are applied here, the
+    /// first listing is returned to land like any other.
+    fn poll_boot(&mut self) -> Option<Listing> {
+        let mut listing = None;
+        while let Some(b) = &self.boot {
+            match b.rx.try_recv() {
+                Ok(Boot::Start(s)) => self.land_start(*s),
+                Ok(Boot::Listing(l)) => {
+                    listing = Some(l);
+                    self.boot = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.boot = None,
+            }
+        }
+        listing
+    }
+
+    /// The settings, arriving after the window opened (a slow disk under the config folder).
+    fn land_start(&mut self, start: Start) {
+        let Start { config, start, places, note } = start;
+        // Still waiting on the provisional folder: wait on the real start folder instead.
+        if let Some(p) = self.pending.as_mut().filter(|p| p.nav == Nav::Reload && p.path == self.cwd) {
+            p.path = start.clone();
+            self.cwd = start;
+        }
+        self.sort = config.settings.sort;
+        self.show_hidden = config.settings.show_hidden;
+        self.places = places;
+        self.note = config.summary().or(note).or(self.note.take());
+        self.keymap = config.keymap;
+        self.settings = config.settings;
+        let keep = self.cursor_name();
+        self.refilter(keep.as_deref());
+    }
+
+    /// Shows a finished listing if it's the one being waited for (a newer request wins).
+    fn land(&mut self, listing: Listing, tx: &mut Tx) -> bool {
+        let Some(p) = self.pending.take_if(|p| p.path == listing.path) else { return false };
         match listing.result {
             Err(e) => {
                 self.note = Some(format!("{}: {e}", fs::pretty(&p.path)));
@@ -689,23 +770,81 @@ impl State {
     }
 }
 
-/// What `State::new` starts from: read on a thread `main` starts, so it overlaps the platform's
-/// app launch instead of following it.
-struct Startup {
+/// How long the first window waits for the settings and first folder before opening anyway:
+/// one frame at 120 Hz. A local folder is read long before this matters (the read starts at the
+/// top of `main`, and the platform's launch takes 60–80 ms before `State::new` on macOS), so it
+/// still makes the first frame; a slow or network folder costs the window at most this much,
+/// then streams in like any navigation.
+pub const FIRST_PAINT_WAIT: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// Headless runs (scripts, snapshots) run on a virtual clock and must be deterministic, so
+/// they wait for the first listing (bounded, in case the folder never answers).
+const HEADLESS_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The settings and the folder to open, from the startup read.
+struct Start {
     config: Config,
-    listing: Listing,
+    start: PathBuf,
     places: Vec<(String, PathBuf)>,
     /// A problem with the start folder.
     note: Option<String>,
 }
 
-fn startup() -> Startup {
-    let config = Config::load();
-    let (start, note) = start_dir(&config.settings);
-    let listing = fs::list(start, config.settings.sort);
-    let places = places_for(&config.settings);
-    Startup { config, listing, places, note }
+/// What the startup read sends, in this order.
+enum Boot {
+    Start(Box<Start>),
+    Listing(Listing),
 }
+
+/// The startup read: a thread reading the settings, then the first folder, sending each as it
+/// finishes and waking the window once it has one.
+struct Booting {
+    rx: std::sync::mpsc::Receiver<Boot>,
+    waker: std::sync::Arc<std::sync::Mutex<Option<rune::Waker>>>,
+}
+
+impl Booting {
+    fn start() -> Booting {
+        let slow = std::time::Duration::from_millis(SLOW_FIRST_READ_MS.load(std::sync::atomic::Ordering::Relaxed));
+        Booting::spawn(slow, || {
+            let config = Config::load();
+            let (start, note) = start_dir(&config.settings);
+            let places = places_for(&config.settings);
+            Start { config, start, places, note }
+        })
+    }
+
+    /// Runs `settings` then lists the folder it names (`slow` later), on a new thread.
+    fn spawn(slow: std::time::Duration, settings: impl FnOnce() -> Start + Send + 'static) -> Booting {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waker: std::sync::Arc<std::sync::Mutex<Option<rune::Waker>>> = Default::default();
+        let wake = waker.clone();
+        let send = move |b: Boot| {
+            // The window may be gone (or not yet open, when `setup` hasn't run: then `poll` on
+            // its first frame picks this up).
+            if tx.send(b).is_ok()
+                && let Some(w) = wake.lock().ok().and_then(|w| w.clone())
+            {
+                w();
+            }
+        };
+        std::thread::spawn(move || {
+            let start = settings();
+            let (dir, sort) = (start.start.clone(), start.config.settings.sort);
+            send(Boot::Start(Box::new(start)));
+            if !slow.is_zero() {
+                std::thread::sleep(slow);
+            }
+            send(Boot::Listing(fs::list(dir, sort)));
+        });
+        Booting { rx, waker }
+    }
+}
+
+/// `ARBOR_SLOW_FIRST_READ_MS`, read by `timing::init` only when timing is on (otherwise 0 and
+/// never set): makes the first folder read that much slower, to check that a slow disk doesn't
+/// hold up the window.
+pub static SLOW_FIRST_READ_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The sidebar: the settings file's places, or the ones found on this machine.
 fn places_for(s: &Settings) -> Vec<(String, PathBuf)> {
@@ -723,15 +862,15 @@ fn places_for(s: &Settings) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// The settings and first folder, being read on a thread `main` started before Rune's event
-/// loop, so the reads overlap the platform's app launch instead of following it.
-static FIRST: std::sync::Mutex<Option<std::thread::JoinHandle<Startup>>> = std::sync::Mutex::new(None);
+/// The startup read, started by `main` before Rune's event loop so it overlaps the platform's
+/// app launch instead of following it.
+static BOOT: std::sync::Mutex<Option<Booting>> = std::sync::Mutex::new(None);
 
 /// Starts reading the settings file and the folder Arbor opens in. Call first thing in `main`.
 pub fn read_first_folder() {
-    let read = std::thread::spawn(startup);
-    if let Ok(mut slot) = FIRST.lock() {
-        *slot = Some(read);
+    let boot = Booting::start();
+    if let Ok(mut slot) = BOOT.lock() {
+        *slot = Some(boot);
     }
 }
 
@@ -767,4 +906,92 @@ pub fn title(p: &Path) -> String {
 fn now() -> rune::LocalTime {
     let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
     rune::LocalTime::at(ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn folder(name: &str, files: usize) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("arbor-app-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for i in 0..files {
+            std::fs::write(d.join(format!("f{i}")), "x").unwrap();
+        }
+        d
+    }
+
+    fn settings_for(dir: PathBuf, settings: Settings) -> Start {
+        Start { config: Config { settings, ..Config::default() }, start: dir, places: Vec::new(), note: None }
+    }
+
+    /// Polls as frames would until nothing is loading (or 10 s pass).
+    fn settle(s: &mut State) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while (s.is_loading() || s.boot.is_some()) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+            s.poll(&mut Tx::default());
+        }
+        assert!(!s.is_loading(), "never landed");
+    }
+
+    #[test]
+    fn a_slow_first_folder_doesnt_hold_up_the_window() {
+        let d = folder("slow", 3);
+        let dir = d.clone();
+        let boot = Booting::spawn(Duration::from_millis(400), move || settings_for(dir, Settings::default()));
+        let t = Instant::now();
+        let mut s = State::boot(boot, FIRST_PAINT_WAIT);
+        // The bounded wait, plus scheduling slack for a loaded CI machine: far under the 400 ms read.
+        assert!(t.elapsed() < Duration::from_millis(150), "waited {:?}", t.elapsed());
+        assert!(s.is_loading() && s.entries.is_empty() && s.cwd == d);
+        settle(&mut s);
+        assert_eq!((s.entries.len(), s.cwd.clone()), (3, d));
+    }
+
+    #[test]
+    fn a_fast_first_folder_makes_the_first_frame() {
+        let d = folder("fast", 3);
+        let dir = d.clone();
+        let boot = Booting::spawn(Duration::ZERO, move || settings_for(dir, Settings::default()));
+        // Returns as soon as both are in, not at the end of the wait.
+        let t = Instant::now();
+        let s = State::boot(boot, Duration::from_secs(5));
+        assert!(t.elapsed() < Duration::from_secs(1));
+        assert!(!s.is_loading() && s.boot.is_none());
+        assert_eq!((s.entries.len(), s.visible.len()), (3, 3));
+    }
+
+    #[test]
+    fn late_settings_apply_when_they_land() {
+        let d = folder("late-settings", 3);
+        std::fs::write(d.join(".hidden"), "x").unwrap();
+        let dir = d.clone();
+        let boot = Booting::spawn(Duration::ZERO, move || {
+            std::thread::sleep(Duration::from_millis(300));
+            settings_for(dir, Settings { show_hidden: true, ..Settings::default() })
+        });
+        let mut s = State::boot(boot, FIRST_PAINT_WAIT);
+        assert!(s.is_loading() && !s.show_hidden, "opens with the defaults");
+        settle(&mut s);
+        assert!(s.show_hidden && s.cwd == d);
+        assert_eq!(s.visible.len(), 4);
+        assert!(s.back.is_empty(), "the first folder isn't a navigation");
+    }
+
+    /// Going somewhere before the first listing lands: the newer request wins.
+    #[test]
+    fn a_navigation_overtakes_a_slow_first_folder() {
+        let (slow, other) = (folder("overtaken", 3), folder("overtaker", 2));
+        let dir = slow.clone();
+        let boot = Booting::spawn(Duration::from_millis(300), move || settings_for(dir, Settings::default()));
+        let mut s = State::boot(boot, FIRST_PAINT_WAIT);
+        s.go(other.clone(), Nav::New, None);
+        settle(&mut s);
+        std::thread::sleep(Duration::from_millis(400)); // the slow one lands too, and is dropped
+        s.poll(&mut Tx::default());
+        assert_eq!((s.entries.len(), s.cwd.clone()), (2, other));
+    }
 }

@@ -15,9 +15,15 @@
 //! - `key`: from the key's arrival (the OS event's own timestamp on macOS) to the frame it
 //!   changed being submitted.
 //! - `nav`: from the request (the key or click that asked) to the frame showing the new listing.
+//! - `first-listing`: only when the first folder was too slow for the first frame (the window
+//!   waits at most `app::FIRST_PAINT_WAIT` for it): from the top of `main` to the frame showing
+//!   it. `ARBOR_SLOW_FIRST_READ_MS=N` (read only when timing is on) slows that read by N ms to
+//!   try it.
 //!
-//! "Submitted" is when Rune handed the frame to the GPU (`FrameEncoded::at`). The pixels reach
-//! the screen at the next refresh after that; Rune doesn't report when (see RUNE-GAPS.md).
+//! "Submitted" is when Rune handed the frame to the GPU (`FrameEncoded::at`): a proxy for
+//! "pixels on screen", which come at least one refresh later (Rune's own presentation timing,
+//! `frame/present_time.rs`, runs two to three frames behind). Rune doesn't report when a frame
+//! reached the screen (see RUNE-GAPS.md).
 //!
 //! `ARBOR_BENCH=N` (implies timing) drives the app itself: after the first frame it does N
 //! rounds of "go to the parent, come back, press ↓", each step started by the previous step's
@@ -53,7 +59,9 @@ thread_local! {
     static FIRST: Cell<bool> = const { Cell::new(true) };
     /// Entries in the first listing.
     static FIRST_ENTRIES: Cell<usize> = const { Cell::new(0) };
-    /// How long `State::new` took (it reads the first folder before the window opens).
+    /// The first listing missed the first frame and is still on its way.
+    static BOOT_LATE: Cell<bool> = const { Cell::new(false) };
+    /// How long `State::new` took (it waits a bounded time for the first folder).
     static INIT_MS: Cell<f64> = const { Cell::new(0.0) };
     /// When `State::new` started, from the top of `main` (Rune's event loop setup before it).
     static INIT_AT_MS: Cell<f64> = const { Cell::new(0.0) };
@@ -75,6 +83,8 @@ pub fn init() -> bool {
     }
     MAIN.get_or_init(|| (Instant::now(), SystemTime::now()));
     BENCH.set((rounds * 3, 0));
+    let slow = std::env::var("ARBOR_SLOW_FIRST_READ_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+    crate::app::SLOW_FIRST_READ_MS.store(slow, std::sync::atomic::Ordering::Relaxed);
     true
 }
 
@@ -89,6 +99,11 @@ pub fn init_state() -> State {
 pub fn setup(s: &mut State, waker: rune::Waker) {
     let _ = WAKER.set(waker.clone());
     FIRST_ENTRIES.set(s.entries.len());
+    if s.is_loading() {
+        // Timed from `main`, and reported as `first-listing` rather than as a navigation.
+        BOOT_LATE.set(true);
+        NAV.set(MAIN.get().map(|(m, _)| *m));
+    }
     bench_target(Some(s.cwd.clone()));
     s.setup(waker);
 }
@@ -183,7 +198,12 @@ pub fn frame(f: &FrameEncoded) {
     if FIRST.replace(false) {
         let (main, wall) = MAIN.get().copied().unwrap_or((at, SystemTime::now()));
         let epoch = (wall + at.saturating_duration_since(main)).duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros());
-        let (init, init_at, n) = (INIT_MS.get(), INIT_AT_MS.get(), FIRST_ENTRIES.get());
+        let (init, init_at) = (INIT_MS.get(), INIT_AT_MS.get());
+        // A late first listing can still land in time for the first frame's `poll`.
+        let n = match landed {
+            Some((_, n)) if BOOT_LATE.replace(false) => n,
+            _ => FIRST_ENTRIES.get(),
+        };
         eprintln!(
             "arbor-timing first-frame main_ms={:.2} init_at_ms={init_at:.2} init_ms={init:.2} epoch_us={epoch} entries={n} {split}",
             ms(main)
@@ -193,7 +213,11 @@ pub fn frame(f: &FrameEncoded) {
             eprintln!("arbor-timing key ms={:.2} {split}", ms(t));
         }
         if let Some((t, n)) = landed {
-            eprintln!("arbor-timing nav ms={:.2} entries={n} {split}", ms(t));
+            if BOOT_LATE.replace(false) {
+                eprintln!("arbor-timing first-listing main_ms={:.2} entries={n} {split}", ms(t));
+            } else {
+                eprintln!("arbor-timing nav ms={:.2} entries={n} {split}", ms(t));
+            }
         }
     }
     if benching()
