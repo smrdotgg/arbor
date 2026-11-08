@@ -61,6 +61,20 @@ enum Fast {
     Suffix(String),
     Contains(String),
     Affix(String, String),
+    /// More stars, anchored by a prefix or suffix (`IMG_*1*.jpg`): pieces that must follow one
+    /// another in order between them. Finding each piece at its first place after the last is
+    /// always right when only stars come between, so this is linear, where the general matcher
+    /// backtracks on every near miss (6.4 ms against 1 ms for 50,000 names, `match_speed`).
+    /// Unanchored ones (`*a*b*c*`) stay with the general matcher, which measured faster there.
+    Pieces(String, Vec<Piece>, String),
+}
+
+/// A literal between two stars: one character (found with a byte search, far cheaper per name
+/// than setting up a substring search), or more.
+#[derive(Clone, Debug, PartialEq)]
+enum Piece {
+    Char(char),
+    Str(String),
 }
 
 impl Fast {
@@ -74,6 +88,19 @@ impl Fast {
             [i] if *i == n - 1 => Fast::Prefix(lit(&toks[..n - 1])?),
             [i] => Fast::Affix(lit(&toks[..*i])?, lit(&toks[i + 1..])?),
             [0, j] if *j == n - 1 => Fast::Contains(lit(&toks[1..n - 1])?),
+            _ if stars[0] > 0 || stars[stars.len() - 1] < n - 1 => {
+                let (first, last) = (stars[0], stars[stars.len() - 1]);
+                let middles = stars.windows(2).map(|w| lit(&toks[w[0] + 1..w[1]])).collect::<Option<Vec<String>>>()?;
+                let piece = |m: String| {
+                    let mut cs = m.chars();
+                    match (cs.next(), cs.next()) {
+                        (Some(c), None) => Piece::Char(c),
+                        _ => Piece::Str(m),
+                    }
+                };
+                let mids = middles.into_iter().filter(|m| !m.is_empty()).map(piece).collect();
+                Fast::Pieces(lit(&toks[..first])?, mids, lit(&toks[last + 1..])?)
+            }
             _ => return None,
         })
     }
@@ -85,6 +112,23 @@ impl Fast {
             Fast::Suffix(x) => s.ends_with(x.as_str()),
             Fast::Contains(x) => s.contains(x.as_str()),
             Fast::Affix(a, b) => s.len() >= a.len() + b.len() && s.starts_with(a.as_str()) && s.ends_with(b.as_str()),
+            Fast::Pieces(a, mids, b) => {
+                if s.len() < a.len() + b.len() || !s.starts_with(a.as_str()) || !s.ends_with(b.as_str()) {
+                    return false;
+                }
+                let mut rest = &s[a.len()..s.len() - b.len()];
+                for m in mids {
+                    let found = match m {
+                        Piece::Char(c) => rest.find(*c).map(|i| i + c.len_utf8()),
+                        Piece::Str(x) => rest.find(x.as_str()).map(|i| i + x.len()),
+                    };
+                    match found {
+                        Some(end) => rest = &rest[end..],
+                        None => return false,
+                    }
+                }
+                true
+            }
         }
     }
 }
@@ -477,6 +521,16 @@ mod tests {
         assert_eq!(Fast::of(&tokens("IMG_*.jpg", false)), Some(Fast::Affix("IMG_".into(), ".jpg".into())));
         assert_eq!(Fast::of(&tokens("*.jpg", false)), Some(Fast::Suffix(".jpg".into())));
         assert_eq!(Fast::of(&tokens("a?*", false)), None);
+        assert_eq!(
+            Fast::of(&tokens("IMG_*1**.jpg", false)),
+            Some(Fast::Pieces("IMG_".into(), vec![Piece::Char('1')], ".jpg".into())),
+            "an empty piece between stars is no piece"
+        );
+        // Pieces in order, not overlapping the prefix or suffix, and found anywhere between.
+        let n = |p: &str, s: &str| Glob::name(p, Case::Sensitive).unwrap().matches(s);
+        assert!(n("a*b*c", "abc") && n("a*b*c", "axxbyyc") && n("*é*ü*", "xéyüz"));
+        assert!(!n("a*b*c", "acb") && !n("ab*b*ba", "aba") && !n("a*bb*c", "abc") && !n("*x*y*", "yx"));
+        assert!(n("ab*b*ba", "abbba") && n("*aa*aa*", "aaaa") && !n("*aa*aa*", "aaa"));
         // "IMG_*IMG_" needs both ends to fit without overlapping.
         assert!(!m("IMG_*IMG_", "IMG_"));
     }
@@ -519,17 +573,26 @@ mod tests {
         assert!(Glob::path("/TMP/**", Case::Insensitive).unwrap().matches("/tmp/a"));
     }
 
-    /// Matching every name of a 50k folder must fit well inside a frame.
+    /// Matching every name of a 50k folder must fit well inside a frame. The names are
+    /// lowercased first, as a listing's `Entry::lower` is (what `matches_folded` expects for a
+    /// pattern that ignores case), and each count is checked, so a pattern that matches
+    /// nothing can't pass for a fast one.
     #[test]
     #[ignore = "benchmark"]
     fn match_speed() {
         let names: Vec<String> =
-            (0..50_000).map(|i| format!("IMG_{i:05} some longer name part.{}", ["jpg", "png", "txt"][i % 3])).collect();
-        for pat in ["*.jpg", "IMG_*1*.{png,jpg}", "*a*b*c*d*"] {
+            (0..50_000).map(|i| format!("IMG_{i:05} some longer name part.{}", ["jpg", "png", "txt"][i % 3]).to_lowercase()).collect();
+        for (pat, want) in [("*.jpg", 16_667), ("IMG_*1*.{png,jpg}", 15_844), ("*a*b*c*d*", 0)] {
             let g = Glob::name(pat, Case::Insensitive).unwrap();
-            let t = std::time::Instant::now();
-            let n = names.iter().filter(|s| g.matches_folded(s)).count();
-            println!("{pat}: {n} of 50k in {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+            // The best of 20, so a busy machine's noise doesn't decide.
+            let (mut best, mut n) = (f64::MAX, 0);
+            for _ in 0..20 {
+                let t = std::time::Instant::now();
+                n = names.iter().filter(|s| g.matches_folded(s)).count();
+                best = best.min(t.elapsed().as_secs_f64() * 1e3);
+            }
+            println!("{pat}: {n} of 50k in {best:.2} ms (best of 20)");
+            assert_eq!(n, want, "{pat}");
         }
     }
 }
