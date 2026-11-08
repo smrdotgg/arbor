@@ -174,7 +174,10 @@ impl Shared {
                     s = self.wake.wait(s).unwrap_or_else(|e| e.into_inner());
                 }
             };
-            let loaded = load(&job, &stop);
+            // A decoder that panics on a corrupt file still ends in an answer, never in
+            // "Loading…" for good, and the thread lives on for the next preview.
+            let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load(&job, &stop)))
+                .unwrap_or_else(|_| Some(Loaded::body(Body::Error("Couldn't preview it: reading it failed unexpectedly".into()))));
             let mut s = self.slots.lock().unwrap_or_else(|e| e.into_inner());
             // Only the newest request's answer is kept (a stopped read gives none).
             if let Some(loaded) = loaded
@@ -775,6 +778,12 @@ pub fn sniff_image(b: &[u8]) -> Option<Format> {
     }
 }
 
+/// Why an image that says it's `w` × `h` can't be decoded when a side is zero (a corrupt
+/// header): nothing to show, and a zero-wide row would break the shrinking.
+pub fn no_pixels(w: u64, h: u64) -> Option<String> {
+    (w == 0 || h == 0).then(|| format!("it says it's {w} × {h}, so it has no pixels"))
+}
+
 /// Why an image of `w` × `h` isn't decoded, when it's too big (checked from its header, before
 /// anything is allocated for its pixels). `whole`: the decoder holds the whole image at once.
 pub fn too_big(w: u64, h: u64, whole: bool) -> Option<String> {
@@ -908,8 +917,12 @@ fn to_rgba(px: &[u8], channels: usize, out: &mut Vec<u8>) {
 /// Shrinks a whole decoded image (`channels` bytes a pixel) to fit.
 fn shrink_whole(w: u32, h: u32, px: &[u8], channels: usize, fit: [u32; 2], stop: &AtomicBool) -> Option<(u32, u32, Vec<u8>)> {
     let (dw, dh) = fit_size(w, h, fit);
-    let mut s = Shrink::new(w, h, dw, dh);
     let stride = w as usize * channels;
+    // Every decoder refuses a zero side first (`no_pixels`); this is only so it can't panic.
+    if stride == 0 || h == 0 {
+        return Some((dw, dh, vec![0; dw as usize * dh as usize * 4]));
+    }
+    let mut s = Shrink::new(w, h, dw, dh);
     for (y, row) in px.chunks_exact(stride).take(h as usize).enumerate() {
         if y % 64 == 0 && stop.load(Relaxed) {
             return None;
@@ -931,7 +944,7 @@ fn png<R: BufRead + Seek>(mut r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<
         && &head[12..16] == b"IHDR"
     {
         let be = |i: usize| u32::from_be_bytes([head[i], head[i + 1], head[i + 2], head[i + 3]]) as u64;
-        if let Some(why) = too_big(be(16), be(20), head[28] != 0) {
+        if let Some(why) = no_pixels(be(16), be(20)).or_else(|| too_big(be(16), be(20), head[28] != 0)) {
             return Err(why);
         }
     }
@@ -943,7 +956,7 @@ fn png<R: BufRead + Seek>(mut r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<
         let i = reader.info();
         (i.width, i.height, i.interlaced)
     };
-    if let Some(why) = too_big(w as u64, h as u64, interlaced) {
+    if let Some(why) = no_pixels(w as u64, h as u64).or_else(|| too_big(w as u64, h as u64, interlaced)) {
         return Err(why);
     }
     let channels = reader.output_color_type().0.samples();
@@ -978,6 +991,11 @@ fn jpeg<R: BufRead + Seek>(mut r: R, fit: [u32; 2], stop: &AtomicBool) -> Result
     // allocates anything for either.
     match jpeg_scan(&mut r) {
         Ok(Some((w, h, whole))) => {
+            // A height of 0 is legal in a frame header (a DNL segment gives it later): the
+            // decoder's own size is checked below.
+            if let Some(why) = no_pixels(w as u64, h.max(1) as u64) {
+                return Err(format!("Couldn't decode this JPEG: {why}"));
+            }
             if let Some(why) = too_big(w as u64, h as u64, whole) {
                 return Err(why);
             }
@@ -993,6 +1011,9 @@ fn jpeg<R: BufRead + Seek>(mut r: R, fit: [u32; 2], stop: &AtomicBool) -> Result
     let (w, h) = (info.width as u32, info.height as u32);
     let progressive = info.coding_process != jpeg_decoder::CodingProcess::DctSequential;
     // Progressive JPEGs keep every coefficient of the whole image while decoding.
+    if let Some(why) = no_pixels(w as u64, h as u64) {
+        return Err(format!("Couldn't decode this JPEG: {why}"));
+    }
     if let Some(why) = too_big(w as u64, h as u64, progressive || info.pixel_format == jpeg_decoder::PixelFormat::L16) {
         return Err(why);
     }
@@ -1179,10 +1200,13 @@ fn gif<R: BufRead + Seek>(r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Opti
     }
     let mut d = opts.read_info(r).map_err(|e| e.to_string())?;
     let (w, h) = (d.width() as u32, d.height() as u32);
-    if let Some(why) = too_big(w as u64, h as u64, true) {
+    if let Some(why) = no_pixels(w as u64, h as u64).or_else(|| too_big(w as u64, h as u64, true)) {
         return Err(why);
     }
     let Some(frame) = d.read_next_frame().map_err(|e| e.to_string())? else { return Err("it has no frames".into()) };
+    if let Some(why) = no_pixels(frame.width as u64, frame.height as u64) {
+        return Err(format!("its first frame {why}"));
+    }
     // The first frame, on the image's canvas (a frame can be smaller and offset).
     let mut canvas = vec![0u8; w as usize * h as usize * 4];
     let (fw, fl, ft) = (frame.width as usize, frame.left as usize, frame.top as usize);
@@ -1205,7 +1229,7 @@ fn webp<R: BufRead + Seek>(mut r: R, fit: [u32; 2], stop: &AtomicBool) -> Result
     r.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let mut d = image_webp::WebPDecoder::new(r).map_err(|e| e.to_string())?;
     let (w, h) = d.dimensions();
-    if let Some(why) = too_big(w as u64, h as u64, true) {
+    if let Some(why) = no_pixels(w as u64, h as u64).or_else(|| too_big(w as u64, h as u64, true)) {
         return Err(why);
     }
     for (fw, fh) in frames {
@@ -1278,7 +1302,7 @@ fn bmp<R: BufRead + Seek>(r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Opti
     use image::ImageDecoder;
     let d = image::codecs::bmp::BmpDecoder::new(r).map_err(|e| e.to_string())?;
     let (w, h) = d.dimensions();
-    if let Some(why) = too_big(w as u64, h as u64, true) {
+    if let Some(why) = no_pixels(w as u64, h as u64).or_else(|| too_big(w as u64, h as u64, true)) {
         return Err(why);
     }
     let channels = d.color_type().channel_count() as usize;
@@ -1313,7 +1337,13 @@ pub(crate) mod hook {
         static CURRENT: std::cell::RefCell<PathBuf> = const { std::cell::RefCell::new(PathBuf::new()) };
     }
 
+    /// Paths whose read panics at its start, as a decoder with a bug would.
+    pub(crate) static PANICS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
     pub(crate) fn at(p: &Path, stage: &'static str) {
+        if stage == "open" && PANICS.lock().unwrap().iter().any(|q| q == p) {
+            panic!("a decoder bug, for the test");
+        }
         CURRENT.with(|c| *c.borrow_mut() = p.to_path_buf());
         SEEN.lock().unwrap().push((p.to_path_buf(), stage.to_string()));
         let go = {
@@ -1863,6 +1893,44 @@ mod tests {
         // started, and the PNG ran twice (the held read, then the newest request).
         assert_eq!(seen_open(&imgs[1].0), 0, "a replaced request ran");
         assert_eq!(seen_open(&png), 2);
+    }
+
+    /// GIFs whose canvas or first frame is zero pixels wide (34 bytes each): an error card, not
+    /// a panic in the worker and "Loading…" for good.
+    #[test]
+    fn a_gif_with_no_width_says_so() {
+        let canvas: &[u8] = b"GIF89a\0\0\x01\0\x80\0\0\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x01L\0;";
+        let frame: &[u8] = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff,\0\0\0\0\0\0\x01\0\0\x02\x01L\0;";
+        assert_eq!((canvas.len(), frame.len()), (34, 34));
+        let d = folder("zero-gif");
+        std::fs::write(d.join("a-canvas.gif"), canvas).unwrap();
+        std::fs::write(d.join("b-frame.gif"), frame).unwrap();
+        let mut s = state_in(&d);
+        space(&mut s);
+        settle(&mut s);
+        let body = &s.preview.as_ref().unwrap().body;
+        assert!(matches!(body, Body::Error(e) if e.contains("no pixels")), "{body:?}");
+        key(&mut s, Key::Down);
+        settle(&mut s);
+        let body = &s.preview.as_ref().unwrap().body;
+        assert!(matches!(body, Body::Error(e) if e.starts_with("Couldn't decode this GIF")), "{body:?}");
+    }
+
+    /// A decoder that panics: the panel says it couldn't, and the next preview still works.
+    #[test]
+    fn a_panicking_decoder_ends_in_an_error_not_loading() {
+        let d = folder("panic");
+        std::fs::write(d.join("a.txt"), "boom").unwrap();
+        std::fs::write(d.join("b.txt"), "fine").unwrap();
+        hook::PANICS.lock().unwrap().push(d.join("a.txt"));
+        let mut s = state_in(&d);
+        space(&mut s);
+        settle(&mut s);
+        let body = &s.preview.as_ref().unwrap().body;
+        assert!(matches!(body, Body::Error(e) if e.contains("failed unexpectedly")), "{body:?}");
+        key(&mut s, Key::Down);
+        settle(&mut s);
+        assert!(matches!(&s.preview.as_ref().unwrap().body, Body::Text(t) if t.line(0) == "fine"));
     }
 
     /// Closing during a read: it stops, and nothing lands afterwards.
