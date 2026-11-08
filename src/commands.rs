@@ -57,6 +57,7 @@ commands! {
     Forward "nav.forward" "Go Forward", ["cmd+]", "alt+right"];
     GoTo "nav.goto" "Go to Path…", ["cmd+l"];
     Jump "nav.jump" "Jump to Folder…", ["cmd+j"];
+    Search "nav.search" "Search in This Folder…", ["cmd+f"];
     ClearJump "nav.clear_jump_history" "Clear Jump History", [];
     Reload "nav.reload" "Reload", ["cmd+r"];
     Reveal "nav.reveal" REVEAL, ["cmd+enter"];

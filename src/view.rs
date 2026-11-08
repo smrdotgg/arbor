@@ -14,6 +14,7 @@ use crate::folder::{Folder, tab_label};
 use crate::fs::{self, SortKey};
 use crate::palette;
 use crate::preview::{Body, Preview};
+use crate::search::Search;
 
 const ROW_H: f32 = 24.0;
 /// Height of the top band (path bar, and the sidebar's traffic-light strip on macOS).
@@ -216,6 +217,9 @@ fn pane(s: &State, p: &Pane, c: Ctx) -> El {
     if p.tabs.len() > 1 {
         col = col.child(hr(l)).child(tabbar(p, l, c.w));
     }
+    if let Some(search) = &f.search {
+        col = col.child(hr(l)).child(search_bar(f, search, c));
+    }
     col = col.child(hr(l)).child(header(f, c)).child(hr(l)).child(list(f, c));
     if c.split.is_some() {
         // The active pane: a thin accent line along its top (its selection is in the accent
@@ -241,7 +245,8 @@ fn in_pane(s: &mut State, id: u64, tx: &mut rune::Tx) -> bool {
 
 fn pathbar(f: &Folder, l: Look, width: f32) -> El {
     let id = f.id;
-    let nav = |label: &'static str, key: &'static str, on: bool, go: fn(&mut State)| {
+    // As their keys do: in a search, Back leaves it and Up waits until it has.
+    let nav = |label: &'static str, key: &'static str, on: bool, cmd: Cmd| {
         text(label)
             .key(key)
             .font(TextStyle::new(16.0, 500.0))
@@ -253,8 +258,8 @@ fn pathbar(f: &Folder, l: Look, width: f32) -> El {
             .hover(l.t.hover)
             .cursor(Cursor::Pointer)
             .on_press_tx(move |s: &mut State, tx| {
-                if in_pane(s, id, tx) {
-                    go(s);
+                if in_pane(s, id, tx) && s.unavailable(cmd).is_none() {
+                    s.run(cmd, tx);
                 }
             })
     };
@@ -303,9 +308,9 @@ fn pathbar(f: &Folder, l: Look, width: f32) -> El {
         .px(8.0)
         .gap(2.0)
         .center_y()
-        .child(nav("‹", "nav-back", !f.back.is_empty(), State::go_back))
-        .child(nav("›", "nav-fwd", !f.fwd.is_empty(), State::go_forward))
-        .child(nav("↑", "nav-up", f.cwd.parent().is_some(), State::parent))
+        .child(nav("‹", "nav-back", !f.back.is_empty() || f.searching(), Cmd::Back))
+        .child(nav("›", "nav-fwd", !f.fwd.is_empty(), Cmd::Forward))
+        .child(nav("↑", "nav-up", f.cwd.parent().is_some() && !f.searching(), Cmd::Parent))
         .child(el().w(6.0))
         .child(crumbs)
 }
@@ -551,10 +556,50 @@ fn tabbar(p: &Pane, l: Look, width: f32) -> El {
     )
 }
 
+/// A search's query field, over its results.
+fn search_bar(f: &Folder, s: &Search, c: Ctx) -> El {
+    let (id, l) = (c.id, c.l);
+    let field = text_input(&s.edit, BODY)
+        .key("search-field")
+        .single_line()
+        .placeholder(format!("Search names in {}", tab_label(&f.cwd)), l.t.text_secondary.alpha(0.7))
+        .color(l.t.text)
+        .caret(l.accent, l.accent.alpha(0.35))
+        .on_edit(move |s: &mut State| s.search_edit(id))
+        .on_input_change(move |s: &mut State, tx| s.search_changed(id, tx))
+        .on_input_key(move |s: &mut State, ev, tx| s.search_field_key(id, ev, tx))
+        .grow(1.0)
+        .min_w(0.0);
+    let state = if s.walking() {
+        "Searching…"
+    } else if s.stopped {
+        "Stopped"
+    } else {
+        ""
+    };
+    row()
+        .key("search")
+        .w_full()
+        .h(SEARCH_H)
+        .px(12.0)
+        .gap(10.0)
+        .center_y()
+        .child(text("Search").font(SMALL).color(l.accent))
+        .child(field)
+        .child(text(state).font(SMALL).color(l.t.text_secondary))
+}
+
+/// The search bar's height.
+const SEARCH_H: f32 = 32.0;
+/// How much of the Name column's room a search's Folder column gets (names matter more).
+const FOLDER_GROW: f32 = 0.6;
+
 fn header(f: &Folder, c: Ctx) -> El {
     let (id, l) = (c.id, c.l);
+    // Search results are in the order found until a header is clicked.
+    let unsorted = f.search.as_ref().is_some_and(|s| !s.sorted);
     let col_head = |label: &'static str, key: SortKey, w: Option<f32>, align: Align| {
-        let on = f.sort.key == key;
+        let on = f.sort.key == key && !unsorted;
         let arrow = if !on {
             ""
         } else if f.sort.desc {
@@ -582,7 +627,9 @@ fn header(f: &Folder, c: Ctx) -> El {
     };
     let mut h =
         row().key("header").w_full().h(24.0).px(12.0).gap(12.0).center_y().child(col_head("Name", SortKey::Name, None, Align::Start));
-    if c.cols.kind {
+    if f.searching() {
+        h = h.child(text("Folder").key("head-folder").font(SMALL).color(l.t.text_secondary).grow(FOLDER_GROW).min_w(0.0));
+    } else if c.cols.kind {
         h = h.child(col_head("Kind", SortKey::Kind, Some(KIND_W), Align::Start));
     }
     h = h.child(col_head("Size", SortKey::Size, Some(SIZE_W), Align::End));
@@ -604,6 +651,11 @@ fn list(f: &Folder, c: Ctx) -> El {
         .on_drop_files(move |s: &mut State, files, tx| {
             tx.instant();
             if let Some(p) = s.pane(id) {
+                // Results come from many folders: a drop needs a folder row to land on.
+                if p.f.searching() {
+                    s.note = Some("Drop onto a folder in the results, or leave the search (Esc) to drop here".into());
+                    return;
+                }
                 let here = p.f.cwd.clone();
                 s.drop_files(files, here, tx);
             }
@@ -617,6 +669,14 @@ fn list(f: &Folder, c: Ctx) -> El {
         // A tab whose fresh read hasn't landed yet: its path, and an empty list until it does.
         let msg = if f.is_loading() {
             ""
+        } else if let Some(s) = &f.search {
+            if s.query.is_empty() || s.bad.is_some() || s.error.is_some() {
+                ""
+            } else if s.walking() {
+                "Searching…"
+            } else {
+                "No matches"
+            }
         } else if f.entries.is_empty() {
             "Empty folder"
         } else {
@@ -701,6 +761,9 @@ fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
                 return;
             }
             let m = tx.mods();
+            // The results take the keys from the search field.
+            let ix = s.active;
+            s.focus_results(ix, tx);
             let f = s.cur_mut();
             if m.shift {
                 f.extend_to(i);
@@ -783,7 +846,12 @@ fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
                 }
             });
     }
-    if cols.kind {
+    if f.searching() {
+        // Where it is: its folder below the search's root (the root itself shows as "—").
+        let at = std::path::Path::new(&e.os).parent().filter(|p| !p.as_os_str().is_empty());
+        let at = at.map_or_else(|| "—".to_string(), |p| p.display().to_string());
+        r = r.child(text(at).font(BODY).color(dim).truncate_head().grow(FOLDER_GROW).min_w(0.0));
+    } else if cols.kind {
         r = r.child(text(fs::kind(e).to_string()).font(NUM).color(dim).truncate().w(KIND_W));
     }
     r = r.child(text(if e.is_dir { "—".to_string() } else { fs::fmt_size(e.size) }).font(NUM).color(dim).align(Align::End).w(SIZE_W));
@@ -823,6 +891,13 @@ fn status(s: &State, l: Look) -> El {
     bar = bar.child(el().grow(1.0));
     if f.is_loading() {
         bar = bar.child(text("Loading…").font(SMALL).color(l.t.text_secondary));
+    }
+    if let Some(line) = State::search_status(f) {
+        let picked = if f.marked.len() > 1 { format!("{} selected · ", f.marked.len()) } else { String::new() };
+        let hint = if s.show_hidden { "hidden shown" } else { "" };
+        return bar
+            .child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)))
+            .child(text(format!("{picked}{line}")).font(NUM).color(l.t.text_secondary).truncate().min_w(0.0).shrink());
     }
     let hidden = f.entries.len() - f.entries.iter().filter(|e| !e.hidden).count();
     let count = if f.visible.len() == f.entries.len() || (!f.show_hidden && f.visible.len() + hidden == f.entries.len()) {

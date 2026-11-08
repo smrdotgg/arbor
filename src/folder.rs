@@ -54,6 +54,9 @@ pub struct TabMemo {
     pub sort: Sort,
     /// The user chose this tab's sort (see [`Folder::sort_set`]).
     pub sort_set: bool,
+    /// It was showing a search for this: showing the tab again searches again (nothing of
+    /// the results is kept).
+    pub search: Option<String>,
 }
 
 /// A finished read, tagged with the request that asked for it and the sort it was sorted by.
@@ -118,6 +121,9 @@ pub struct Folder {
     /// Set to stop the read in flight: when a newer one replaces it, or the tab it's for is
     /// hidden, closed or dropped. Each read gets its own.
     stop: Arc<AtomicBool>,
+    /// A search of this folder, while it's on screen (`search.rs`): `entries` are its results,
+    /// each `os` a path relative to `cwd`. Dropping it stops its walk.
+    pub search: Option<Box<crate::search::Search>>,
 }
 
 impl Drop for Folder {
@@ -154,12 +160,13 @@ impl Folder {
             pending: None,
             scroll: Rc::new(Cell::new(0.0)),
             stop: Arc::default(),
+            search: None,
         }
     }
 
     /// Stops the read in flight (its answer could only be stale now) and arms a flag for the
     /// next one.
-    fn stop_read(&mut self) -> Arc<AtomicBool> {
+    pub(crate) fn stop_read(&mut self) -> Arc<AtomicBool> {
         self.stop.store(true, Relaxed);
         self.stop = Arc::default();
         self.stop.clone()
@@ -226,6 +233,8 @@ impl Folder {
 
     /// Asks for a fresh read of `path`; it lands in `State::poll` (a newer request wins).
     pub(crate) fn request(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, rename: bool) {
+        // Going anywhere ends a search (its walk stops).
+        self.search = None;
         let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
         self.pending = Some(Pending { req, path: path.clone(), nav, select, rename, scroll: 0.0 });
         self.loader.request_opt(path, move |p| Some(Answer { req, sort, listing: fs::list_until(p, sort, &stop)? }));
@@ -242,6 +251,10 @@ impl Folder {
 
     /// This tab's lightweight state, to keep while it's hidden.
     pub fn memo(&self) -> TabMemo {
+        // Searching: the plain listing's state, and the query to search for again.
+        if let Some(s) = &self.search {
+            return TabMemo { search: Some(s.edit.text.clone()).filter(|q| !q.trim().is_empty()), ..s.memo.clone() };
+        }
         // Hidden again before its read landed: keep what it was going to restore.
         if let Some(p) = self.pending.as_ref().filter(|p| p.nav == Nav::Show) {
             return TabMemo {
@@ -253,6 +266,7 @@ impl Folder {
                 filter: self.filter.clone(),
                 sort: self.sort,
                 sort_set: self.sort_set,
+                search: None,
             };
         }
         let cursor = self.cursor_name();
@@ -270,21 +284,23 @@ impl Folder {
             filter: self.filter.clone(),
             sort: self.sort,
             sort_set: self.sort_set,
+            search: None,
         }
     }
 
     /// Shows a hidden tab: its path, history, filter and sort at once, an empty list until its
     /// fresh read lands (`request_now`), then its selection and scroll.
     pub fn show(&mut self, m: TabMemo) {
-        // The tab that was here is hidden now: its read, if any, stops.
+        // The tab that was here is hidden now: its read or search, if any, stops.
         self.stop_read();
+        self.search = None;
         self.entries = Vec::new();
         self.visible.clear();
         self.marked.clear();
         self.sel = 0;
         self.anchor = 0;
         self.drop_target = None;
-        self.version = next_version();
+        self.bump();
         self.dir_id = None;
         self.cwd = m.path;
         self.back = m.back;
@@ -309,7 +325,8 @@ impl Folder {
         let mut f = Folder::new(id, other.cwd.clone(), other.sort, other.show_hidden, waker);
         f.sort_set = other.sort_set;
         f.dir_id = other.dir_id;
-        if other.is_loading() {
+        // A search's results stay its own: the new pane reads the folder.
+        if other.is_loading() || other.searching() {
             f.request(other.cwd.clone(), Nav::Reload, Vec::new(), false);
         } else {
             f.entries = other.entries.clone();
@@ -340,6 +357,11 @@ impl Folder {
         let by_prefix =
             || (!q.is_empty()).then(|| self.visible.iter().position(|&i| self.entries[i as usize].lower.starts_with(&q))).flatten();
         self.sel = by_name.or_else(by_prefix).unwrap_or(0);
+        self.bump();
+    }
+
+    /// `visible` changed: virtual rows look at every key again.
+    pub(crate) fn bump(&mut self) {
         self.version = next_version();
     }
 
@@ -349,13 +371,28 @@ impl Folder {
 
     pub fn set_sort(&mut self, key: SortKey) {
         self.sort_set = true;
-        self.sort = if self.sort.key == key {
+        // Search results are in the order found until a header is clicked: the first click
+        // sorts by it, the way a new column does.
+        let first = self.search.as_mut().is_some_and(|s| !std::mem::replace(&mut s.sorted, true));
+        self.sort = if self.sort.key == key && !first {
             Sort { key, desc: !self.sort.desc }
         } else {
             // Newest and largest first feel right; names and kinds read A→Z.
             Sort { key, desc: matches!(key, SortKey::Size | SortKey::Modified) }
         };
         self.resort();
+    }
+
+    /// A new sort from the settings: a search's results keep their order (the listing behind
+    /// it gets the sort when the search ends).
+    pub fn apply_sort(&mut self, sort: Sort) {
+        match self.search.as_mut() {
+            Some(s) => s.memo.sort = sort,
+            None => {
+                self.sort = sort;
+                self.resort();
+            }
+        }
     }
 
     /// Sorts the listing by `self.sort` again, keeping the cursor.

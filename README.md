@@ -245,6 +245,7 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Go Forward | ⌘], ⌥→ | Ctrl+], Alt+→ | `nav.forward` |
 | Go to Path… | ⌘L | Ctrl+L | `nav.goto` |
 | Jump to Folder… | ⌘J | Ctrl+J | `nav.jump` |
+| Search in This Folder… | ⌘F | Ctrl+F | `nav.search` |
 | Clear Jump History |  |  | `nav.clear_jump_history` |
 | Reload | ⌘R | Ctrl+R | `nav.reload` |
 | Show in Finder / Explorer / file manager | ⌘↩ | Ctrl+Enter | `nav.reveal` |

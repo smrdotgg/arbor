@@ -141,6 +141,8 @@ pub struct State {
     /// Preview reads started and answers landed, for tests and timing.
     pub preview_reads: u64,
     pub preview_lands: u64,
+    /// The threads searches walk on, from the first search on (kept, idle between searches).
+    pub(crate) search_pool: Option<crate::search::Pool>,
 }
 
 impl State {
@@ -212,6 +214,7 @@ impl State {
             preview_fit: std::rc::Rc::new(std::cell::Cell::new(preview::DEFAULT_FIT)),
             preview_reads: 0,
             preview_lands: 0,
+            search_pool: None,
         };
         let f = &mut s.panes[0].f;
         match listing {
@@ -352,7 +355,13 @@ impl State {
         reload_folder(self.cur_mut(), names, rename);
     }
 
+    /// ⌘R: reads the folder again, or in a search walks again.
     pub fn reload(&mut self) {
+        if self.cur().searching() {
+            let ix = self.active;
+            self.restart_search(ix, &mut Tx::default());
+            return;
+        }
         self.reload_selecting(Vec::new(), false);
     }
 
@@ -400,6 +409,7 @@ impl State {
             changed = true;
         }
         changed |= self.poll_history();
+        changed |= self.poll_search();
         // After everything that can move the selection this frame.
         changed |= self.sync_preview();
         changed |= self.land_preview();
@@ -458,8 +468,7 @@ impl State {
         }
         for p in &mut self.panes {
             if !p.f.sort_set && new.sort != old.sort {
-                p.f.sort = new.sort;
-                p.f.resort();
+                p.f.apply_sort(new.sort);
             }
             for m in p.tabs.iter_mut().flatten().filter(|m| !m.sort_set) {
                 m.sort = new.sort;
@@ -620,6 +629,12 @@ impl State {
         if self.pick.is_some() {
             return self.pick_key(ev, tx);
         }
+        // In a search with the results focused, ⌫ edits the query (as typing does, below).
+        let m = ev.mods;
+        if self.cur().searching() && ev.key == Key::Backspace && !m.cmd && !m.ctrl && !m.alt {
+            self.type_in_search(self.active, None, tx);
+            return true;
+        }
         if self.edit_filter(ev, tx) {
             return true;
         }
@@ -628,6 +643,11 @@ impl State {
             // had it first, above).
             if cmd == Cmd::Clear && self.preview.is_some() {
                 cmd = Cmd::ClosePreview;
+            }
+            // Then a running file operation; then in a search, it stops the walk or leaves.
+            if cmd == Cmd::Clear && self.job.is_none() && self.cur().searching() {
+                self.search_escape(self.active, tx);
+                return true;
             }
             if let Some(why) = self.unavailable(cmd) {
                 // Closing the last tab does nothing, the same on every platform: passed on, ⌘W
@@ -641,6 +661,16 @@ impl State {
             }
             self.run(cmd, tx);
             return true;
+        }
+        if self.cur().searching() {
+            if let Key::Text(t) = &ev.key
+                && !ev.mods.cmd
+                && !ev.mods.ctrl
+            {
+                self.type_in_search(self.active, Some(t), tx);
+                return true;
+            }
+            return false;
         }
         let f = self.cur_mut();
         match &ev.key {
@@ -698,24 +728,32 @@ impl State {
         let busy = self.job.is_some();
         let pane = &self.panes[self.active];
         let when = |cond: bool, why: &'static str| cond.then_some(why);
+        let searching = f.searching();
         match cmd {
             // Start a file operation.
-            Duplicate | Trash => when(busy, BUSY).or(when(nothing, "Select an item first")),
+            Trash => when(busy, BUSY).or(when(nothing, "Select an item first")),
+            // A duplicate goes beside its original, so all of them must be in one folder.
+            Duplicate => when(busy, BUSY).or(when(nothing, "Select an item first")).or(when(
+                searching && f.target_paths().iter().map(|p| p.parent()).collect::<std::collections::HashSet<_>>().len() > 1,
+                "Duplicate items from one folder at a time",
+            )),
             CopyToOther | MoveToOther => when(!self.split(), NOT_SPLIT)
                 .or(when(busy, BUSY))
                 .or(when(nothing, "Select an item first"))
+                .or(when(self.other().is_some_and(Folder::searching), IN_OTHER_SEARCH))
                 .or(when(self.other().is_some_and(|o| o.shows(&f.cwd, f.dir_id)), "Both panes show the same folder")),
             // Paste always shows as available otherwise: Rune can't ask the clipboard what it
             // holds without reading it (RUNE-GAPS.md). Pasting nothing says so.
-            Paste | PasteMove => when(busy, BUSY),
+            Paste | PasteMove => when(busy, BUSY).or(when(searching, "Leave the search (Esc) to paste into this folder")),
             Undo => when(busy, BUSY).or(when(self.undo.is_empty(), "Nothing to undo")),
             Cancel => when(!busy, "No file operation is running"),
             Open | Copy | Cut | Rename => when(nothing, "Select an item first"),
             Into => when(!f.selected().is_some_and(|e| e.is_dir), "Select a folder first"),
-            Parent => when(f.cwd.parent().is_none(), "Already at the top"),
-            Back => when(f.back.is_empty(), "Nothing to go back to"),
+            Parent => when(searching, "Leave the search first (Esc)").or(when(f.cwd.parent().is_none(), "Already at the top")),
+            // In a search, Back leaves it.
+            Back => when(!searching && f.back.is_empty(), "Nothing to go back to"),
             Forward => when(f.fwd.is_empty(), "Nothing to go forward to"),
-            Clear => when(!busy && f.filter.is_empty() && self.note.is_none() && f.marked.is_empty(), "Nothing to clear"),
+            Clear => when(!busy && !searching && f.filter.is_empty() && self.note.is_none() && f.marked.is_empty(), "Nothing to clear"),
             Up | Down | PageUp | PageDown | First | Last | ExtendUp | ExtendDown | ExtendPageUp | ExtendPageDown | ExtendFirst
             | ExtendLast | SelectAll | SelectPattern | InvertSelection => when(empty, "Nothing to select"),
             SelectKind => when(nothing, "Select an item first"),
@@ -735,8 +773,9 @@ impl State {
                 when(cmd.place().is_some_and(|i| i >= self.places.len()), "No sidebar place there")
             }
             // Always available.
-            GoTo | Reload | Reveal | Palette | OpenSettings | ReloadSettings | CopyPath | NewFolder | Hidden | SortReverse | NewTab
-            | Split | ClearJump => None,
+            NewFolder => when(searching, "Leave the search (Esc) to make a folder here"),
+            GoTo | Reload | Reveal | Palette | OpenSettings | ReloadSettings | CopyPath | Hidden | SortReverse | NewTab | Split
+            | ClearJump | Search => None,
         }
     }
 
@@ -777,9 +816,11 @@ impl State {
                 self.open_selected();
             }
             Parent => self.parent(),
+            Back if self.cur().searching() => self.leave_search(self.active, tx),
             Back => self.go_back(),
             Forward => self.go_forward(),
             GoTo => {
+                self.leave_search(self.active, tx);
                 let f = self.cur_mut();
                 let mut p = fs::pretty(&f.cwd);
                 if !p.ends_with(std::path::MAIN_SEPARATOR) {
@@ -788,6 +829,7 @@ impl State {
                 f.filter = p;
                 f.refilter(None);
             }
+            Reload if self.cur().searching() => self.restart_search(self.active, tx),
             Reload => self.reload(),
             Reveal => self.reveal_selected(),
             Palette => {
@@ -795,6 +837,7 @@ impl State {
                 self.open_palette();
             }
             Jump => self.open_jump(tx),
+            Search => self.open_search(tx),
             ClearJump => self.clear_jump_history(),
             SelectPattern => self.open_pick(tx),
             InvertSelection => self.invert_selection(tx),
@@ -805,6 +848,8 @@ impl State {
                 if let Some(job) = &self.job {
                     job.cancel();
                     self.note = Some("Cancelling…".into());
+                } else if self.cur().searching() {
+                    self.search_escape(self.active, tx);
                 } else {
                     self.note = None;
                     let f = self.cur_mut();
@@ -855,7 +900,15 @@ impl State {
             ExtendFirst => self.cur_mut().step(isize::MIN / 2, true, tx),
             ExtendLast => self.cur_mut().step(isize::MAX / 2, true, tx),
             SelectAll => self.cur_mut().select_all(),
-            Hidden => self.toggle_hidden(),
+            Hidden => {
+                self.toggle_hidden();
+                // Hidden folders are walked or skipped: searches start again.
+                for ix in 0..self.panes.len() {
+                    if self.panes[ix].f.searching() {
+                        self.restart_search(ix, tx);
+                    }
+                }
+            }
             SortName => self.sort_by(SortKey::Name, tx),
             SortKind => self.sort_by(SortKey::Kind, tx),
             SortSize => self.sort_by(SortKey::Size, tx),
@@ -921,8 +974,7 @@ impl State {
         let (old, new) = (&self.settings, &c.settings);
         if new.sort != old.sort {
             for p in &mut self.panes {
-                p.f.sort = new.sort;
-                p.f.resort();
+                p.f.apply_sort(new.sort);
                 for m in p.tabs.iter_mut().flatten() {
                     m.sort = new.sort;
                 }
@@ -963,6 +1015,9 @@ impl State {
 
 /// Why a command that needs two panes can't run.
 pub(crate) const NOT_SPLIT: &str = "The window isn't split";
+
+/// Why nothing goes into a pane showing search results (which folder would it be?).
+pub(crate) const IN_OTHER_SEARCH: &str = "The other pane is showing search results";
 
 /// Re-reads `f`, keeping its selection (or selecting `names` instead). A tab still waiting for
 /// the read that shows it reads again, still restoring its selection and scroll.

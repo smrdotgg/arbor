@@ -32,6 +32,9 @@ impl State {
         if self.rename.take().is_some() {
             tx.blur();
         }
+        // The other pane's search field lets go of the keys.
+        let was = self.active;
+        self.focus_results(was, tx);
         self.active = ix;
         tx.set_title(title(&self.cur().cwd));
         self.sync_preview();
@@ -54,10 +57,14 @@ impl State {
         if self.rename.take().is_some() {
             tx.blur();
         }
-        let p = &mut self.panes[self.active];
+        let ix = self.active;
+        let p = &mut self.panes[ix];
         p.tabs[p.tab] = Some(p.f.memo());
         p.tab += 1;
         p.tabs.insert(p.tab, None);
+        // A search stays with its tab (as a query to run again); the new one shows the folder.
+        self.leave_search(ix, tx);
+        let p = &mut self.panes[ix];
         p.f.back.clear();
         p.f.fwd.clear();
         if !p.f.filter.is_empty() {
@@ -81,18 +88,27 @@ impl State {
     }
 
     /// Puts `m` on screen in pane `ix` (whose tab slot for it is already `None`).
-    fn reveal_tab(&mut self, ix: usize, m: TabMemo, tx: &mut Tx) {
+    fn reveal_tab(&mut self, ix: usize, mut m: TabMemo, tx: &mut Tx) {
         if ix == self.active && self.rename.take().is_some() {
             tx.blur();
         }
+        // The pane's search field (the tab being hidden's) lets go of the keys.
+        self.focus_results(ix, tx);
         let wait = self.show_wait;
+        let query = m.search.take();
         let f = &mut self.panes[ix].f;
-        f.show(m);
+        f.show(m.clone());
         if ix == self.active {
             tx.set_title(title(&f.cwd));
         }
-        if let Some(listing) = f.request_now(wait) {
-            self.land(ix, listing, tx);
+        match query {
+            // It was showing a search: it walks again (nothing of the results was kept).
+            Some(q) => self.begin_search(ix, m, &q, tx),
+            None => {
+                if let Some(listing) = f.request_now(wait) {
+                    self.land(ix, listing, tx);
+                }
+            }
         }
         self.sync_preview();
     }
@@ -206,6 +222,10 @@ impl State {
         self.pane_drop = None;
         let (Some(src), Some(dst)) = (self.pane(from), self.pane(to)) else { return };
         if src.f.version != version || from == to {
+            return;
+        }
+        if dst.f.searching() {
+            self.note = Some(crate::app::IN_OTHER_SEARCH.into());
             return;
         }
         let (files, into) = (src.f.drag_paths(i), dst.f.cwd.clone());

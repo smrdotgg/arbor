@@ -43,6 +43,8 @@ pub struct Settings {
     pub jump_exclude: Vec<String>,
     /// `[select] case_sensitive`: how Select by Pattern compares; `None` is the platform's way.
     pub case_sensitive: Option<bool>,
+    /// `[search] cross_devices`: a search walks into other file systems mounted inside it.
+    pub search_cross_devices: bool,
 }
 
 impl Default for Settings {
@@ -55,6 +57,7 @@ impl Default for Settings {
             jump_enabled: true,
             jump_exclude: Vec::new(),
             case_sensitive: None,
+            search_cross_devices: false,
         }
     }
 }
@@ -121,12 +124,16 @@ impl Config {
                 ("general", Some(t)) => general(t, &mut settings, &mut errors, &line),
                 ("jump", Some(t)) => jump(t, &mut settings, &mut errors, &line),
                 ("select", Some(t)) => select(t, &mut settings, &mut errors, &line),
+                ("search", Some(t)) => search(t, &mut settings, &mut errors, &line),
                 ("keys", Some(t)) => keys = key_table(t, &mut errors, &line),
-                ("general" | "jump" | "select" | "keys", None) => errors.push(format!("line {at}: '{name}' should be a section: [{name}]")),
+                ("general" | "jump" | "search" | "select" | "keys", None) => {
+                    errors.push(format!("line {at}: '{name}' should be a section: [{name}]"))
+                }
                 (_, _) if GENERAL.contains(&name) => {
                     errors.push(format!("line {at}: '{name}' belongs under [general]"));
                 }
-                _ => errors.push(format!("line {at}: unknown section '{name}' (sections are [general], [jump], [select] and [keys])")),
+                _ => errors
+                    .push(format!("line {at}: unknown section '{name}' (sections are [general], [jump], [search], [select] and [keys])")),
             }
         }
         let keymap = build_keymap(&keys, platform, &mut errors);
@@ -248,6 +255,17 @@ fn select(t: &dyn TableLike, s: &mut Settings, errors: &mut Vec<String>, line: &
             ("case_sensitive", Some(b)) => s.case_sensitive = Some(b),
             ("case_sensitive", None) => errors.push(format!("line {at}: case_sensitive should be true or false")),
             _ => errors.push(format!("line {at}: unknown setting '{name}' under [select] (settings are case_sensitive)")),
+        }
+    }
+}
+
+fn search(t: &dyn TableLike, s: &mut Settings, errors: &mut Vec<String>, line: &dyn Fn(Option<std::ops::Range<usize>>) -> usize) {
+    for (name, item) in t.iter() {
+        let at = line(t.key(name).and_then(|k| k.span()));
+        match (name, item.as_bool()) {
+            ("cross_devices", Some(b)) => s.search_cross_devices = b,
+            ("cross_devices", None) => errors.push(format!("line {at}: cross_devices should be true or false")),
+            _ => errors.push(format!("line {at}: unknown setting '{name}' under [search] (settings are cross_devices)")),
         }
     }
 }
@@ -405,6 +423,12 @@ pub fn template() -> String {
          # Folders never remembered: * and ? stay within a folder name, ** crosses folders, and\n\
          # a pattern ending in /** is the folder and everything in it. Example: [\"/tmp/**\", \"**/node_modules\"]\n\
          # exclude = []\n\
+         \n\
+         [search]\n\
+         # Search in This Folder (cmd+f) stays on the folder's own disk: a drive or network share\n\
+         # mounted inside it isn't searched. true searches those too. (Links to folders are never\n\
+         # followed, and on Windows neither are junctions or volumes mounted in a folder.)\n\
+         # cross_devices = false\n\
          \n\
          [select]\n\
          # Whether Select by Pattern tells capitals apart. Without this line, it does on Linux and\n\
@@ -611,7 +635,7 @@ mod tests {
             c.errors,
             [
                 "line 1: 'show_hidden' belongs under [general]",
-                "line 2: unknown section 'colors' (sections are [general], [jump], [select] and [keys])"
+                "line 2: unknown section 'colors' (sections are [general], [jump], [search], [select] and [keys])"
             ]
         );
     }

@@ -319,6 +319,13 @@ impl Running {
 
 type TrashFn = fn(&Path) -> Result<Option<PathBuf>, String>;
 
+/// The trash [`start`] uses: the platform's, or in tests a `.trash` folder beside each item, so
+/// no test fills the user's own Trash.
+#[cfg(not(test))]
+const TRASH: TrashFn = crate::trash::trash;
+#[cfg(test)]
+const TRASH: TrashFn = tests::fake_trash;
+
 /// Runs `op` on a worker thread; its outcome comes back through [`Running::take`].
 ///
 /// With `dest_id`, a copy or move goes only into the folder the user chose as the one with that
@@ -333,12 +340,12 @@ pub fn start(op: Op, dest_id: Option<noclobber::FileId>, waker: Option<rune::Wak
     // Headless runs (scripts, snapshots) run on a virtual clock far faster than real time, so
     // they do the work inline to stay deterministic.
     if rune::tooling::headless_run().is_some() {
-        let outcome = Worker::new(&p, None, crate::trash::trash).run_into(op, dest_id);
+        let outcome = Worker::new(&p, None, TRASH).run_into(op, dest_id);
         *done.lock().expect("fresh mutex") = Some(outcome);
         return Running { verb, progress, done };
     }
     std::thread::spawn(move || {
-        let outcome = Worker::new(&p, waker.as_ref(), crate::trash::trash).run_into(op, dest_id);
+        let outcome = Worker::new(&p, waker.as_ref(), TRASH).run_into(op, dest_id);
         if let Ok(mut slot) = d.lock() {
             *slot = Some(outcome);
         }
@@ -1220,7 +1227,7 @@ mod tests {
 
     /// Stands in for the platform trash: moves the item to a `.trash` folder beside it, so tests
     /// never touch the real one.
-    fn fake_trash(p: &Path) -> Result<Option<PathBuf>, String> {
+    pub(super) fn fake_trash(p: &Path) -> Result<Option<PathBuf>, String> {
         let bin = p.parent().unwrap().join(".trash");
         fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
         let at = free_name(&bin, p.file_name().unwrap(), false);

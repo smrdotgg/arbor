@@ -158,12 +158,12 @@ pub(crate) mod read_hook {
     }
 }
 
-fn mtime(m: &std::fs::Metadata) -> i64 {
+pub(crate) fn mtime(m: &std::fs::Metadata) -> i64 {
     m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as i64)
 }
 
 #[allow(unused_variables)]
-fn is_hidden(name: &str, meta: Option<&std::fs::Metadata>) -> bool {
+pub(crate) fn is_hidden(name: &str, meta: Option<&std::fs::Metadata>) -> bool {
     if name.starts_with('.') {
         return true;
     }

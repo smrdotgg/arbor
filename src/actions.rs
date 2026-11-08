@@ -46,6 +46,10 @@ impl State {
 
     /// The root's paste handler, for a paste the OS started: into the active pane's folder.
     pub fn paste(&mut self, content: &ClipboardContent) {
+        if let Some(why) = self.unavailable(Cmd::Paste) {
+            self.note = Some(why.into());
+            return;
+        }
         self.paste_with(None, content);
     }
 
@@ -91,10 +95,13 @@ impl State {
         }
     }
 
+    /// Copies of the selection beside it ("name copy"). In a search the items are in their own
+    /// folder, not the root's (`unavailable` makes sure there's one).
     pub fn duplicate(&mut self) {
         let sources = self.target_paths();
-        if !sources.is_empty() {
-            self.start(Op::Copy { sources, dest: self.cur().cwd.clone() });
+        let Some(dest) = sources.first().and_then(|p| p.parent()).map(Path::to_path_buf) else { return };
+        if sources.iter().all(|p| p.parent() == Some(dest.as_path())) {
+            self.start(Op::Copy { sources, dest });
         }
     }
 
@@ -147,27 +154,37 @@ impl State {
         let Some(r) = self.rename.take() else { return };
         tx.blur();
         let new = r.edit.text.trim().to_string();
-        let old_name = r.os.to_string_lossy();
-        if new.is_empty() || new == old_name {
+        // The item's own name (in a search, `os` is a path below the root).
+        let from = self.cur().cwd.join(&r.os);
+        let Some(old) = from.file_name().map(|n| n.to_os_string()) else { return };
+        if new.is_empty() || new == old.to_string_lossy() {
             return;
         }
         if new.contains('/') || (cfg!(windows) && new.contains(['\\', ':', '*', '?', '"', '<', '>', '|'])) || new == "." || new == ".." {
             self.note = Some(format!("“{new}” isn't a valid name"));
             return;
         }
-        let from = self.cur().cwd.join(&r.os);
-        let to = self.cur().cwd.join(&new);
+        // Beside it, in its own folder: never "the folder on screen + the new name".
+        let Some(dir) = from.parent().map(Path::to_path_buf) else { return };
+        let to = dir.join(&new);
         // Never over an existing item, even one that appears this instant (a case-only change
         // on a case-insensitive disk is the item itself, and goes through).
         match ops::rename(&from, &to) {
             Ok(()) => {
                 // One lstat to fingerprint it, so undo can tell whether it changed since.
-                self.undo.extend(Undo::renamed(to, from));
+                self.undo.extend(Undo::renamed(to.clone(), from.clone()));
                 self.note = None;
-                // Every pane on this folder, by whatever path (a symlink to it too).
-                let (dir, id, new) = (self.cur().cwd.clone(), self.cur().dir_id, OsString::from(new));
-                for p in self.panes.iter_mut().filter(|p| p.f.shows(&dir, id)) {
-                    p.f.renamed(&r.os, &new);
+                let f = self.cur();
+                let id = if dir == f.cwd && !f.searching() { f.dir_id } else { crate::noclobber::dir_id(&dir) };
+                // Every pane on this folder, by whatever path (a symlink to it too), and every
+                // search showing the item.
+                let new = OsString::from(new);
+                for p in &mut self.panes {
+                    if p.f.searching() {
+                        p.f.renamed_result(&from, &to);
+                    } else if p.f.shows(&dir, id) {
+                        p.f.renamed(&old, &new);
+                    }
                 }
                 self.refresh(&[(dir, id)], &[]);
             }
@@ -256,6 +273,12 @@ impl State {
     pub(crate) fn refresh(&mut self, folders: &[(PathBuf, Option<crate::noclobber::FileId>)], select: &[PathBuf]) {
         for p in &mut self.panes {
             let f = &mut p.f;
+            // A search re-checks the results the change could touch, and doesn't walk again.
+            if f.searching() {
+                let changed: Vec<PathBuf> = folders.iter().map(|(p, _)| p.clone()).collect();
+                f.recheck_results(&changed, select);
+                continue;
+            }
             let going = f.pending.as_ref().is_some_and(|p| matches!(p.nav, Nav::New | Nav::Back | Nav::Forward));
             let (at, at_id) = match &f.pending {
                 // Not listed yet: its identity isn't known.
