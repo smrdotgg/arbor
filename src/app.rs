@@ -35,6 +35,13 @@ pub(crate) struct Clip {
     pub cut: bool,
 }
 
+/// ⌘V or ⌥⌘V, waiting for the clipboard: the folder that was on screen in the active pane
+/// when it was asked for, and whether it moves.
+pub(crate) struct PasteReq {
+    pub dest: PathBuf,
+    pub mv: bool,
+}
+
 /// One side of the window: its tabs, and the visible tab's live folder.
 pub struct Pane {
     /// The visible tab's folder (its `id` is the pane's).
@@ -81,7 +88,8 @@ pub struct State {
     /// The running file operation, if any.
     pub job: Option<ops::Running>,
     pub(crate) clip: Option<Clip>,
-    pub(crate) paste_move: bool,
+    /// A paste asked for whose clipboard read hasn't come back yet.
+    pub(crate) paste_req: Option<PasteReq>,
     pub(crate) undo: Vec<ops::Undo>,
     /// Which keys run which command (defaults plus the settings file).
     pub keymap: Keymap,
@@ -145,7 +153,7 @@ impl State {
             rename: None,
             job: None,
             clip: None,
-            paste_move: false,
+            paste_req: None,
             undo: Vec::new(),
             keymap: config.keymap,
             settings: config.settings,
@@ -689,9 +697,10 @@ impl State {
             }
             Copy => self.copy_selected(false, tx),
             Cut => self.copy_selected(true, tx),
-            // The paste lands in the root's paste handler (`view::view`).
+            // The paste lands in the root's paste handler (`view::view`), a frame or more later:
+            // where it goes and whether it moves are fixed now, by the pane it was asked in.
             Paste | PasteMove => {
-                self.paste_move = cmd == PasteMove;
+                self.paste_req = Some(PasteReq { dest: self.cur().cwd.clone(), mv: cmd == PasteMove });
                 tx.request_paste();
             }
             CopyPath => self.copy_path(tx),

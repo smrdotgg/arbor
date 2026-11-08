@@ -241,6 +241,17 @@ mod tests {
         assert!(!s.panes.iter().any(|p| p.f.is_loading()), "never landed");
     }
 
+    /// Polls as frames would until the file operation is done and no pane is loading.
+    fn finish(s: &mut State) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while s.job.is_some() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            s.poll(&mut Tx::default());
+        }
+        assert!(s.job.is_none(), "the operation never finished");
+        settle(s);
+    }
+
     fn go(s: &mut State, p: &Path) {
         s.go_to(p.to_path_buf());
         settle(s);
@@ -442,6 +453,28 @@ mod tests {
         run(&mut s, Cmd::Split);
         run(&mut s, Cmd::CloseTab);
         assert_eq!((s.panes.len(), s.active), (1, 0));
+    }
+
+    /// Paste (or Paste and Move) asked for in one pane lands in that pane's folder, even when
+    /// the other pane is active by the time the clipboard answers.
+    #[test]
+    fn a_paste_lands_where_it_was_asked_for() {
+        for (i, cmd) in [Cmd::Paste, Cmd::PasteMove].into_iter().enumerate() {
+            let (a, b, src) =
+                (folder(&format!("paste-a{i}"), &[]), folder(&format!("paste-b{i}"), &[]), folder(&format!("paste-src{i}"), &["f0"]));
+            let mut s = state_in(&a);
+            run(&mut s, Cmd::Split);
+            go(&mut s, &b);
+            run(&mut s, Cmd::OtherPane);
+            assert_eq!(s.cur().cwd, a);
+            run(&mut s, cmd);
+            run(&mut s, Cmd::OtherPane); // B is active when the clipboard answers
+            s.paste(&rune::ClipboardContent::new("").with_files(vec![src.join("f0")]));
+            finish(&mut s);
+            assert!(a.join("f0").exists(), "{cmd:?} lands in A");
+            assert!(!b.join("f0").exists(), "{cmd:?} not in B");
+            assert_eq!(src.join("f0").exists(), cmd == Cmd::Paste, "{cmd:?}: copies or moves as asked");
+        }
     }
 
     /// A handler from a frame drawn before a pane closed names a pane that's gone: nothing.
