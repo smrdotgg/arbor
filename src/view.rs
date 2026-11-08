@@ -152,7 +152,9 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         .child(sidebar(s, l, cx.titlebar_inset() > 0.0))
         .child(el().w(1.0).h_full().fill(l.t.separator))
         .child(col().key("main").grow(1.0).min_w(0.0).h_full().child(panes).child(hr(l)).child(status(s, l)));
-    if s.palette.is_some() {
+    if let Some(a) = &s.asking {
+        window.child(confirm_view(a, l))
+    } else if s.palette.is_some() {
         window.child(palette_view(s, l))
     } else if s.jump.is_some() {
         window.child(jump_view(s, l))
@@ -1167,6 +1169,53 @@ fn jump_row(h: &crate::jump::Hit, i: usize, on: bool, typed: bool, l: Look) -> E
     }
     r = r.child(text(h.shown.clone()).spans(spans).font(BODY).color(fg).truncate_head().grow(1.0).min_w(0.0));
     if on { r.fill(l.accent) } else { r.hover(l.t.hover) }
+}
+
+/// Arbor's one dialog: before something that can't be undone (`confirm.rs`). A title, what it
+/// does ("… This can't be undone."), Cancel and the destructive button; the focused one has a
+/// ring, and Cancel has the focus when it opens. Modal: a click outside cancels.
+fn confirm_view(a: &crate::confirm::Ask, l: Look) -> El {
+    use crate::confirm::Button;
+    let red = rune::oklch(0.60, 0.19, 27.0);
+    let button = |label: &'static str, key: &'static str, which: Button| {
+        let focused = a.focus == which;
+        let yes = which == Button::Action;
+        let b = text(label)
+            .key(key)
+            .font(TextStyle::new(13.0, 500.0))
+            .color(if yes { Color::WHITE } else { l.t.text })
+            .px(14.0)
+            .h(28.0)
+            .center_y()
+            .radius(6.0)
+            .cursor(Cursor::Pointer)
+            .on_press_tx(move |s: &mut State, tx| s.answer(yes, tx));
+        let b = if yes { b.fill(red) } else { b.fill(l.t.control_off).hover(l.t.hover) };
+        if focused { b.border(2.0, l.accent) } else { b }
+    };
+    // A focusable card that owns its keys: Rune focuses it when the modal opens, and its keys
+    // come before Rune's focus navigation, so Tab, ← → and Enter are the dialog's
+    // (`State::ask_key`), and the buttons aren't Tab stops of their own.
+    let panel = overlay_card("confirm", 420.0, l, |s: &mut State| s.asking = None)
+        .focusable(true)
+        .on_key(|s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx| s.ask_key(ev, tx))
+        .no_focus_ring()
+        .px(20.0)
+        .py(18.0)
+        .gap(10.0)
+        .child(text(a.title.clone()).font(TextStyle::new(15.0, 600.0)).color(l.t.text))
+        .child(text(a.body.clone()).font(BODY).color(l.t.text_secondary).wrap().w_full())
+        .child(
+            row()
+                .key("confirm-buttons")
+                .w_full()
+                .pt(6.0)
+                .gap(8.0)
+                .child(el().grow(1.0))
+                .child(button("Cancel", "confirm-cancel", Button::Cancel))
+                .child(button(a.action, "confirm-action", Button::Action)),
+        );
+    overlay_layer("confirm-layer", panel)
 }
 
 /// Select by Pattern: a field, the live count, and what Enter, ⇧Enter and ⌥Enter do.

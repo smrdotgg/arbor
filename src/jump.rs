@@ -811,13 +811,8 @@ impl State {
 
     /// "Clear Jump History": it can't be undone, so the first run asks and the second, right
     /// after, clears.
+    /// Forgets the whole history: run only from the confirmation dialog (`Cmd::permanent`).
     pub(crate) fn clear_jump_history(&mut self) {
-        if self.confirm != Some(Cmd::ClearJump) {
-            let n = self.history.agg.as_ref().map(|a| format!("{} folders", a.len())).unwrap_or_else(|| "every folder".into());
-            self.note = Some(format!("Clearing Jump history forgets {n} and can't be undone. Run Clear Jump History again to clear it."));
-            self.confirm = Some(Cmd::ClearJump);
-            return;
-        }
         self.history.clear();
         self.note = Some("Jump history cleared".into());
     }
@@ -1137,26 +1132,6 @@ mod tests {
 
     /// Clearing can't be undone: the first run only asks, and anything else in between
     /// cancels the question.
-    #[test]
-    fn clearing_the_history_asks_first() {
-        let d = dirs("clear", &["a"]);
-        let mut s = crate::app::tests::state_in(&d);
-        let mut tx = Tx::default();
-        s.go(d.join("a"), Nav::New, None);
-        crate::app::tests::settle_all(&mut s);
-        s.run(Cmd::Jump, &mut tx);
-        s.close_jump(&mut tx);
-        s.run(Cmd::ClearJump, &mut tx);
-        assert!(s.note.as_deref().unwrap().contains("can't be undone"));
-        assert_eq!(s.history.agg.as_ref().unwrap().len(), 1);
-        s.run(Cmd::Down, &mut tx);
-        s.run(Cmd::ClearJump, &mut tx);
-        assert_eq!(s.history.agg.as_ref().unwrap().len(), 1, "another command came between");
-        s.run(Cmd::ClearJump, &mut tx);
-        assert!(s.history.agg.as_ref().unwrap().is_empty());
-        assert_eq!(s.note.as_deref(), Some("Jump history cleared"));
-    }
-
     #[test]
     fn jump_off_records_nothing_and_cant_open() {
         let d = dirs("off", &["a"]);

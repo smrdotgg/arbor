@@ -115,8 +115,9 @@ pub struct State {
     pub history: History,
     /// The read a Jump asked for, so a folder that's gone is dropped from the history.
     pub(crate) jump_req: Option<u64>,
-    /// A command that can't be undone, run once and waiting to be run again to confirm.
-    pub(crate) confirm: Option<Cmd>,
+    /// The confirmation dialog, while it asks about a command that can't be undone
+    /// (`confirm.rs`).
+    pub asking: Option<crate::confirm::Ask>,
     /// The palette's, Jump's and Select by Pattern's late field writes after they close (see
     /// `rename_sink`).
     pub(crate) palette_sink: TextEdit,
@@ -201,7 +202,7 @@ impl State {
             pick: None,
             history,
             jump_req: None,
-            confirm: None,
+            asking: None,
             palette_sink: TextEdit::new(""),
             rename_sink: TextEdit::new(""),
             job_seen: (0, 0),
@@ -598,11 +599,6 @@ impl State {
     // ---- keys and commands -----------------------------------------------------------------
 
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        // A confirmation is only for the very next command (`run` keeps it for that one).
-        let confirm = self.confirm.take();
-        if self.keymap.find(|c| c.matches_tx(ev, tx)).is_some() {
-            self.confirm = confirm;
-        }
         let handled = self.key(ev, tx);
         if handled {
             self.sync_preview();
@@ -612,6 +608,10 @@ impl State {
 
     fn key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         tx.instant();
+        // The confirmation dialog is modal: it has every key.
+        if self.asking.is_some() {
+            return self.ask_key(ev, tx);
+        }
         // While renaming, the field has the keys; only Escape (which it passes on) gets here.
         if self.rename.is_some() {
             if ev.key == Key::Escape {
@@ -797,10 +797,17 @@ impl State {
 
     /// Runs `cmd`, from a key, the palette or the context menu. Check `unavailable` first.
     pub fn run(&mut self, cmd: Cmd, tx: &mut Tx) {
-        // A confirmation lasts one command: running anything else cancels it.
-        if self.confirm != Some(cmd) {
-            self.confirm = None;
+        // What can't be undone asks first; only the dialog's button runs it (`run_permanent`).
+        if cmd.permanent() {
+            self.ask(cmd, tx);
+            return;
         }
+        self.run_cmd(cmd, tx);
+        self.sync_preview();
+    }
+
+    /// Runs a permanent command, confirmed in the dialog.
+    pub(crate) fn run_permanent(&mut self, cmd: Cmd, tx: &mut Tx) {
         self.run_cmd(cmd, tx);
         self.sync_preview();
     }
@@ -1007,6 +1014,7 @@ impl State {
 
     /// Closes the palette, Jump and Select by Pattern (at most one is open).
     pub fn close_overlays(&mut self, tx: &mut Tx) {
+        self.asking = None;
         self.close_palette(tx);
         self.close_jump(tx);
         self.close_pick(tx);

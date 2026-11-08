@@ -40,6 +40,14 @@ macro_rules! commands {
     };
 }
 
+impl Cmd {
+    /// Commands that can't be undone. Running one asks first, in Arbor's one dialog
+    /// (`confirm.rs`), and only its destructive button runs it.
+    pub fn permanent(self) -> bool {
+        matches!(self, Cmd::ClearJump)
+    }
+}
+
 /// "Show in Finder" and its equivalents.
 pub const REVEAL: &str = if cfg!(target_os = "macos") {
     "Show in Finder"
@@ -58,7 +66,7 @@ commands! {
     GoTo "nav.goto" "Go to Path…", ["cmd+l"];
     Jump "nav.jump" "Jump to Folder…", ["cmd+j"];
     Search "nav.search" "Search in This Folder…", ["cmd+f"];
-    ClearJump "nav.clear_jump_history" "Clear Jump History", [];
+    ClearJump "nav.clear_jump_history" "Clear Jump History…", [];
     Reload "nav.reload" "Reload", ["cmd+r"];
     Reveal "nav.reveal" REVEAL, ["cmd+enter"];
     Palette "app.palette" "Command Palette", ["cmd+k", "cmd+shift+p"];

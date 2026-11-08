@@ -218,8 +218,11 @@ until Jump opens:
   Past 10,000 lines the writer rewrites the log as one line for each of the top 5,000 folders.
 - Nothing checks that the folders still exist. Going to one that's gone says so and forgets it.
 - `[jump] enabled = false` stops recording and reading it (and Jump says it's off);
-  `[jump] exclude` lists globs of folders never recorded. "Clear Jump History" forgets it all:
-  it can't be undone, so the first run asks and running it again right after clears.
+  `[jump] exclude` lists globs of folders never recorded. "Clear Jump History…" forgets it all.
+  It can't be undone, so it asks first, in Arbor's one dialog (only for actions that can't be
+  undone): it says so plainly, and Cancel has the focus, so Enter (or Esc, or a click outside)
+  cancels. Tab or ← → moves to "Clear History", and Enter (or a click on it) clears. Starting
+  with Cancel means an Enter pressed twice, or out of habit, can't destroy anything.
 
 ### Select by Pattern
 
@@ -293,7 +296,7 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Go to Path… | ⌘L | Ctrl+L | `nav.goto` |
 | Jump to Folder… | ⌘J | Ctrl+J | `nav.jump` |
 | Search in This Folder… | ⌘F | Ctrl+F | `nav.search` |
-| Clear Jump History |  |  | `nav.clear_jump_history` |
+| Clear Jump History… |  |  | `nav.clear_jump_history` |
 | Reload | ⌘R | Ctrl+R | `nav.reload` |
 | Show in Finder / Explorer / file manager | ⌘↩ | Ctrl+Enter | `nav.reveal` |
 | Command Palette | ⌘K, ⇧⌘P | Ctrl+K, Ctrl+Shift+P | `app.palette` |

@@ -7,6 +7,7 @@ mod actions;
 mod app;
 mod commands;
 mod config;
+mod confirm;
 mod folder;
 mod fs;
 mod jump;
