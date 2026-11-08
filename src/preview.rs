@@ -24,9 +24,11 @@
 //!   previews then wait behind it). Only regular files are opened: a pipe would block its
 //!   reader forever.
 //! - **Memory stays bounded.** One decode at a time, and every image's size is checked from
-//!   its header before its pixels are allocated. Formats decoded whole, which can't stop
-//!   between rows (GIF, WebP, BMP, interlaced PNG, progressive JPEG), are refused over
-//!   [`MAX_PIXELS_WHOLE`], so one that can't be cancelled is short.
+//!   its header before its pixels are allocated. Formats decoded whole (BMP, interlaced PNG,
+//!   progressive JPEG, interlaced GIF) are refused over [`MAX_PIXELS_WHOLE`]. GIF decodes a
+//!   chunk of rows at a time and looks at the stop flag between them. WebP can't be stopped
+//!   once it starts (image-webp has no incremental decoding), so it's held to
+//!   [`MAX_PIXELS_WEBP_LOSSY`] and [`MAX_PIXELS_WEBP_LOSSLESS`], about 30 ms of decoding.
 
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -54,7 +56,7 @@ const TAB: usize = 4;
 /// The most pixels an image may have when its decoder streams it (PNG rows) or shrinks it
 /// while decoding (JPEG's IDCT scaling): the result is panel-sized whatever the source.
 pub const MAX_PIXELS: u64 = 100_000_000;
-/// The most pixels for formats decoded whole before shrinking (GIF, WebP, BMP, interlaced PNG,
+/// The most pixels for formats decoded whole before shrinking (BMP, interlaced PNG and GIF,
 /// progressive and 16-bit JPEG). Their decoders run to the end once started (the stop flag is
 /// only seen between reads, and a small file of a big image is read in one go), so this bounds
 /// how long and how big a decode that can't be cancelled is: 24 MP (6000 × 4000, a full-frame
@@ -62,6 +64,14 @@ pub const MAX_PIXELS: u64 = 100_000_000;
 /// decode a GIF on this class of machine (a 49 MP one took 423 ms). Serialized, one at a time,
 /// that's at most about 200 MB for a moment on an 8 GB machine, however fast Space is tapped.
 pub const MAX_PIXELS_WHOLE: u64 = 24_000_000;
+/// WebP decodes whole, and image-webp has no way to stop partway (no incremental decoding: a
+/// lossy image's data is read up front, and a well-compressed one is in the first read), so its
+/// limits keep a decode that can't be stopped to about 30 ms. Measured on tabot-dev (Xeon
+/// 8375C, `webp_decode_speed`): the slowest lossy images (random pixels with alpha) take 67 ms
+/// a megapixel, lossless 17 ms. So lossy (and animated) WebP up to 0.45 MP and lossless up to
+/// 1.7 MP, and "Too large to preview" above.
+pub const MAX_PIXELS_WEBP_LOSSY: u64 = 450_000;
+pub const MAX_PIXELS_WEBP_LOSSLESS: u64 = 1_700_000;
 /// The widest or tallest image decoded: JPEG's own limit. A pixel limit alone lets a
 /// 99,999,999 × 1 image through, whose rows and column map would take gigabytes; with each side
 /// at most this, a row is at most 512 KB (16-bit RGBA) and the column map 256 KB.
@@ -818,13 +828,20 @@ pub fn no_pixels(w: u64, h: u64) -> Option<String> {
 /// Why an image of `w` × `h` isn't decoded, when it's too big (checked from its header, before
 /// anything is allocated for its pixels). `whole`: the decoder holds the whole image at once.
 pub fn too_big(w: u64, h: u64, whole: bool) -> Option<String> {
+    too_big_for(w, h, if whole { MAX_PIXELS_WHOLE } else { MAX_PIXELS }, "this format")
+}
+
+/// [`too_big`] with its own pixel limit, for `what` ("lossy WebP").
+pub fn too_big_for(w: u64, h: u64, limit: u64, what: &str) -> Option<String> {
     if w > MAX_SIDE || h > MAX_SIDE {
         return Some(format!("{TOO_LARGE}: {w} × {h} is wider or taller than {MAX_SIDE} pixels"));
     }
-    let limit = if whole { MAX_PIXELS_WHOLE } else { MAX_PIXELS };
-    (w.saturating_mul(h) > limit).then(|| {
-        format!("{TOO_LARGE}: {w} × {h} is {:.0} megapixels (the limit is {} for this format)", (w * h) as f64 / 1e6, limit / 1_000_000)
-    })
+    let mp = |n: u64| {
+        let v = n as f64 / 1e6;
+        if v < 10.0 { format!("{}", (v * 100.0).round() / 100.0) } else { format!("{v:.0}") }
+    };
+    (w.saturating_mul(h) > limit)
+        .then(|| format!("{TOO_LARGE}: {w} × {h} is {} megapixels (the limit is {} for {what})", mp(w * h), mp(limit)))
 }
 
 /// The largest size at most `w` × `h` that fits in `fit` keeping the aspect ratio. Never
@@ -1223,6 +1240,14 @@ fn orient(w: u32, h: u32, rgba: Vec<u8>, o: image::metadata::Orientation) -> (u3
     (img.width(), img.height(), img.into_raw())
 }
 
+/// Frame rows a GIF decodes between looks at the stop flag: a few hundred microseconds of LZW
+/// for a 6000-pixel row.
+const GIF_ROWS: usize = 16;
+
+/// A GIF's first frame, on its canvas, decoded `GIF_ROWS` rows at a time with a look at `stop`
+/// between them, so moving on stops it within a chunk. Rows in order (most GIFs) stream into the
+/// shrinker, so neither the frame nor the canvas is ever held whole; an interlaced frame's rows
+/// come in four passes, so it fills a frame buffer first (still a chunk at a time), then shrinks.
 fn gif<R: BufRead + Seek>(r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Option<Decoded>, String> {
     let mut opts = gif::DecodeOptions::new();
     opts.set_color_output(gif::ColorOutput::RGBA);
@@ -1231,26 +1256,95 @@ fn gif<R: BufRead + Seek>(r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Opti
     }
     let mut d = opts.read_info(r).map_err(|e| e.to_string())?;
     let (w, h) = (d.width() as u32, d.height() as u32);
-    if let Some(why) = no_pixels(w as u64, h as u64).or_else(|| too_big(w as u64, h as u64, true)) {
+    if let Some(why) = no_pixels(w as u64, h as u64).or_else(|| too_big(w as u64, h as u64, false)) {
         return Err(why);
     }
-    let Some(frame) = d.read_next_frame().map_err(|e| e.to_string())? else { return Err("it has no frames".into()) };
-    if let Some(why) = no_pixels(frame.width as u64, frame.height as u64) {
+    let Some(frame) = d.next_frame_info().map_err(|e| e.to_string())? else { return Err("it has no frames".into()) };
+    let (fw, fh, fl, ft, interlaced) =
+        (frame.width as usize, frame.height as usize, frame.left as usize, frame.top as usize, frame.interlaced);
+    if let Some(why) = no_pixels(fw as u64, fh as u64) {
         return Err(format!("its first frame {why}"));
     }
-    // The first frame, on the image's canvas (a frame can be smaller and offset).
-    let mut canvas = vec![0u8; w as usize * h as usize * 4];
-    let (fw, fl, ft) = (frame.width as usize, frame.left as usize, frame.top as usize);
-    for (y, row) in frame.buffer.chunks_exact(fw * 4).enumerate() {
-        let cy = ft + y;
-        if cy >= h as usize || fl >= w as usize {
+    if interlaced && let Some(why) = too_big(w as u64, h as u64, true) {
+        return Err(why);
+    }
+    #[cfg(test)]
+    let path = hook::current();
+    let row_bytes = fw * 4;
+    let mut chunk = vec![0u8; row_bytes * GIF_ROWS.min(fh)];
+    // Reads the frame's next `n` rows into `chunk`; `None` when stopped first.
+    let next = |d: &mut gif::Decoder<R>, chunk: &mut [u8], done: usize| -> Result<Option<()>, String> {
+        #[cfg(not(test))]
+        let _ = done; // rows decoded so far: tests count them
+        #[cfg(test)]
+        hook::at(&path, "gif-chunk");
+        if stop.load(Relaxed) {
+            #[cfg(test)]
+            hook::rows(&path, done as u32);
+            return Ok(None);
+        }
+        if !d.fill_buffer(chunk).map_err(|e| e.to_string())? {
+            return Err("its pixel data ends early".into());
+        }
+        Ok(Some(()))
+    };
+    if interlaced {
+        // Pass by pass, each row where it goes.
+        let rows: Vec<usize> = [(0, 8), (4, 8), (2, 4), (1, 2)].into_iter().flat_map(|(from, step)| (from..fh).step_by(step)).collect();
+        let mut frame_px = vec![0u8; row_bytes * fh];
+        for (k, ys) in rows.chunks(GIF_ROWS).enumerate() {
+            let buf = &mut chunk[..ys.len() * row_bytes];
+            if next(&mut d, buf, k * GIF_ROWS)?.is_none() {
+                return Ok(None);
+            }
+            for (i, &y) in ys.iter().enumerate() {
+                frame_px[y * row_bytes..(y + 1) * row_bytes].copy_from_slice(&buf[i * row_bytes..(i + 1) * row_bytes]);
+            }
+        }
+        let canvas = place(&frame_px, (fw, fh, fl, ft), (w as usize, h as usize));
+        return Ok(shrink_whole(w, h, &canvas, 4, fit, stop).map(|px| picture(Format::Gif, w, h, px)));
+    }
+    let (dw, dh) = fit_size(w, h, fit);
+    let mut s = Shrink::new(w, h, dw, dh);
+    // The canvas row being shrunk: transparent, with the frame's row in its place.
+    let (cw, empty) = (w as usize * 4, vec![0u8; w as usize * 4]);
+    let mut line = vec![0u8; cw];
+    let (x0, n) = ((fl * 4).min(cw), (row_bytes).min(cw.saturating_sub(fl * 4)));
+    let mut y = 0usize;
+    for cy in 0..h as usize {
+        if cy < ft || cy >= ft + fh {
+            s.row(cy as u32, &empty, 4);
             continue;
         }
-        let n = fw.min(w as usize - fl) * 4;
-        let at = (cy * w as usize + fl) * 4;
+        let i = (cy - ft) % GIF_ROWS;
+        if i == 0 {
+            let rows = GIF_ROWS.min(fh - (cy - ft));
+            if next(&mut d, &mut chunk[..rows * row_bytes], y)?.is_none() {
+                return Ok(None);
+            }
+        }
+        line[x0..x0 + n].copy_from_slice(&chunk[i * row_bytes..i * row_bytes + n]);
+        s.row(cy as u32, &line, 4);
+        y += 1;
+    }
+    #[cfg(test)]
+    hook::rows(&path, y as u32);
+    Ok(Some(picture(Format::Gif, w, h, (dw, dh, s.finish()))))
+}
+
+/// A frame of `fw` × `fh` RGBA pixels at (`fl`, `ft`) on a transparent canvas of `w` × `h`.
+fn place(frame: &[u8], (fw, fh, fl, ft): (usize, usize, usize, usize), (w, h): (usize, usize)) -> Vec<u8> {
+    let mut canvas = vec![0u8; w * h * 4];
+    for (y, row) in frame.chunks_exact(fw * 4).take(fh).enumerate() {
+        let cy = ft + y;
+        if cy >= h || fl >= w {
+            continue;
+        }
+        let n = fw.min(w - fl) * 4;
+        let at = (cy * w + fl) * 4;
         canvas[at..at + n].copy_from_slice(&row[..n]);
     }
-    Ok(shrink_whole(w, h, &canvas, 4, fit, stop).map(|px| picture(Format::Gif, w, h, px)))
+    canvas
 }
 
 fn webp<R: BufRead + Seek>(mut r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Option<Decoded>, String> {
@@ -1260,11 +1354,17 @@ fn webp<R: BufRead + Seek>(mut r: R, fit: [u32; 2], stop: &AtomicBool) -> Result
     r.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let mut d = image_webp::WebPDecoder::new(r).map_err(|e| e.to_string())?;
     let (w, h) = d.dimensions();
-    if let Some(why) = no_pixels(w as u64, h as u64).or_else(|| too_big(w as u64, h as u64, true)) {
+    // An animation's frames can be either kind: the lossy limit for all of it.
+    let (limit, what) = if d.is_animated() || d.is_lossy() {
+        (MAX_PIXELS_WEBP_LOSSY, "lossy WebP, which can't be stopped once it starts decoding")
+    } else {
+        (MAX_PIXELS_WEBP_LOSSLESS, "lossless WebP, which can't be stopped once it starts decoding")
+    };
+    if let Some(why) = no_pixels(w as u64, h as u64).or_else(|| too_big_for(w as u64, h as u64, limit, what)) {
         return Err(why);
     }
     for (fw, fh) in frames {
-        if let Some(why) = too_big(fw as u64, fh as u64, true) {
+        if let Some(why) = too_big_for(fw as u64, fh as u64, limit, what) {
             return Err(why);
         }
         if fw > w || fh > h {
@@ -1652,6 +1752,131 @@ mod tests {
         let imgs = write_images(&d, 64, 48);
         let real = std::fs::read(&imgs[3].0).unwrap();
         assert_eq!(webp_frames(&mut std::io::Cursor::new(&real)).unwrap(), [(64, 48)]);
+    }
+
+    /// A GIF of `w` × `h` on a canvas of `cw` × `ch` at (`left`, `top`), grey levels from
+    /// `gradient`, optionally interlaced.
+    fn gif_file(cw: u16, ch: u16, (w, h, left, top): (u16, u16, u16, u16), interlaced: bool) -> Vec<u8> {
+        let px = gradient(w as u32, h as u32);
+        let palette: Vec<u8> = (0..=255u8).flat_map(|i| [i, i, i]).collect();
+        let mut b = Vec::new();
+        {
+            let mut e = gif::Encoder::new(&mut b, cw, ch, &palette).unwrap();
+            let idx: Vec<u8> = px.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
+            let mut f = gif::Frame::from_indexed_pixels(w, h, idx, None);
+            (f.left, f.top, f.interlaced) = (left, top, interlaced);
+            e.write_frame(&f).unwrap();
+        }
+        b
+    }
+
+    /// A GIF stops at the next chunk of rows once the stop flag is set: it never decodes the
+    /// rest of the frame (it used to decode it whole, then look).
+    #[test]
+    fn a_gif_decode_stops_within_a_chunk_of_rows() {
+        for interlaced in [false, true] {
+            let d = folder(&format!("gif-stop-{interlaced}"));
+            let p = d.join("big.gif");
+            std::fs::write(&p, gif_file(1200, 900, (1200, 900, 0, 0), interlaced)).unwrap();
+            let ((reached, wait), (go, gate)) = (channel(), channel());
+            hook::GATES.lock().unwrap().push(hook::Gate { path: p.clone(), stage: "gif-chunk", reached, go: Some(gate) });
+            let stop = Arc::new(AtomicBool::new(false));
+            let (q, flag) = (p.clone(), stop.clone());
+            let decode = std::thread::spawn(move || {
+                hook::at(&q, "open");
+                let f = BufReader::new(std::fs::File::open(&q).unwrap());
+                gif(f, [300, 300], &flag).map(|d| d.is_some())
+            });
+            wait.recv_timeout(Duration::from_secs(5)).expect("the decode reached its first chunk");
+            stop.store(true, Relaxed);
+            go.send(()).unwrap();
+            assert_eq!(decode.join().unwrap(), Ok(false), "interlaced {interlaced}: stopped");
+            assert!(hook::seen(&p).contains(&"rows 0".to_string()), "{:?}", hook::seen(&p));
+        }
+    }
+
+    /// Streamed or interlaced, a frame smaller than its canvas lands where it says, the rest
+    /// transparent, as the whole-frame decode put it.
+    #[test]
+    fn gif_frames_land_on_their_canvas() {
+        let (cw, ch, frame) = (80, 60, (40, 30, 20, 10));
+        let (fw, fh, fl, ft) = (frame.0 as usize, frame.1 as usize, frame.2 as usize, frame.3 as usize);
+        let px = gradient(fw as u32, fh as u32);
+        let mut want = vec![0u8; cw as usize * ch as usize * 4];
+        for y in 0..fh {
+            for x in 0..fw {
+                let g = px[(y * fw + x) * 4];
+                let at = ((ft + y) * cw as usize + fl + x) * 4;
+                want[at..at + 4].copy_from_slice(&[g, g, g, 255]);
+            }
+        }
+        for interlaced in [false, true] {
+            let file = gif_file(cw, ch, frame, interlaced);
+            let (pic, (w, h, rgba)) = gif(std::io::Cursor::new(&file), [1000, 1000], &never()).unwrap().unwrap();
+            assert_eq!((pic.width, pic.height, w, h), (80, 60, 80, 60));
+            assert!(rgba == want, "interlaced {interlaced}: pixels differ");
+        }
+    }
+
+    /// WebP can't be stopped once it starts decoding, so it's held to sizes that decode in about
+    /// 30 ms: lossless up to 1.7 MP, lossy up to 0.45 MP.
+    #[test]
+    fn webp_is_held_to_what_decodes_in_about_30_ms() {
+        let d = folder("webp-caps");
+        let lossless = |w: u32, h: u32| {
+            let mut b = Vec::new();
+            image_webp::WebPEncoder::new(&mut b).encode(&gradient(w, h), w, h, image_webp::ColorType::Rgba8).unwrap();
+            b
+        };
+        assert!(image(Format::Webp, std::io::Cursor::new(lossless(1300, 1300)), DEFAULT_FIT, &never()).is_ok(), "1.69 MP");
+        let err = image(Format::Webp, std::io::Cursor::new(lossless(1400, 1300)), DEFAULT_FIT, &never()).unwrap_err();
+        assert!(err.starts_with(TOO_LARGE) && err.contains("1.82 megapixels (the limit is 1.7 for lossless WebP"), "{err}");
+        // A lossy header (a VP8 key frame) of 800 × 600: over 0.45 MP, refused before decoding.
+        let chunk =
+            |id: &[u8], body: &[u8]| [id, &(body.len() as u32).to_le_bytes(), body, if body.len() % 2 == 1 { &[0] } else { &[] }].concat();
+        let mut vp8 = vec![0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a];
+        vp8.extend_from_slice(&800u16.to_le_bytes());
+        vp8.extend_from_slice(&600u16.to_le_bytes());
+        vp8.extend_from_slice(&[0; 64]);
+        let body = [b"WEBP".as_slice(), &chunk(b"VP8 ", &vp8)].concat();
+        let file = [b"RIFF".as_slice(), &(body.len() as u32).to_le_bytes(), &body].concat();
+        let err = image(Format::Webp, std::io::Cursor::new(&file), DEFAULT_FIT, &never()).unwrap_err();
+        assert!(err.starts_with(TOO_LARGE) && err.contains("(the limit is 0.45 for lossy WebP"), "{err}");
+        let _ = d;
+    }
+
+    /// How long a decode goes on after it's told to stop: a 24 MP GIF (6000 × 4000) told 12 ms
+    /// in. `cargo test --release -- --ignored --nocapture gif_cancel_latency`
+    #[test]
+    #[ignore = "benchmark: encodes a 24 MP GIF"]
+    fn gif_cancel_latency() {
+        for interlaced in [false, true] {
+            let file = Arc::new(gif_file(6000, 4000, (6000, 4000, 0, 0), interlaced));
+            let mut after: Vec<f64> = (0..7)
+                .map(|_| {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let (f, flag) = (file.clone(), stop.clone());
+                    let t = std::thread::spawn(move || {
+                        let r = gif(std::io::Cursor::new(&*f), [1000, 1000], &flag);
+                        (r.map(|d| d.is_some()), Instant::now())
+                    });
+                    std::thread::sleep(Duration::from_millis(12));
+                    let told = Instant::now();
+                    stop.store(true, Relaxed);
+                    let (r, ended) = t.join().unwrap();
+                    assert_eq!(r, Ok(false));
+                    ended.saturating_duration_since(told).as_secs_f64() * 1000.0
+                })
+                .collect();
+            after.sort_by(f64::total_cmp);
+            let t = Instant::now();
+            gif(std::io::Cursor::new(&*file), [1000, 1000], &never()).unwrap();
+            let whole = t.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "24 MP GIF, interlaced {interlaced}: whole decode {whole:.0} ms; work after the stop: median {:.2} ms, max {:.2} ms",
+                after[3], after[6]
+            );
+        }
     }
 
     fn gradient(w: u32, h: u32) -> Vec<u8> {
@@ -2082,5 +2307,38 @@ mod tests {
         s.run(Cmd::OtherPane, &mut Tx::default());
         assert_eq!(shown(&s), Some("in-a.txt"));
         settle(&mut s);
+    }
+
+    /// How long a whole WebP decode takes (it can't be stopped once started), for each `.webp`
+    /// in `ARBOR_WEBP_DIR`: what sets [`MAX_PIXELS_WEBP`]. Median of 5.
+    /// `ARBOR_WEBP_DIR=… cargo test --release -- --ignored --nocapture webp_decode_speed`
+    #[test]
+    #[ignore = "benchmark: needs ARBOR_WEBP_DIR"]
+    fn webp_decode_speed() {
+        let Some(dir) = std::env::var_os("ARBOR_WEBP_DIR") else { return };
+        let mut files: Vec<PathBuf> =
+            std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "webp")).collect();
+        files.sort();
+        for p in files {
+            let mut times: Vec<f64> = (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    let mut d = image_webp::WebPDecoder::new(BufReader::new(std::fs::File::open(&p).unwrap())).unwrap();
+                    let mut buf = vec![0; d.output_buffer_size().unwrap()];
+                    d.read_image(&mut buf).unwrap();
+                    t.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            times.sort_by(f64::total_cmp);
+            let d = image_webp::WebPDecoder::new(BufReader::new(std::fs::File::open(&p).unwrap())).unwrap();
+            let (w, h) = d.dimensions();
+            let mp = (w as f64 * h as f64) / 1e6;
+            eprintln!(
+                "{}: {w} × {h} ({mp:.1} MP): {:.1} ms, {:.2} ms/MP",
+                p.file_name().unwrap().to_string_lossy(),
+                times[2],
+                times[2] / mp
+            );
+        }
     }
 }

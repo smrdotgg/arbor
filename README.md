@@ -171,11 +171,15 @@ clears the filter or cancels a file operation.
 - **Images**: PNG, JPEG, GIF (its first frame), WebP and BMP, also found by their bytes. Decoded
   on a worker and shrunk to the panel's size in pixels before they're uploaded: a PNG shrinks row
   by row as it decodes, and a JPEG decodes at 1/2, 1/4 or 1/8 size straight from its DCT. JPEGs
-  are turned as their EXIF orientation says. The header gives the size first, and anything over
-  100 megapixels (24 for GIF, WebP, BMP, interlaced PNG and progressive JPEG, which decode whole
-  first and can't stop partway, so one that can't be cancelled is short), or wider or taller
-  than 65,535 pixels, is refused with a "Too large to preview" card, so a huge image never
-  takes gigabytes. So is a JPEG with over 16 MB of metadata (its markers are walked before it's
+  are turned as their EXIF orientation says. A GIF decodes 16 rows at a time, shrinking as
+  they come, and stops at the next 16 when you move on (under a millisecond after a 24 MP GIF
+  is told to stop). The header gives the size first, and anything over 100 megapixels (24 for
+  BMP, interlaced PNG and GIF, and progressive JPEG, which decode whole first), or wider or
+  taller than 65,535 pixels, is refused with a "Too large to preview" card, so a huge image
+  never takes gigabytes. WebP can't be stopped once it starts decoding (its decoder has no way
+  to), so it's held to what decodes in about 30 ms here: 0.45 megapixels for lossy and animated
+  WebP, 1.7 for lossless. Larger ones say "Too large to preview" until a decoder that can stop
+  partway is available. So is a JPEG with over 16 MB of metadata (its markers are walked before it's
   decoded), and a WebP's bitstreams are checked against its canvas before decoding.
 - **Everything else**, and folders: name, kind, size and date, and for a folder how many items
   it has (one read of it). PDF, video, audio, office documents and other image formats (HEIC,
