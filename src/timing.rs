@@ -22,6 +22,9 @@
 //! - `preview`: a key that started a quick preview read (Space opening it, or moving the
 //!   selection while it's open), to the frame showing what it read. `from=open` or `from=move`,
 //!   and `kind=text|image|card|error`. A `key` line has `preview=1` when the preview was open.
+//! - `jump`: the key that opened Jump to Folder, to the frame showing its ranked folders.
+//!   `cold=1` when that open read the history log (the first of a session), `folders=N` the
+//!   history's size, `same_frame=1` when the load landed within the open's bounded wait.
 //! - `first-listing`: only when the first folder was too slow for the first frame (the window
 //!   waits at most `app::FIRST_PAINT_WAIT` for it): from the top of `main` to the frame showing
 //!   it. `ARBOR_SLOW_FIRST_READ_MS=N` (read only when timing is on) slows that read by N ms to
@@ -37,7 +40,10 @@
 //! frame (no timers), then quits. With `ARBOR_BENCH_PREVIEW=1` (in a folder whose first two
 //! files are a text file and an image) each round is: Space (preview the text), Space, ↓,
 //! Space (preview the image), ↑, ↓, ↑ (the last two while it's open, the ↑ while the image
-//! decodes), Space; opening waits for the preview to land. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
+//! decodes), Space; opening waits for the preview to land. With `ARBOR_BENCH_JUMP=1` each
+//! round opens Jump to Folder (waiting for the history to land; the first open of a run reads
+//! and aggregates the log, the rest rank what's in memory), types `a` and `r`, and closes it
+//! with Esc. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
 //! parent folder instead, then does N rounds of "previous tab (the start folder), next tab". The ↓ is synthetic, so its `key` time starts when the handler
 //! is called rather than at an OS event. The window opens without taking focus and ignores real
 //! keys, so typing in another app while it runs can't reach it (and its ⌘⌫ can't trash anything).
@@ -87,6 +93,12 @@ thread_local! {
     static PREVIEW_LANDED: Cell<Option<(Instant, bool, &'static str)>> = const { Cell::new(None) };
     /// The handled key's frame shows an open preview.
     static KEY_PREVIEW: Cell<bool> = const { Cell::new(false) };
+    /// `ARBOR_BENCH_JUMP`: the bench opens Jump to Folder and types in it.
+    static JUMP: Cell<bool> = const { Cell::new(false) };
+    /// Jump opened and its history is still loading: when, and whether it reads the log.
+    static JUMP_ASKED: Cell<Option<(Instant, bool)>> = const { Cell::new(None) };
+    /// Jump's rows land in the frame being built: the open's time, cold, folders, same frame.
+    static JUMP_LANDED: Cell<Option<(Instant, bool, usize, bool)>> = const { Cell::new(None) };
     static FIRST: Cell<bool> = const { Cell::new(true) };
     /// Entries in the first listing.
     static FIRST_ENTRIES: Cell<usize> = const { Cell::new(0) };
@@ -117,8 +129,11 @@ pub fn init() -> bool {
     MAIN.get_or_init(|| (Instant::now(), SystemTime::now()));
     TABS.set(set("ARBOR_BENCH_TABS"));
     PREVIEW.set(set("ARBOR_BENCH_PREVIEW"));
+    JUMP.set(set("ARBOR_BENCH_JUMP"));
     let steps = if PREVIEW.get() {
         rounds * PREVIEW_STEPS
+    } else if JUMP.get() {
+        rounds * JUMP_STEPS
     } else if TABS.get() {
         rounds * 2 + 1
     } else {
@@ -175,7 +190,19 @@ fn measured(s: &mut State, tx: &mut Tx, t: Instant, f: impl FnOnce(&mut State, &
     let asked = s.pending_path().map(Path::to_path_buf);
     let (lands, tab) = (s.lands, tab_of(s));
     let (reads, closed) = (s.preview_reads, s.preview.is_none());
+    let (no_jump, cold) = (s.jump.is_none(), s.history.loads == 0);
     let handled = f(s, tx);
+    if handled
+        && no_jump
+        && let Some(j) = &s.jump
+    {
+        let folders = s.history.agg.as_ref().map_or(0, |a| a.len());
+        if j.loading {
+            JUMP_ASKED.set(Some((t, cold)));
+        } else {
+            JUMP_LANDED.set(Some((t, cold, folders, true)));
+        }
+    }
     if handled {
         KEY.set(Some(t));
         KEY_PREVIEW.set(s.preview.is_some());
@@ -205,7 +232,13 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         NAV.set(Some((rune::last_input().unwrap_or_else(Instant::now), Kind::Nav)));
     }
     let previews = s.preview_lands;
+    let jump_loads = s.history.loads;
     let mut changed = s.poll(tx);
+    if s.history.loads != jump_loads
+        && let Some((t, cold)) = JUMP_ASKED.take()
+    {
+        JUMP_LANDED.set(Some((t, cold, s.history.agg.as_ref().map_or(0, |a| a.len()), false)));
+    }
     if loading && !s.is_loading() {
         LANDED.set(NAV.take().map(|(t, kind)| (t, s.cur().entries.len(), kind, false)));
     }
@@ -214,8 +247,9 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     {
         PREVIEW_LANDED.set(Some((t, opened, preview_kind(s))));
     }
-    // One step per frame: a frame that landed a listing or a preview is that step's frame.
-    if !loading && !FIRST.get() && s.preview_lands == previews {
+    // One step per frame: a frame that landed a listing, a preview or Jump's history is that
+    // step's frame.
+    if !loading && !FIRST.get() && s.preview_lands == previews && s.history.loads == jump_loads {
         changed |= bench_step(s, tx);
     }
     changed
@@ -234,6 +268,8 @@ fn preview_kind(s: &State) -> &'static str {
 
 /// Steps in a preview bench round (see the module docs).
 const PREVIEW_STEPS: u32 = 8;
+/// Steps in a Jump bench round: open, `a`, `r`, Esc.
+const JUMP_STEPS: u32 = 4;
 
 /// One step of the preview bench: the keys, and whether to wait for the preview to land first.
 fn preview_step(s: &mut State, tx: &mut Tx, n: u32, now: Instant) -> bool {
@@ -265,8 +301,30 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
         }
         return false;
     }
+    // The Jump bench waits for the history to land before typing.
+    if JUMP.get() && s.jump.as_ref().is_some_and(|j| j.loading) {
+        return false;
+    }
     BENCH.set((left - 1, n + 1));
     let now = Instant::now();
+    if JUMP.get() {
+        let key = |k: Key| KeyEvent { key: k, mods: Mods::default() };
+        match n % JUMP_STEPS {
+            0 => {
+                measured(s, tx, now, |s, tx| run(s, Cmd::Jump, tx));
+            }
+            1 => {
+                keyed(s, &key(Key::Text("a".into())), tx, now);
+            }
+            2 => {
+                keyed(s, &key(Key::Text("r".into())), tx, now);
+            }
+            _ => {
+                keyed(s, &key(Key::Escape), tx, now);
+            }
+        }
+        return true;
+    }
     if PREVIEW.get() {
         WAIT_PREVIEW.set(preview_step(s, tx, n, now));
         return true;
@@ -316,7 +374,7 @@ fn bench_target(first: Option<PathBuf>) -> PathBuf {
 pub fn frame(f: &FrameEncoded) {
     // Rune runs a frame's input handlers and `poll` before building it, so whatever they marked
     // belongs to this frame, drawn or not.
-    let (key, landed, preview) = (KEY.take(), LANDED.take(), PREVIEW_LANDED.take());
+    let (key, landed, preview, jump) = (KEY.take(), LANDED.take(), PREVIEW_LANDED.take(), JUMP_LANDED.take());
     if f.outcome() != FrameOutcome::Drawn {
         return;
     }
@@ -344,6 +402,14 @@ pub fn frame(f: &FrameEncoded) {
     } else {
         if let Some(t) = key {
             eprintln!("arbor-timing key ms={:.2} {split} preview={}", ms(t), u8::from(KEY_PREVIEW.get()));
+        }
+        if let Some((t, cold, folders, inside)) = jump {
+            eprintln!(
+                "arbor-timing jump ms={:.2} cold={} folders={folders} same_frame={} {split}",
+                ms(t),
+                u8::from(cold),
+                u8::from(inside)
+            );
         }
         if let Some((t, opened, kind)) = preview {
             eprintln!("arbor-timing preview ms={:.2} from={} kind={kind} {split}", ms(t), if opened { "open" } else { "move" });

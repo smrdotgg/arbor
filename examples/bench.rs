@@ -2,7 +2,7 @@
 //! Run through `scripts/bench.sh`, which builds first:
 //!
 //! ```text
-//! bench [RUNS] [ROUNDS] [--bin PATH] [--keep] [--tabs N]
+//! bench [RUNS] [ROUNDS] [--bin PATH] [--keep] [--tabs N] [--preview N] [--jump N]
 //! ```
 //!
 //! Makes a folder of 10,000 entries in the temp dir, then cold-starts Arbor on it RUNS times
@@ -37,6 +37,15 @@
 //! and moves the selection while the preview is open, once while the photo is still decoding
 //! (see `src/timing.rs`). Such a run counts only with exactly 8 keys, one text preview and
 //! one photo preview logged per round.
+//!
+//! `--jump N` adds N more cold starts with `ARBOR_BENCH_JUMP=1` and a Jump history of
+//! [`JUMP_FOLDERS`] folders: each round opens Jump to Folder (timed from the key to the frame
+//! showing the ranked folders; the first open of a run reads and aggregates the log, later ones
+//! rank what's in memory), types two letters (each key timed, ranking all of them again) and
+//! closes it. Such a run counts only with exactly ROUNDS opens (one cold) and 4 keys a round.
+//!
+//! Every run gets its own settings folder (`RUNE_DIRS_ROOT`), so the user's settings don't
+//! change the numbers and the navigations don't land in their Jump history.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -44,6 +53,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ENTRIES: usize = 10_000;
+/// Folders in the `--jump` history.
+const JUMP_FOLDERS: usize = 5_000;
 
 fn main() {
     let mut nums = Vec::new();
@@ -51,6 +62,7 @@ fn main() {
     let mut keep = false;
     let mut tab_runs = 0;
     let mut preview_runs = 0;
+    let mut jump_runs = 0;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -58,6 +70,7 @@ fn main() {
             "--keep" => keep = true,
             "--tabs" => tab_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--tabs N"),
             "--preview" => preview_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--preview N"),
+            "--jump" => jump_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--jump N"),
             n => nums.push(n.parse::<u32>().unwrap_or_else(|_| panic!("not a number: {n}"))),
         }
     }
@@ -126,6 +139,24 @@ fn main() {
             }
         }
     }
+    let (mut jump_cold, mut jump_warm, mut jump_key, mut jump_same) = (Vec::new(), Vec::new(), Vec::new(), 0);
+    if jump_runs > 0 {
+        make_jump_history(&root.join("dirs-jump"), &root);
+        for run in 0..jump_runs {
+            match run_once(&bin, &big, rounds, Mode::Jump) {
+                Ok(r) => {
+                    jump_cold.extend(r.jump_cold);
+                    jump_warm.extend(r.jump_warm);
+                    jump_key.extend(r.jump_key);
+                    jump_same += r.same_frame;
+                }
+                Err(e) => {
+                    eprintln!("jump run {run}: INVALID: {e}");
+                    invalid.push(runs + tab_runs + preview_runs + run);
+                }
+            }
+        }
+    }
     if !keep {
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -134,7 +165,8 @@ fn main() {
     println!("{:<34} {:>5} {:>9} {:>9} {:>8}  result (submission proxy)", "measure", "n", "median", "p95", "budget");
     let tabs = tab_runs > 0;
     let previews = preview_runs > 0;
-    let rows: [(&str, &mut Vec<f64>, Option<f64>); 9] = [
+    let jumps = jump_runs > 0;
+    let rows: [(&str, &mut Vec<f64>, Option<f64>); 12] = [
         ("cold start (spawn → first frame)*", &mut cold, Some(100.0)),
         ("  of which main → first frame", &mut main, None),
         ("listing visible (10k, nav → frame)", &mut nav, Some(50.0)),
@@ -144,9 +176,15 @@ fn main() {
         ("preview 12 MP JPEG (Space → frame)", &mut photo, None),
         ("key → frame, preview open", &mut open_key, Some(8.0)),
         ("  … while the JPEG decodes", &mut decoding_key, Some(8.0)),
+        ("jump open, 5k history, cold", &mut jump_cold, None),
+        ("jump open, 5k history, warm", &mut jump_warm, Some(8.0)),
+        ("key → frame, typing in Jump (5k)", &mut jump_key, Some(8.0)),
     ];
     for (name, v, budget) in rows {
-        if v.is_empty() && ((name.starts_with("tab") && !tabs) || (name.contains("preview") || name.contains("JPEG")) && !previews) {
+        let off = (name.starts_with("tab") && !tabs)
+            || ((name.contains("preview") || name.contains("JPEG")) && !previews)
+            || (name.contains("ump") && !jumps);
+        if v.is_empty() && off {
             continue;
         }
         if v.is_empty() {
@@ -173,6 +211,9 @@ fn main() {
     if tabs {
         println!("tab switches whose listing was in the key's own frame: {same} of {}", tab.len());
     }
+    if jumps {
+        println!("Jump opens whose rows were in the key's own frame: {jump_same} of {}", jump_cold.len() + jump_warm.len());
+    }
     if let Some((c, m)) = first {
         println!("* first run left out: {c:.0} ms cold, {m:.0} ms of it from main");
     }
@@ -195,6 +236,7 @@ enum Mode {
     Nav,
     Tabs,
     Preview,
+    Jump,
 }
 
 struct Run {
@@ -213,12 +255,21 @@ struct Run {
     preview_photo: Vec<f64>,
     key_open: Vec<f64>,
     key_decoding: Vec<f64>,
+    /// Jump opened, reading the log or ranking what's in memory; keys typed in it.
+    jump_cold: Vec<f64>,
+    jump_warm: Vec<f64>,
+    jump_key: Vec<f64>,
 }
 
 fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, String> {
     let spawned = SystemTime::now();
     let mut cmd = Command::new(bin);
-    for (var, on) in [("ARBOR_BENCH_TABS", mode == Mode::Tabs), ("ARBOR_BENCH_PREVIEW", mode == Mode::Preview)] {
+    // Its own settings folder: the Jump history for `--jump`, an empty one otherwise.
+    let dirs = dir.parent().unwrap_or(dir).join(if mode == Mode::Jump { "dirs-jump" } else { "dirs" });
+    cmd.env("RUNE_DIRS_ROOT", dirs);
+    for (var, on) in
+        [("ARBOR_BENCH_TABS", mode == Mode::Tabs), ("ARBOR_BENCH_PREVIEW", mode == Mode::Preview), ("ARBOR_BENCH_JUMP", mode == Mode::Jump)]
+    {
         if on {
             cmd.env(var, "1");
         } else {
@@ -264,6 +315,9 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         preview_photo: Vec::new(),
         key_open: Vec::new(),
         key_decoding: Vec::new(),
+        jump_cold: Vec::new(),
+        jump_warm: Vec::new(),
+        jump_key: Vec::new(),
     };
     let mut keys = 0;
     for line in &lines {
@@ -289,6 +343,21 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
                 }
                 keys += 1;
             }
+            Some("key") if mode == Mode::Jump => {
+                // Each round's keys: open, a, r, Esc.
+                if matches!(keys % 4, 1 | 2) {
+                    run.jump_key.extend(field("ms"));
+                }
+                keys += 1;
+            }
+            Some("jump") if field("folders").is_some_and(|n| n as usize >= JUMP_FOLDERS) => {
+                if field("cold") == Some(1.0) {
+                    run.jump_cold.extend(field("ms"));
+                } else {
+                    run.jump_warm.extend(field("ms"));
+                }
+                run.same_frame += usize::from(field("same_frame") == Some(1.0));
+            }
             Some("key") => run.key.extend(field("ms")),
             Some("preview") if rest.contains("from=open") && rest.contains("kind=text") => run.preview_text.extend(field("ms")),
             Some("preview") if rest.contains("from=open") && rest.contains("kind=image") => run.preview_photo.extend(field("ms")),
@@ -303,6 +372,18 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         return Err(format!("no first frame logged:\n{}", lines.join("\n")));
     }
     let want = rounds as usize;
+    if mode == Mode::Jump {
+        if keys != want * 4 || run.jump_cold.len() != 1 || run.jump_cold.len() + run.jump_warm.len() != want {
+            return Err(format!(
+                "expected {} keys and {want} Jump opens of {JUMP_FOLDERS} folders (one cold), got {keys}, {} cold and {} warm:\n{}",
+                want * 4,
+                run.jump_cold.len(),
+                run.jump_warm.len(),
+                lines.join("\n")
+            ));
+        }
+        return Ok(run);
+    }
     if mode == Mode::Preview {
         if keys != want * 8 || run.preview_text.len() != want || run.preview_photo.len() != want {
             return Err(format!(
@@ -381,6 +462,23 @@ fn make_preview_folder(dir: &Path) {
         .write_image(&px, w, h, image::ExtendedColorType::Rgb8)
         .expect("encode the photo");
     std::fs::write(dir.join("b.jpg"), jpg).expect("b.jpg");
+}
+
+/// A Jump history of [`JUMP_FOLDERS`] folders (one line each, two visits to every fifth, spread over
+/// a month; ranks under `MAX_AGE`, so none age out), at `root`'s settings folder. The folders
+/// needn't exist: Jump never looks.
+fn make_jump_history(root: &Path, under: &Path) {
+    let dir = root.join("config").join(if cfg!(any(target_os = "macos", windows)) { "Arbor" } else { "arbor" });
+    std::fs::create_dir_all(&dir).expect("settings folder");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let words = ["projects", "arbor", "src", "photos", "2024", "work", "client", "notes", "music", "build"];
+    let mut log = String::new();
+    for i in 0..JUMP_FOLDERS {
+        let w = |k: usize| words[(i / k) % words.len()];
+        let p = under.join("home").join(w(1)).join(format!("{}-{i}", w(10))).join(w(100));
+        log.push_str(&format!("{}\t{}\t{}\n", now - (i as u64 * 517) % (30 * 86_400), 1 + usize::from(i % 5 == 0), p.display()));
+    }
+    std::fs::write(dir.join("history.log"), log).expect("history.log");
 }
 
 /// The `p`th percentile of sorted `v` (nearest rank).
