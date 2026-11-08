@@ -169,8 +169,9 @@ clears the filter or cancels a file operation.
   on a worker and shrunk to the panel's size in pixels before they're uploaded: a PNG shrinks row
   by row as it decodes, and a JPEG decodes at 1/2, 1/4 or 1/8 size straight from its DCT. JPEGs
   are turned as their EXIF orientation says. The header gives the size first, and anything over
-  100 megapixels (50 for GIF, WebP, BMP, interlaced PNG and progressive JPEG, which decode whole
-  first) is refused with a message, so a huge image never takes gigabytes.
+  100 megapixels (24 for GIF, WebP, BMP, interlaced PNG and progressive JPEG, which decode whole
+  first and can't stop partway, so one that can't be cancelled is short) is refused with a
+  message, so a huge image never takes gigabytes.
 - **Everything else**, and folders: name, kind, size and date, and for a folder how many items
   it has (one read of it). PDF, video, audio, office documents and other image formats (HEIC,
   TIFF, RAW) say they need the platform's own preview API, which Arbor doesn't use yet.
@@ -182,7 +183,10 @@ work that follows the rules for it: the list moves at once and the header (from 
 changes in the same frame, then the contents land when they're read. Moving on or closing stops
 the read in flight (every read call and decoded row checks) and its result is dropped. One read
 per item, no watching, nothing kept: coming back to a file reads it again. All of it runs on one
-worker, so a slow or hung disk slows previews, never the list or other folders.
+thread of its own, started by the first preview and kept across opens, one read or decode at a
+time: tapping Space quickly queues at most one more (each new request replaces the one
+waiting), so decodes never pile up, and a slow or hung disk slows previews, never the list or
+other folders.
 
 ### Jump to Folder
 

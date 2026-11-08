@@ -134,6 +134,8 @@ pub struct State {
     boot_req: Option<u64>,
     /// Quick preview, while it's open (`preview.rs`). Closed, it costs nothing.
     pub preview: Option<Preview>,
+    /// The preview's worker thread, from the first preview on (kept across opens).
+    pub(crate) preview_worker: Option<preview::Worker>,
     /// The preview panel's laid-out size in device pixels, written by the view.
     pub preview_fit: preview::Fit,
     /// Preview reads started and answers landed, for tests and timing.
@@ -206,6 +208,7 @@ impl State {
             boot: None,
             boot_req: None,
             preview: None,
+            preview_worker: None,
             preview_fit: std::rc::Rc::new(std::cell::Cell::new(preview::DEFAULT_FIT)),
             preview_reads: 0,
             preview_lands: 0,

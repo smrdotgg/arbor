@@ -17,9 +17,16 @@
 //! - **Nothing stored.** Moving away and back reads the file again. The decoded pixels go
 //!   when the selection moves.
 //! - **A slow disk slows the preview, never the UI.** All reading and decoding runs on one
-//!   `Latest`, so the preview holds at most one of Rune's shared workers and folder reads keep
-//!   the rest, even when a read hangs on a dead disk (later previews then wait behind it).
-//!   Only regular files are opened: a pipe would block its reader forever.
+//!   thread of its own ([`Worker`]), started by the first preview and kept for the session
+//!   across opens, so at most one read or decode runs at a time: a new request replaces one
+//!   still waiting (which then never runs) and never runs beside the one in progress. Folder
+//!   reads keep Rune's shared workers, even when a preview read hangs on a dead disk (later
+//!   previews then wait behind it). Only regular files are opened: a pipe would block its
+//!   reader forever.
+//! - **Memory stays bounded.** One decode at a time, and every image's size is checked from
+//!   its header before its pixels are allocated. Formats decoded whole, which can't stop
+//!   between rows (GIF, WebP, BMP, interlaced PNG, progressive JPEG), are refused over
+//!   [`MAX_PIXELS_WHOLE`], so one that can't be cancelled is short.
 
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -27,10 +34,10 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::{Arc, Condvar, Mutex};
 
-use rune::{Latest, Pixels};
+use rune::Pixels;
 
 use crate::app::State;
 use crate::fs::{self, Entry};
@@ -48,8 +55,13 @@ const TAB: usize = 4;
 /// while decoding (JPEG's IDCT scaling): the result is panel-sized whatever the source.
 pub const MAX_PIXELS: u64 = 100_000_000;
 /// The most pixels for formats decoded whole before shrinking (GIF, WebP, BMP, interlaced PNG,
-/// 16-bit JPEG): 50 MP is 200 MB of RGBA, briefly.
-pub const MAX_PIXELS_WHOLE: u64 = 50_000_000;
+/// progressive and 16-bit JPEG). Their decoders run to the end once started (the stop flag is
+/// only seen between reads, and a small file of a big image is read in one go), so this bounds
+/// how long and how big a decode that can't be cancelled is: 24 MP (6000 × 4000, a full-frame
+/// camera's size) is 96 MB of RGBA, plus as much again for a GIF's canvas, and about 200 ms to
+/// decode a GIF on this class of machine (a 49 MP one took 423 ms). Serialized, one at a time,
+/// that's at most about 200 MB for a moment on an 8 GB machine, however fast Space is tapped.
+pub const MAX_PIXELS_WHOLE: u64 = 24_000_000;
 
 /// The panel's state while it's open.
 pub struct Preview {
@@ -60,10 +72,111 @@ pub struct Preview {
     pub link: Option<String>,
     /// The image the body shows, replaced (not reused) for each image.
     pub pixels: Pixels,
-    loader: Latest<Answer>,
-    /// The request on screen, and the stop flag of the read for it.
+    /// The request on screen (the worker numbers them across opens), and the stop flag of the
+    /// read for it.
     req: u64,
     stop: Arc<AtomicBool>,
+}
+
+/// The preview's one worker thread: started by the first preview, kept for the session (it
+/// sleeps on a condition variable while there's nothing to do), and ended when the state is
+/// dropped. One request runs at a time; a newer one replaces the one waiting.
+pub struct Worker {
+    shared: Arc<Shared>,
+}
+
+struct Shared {
+    slots: Mutex<Slots>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct Slots {
+    /// The next request: replaced by a newer one before it starts, so it never runs.
+    next: Option<(u64, Job, Arc<AtomicBool>)>,
+    /// The last answer, until the UI takes it.
+    done: Option<Answer>,
+    /// The last request number given out.
+    req: u64,
+    waker: Option<rune::Waker>,
+    /// The state is gone: the thread ends after what it's doing.
+    closed: bool,
+}
+
+impl Worker {
+    fn spawn(waker: Option<rune::Waker>) -> Worker {
+        let shared = Arc::new(Shared { slots: Mutex::new(Slots { waker, ..Slots::default() }), wake: Condvar::new() });
+        let s = shared.clone();
+        std::thread::Builder::new().name("arbor-preview".into()).spawn(move || s.run()).expect("can't start the preview thread");
+        Worker { shared }
+    }
+
+    fn slots(&self) -> std::sync::MutexGuard<'_, Slots> {
+        self.shared.slots.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Queues `job` as the next request, replacing one that hasn't started. Its number.
+    fn request(&self, job: Job, stop: Arc<AtomicBool>) -> u64 {
+        let mut s = self.slots();
+        s.req += 1;
+        let req = s.req;
+        s.next = Some((req, job, stop));
+        s.done = None;
+        self.shared.wake.notify_one();
+        req
+    }
+
+    /// Drops the waiting request and any answer not taken yet (the one running stops by its
+    /// flag).
+    fn cancel(&self) {
+        let mut s = self.slots();
+        s.next = None;
+        s.done = None;
+    }
+
+    fn take(&self) -> Option<Answer> {
+        self.slots().done.take()
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        let mut s = self.slots();
+        s.closed = true;
+        s.next = None;
+        self.shared.wake.notify_one();
+    }
+}
+
+impl Shared {
+    fn run(&self) {
+        loop {
+            let (req, job, stop) = {
+                let mut s = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+                loop {
+                    if s.closed {
+                        return;
+                    }
+                    if let Some(next) = s.next.take() {
+                        break next;
+                    }
+                    s = self.wake.wait(s).unwrap_or_else(|e| e.into_inner());
+                }
+            };
+            let loaded = load(&job, &stop);
+            let mut s = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+            // Only the newest request's answer is kept (a stopped read gives none).
+            if let Some(loaded) = loaded
+                && req == s.req
+            {
+                s.done = Some(Answer { req, loaded });
+                if let Some(w) = s.waker.clone() {
+                    drop(s);
+                    w();
+                }
+            }
+        }
+    }
 }
 
 impl Drop for Preview {
@@ -200,12 +313,8 @@ pub(crate) struct Job {
 }
 
 impl Preview {
-    fn new(waker: Option<rune::Waker>) -> Preview {
-        let loader = Latest::default();
-        if let Some(w) = waker {
-            loader.set_waker(w);
-        }
-        Preview { target: None, body: Body::Empty, link: None, pixels: Pixels::new(), loader, req: 0, stop: Arc::default() }
+    fn new() -> Preview {
+        Preview { target: None, body: Body::Empty, link: None, pixels: Pixels::new(), req: 0, stop: Arc::default() }
     }
 
     /// Stops the read in flight and arms a fresh flag for the next one.
@@ -220,27 +329,26 @@ impl Preview {
         self.body == Body::Loading
     }
 
-    /// Points the panel at `target` (or nothing) and starts reading it.
-    fn retarget(&mut self, target: Option<Target>, fit: [u32; 2]) {
+    /// Points the panel at `target` (or nothing) and starts reading it on `worker`.
+    fn retarget(&mut self, worker: &Worker, target: Option<Target>, fit: [u32; 2]) {
         let stop = self.stop_read();
-        self.req += 1;
         self.link = None;
         self.pixels = Pixels::new();
         self.target = target;
         let Some(t) = &self.target else {
-            self.loader.cancel();
+            worker.cancel();
+            self.req = 0;
             self.body = Body::Empty;
             return;
         };
         self.body = Body::Loading;
         let job = Job { path: t.path(), is_dir: t.is_dir, is_link: t.is_link, ext: t.ext(), size: t.size, fit };
-        let req = self.req;
-        self.loader.request_opt((), move |()| Some(Answer { req, loaded: load(&job, &stop)? }));
+        self.req = worker.request(job, stop);
     }
 
     /// Lands the worker's answer if it's for the request on screen. True when it did.
-    fn land(&mut self) -> bool {
-        let Some(a) = self.loader.take() else { return false };
+    fn land(&mut self, worker: &Worker) -> bool {
+        let Some(a) = worker.take() else { return false };
         if a.req != self.req {
             return false;
         }
@@ -260,14 +368,21 @@ impl State {
         if self.preview.is_some() {
             self.close_preview();
         } else {
-            self.preview = Some(Preview::new(self.waker.clone()));
+            if self.preview_worker.is_none() {
+                self.preview_worker = Some(Worker::spawn(self.waker.clone()));
+            }
+            self.preview = Some(Preview::new());
             self.sync_preview();
         }
     }
 
-    /// Closes the panel: the read in flight stops and its answer never lands.
+    /// Closes the panel: the read in flight stops, one waiting never starts, and no answer
+    /// lands.
     pub fn close_preview(&mut self) {
         self.preview = None;
+        if let Some(w) = &self.preview_worker {
+            w.cancel();
+        }
     }
 
     /// Keeps the panel on the active pane's selected item, starting a read when it moved.
@@ -288,13 +403,15 @@ impl State {
             self.preview_reads += 1;
         }
         let fit = self.preview_fit.get();
-        p.retarget(target, fit);
+        let Some(w) = &self.preview_worker else { return false };
+        p.retarget(w, target, fit);
         true
     }
 
     /// The preview's answer, from `poll`. True when one landed.
     pub(crate) fn land_preview(&mut self) -> bool {
-        let landed = self.preview.as_mut().is_some_and(Preview::land);
+        let (Some(p), Some(w)) = (&mut self.preview, &self.preview_worker) else { return false };
+        let landed = p.land(w);
         if landed {
             self.preview_lands += 1;
         }
@@ -314,6 +431,8 @@ pub type Fit = Rc<Cell<[u32; 2]>>;
 
 /// What one preview reads: `None` when stopped (the selection moved or the panel closed).
 pub(crate) fn load(job: &Job, stop: &AtomicBool) -> Option<Loaded> {
+    #[cfg(test)]
+    let _running = hook::Running::enter(&job.path);
     #[cfg(test)]
     hook::at(&job.path, "open");
     let mut link = None;
@@ -1006,6 +1125,40 @@ pub(crate) mod hook {
     pub(crate) fn seen(p: &Path) -> Vec<String> {
         SEEN.lock().unwrap().iter().filter(|(q, _)| q == p).map(|(_, s)| s.clone()).collect()
     }
+
+    /// Reads running now and at most, per folder.
+    pub(crate) static RUNNING: Mutex<Vec<(PathBuf, usize, usize)>> = Mutex::new(Vec::new());
+
+    /// One read running, in its file's folder, until dropped.
+    pub(crate) struct Running(PathBuf);
+
+    impl Running {
+        pub(crate) fn enter(p: &Path) -> Running {
+            let dir = p.parent().unwrap_or(p).to_path_buf();
+            let mut r = RUNNING.lock().unwrap();
+            match r.iter_mut().find(|e| e.0 == dir) {
+                Some(e) => {
+                    e.1 += 1;
+                    e.2 = e.2.max(e.1);
+                }
+                None => r.push((dir.clone(), 1, 1)),
+            }
+            Running(dir)
+        }
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            if let Some(e) = RUNNING.lock().unwrap().iter_mut().find(|e| e.0 == self.0) {
+                e.1 -= 1;
+            }
+        }
+    }
+
+    /// The most reads that ran at once for files in `dir`.
+    pub(crate) fn most_running(dir: &Path) -> usize {
+        RUNNING.lock().unwrap().iter().find(|e| e.0 == dir).map_or(0, |e| e.2)
+    }
 }
 
 #[cfg(test)]
@@ -1107,7 +1260,8 @@ mod tests {
         assert_eq!(too_big(4000, 3000, false), None);
         assert_eq!(too_big(10_000, 10_000, false), None, "100 MP exactly is allowed");
         assert!(too_big(10_001, 10_000, false).unwrap().contains("100 megapixels"));
-        assert!(too_big(8000, 7000, true).is_some(), "56 MP decoded whole is over 50");
+        assert!(too_big(8000, 7000, true).is_some(), "56 MP decoded whole is over 24");
+        assert!(too_big(5000, 5000, true).is_some() && too_big(6000, 4000, true).is_none(), "24 MP decoded whole is the limit");
         assert!(too_big(u32::MAX as u64, u32::MAX as u64, false).is_some(), "no overflow");
         assert_eq!(fit_size(4000, 3000, [1000, 1000]), (1000, 750));
         assert_eq!(fit_size(3000, 4000, [1000, 500]), (375, 500));
@@ -1385,6 +1539,38 @@ mod tests {
         let seen = hook::seen(&png);
         assert!(seen.contains(&"header".to_string()) && !seen.contains(&"done".to_string()), "{seen:?}");
         assert!(!seen.iter().any(|s| s.starts_with("rows ") && s != "rows 0"), "{seen:?}");
+    }
+
+    /// Space tapped fast while a decode is held: reopening and moving on queue new requests,
+    /// each replacing the last, and none runs beside the held one; only the newest runs after
+    /// it. The decoder threads of earlier opens never pile up.
+    #[test]
+    fn reopening_never_runs_two_decodes_at_once() {
+        let d = folder("reopen");
+        let imgs = write_images(&d, 400, 300);
+        let png = imgs[0].0.clone(); // a.png, then b.jpg, c.bmp, d.webp, e.gif
+        let mut s = state_in(&d);
+        let ((reached, wait), (go, gate)) = (channel(), channel());
+        hook::GATES.lock().unwrap().push(hook::Gate { path: png.clone(), stage: "header", reached, go: Some(gate) });
+        space(&mut s);
+        wait.recv_timeout(Duration::from_secs(5)).expect("the decode started");
+        for _ in 0..4 {
+            space(&mut s); // close
+            space(&mut s); // open again, on a.png
+            key(&mut s, Key::Down); // b.jpg
+            key(&mut s, Key::Up); // a.png
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(hook::most_running(&d), 1, "a second read ran beside the held one");
+        go.send(()).unwrap();
+        settle(&mut s);
+        let body = &s.preview.as_ref().unwrap().body;
+        assert!(matches!(body, Body::Image(i) if i.format == Format::Png), "{body:?}");
+        assert_eq!(hook::most_running(&d), 1);
+        // Only the newest waiting request ran: the JPEG's were always replaced before they
+        // started, and the PNG ran twice (the held read, then the newest request).
+        assert_eq!(seen_open(&imgs[1].0), 0, "a replaced request ran");
+        assert_eq!(seen_open(&png), 2);
     }
 
     /// Closing during a read: it stops, and nothing lands afterwards.
