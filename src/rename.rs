@@ -160,7 +160,8 @@ impl Rule {
         } else {
             Find::Text { needle: self.find.clone(), fold: !self.case_sensitive }
         };
-        Ok(Compiled { find, pieces: pieces(&self.replace), start, step, case: self.case, include_ext: self.include_ext })
+        let pieces = pieces(&self.replace, self.regex);
+        Ok(Compiled { find, pieces, start, step, case: self.case, include_ext: self.include_ext })
     }
 }
 
@@ -171,13 +172,33 @@ fn regex_error(e: &regex_lite::Error) -> String {
     format!("Regex: {}", last.trim_start_matches("error: "))
 }
 
-/// Replace with, split into text and tokens.
-fn pieces(s: &str) -> Vec<Piece> {
+/// Replace with, split into text and tokens. In regex mode a group reference (`$$`, or `${…}`
+/// around a group's name or number) is text, kept whole for the regex to fill in, before any
+/// token is looked for, so `${name}` is the group named "name", not a `$` and the `{name}`
+/// token.
+fn pieces(s: &str, regex: bool) -> Vec<Piece> {
     let mut out: Vec<Piece> = Vec::new();
     let mut text = String::new();
     let mut rest = s;
-    while let Some(i) = rest.find('{') {
+    let next = |r: &str| if regex { r.find(['{', '$']) } else { r.find('{') };
+    while let Some(i) = next(rest) {
         text.push_str(&rest[..i]);
+        if rest[i..].starts_with('$') {
+            let tail = &rest[i + 1..];
+            let len = if tail.starts_with('$') {
+                2
+            } else if let Some(name) = tail.strip_prefix('{').and_then(|t| t.split_once('}')).map(|(n, _)| n)
+                && !name.is_empty()
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                name.len() + 3
+            } else {
+                1
+            };
+            text.push_str(&rest[i..i + len]);
+            rest = &rest[i + len..];
+            continue;
+        }
         let after = &rest[i + 1..];
         let token = after.find('}').and_then(|j| {
             let inner = &after[..j];
@@ -762,6 +783,21 @@ mod tests {
 
     /// Every key while the dialog is open runs the whole plan: `cargo test --release --
     /// --ignored --nocapture plan_speed`.
+    /// In regex mode a named group's reference is the group, before any token: `${name}`,
+    /// `${ext}` and `${parent}` are what those groups matched, and tokens beside them still work.
+    #[test]
+    fn named_groups_are_read_before_tokens() {
+        let re = |find: &str, replace: &str| Rule { find: find.into(), replace: replace.into(), regex: true, ..Rule::default() };
+        assert_eq!(one(&re(r"^(?<name>a)(.*)$", "${name}"), "ab.txt"), "a.txt");
+        assert_eq!(one(&re(r"^(?<ext>a)(?<parent>b)$", "${parent}${ext}"), "ab.txt"), "ba.txt");
+        assert_eq!(one(&re(r"^(?<name>a)b$", "${name}-{name}-{ext}-{parent}"), "ab.txt"), "a-ab-txt-Photos.txt");
+        assert_eq!(one(&re(r"^a", "$$-{n}"), "ab.txt"), "$-1b.txt");
+        // An unclosed `${` is left to the regex, and a `{` after it is still a token.
+        assert_eq!(one(&re(r"^a", "${x{n}"), "ab.txt"), one(&re(r"^a", "${x1"), "ab.txt"));
+        // Outside regex mode a `$` is just a character.
+        assert_eq!(one(&rule("a", "${name}"), "ab.txt"), "$abb.txt");
+    }
+
     /// An item inside another one of the batch can't change along with it; either alone can.
     #[test]
     fn an_item_inside_another_that_changes_is_a_problem() {
