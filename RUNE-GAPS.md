@@ -16,6 +16,34 @@ Newest first.
 
 ---
 
+## Truncated text: each width tried shapes the whole string again
+
+- **Feature:** Jump to Folder's rows and Search's folder column, which show long paths cut at the
+  start ("…/projects/arbor"), so the folder's own name stays in view (NORTHSTAR: every key within
+  a frame).
+- **What Rune is missing:** a cheap head (or middle, or end) truncation. `truncated()`
+  (`runtime/commit/text_layout.rs:198–255`) binary-searches the cut, and each probe builds the
+  cut string and lays it out again in full (`layout_blocks_inner`): about 8 shapes for every row
+  that doesn't fit. Its elision cache only helps when exactly the same row shows again. On the
+  M4 Pro, with a fresh Jump query each round over ~85-character paths, it was 45% of a frame:
+  keys took 6.3–8.6 ms of `update_ms` hot and 14–19 ms once the CPU cooled, against 1.1–1.7 ms
+  for the same history with short paths (FINDINGS of the 2026-11-08 Mac investigation).
+- **What we did instead:** Arbor cuts long paths itself to whole trailing folders that fit,
+  "…/" first, before Rune sees them (`fit_path` in `src/view.rs`), estimating widths from
+  per-character advances of the font measured once per thread (`char_advance`, through
+  `rune::text::advance`), with 3% to spare. The bold match ranges move with the cut
+  (`shift_marks`). `truncate_head()` stays as the fallback, which then almost never runs. The
+  search folder column got a width of its own (the same share of the row) so the cut knows its
+  room.
+- **What users lose:** a little room: the estimate leaves up to a few percent unused, and a path
+  is cut at a folder boundary, so "…/projects/arbor" may show where "…ojects/arbor/src" would
+  have fit (which also reads better). A row with a character outside ASCII is estimated with
+  the widest ASCII advance, so it's cut a little shorter.
+- **Suggested Rune change:** shape the string once and find the cut from the clusters' advances
+  (plus the ellipsis's width), then shape only the final cut string: one or two shapes instead
+  of eight. Optionally a "cut at these byte offsets only" hint (path separators), so apps get
+  whole-segment cuts for free.
+
 ## Context menu: no native pop-up menu on Linux
 
 - **Feature:** right-click on a row or the list opens a context menu (NORTHSTAR: "Out of the box

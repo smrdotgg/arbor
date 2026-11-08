@@ -44,6 +44,19 @@ struct Cols {
     date: bool,
 }
 
+impl Ctx {
+    /// Search's folder column: its share (`FOLDER_GROW` to the name's 1) of what the fixed
+    /// columns, padding and gaps leave, so a long folder can be cut to fit before Rune lays it
+    /// out (`fit_path`). `None` before the pane's first layout.
+    fn folder_w(&self) -> Option<f32> {
+        if self.w == f32::MAX {
+            return None;
+        }
+        let fixed = 24.0 + SIZE_W + 12.0 * 2.0 + if self.cols.date { DATE_W + 12.0 } else { 0.0 };
+        Some(((self.w - fixed) * FOLDER_GROW / (1.0 + FOLDER_GROW)).floor().max(24.0))
+    }
+}
+
 impl Cols {
     fn for_width(w: f32) -> Cols {
         let base = 24.0 + 180.0 + 12.0 + SIZE_W;
@@ -161,7 +174,9 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
     } else if s.palette.is_some() {
         window.child(palette_view(s, l))
     } else if s.jump.is_some() {
-        window.child(jump_view(s, l))
+        // The card's laid-out width (last frame's; at most 640), for cutting long paths.
+        let card = cx.layout_size("jump").map_or(640.0, |[w, _]| w);
+        window.child(jump_view(s, l, card))
     } else if s.pick.is_some() {
         window.child(pick_view(s, l))
     } else if let Some(b) = &s.batch {
@@ -636,7 +651,11 @@ fn header(f: &Folder, c: Ctx) -> El {
     let mut h =
         row().key("header").w_full().h(24.0).px(12.0).gap(12.0).center_y().child(col_head("Name", SortKey::Name, None, Align::Start));
     if f.searching() {
-        h = h.child(text("Folder").key("head-folder").font(SMALL).color(l.t.text_secondary).grow(FOLDER_GROW).min_w(0.0));
+        let head = text("Folder").key("head-folder").font(SMALL).color(l.t.text_secondary).min_w(0.0);
+        h = h.child(match c.folder_w() {
+            Some(w) => head.w(w),
+            None => head.grow(FOLDER_GROW),
+        });
     } else if c.cols.kind {
         h = h.child(col_head("Kind", SortKey::Kind, Some(KIND_W), Align::Start));
     }
@@ -858,7 +877,14 @@ fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
         // Where it is: its folder below the search's root (the root itself shows as "—").
         let at = std::path::Path::new(&e.os).parent().filter(|p| !p.as_os_str().is_empty());
         let at = at.map_or_else(|| "—".to_string(), |p| p.display().to_string());
-        r = r.child(text(at).font(BODY).color(dim).truncate_head().grow(FOLDER_GROW).min_w(0.0));
+        // Cut to whole trailing folders that fit here first: Rune's own head truncation shapes
+        // the whole string again for each width it tries (RUNE-GAPS.md), so it's only the
+        // fallback.
+        let folder = match c.folder_w() {
+            Some(w) => text(fit_path(&at, w).0.into_owned()).w(w),
+            None => text(at).grow(FOLDER_GROW),
+        };
+        r = r.child(folder.font(BODY).color(dim).truncate_head().min_w(0.0));
     } else if cols.kind {
         r = r.child(text(fs::kind(e).to_string()).font(NUM).color(dim).truncate().w(KIND_W));
     }
@@ -1111,7 +1137,7 @@ fn overlay_card(key: &'static str, max_w: f32, l: Look, close: fn(&mut State)) -
 }
 
 /// Jump to Folder: a field, then the folders ranked for it, the matched letters in bold.
-fn jump_view(s: &State, l: Look) -> El {
+fn jump_view(s: &State, l: Look, card_w: f32) -> El {
     let Some(j) = &s.jump else { return el() };
     let field = text_input(&j.edit, TextStyle::new(15.0, 400.0))
         .key("jump-field")
@@ -1146,7 +1172,7 @@ fn jump_view(s: &State, l: Look) -> El {
                 PALETTE_ROW_H,
                 |_: &State, i| Cow::Owned(crate::jump::row_key(i)),
                 move |s: &State, i| match s.jump.as_ref().and_then(|j| Some((j.hits.get(i)?, &j.words))) {
-                    Some((h, words)) => jump_row(h, words, i, i == sel, path_mode && i == 0, l),
+                    Some((h, words)) => jump_row(h, words, i, i == sel, path_mode && i == 0, card_w, l),
                     None => el(),
                 },
             )
@@ -1164,9 +1190,16 @@ fn jump_view(s: &State, l: Look) -> El {
 
 /// One Jump row: the folder as `~/…`, matched letters bold (the start is cut when it's long:
 /// the folder's own name matters most). In go-to mode, the first row is the path typed.
-fn jump_row(h: &crate::jump::Hit, words: &[Vec<char>], i: usize, on: bool, typed: bool, l: Look) -> El {
+/// `card_w`: the Jump card's width, for cutting the path to whole folders that fit.
+fn jump_row(h: &crate::jump::Hit, words: &[Vec<char>], i: usize, on: bool, typed: bool, card_w: f32, l: Look) -> El {
     let (fg, dim, mark) = if on { (l.sel_text, l.sel_text.alpha(0.75), l.sel_text) } else { (l.t.text, l.t.text_secondary, l.accent) };
-    let spans: Vec<rune::text::Span> = h.marks(words).iter().map(|&(a, b)| rune::text::Span::new(a, b).bold().color(mark)).collect();
+    // The text's room: the card less its border, the list's and the row's padding, and "Go to".
+    let room = card_w - 2.0 - 12.0 - 20.0 - if typed { advance("Go to", SMALL) + 10.0 } else { 0.0 };
+    // Cut here to whole trailing folders that fit: Rune's own head truncation shapes the whole
+    // path again for each width it tries (RUNE-GAPS.md), so it's only the fallback.
+    let (shown, cut) = fit_path(&h.shown, room);
+    let spans: Vec<rune::text::Span> =
+        shift_marks(&h.marks(words), cut).into_iter().map(|(a, b)| rune::text::Span::new(a, b).bold().color(mark)).collect();
     let mut r = row()
         .w_full()
         .h(PALETTE_ROW_H)
@@ -1179,8 +1212,85 @@ fn jump_row(h: &crate::jump::Hit, words: &[Vec<char>], i: usize, on: bool, typed
     if typed {
         r = r.child(text("Go to").font(SMALL).color(dim));
     }
-    r = r.child(text(h.shown.to_string()).spans(spans).font(BODY).color(fg).truncate_head().grow(1.0).min_w(0.0));
+    r = r.child(text(shown.into_owned()).spans(spans).font(BODY).color(fg).truncate_head().grow(1.0).min_w(0.0));
     if on { r.fill(l.accent) } else { r.hover(l.t.hover) }
+}
+
+/// What a long path shows from its start when cut: an ellipsis and a separator (the path's
+/// own, `/` or `\\`, the same length).
+const CUT: &str = "…/";
+
+/// `path` cut to its trailing folders that fit in `room` points of `BODY` text, after "…/", and
+/// how many of its bytes were cut from the front (0: it fits whole). Widths are estimated from
+/// per-character advances (see [`advance`]), with a little room to spare, so the result almost
+/// always fits and Rune's own head truncation, kept as the fallback, almost never runs.
+pub(crate) fn fit_path(path: &str, room: f32) -> (Cow<'_, str>, usize) {
+    fit_path_with(path, room, &|c| char_advance(c, BODY))
+}
+
+fn fit_path_with<'a>(path: &'a str, room: f32, adv: &dyn Fn(char) -> f32) -> (Cow<'a, str>, usize) {
+    // Kerning and rounding can make a string a little wider than its advances add up to.
+    let room = room * 0.97;
+    let width = |s: &str| s.chars().map(adv).sum::<f32>();
+    if width(path) <= room {
+        return (Cow::Borrowed(path), 0);
+    }
+    let budget = room - width(CUT);
+    // From the end, the widest run of whole trailing folders that fits; at least the last one.
+    let (mut w, mut cut) = (0.0, None);
+    for (i, c) in path.char_indices().rev() {
+        if matches!(c, '/' | '\\') && i + 1 < path.len() {
+            if w > budget && cut.is_some() {
+                break;
+            }
+            cut = Some(i + 1);
+        }
+        w += adv(c);
+    }
+    match cut {
+        // "…/" or "…\\", as the path writes its separators.
+        Some(at) if at > 0 => (Cow::Owned(format!("…{}{}", &path[at - 1..at], &path[at..])), at),
+        _ => (Cow::Borrowed(path), 0),
+    }
+}
+
+/// Byte ranges into a path moved to where they are once its first `cut` bytes became "…/"
+/// (ranges in the cut part go; one across the cut keeps its visible part).
+fn shift_marks(marks: &[(usize, usize)], cut: usize) -> Vec<(usize, usize)> {
+    if cut == 0 {
+        return marks.to_vec();
+    }
+    marks.iter().filter(|&&(_, b)| b > cut).map(|&(a, b)| (a.max(cut) - cut + CUT.len(), b - cut + CUT.len())).collect()
+}
+
+/// A character's advance in `style`, in points: printable ASCII from a table measured once per
+/// thread (a property of the font, as the text preview's monospaced width is), anything else
+/// as the widest of them, which keeps estimates on the safe side.
+fn char_advance(c: char, style: TextStyle) -> f32 {
+    thread_local! {
+        static TABLE: std::cell::RefCell<Vec<(TextStyle, [f32; 96])>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    TABLE.with_borrow_mut(|t| {
+        let i = match t.iter().position(|(s, _)| *s == style) {
+            Some(i) => i,
+            None => {
+                let mut a = [0.0; 96];
+                for (k, ch) in (' '..='~').enumerate() {
+                    a[k] = rune::text::advance(&ch.to_string(), style);
+                }
+                a[95] = a[..95].iter().copied().fold(0.0, f32::max);
+                t.push((style, a));
+                t.len() - 1
+            }
+        };
+        let a = &t[i].1;
+        if (' '..='~').contains(&c) { a[c as usize - ' ' as usize] } else { a[95] }
+    })
+}
+
+/// The width of `s` in `style` from [`char_advance`].
+fn advance(s: &str, style: TextStyle) -> f32 {
+    s.chars().map(|c| char_advance(c, style)).sum()
 }
 
 const MENU_W: f32 = 250.0;
@@ -1658,6 +1768,43 @@ fn palette_row(h: &palette::Hit, on: bool, l: Look) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A long path is cut to whole trailing folders that fit, after "…/"; one that fits stays
+    /// whole; at least the last folder is kept (Rune cuts that one further if it must).
+    #[test]
+    fn long_paths_are_cut_to_whole_trailing_folders() {
+        let one = |_: char| 1.0;
+        assert_eq!(fit_path_with("~/a/bb/ccc", 100.0, &one), (Cow::Borrowed("~/a/bb/ccc"), 0));
+        // 9.28 × 0.97 = 9 of room, 7 after "…/": "bb/ccc" (6) fits, "a/bb/ccc" (8) doesn't.
+        assert_eq!(fit_path_with("~/a/bb/ccc", 9.28, &one), (Cow::Owned("…/bb/ccc".into()), 4));
+        assert_eq!(fit_path_with("~/a/bb/ccc", 4.0, &one), (Cow::Owned("…/ccc".into()), 7), "the last folder at least");
+        assert_eq!(fit_path_with(r"C:\Users\me\Documents", 15.0, &one), (Cow::Owned(r"…\me\Documents".into()), 9));
+        assert_eq!(fit_path_with("no-separators-at-all", 3.0, &one).1, 0, "left to Rune");
+        assert_eq!(fit_path_with("~/é/ü/naïve", 10.0, &one), (Cow::Owned("…/ü/naïve".into()), 5), "bytes, not chars");
+        // Bold marks follow the cut: those in the cut part go, one across it keeps its rest.
+        let marks = [(0, 1), (2, 3), (4, 6), (7, 10), (2, 5)];
+        assert_eq!(shift_marks(&marks, 4), [(4, 6), (7, 10), (4, 5)]);
+        assert_eq!(shift_marks(&marks, 0), marks);
+        let (shown, cut) = fit_path_with("~/a/bb/ccc", 9.28, &one);
+        for (a, b) in shift_marks(&[(4, 6), (7, 10)], cut) {
+            assert!(shown.is_char_boundary(a) && shown.is_char_boundary(b));
+        }
+        assert_eq!(&shown[4..6], "bb");
+    }
+
+    /// The real advances: a path cut for 300 points of BODY text measures within it.
+    #[test]
+    fn a_cut_path_fits_its_room() {
+        let p = "~/Library/Mobile Documents/com~apple~CloudDocs/Projects/2026/clients/acme/reports/quarterly/final";
+        let (shown, cut) = fit_path(p, 300.0);
+        assert!(cut > 0 && shown.starts_with("…/") && shown.ends_with("/final"), "{shown}");
+        let w = rune::text::measure(&shown, &[], BODY, None).0;
+        assert!(w <= 300.0, "{shown}: {w}");
+        // And not much shorter than it could be: the next folder up wouldn't fit.
+        let longer = format!("…/{}", &p[p[..cut - 1].rfind('/').unwrap() + 1..]);
+        assert!(rune::text::measure(&longer, &[], BODY, None).0 > 300.0 * 0.9, "{longer}");
+    }
+
     use std::path::Path;
 
     /// 7 pt a character, standing in for text measurement.
