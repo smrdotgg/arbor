@@ -45,7 +45,7 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 19,700 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
+About 20,600 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
 `ops.rs` (copy, move, trash, batch rename and undo on a worker), `noclobber.rs` (moves, copies and file ids
 that never replace anything), `trash.rs` (each platform's trash), `app.rs`
 (state, startup, key dispatch, what each command does), `folder.rs` (one folder on screen: its
@@ -337,9 +337,24 @@ search walks again, and nothing is kept once it ends.
   different folders are two items). Paste, New Folder and drops onto the list wait until you
   leave the search (where would they go?); a drop onto a folder in the results works.
   Duplicate works on items from one folder at a time.
+- **Each result is the item the walk found.** It keeps that item's identity (device and inode,
+  from the `lstat` the walk already does; on Windows its creation time, since the file index
+  needs the file opened). Move to Trash, cut and paste, copy, F5 and F6, drops, Duplicate,
+  Rename and Batch Rename check it first (on the worker for operations, at the spot for an
+  inline rename and a drag out to another app), and leave out any item whose path now holds
+  something else or nothing, saying so; the rest go ahead. On Windows a file deleted and
+  recreated under the same name within 15 seconds keeps the old creation time, so a replacement
+  that quick isn't seen there.
 - **After a file operation**, the results it could have touched are checked again on a worker
-  (not the whole walk): what's gone drops, what changed updates, and what landed inside the
-  search's root and matches joins. A renamed folder takes its results with it.
+  (not the whole walk): what's gone, or isn't the item the walk found any more, drops; what
+  changed updates; and what landed inside the search's root and matches joins. A renamed folder
+  takes its results with it. A change made through another path to the same folders (another
+  pane on the folder a symlink leads to) is matched by the folders' canonical paths, which the
+  operation and the walk each look up on their own threads. While a walk is still going, it
+  remembers what operations moved or removed: results it delivers later under a changed path
+  (read before the change) are checked again by identity, found where they went, or dropped.
+  A newer recheck stops the one in flight and takes over its work; a new query or leaving the
+  search stops it too.
 - **Esc** stops a walk that's still going, keeping what it found; Esc again (or Back, ⌘[, or
   clearing the query) goes back to the folder, read fresh, with its selection, scroll and filter
   as they were. Opening a folder in the results goes there (Back comes back to the folder). A
@@ -348,12 +363,17 @@ search walks again, and nothing is kept once it ends.
   search, kept, and idle between searches, below the window's priority (nice 10 and the lowest
   disk priority on Linux, the utility class on macOS, below normal on Windows). They share one queue of folders and check a stop flag
   before every entry, so a new query, Esc, navigating, or hiding or closing the tab stops the
-  old walk at once. What they find goes into one shared batch, and the window takes it at most
-  once a frame and only appends it, so a slow disk slows the results, never the window. It
-  doesn't enter links to folders (no loops), hidden folders while hidden files are hidden, other
-  file systems mounted inside (`[search] cross_devices = true` to search those), or `/proc`,
-  `/sys` and `/dev` on Linux. Folders it can't read are counted ("3 folders couldn't be read").
-  It stops at 100,000 results and says so.
+  old walk at once. Starting one touches no disk on the window's thread: the root's device and
+  canonical path are looked up by the thread that reads it. What they find goes into one shared
+  batch (a big folder hands its matches over 256 at a time while it's read), and the window
+  takes it at most once a frame and only appends it, so a slow disk slows the results, never the
+  window. It doesn't enter links to folders (no loops), a folder it has already entered by
+  another path (a bind mount on the same disk; known by device and inode), hidden folders while
+  hidden files are hidden, other file systems mounted inside (`[search] cross_devices = true` to
+  search those), or `/proc`, `/sys` and `/dev` on Linux. Folders it can't read are counted ("3
+  folders couldn't be read"). It stops at 100,000 results and says so, and stops reading a
+  folder as soon as the cap is reached in it. Closing the window stops walks and rechecks
+  before the Jump history's last write.
 
 Every command, with its default keys (generated from `src/commands.rs`; a test keeps it in sync,
 `ARBOR_WRITE_README=1 cargo test readme` rewrites it):
