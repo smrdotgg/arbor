@@ -44,6 +44,19 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-09 · Long paths are cut at whole folders, by estimate.** Jump rows and Search's
+  folder column show "…/" and the trailing folders that fit, estimated from per-character
+  advances measured once per thread (3% to spare; a character outside ASCII counts as the widest
+  ASCII one), with Rune's head truncation as the fallback. Search's folder column now has a fixed
+  share of the row (0.6 to the name's 1, as its grow factor was) so the cut knows its room.
+  Undo: `fit_path` in `src/view.rs`.
+- **2026-11-09 · The Jump bench's history is synthetic paths under the home folder** (2–9 levels,
+  realistic names, not created on disk) and it types a different pair of letters each round.
+  Its numbers aren't comparable with earlier Jump rows. Undo: `make_jump_history` and
+  `JUMP_QUERIES`.
+- **2026-11-09 · `--pace` sleeps on a thread and wakes the window** (bench only): no timer and no
+  polling in the app. Undo: `paced` in `src/timing.rs`.
+
 - **2026-11-08 · Permanent delete stops at a mount point** (it doesn't skip it and carry on with
   the rest of the folder): the owner said "stop and report". Deleting a mount point itself is
   refused the same way, since its own folder can't be removed while mounted and the confirm said
