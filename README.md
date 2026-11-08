@@ -375,7 +375,10 @@ Cancel has the focus, and Esc keeps them.
 Explorer and Files) always asks first. The dialog names the count and the first few items, says
 folders go with everything in them, and that it can't be undone. It runs as a file operation on
 the worker, with progress, and Esc cancels it: what's already deleted stays deleted, and the
-status bar says how many went and which folder was left partly deleted. There's no undo entry.
+status bar says how many went and which folder was left partly deleted. A folder it can't
+finish (an item it can't remove, a mount, a folder moved meanwhile) stops there and says so
+truthfully: "Partly deleted “x”: stopped at “x/y” (permission denied); 12 items deleted, 3 left"
+(what's left is counted on the worker). There's no undo entry.
 Each item is deleted only while it's still the item you chose (its identity from the listing, or
 the walk's for search results, checked right before it goes); one replaced or removed since is
 left alone and named. It never crosses into another disk: a folder something is mounted on

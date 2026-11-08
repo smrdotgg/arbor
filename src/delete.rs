@@ -156,6 +156,26 @@ pub fn remove_tree(path: &Path, mounts: &Mounts, go: &mut dyn FnMut(&Path) -> bo
     imp::remove_tree(path, mounts, go, removed)
 }
 
+/// How many items are left in `path` (itself included), not entering mount points: what a
+/// delete that stopped left behind. `None` when `go` says stop.
+pub fn count_left(path: &Path, mounts: &Mounts, go: &mut dyn FnMut() -> bool) -> Option<u64> {
+    let fence = Fence::new(path, mounts);
+    fn walk(p: &Path, fence: &Fence, go: &mut dyn FnMut() -> bool) -> Option<u64> {
+        if !go() {
+            return None;
+        }
+        let Ok(m) = p.symlink_metadata() else { return Some(0) };
+        let mut n = 1;
+        if m.is_dir() && !fence.crosses(p, &m) {
+            for de in std::fs::read_dir(p).into_iter().flatten().flatten() {
+                n += walk(&de.path(), fence, go)?;
+            }
+        }
+        Some(n)
+    }
+    walk(path, &fence, go)
+}
+
 #[cfg(unix)]
 mod imp {
     use std::ffi::{CStr, CString, OsStr};
@@ -449,6 +469,8 @@ mod tests {
         let r = remove_tree(&d.join("m2"), &mounts, &mut |_| true, &mut n);
         assert!(matches!(&r, Err(Halt::Mounted { at }) if at == &d.join("m2")), "{r:?}");
         assert!(d.join("m2/precious").exists());
+        // What's left is counted without entering the mount: t and mnt.
+        assert_eq!(count_left(&d.join("t"), &mounts, &mut || true), Some(2));
         let _ = fs::remove_dir_all(&d);
     }
 

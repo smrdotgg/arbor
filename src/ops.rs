@@ -989,11 +989,19 @@ impl<'a> Worker<'a> {
                 Err(halt) => {
                     let Some((at, why)) = halt.why() else { continue };
                     let shown = d.path.parent().and_then(|p| at.strip_prefix(p).ok()).unwrap_or(at).display().to_string();
-                    if !matches!(halt, crate::delete::Halt::Failed { .. }) {
-                        out.errors.push(format!("Skipped “{shown}”: {why}"));
+                    let first = if matches!(halt, crate::delete::Halt::Failed { .. }) { "Couldn't delete" } else { "Skipped" };
+                    if removed == 0 {
+                        out.errors.push(format!("{first} “{shown}”: {why}"));
                     } else {
-                        let part = if removed > 0 { " (the rest of it was deleted)" } else { "" };
-                        out.errors.push(format!("Couldn't delete “{shown}”: {why}{part}"));
+                        // Truthful counts: what went, and what's still there (counted on this
+                        // worker, not entering mounts; left out if a cancel stops the count).
+                        let left = crate::delete::count_left(&d.path, &mounts, &mut || !self.cancelled())
+                            .map_or_else(String::new, |n| format!(", {n} left"));
+                        out.errors.push(format!(
+                            "Partly deleted “{}”: stopped at “{shown}” ({why}); {removed} item{} deleted{left}",
+                            name_of(&d.path),
+                            if removed == 1 { "" } else { "s" }
+                        ));
                     }
                 }
             }
@@ -2970,6 +2978,33 @@ mod tests {
         let left = fs::read_dir(d.join("big")).unwrap().count();
         assert!(left > 0 && left < 20, "{left} left");
         assert!(d.join("later").exists() && !d.join("first").exists());
+    }
+
+    /// A failure partway through a folder says so truthfully: partly deleted, where it stopped
+    /// and why, how many items went and how many are left (it used to say "the rest of it was
+    /// deleted" while leaving more).
+    #[cfg(unix)]
+    #[test]
+    fn a_delete_that_stops_partway_says_what_it_left() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid can't fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: permissions don't stop root");
+            return;
+        }
+        let d = tmp("del-partly");
+        // doomed/x/y/file: the file goes (y can be changed), then y can't (x can't be changed).
+        fs::create_dir_all(d.join("doomed/x/y")).unwrap();
+        fs::write(d.join("doomed/x/y/file"), "x").unwrap();
+        fs::set_permissions(d.join("doomed/x"), fs::Permissions::from_mode(0o555)).unwrap();
+        let o = run_now(Op::Delete { items: doomed(&[d.join("doomed")]) });
+        fs::set_permissions(d.join("doomed/x"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(o.removed.is_empty());
+        assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
+        let e = &o.errors[0];
+        assert!(e.starts_with("Partly deleted “doomed”: stopped at “doomed/x/y” (Permission denied"), "{e}");
+        assert!(e.ends_with("); 1 item deleted, 3 left"), "{e}");
+        assert!(!d.join("doomed/x/y/file").exists() && d.join("doomed/x/y").is_dir());
     }
 
     /// A permanent delete never crosses into a mounted disk: it stops at the mount point, names
