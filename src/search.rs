@@ -20,7 +20,11 @@
 //! - **Streaming**: workers add what they find to one shared batch and wake the window only
 //!   when it has taken the last one, so the window takes at most one batch per frame and only
 //!   appends it ([`Folder::poll_search`]). Progress without results wakes it at most every
-//!   [`PROGRESS_EVERY`].
+//!   [`PROGRESS_EVERY`]. The list itself grows only to [`LIVE_ROWS`] while the walk goes on:
+//!   Rune reads every row's key again whenever a list's row count changes (RUNE-GAPS.md), so
+//!   a list growing every frame would cost the window time in proportion to the results. The
+//!   rest join in one step when the walk ends or Esc stops it, as a folder that size would.
+//!   The walking threads run below the window's priority (CPU and disk).
 //! - **Cancelled** by a query change, Esc (keeping what was found), navigating away, and closing
 //!   or hiding the tab: the walk's flag is set and its queued folders are dropped unread.
 
@@ -48,6 +52,11 @@ pub const THREADS: usize = 4;
 
 /// How often a walk that's finding nothing still wakes the window to update its count.
 pub const PROGRESS_EVERY: Duration = Duration::from_millis(100);
+
+/// The most rows the list shows while a walk is still going (the rest are counted, and join when
+/// it ends). Plenty to look through, and a row count change of this size costs Rune about a
+/// millisecond (it reads every key again).
+pub const LIVE_ROWS: usize = 1_000;
 
 // ---- matching -----------------------------------------------------------------------------
 
@@ -310,6 +319,7 @@ fn devices_for(root: &Path) -> Vec<u64> {
 
 /// A walking thread: takes folders off the queue until the pool closes.
 fn work(s: &Shared) {
+    background();
     let mut buf = String::new();
     loop {
         let task = {
@@ -332,6 +342,34 @@ fn work(s: &Shared) {
         if walk.pending.fetch_sub(1, Relaxed) == 1 {
             walk.deliver(Vec::new(), 0, true);
         }
+    }
+}
+
+/// Puts the calling thread below the window's priority: CPU, and the disk where the platform
+/// has a per-thread setting. A big walk on a small machine then slows its own results, not the
+/// window (or other apps).
+fn background() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: plain syscalls on the calling thread, with constant arguments.
+    unsafe {
+        // Linux applies both per thread: nice 10, and the lowest best-effort disk priority.
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        libc::setpriority(libc::PRIO_PROCESS, tid, 10);
+        const IOPRIO_WHO_PROCESS: libc::c_long = 1;
+        const IOPRIO_BEST_EFFORT_LOWEST: libc::c_long = (2 << 13) | 7;
+        libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, IOPRIO_BEST_EFFORT_LOWEST);
+    }
+    #[cfg(target_os = "macos")]
+    // SAFETY: sets the calling thread's own QoS class.
+    unsafe {
+        // Utility: user-visible progress, below the window's interactive class for CPU and I/O.
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+    }
+    #[cfg(windows)]
+    // SAFETY: the pseudo handle of the calling thread, and a valid priority.
+    unsafe {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
 }
 
@@ -571,6 +609,9 @@ pub struct Search {
     pub sorted: bool,
     /// Which walk this is: a recheck asked for under an older one is dropped.
     pub generation: u64,
+    /// How many of the results (`Folder::entries`, in order) the list has taken in: all of
+    /// them once the walk is over, at most [`LIVE_ROWS`] while it goes on.
+    pub upto: usize,
     /// Re-checks of results after a file operation, on a worker.
     recheck: Latest<Recheck>,
 }
@@ -598,6 +639,7 @@ impl Search {
             stopped: false,
             sorted: false,
             generation: 0,
+            upto: 0,
             recheck,
         }
     }
@@ -636,6 +678,9 @@ impl Folder {
 
     /// The results now, empty, for a new walk (or none): keys change, the list scrolls up.
     fn clear_results(&mut self) {
+        if let Some(s) = self.search.as_mut() {
+            s.upto = 0;
+        }
         self.entries.clear();
         self.visible.clear();
         self.marked.clear();
@@ -666,18 +711,29 @@ impl Folder {
             s.walk = None;
         }
         let resort = d.done && s.sorted;
-        if !d.batch.is_empty() {
-            // Appending only: rows keep their keys and places, so nothing moves under the
-            // pointer and virtual rows need no new version.
-            let from = self.entries.len() as u32;
-            self.entries.extend(d.batch);
-            self.visible.extend(from..self.entries.len() as u32);
-        }
+        self.entries.extend(d.batch);
+        self.take_in();
         if resort {
             // Sorted by a header click while it was walking: what came after joins the order.
             self.resort();
         }
         changed | moved
+    }
+
+    /// Shows the results the list hasn't taken in yet: up to [`LIVE_ROWS`] while the walk goes
+    /// on, then the rest. Appending only: rows keep their keys and places, so nothing moves
+    /// under the pointer and virtual rows need no new version. True when the list grew.
+    fn take_in(&mut self) -> bool {
+        let Some(s) = self.search.as_mut() else { return false };
+        let n = self.entries.len();
+        let to = if s.walking() { n.min(LIVE_ROWS.max(s.upto)) } else { n };
+        if to <= s.upto {
+            return false;
+        }
+        let hidden = self.show_hidden;
+        let from = std::mem::replace(&mut s.upto, to);
+        self.visible.extend((from..to).filter(|&i| hidden || !self.entries[i].hidden).map(|i| i as u32));
+        true
     }
 
     /// Applies a recheck's findings, if it's for the walk on screen.
@@ -689,10 +745,14 @@ impl Folder {
         let changed: HashMap<&str, (bool, u64, i64)> = r.changed.iter().map(|(k, d, s, m)| (k.as_str(), (*d, *s, *m))).collect();
         let before = self.entries.len();
         let mut touched = !r.added.is_empty();
+        let upto = self.search.as_ref().map_or(0, |s| s.upto);
+        let (mut i, mut kept_shown) = (0, 0);
         self.entries.retain_mut(|e| {
+            i += 1;
             if r.gone.contains(&e.key) {
                 return false;
             }
+            kept_shown += usize::from(i <= upto);
             if let Some(&(is_dir, size, mtime)) = changed.get(e.key.as_str())
                 && (e.is_dir, e.size, e.mtime_ms) != (is_dir, size, mtime)
             {
@@ -710,6 +770,10 @@ impl Folder {
         self.entries.extend(added);
         let names: HashSet<OsString> = self.entries.iter().map(|e| e.os.clone()).collect();
         self.marked.retain(|n| names.contains(n));
+        if let Some(s) = self.search.as_mut() {
+            // Added results join the list when it has taken in everything (else at the end).
+            s.upto = if s.walking() { kept_shown } else { self.entries.len() };
+        }
         self.refilter(keep.as_deref());
         true
     }
@@ -949,6 +1013,12 @@ impl State {
         {
             s.took = Some(w.elapsed());
             s.stopped = true;
+            // What it found and the list hadn't taken in yet joins it.
+            let sorted = s.sorted;
+            f.take_in();
+            if sorted {
+                f.resort();
+            }
         }
     }
 
@@ -1082,6 +1152,9 @@ impl State {
         let found = count(f.entries.len() as u64);
         let seen = count(s.visited);
         let mut line = match s.took {
+            None if f.entries.len() > s.upto => {
+                format!("Searching… {found} found in {seen} items · showing the first {} until it's done", count(s.upto as u64))
+            }
             None => format!("Searching… {found} found in {seen} items"),
             Some(t) => {
                 let secs = t.as_secs_f64();

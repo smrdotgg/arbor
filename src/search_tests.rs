@@ -675,3 +675,40 @@ fn search_speed() {
         }
     }
 }
+
+/// While a walk goes on the list grows only to `LIVE_ROWS` (a row count change makes Rune read
+/// every key again); the rest join when it ends, or when Esc stops it.
+#[test]
+fn the_list_grows_only_so_far_while_the_walk_goes_on() {
+    let d = tree("live", &["seed"]);
+    let mut s = state_in(&d);
+    search(&mut s, "hit");
+    let f = s.cur_mut();
+    let fake = |i: usize| Entry {
+        os: format!("x/hit{i}").into(),
+        name: format!("hit{i}"),
+        lower: format!("hit{i}"),
+        key: next_key(),
+        is_dir: false,
+        is_link: false,
+        hidden: false,
+        size: 1,
+        mtime_ms: 1,
+    };
+    // As poll_search appends batches while the walk is still going.
+    for batch in 0..3 {
+        f.entries.extend((0..700).map(|i| fake(batch * 700 + i)));
+        f.take_in();
+    }
+    assert_eq!((f.entries.len(), f.visible.len()), (2100, LIVE_ROWS));
+    let line = State::search_status(f).unwrap();
+    assert!(line.contains("2,100 found") && line.ends_with("showing the first 1,000 until it's done"), "{line}");
+    // Selection works on what's shown.
+    f.select_all();
+    assert_eq!(f.marked.len(), LIVE_ROWS);
+    // Esc stops it: everything found joins the list.
+    s.stop_search(0);
+    let f = s.cur();
+    assert!(f.entries.len() >= 2100 && f.visible.len() == f.entries.len(), "{} of {}", f.visible.len(), f.entries.len());
+    assert!(!State::search_status(f).unwrap().contains("showing the first"));
+}

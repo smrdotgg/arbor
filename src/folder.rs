@@ -345,9 +345,11 @@ impl Folder {
     pub fn refilter(&mut self, select: Option<&OsStr>) {
         let q = if self.path_mode() { String::new() } else { self.filter.to_lowercase() };
         let hidden = self.show_hidden;
+        // A search's list holds only the results it has taken in so far (`search.rs`).
+        let n = self.search.as_ref().map_or(self.entries.len(), |s| s.upto.min(self.entries.len()));
         self.visible.clear();
         self.visible.extend(
-            self.entries
+            self.entries[..n]
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| (hidden || !e.hidden) && (q.is_empty() || e.lower.contains(&q)))
