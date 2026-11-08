@@ -3,14 +3,15 @@
 //! `ARBOR_TIMING=1` logs to stderr, one line per event:
 //!
 //! ```text
-//! arbor-timing first-frame main_ms=41.2 init_ms=12.0 epoch_us=1762591234567890 entries=10000
+//! arbor-timing first-frame main_ms=41.2 init_at_ms=3.1 init_ms=12.0 epoch_us=1762591234567890 entries=10000
 //! arbor-timing key ms=1.9 update_ms=1.1 encode_ms=0.6 refresh_hz=120
 //! arbor-timing nav ms=9.4 update_ms=3.2 encode_ms=0.7 entries=10000
 //! ```
 //!
 //! - `first-frame`: from the top of `main` to the first frame submitted. `epoch_us` is that
 //!   moment on the wall clock, so a launcher can measure from before `exec` (`scripts/bench.sh`).
-//!   `init_ms` is the part spent in `State::new`, which reads the first folder.
+//!   `init_ms` is the part spent in `State::new`, which reads the first folder; `init_at_ms` is
+//!   when that started (Rune sets up its event loop first, then creates the window and GPU).
 //! - `key`: from the key's arrival (the OS event's own timestamp on macOS) to the frame it
 //!   changed being submitted.
 //! - `nav`: from the request (the key or click that asked) to the frame showing the new listing.
@@ -53,6 +54,8 @@ thread_local! {
     static FIRST_ENTRIES: Cell<usize> = const { Cell::new(0) };
     /// How long `State::new` took (it reads the first folder before the window opens).
     static INIT_MS: Cell<f64> = const { Cell::new(0.0) };
+    /// When `State::new` started, from the top of `main` (Rune's event loop setup before it).
+    static INIT_AT_MS: Cell<f64> = const { Cell::new(0.0) };
     /// Bench steps left, and the step counter.
     static BENCH: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
 }
@@ -71,6 +74,7 @@ pub fn init() -> bool {
 
 pub fn init_state() -> State {
     let t = Instant::now();
+    INIT_AT_MS.set(MAIN.get().map_or(0.0, |(m, _)| t.duration_since(*m).as_secs_f64() * 1000.0));
     let s = State::new();
     INIT_MS.set(t.elapsed().as_secs_f64() * 1000.0);
     s
@@ -170,8 +174,11 @@ pub fn frame(f: &FrameEncoded) {
     if FIRST.replace(false) {
         let (main, wall) = MAIN.get().copied().unwrap_or((at, SystemTime::now()));
         let epoch = (wall + at.saturating_duration_since(main)).duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros());
-        let (init, n) = (INIT_MS.get(), FIRST_ENTRIES.get());
-        eprintln!("arbor-timing first-frame main_ms={:.2} init_ms={init:.2} epoch_us={epoch} entries={n} {split}", ms(main));
+        let (init, init_at, n) = (INIT_MS.get(), INIT_AT_MS.get(), FIRST_ENTRIES.get());
+        eprintln!(
+            "arbor-timing first-frame main_ms={:.2} init_at_ms={init_at:.2} init_ms={init:.2} epoch_us={epoch} entries={n} {split}",
+            ms(main)
+        );
     } else {
         if let Some(t) = key {
             eprintln!("arbor-timing key ms={:.2} {split}", ms(t));
