@@ -4,6 +4,7 @@ Arbor against the speed budgets in [`NORTHSTAR.md`](NORTHSTAR.md). Newest first.
 
 ```sh
 scripts/bench.sh 11 10                         # 11 cold starts, 10 rounds each (opens windows: leave the machine alone)
+scripts/bench.sh 11 10 --tabs 5                # plus 5 cold starts timing a tab switch to the 10k folder
 xvfb-run -a scripts/bench.sh 11 10             # Linux without a display
 cargo test --release -- --ignored --nocapture list_10k   # read + sort only, no window
 ```
@@ -20,6 +21,52 @@ runs two to three frames behind submission (`frame/present_time.rs`). Rune doesn
 frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below means the
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
+
+## 2026-11-08, tabs and split view (milestone 3)
+
+What changed on the measured path: the window's folder now lives in a pane (one, unless split),
+every read carries a request number, and the view builds a pane column around the list. With
+one pane and one tab nothing else is drawn or run: no tab bar, no second pane, no drag handler.
+Before is 7b4b9b8, after is d7fe026. Both were driven by the new bench (bd3756c,
+`--bin`), alternating, 11 cold starts × 10 rounds per pass. New row: **tab switch to 10k**,
+`--tabs 5`: five more cold starts, each opening a second tab on the parent folder, then 10
+times showing the 10k tab again (a fresh read, since a hidden tab keeps no listing), timed from
+the key to the frame showing it, and going back.
+
+### MacBook Pro, Apple M4 Pro, macOS 27.2 (60 Hz)
+
+Load average 1.7–4.2 during the passes (not known to be idle). Order: before, before, after,
+before, after (a first after pass was lost to a driver argument bug).
+
+| Measure (median / p95, submission proxy) | Before (3 passes) | After (2 passes) |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 131.2 / 145.0, 129.8 / 146.1, 132.5 / 142.9 ms | 132.8 / 161.8, 130.6 / 139.4 ms |
+| … of which `main` → first frame | 117.6, 117.3, 118.6 ms | 119.6, 118.8 ms |
+| Listing visible (10k), request → frame | 36.8 / 38.6, 36.8 / 41.1, 36.8 / 43.5 ms | 36.9 / 38.4, 36.7 / 38.0 ms |
+| Key → frame (synthetic ↓) | 0.7 / 0.8 ms | 0.7 / 0.8 ms |
+| **Tab switch to 10k** (key → frame) | — | **36.2 / 50.2, 36.2 / 38.0 ms** (under the 50 ms listing budget) |
+| 10k listing in the first frame | 33 of 33 runs | 22 of 22 runs |
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+The machine was busy (other jobs compiling; load average 2.3–4.4 on 4 cores), so every number
+is well above the earlier tables, both builds alike. Order: before, after, after, before.
+
+| Measure (median / p95, submission proxy) | Before (2 passes) | After (2 passes) |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 211.4 / 221.4, 207.6 / 231.1 ms | 207.5 / 219.0, 206.0 / 247.9 ms |
+| Listing visible (10k) | 63.8 / 88.9, 61.8 / 87.9 ms | 58.0 / 78.9, 60.4 / 83.8 ms |
+| Key → frame (synthetic ↓) | 11.6 / 12.8, 11.6 / 14.8 ms | 10.7 / 12.6, 10.6 / 12.5 ms |
+| **Tab switch to 10k** (key → frame) | — | 48.5 / 56.0, 61.6 / 78.3 ms |
+
+No regression beyond noise on either machine. A tab switch to the 10k folder costs what a
+navigation to it costs: the read (about 18 ms on the Mac) is the work, and nothing is kept to
+skip it. It never made the key's own frame (0 of 100 on each machine): showing a tab waits at
+most 8 ms for its read, and a 10k read takes longer, so the key's frame shows the tab's path
+and an empty list, and the listing follows in its own frame. Smaller folders do land in the
+key's frame: a 300-entry tab under Xvfb logged `tab ms=26.9 same_frame=1` (most of it lavapipe
+encoding). That wait holds the UI thread for up to 8 ms on a switch, which the key → frame
+budget shares; it's the price of a local folder appearing without a blank frame.
 
 ## 2026-11-08, after the undo-safety and startup fixes (milestone 1 review)
 
