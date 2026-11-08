@@ -16,6 +16,26 @@ Newest first.
 
 ---
 
+## Context menu: no native pop-up menu on Linux
+
+- **Feature:** right-click on a row or the list opens a context menu (NORTHSTAR: "Out of the box
+  it works like Finder or Explorer: click, double-click, drag, right-click, menus").
+- **What Rune is missing:** a native pop-up menu off macOS and Windows. `Tx::popup_menu` answers
+  `None` at once on Linux (`popup_menu/mod.rs`: `popup_menu_supported()` is false; the host
+  there shows nothing), so the native menu Arbor opens on macOS and Windows never appears.
+- **What we did instead:** where `rune::popup_menu_supported()` is false, the same items, from the
+  same table (`State::menu_items` in `src/actions.rs`), open in Arbor's own menu in the window
+  (`src/menu.rs`, `menu_view` in `src/view.rs`): a small card at the pointer, flipped at the
+  window's edges, with each command's keys; ↑↓, Home, End and a letter move, Enter or Space
+  runs, Esc or a click outside closes. Checked under X11 (Xvfb, XTest).
+- **What users lose:** it's drawn inside the window, so it can't extend past the window's edges
+  (a long menu in a small window is shifted to fit), and it doesn't look like the desktop's own
+  menus (GTK or Qt): no theme, no accessibility roles of a native menu (it's a modal card), no
+  submenus. Under Wayland it can't appear over other windows, which a native popup surface could.
+- **Suggested Rune change:** a Linux host for `popup_menu`: an `xdg_popup` with a positioner on
+  Wayland and an override-redirect window on X11, drawn by Rune with the platform's menu metrics,
+  so `Tx::popup_menu` works the same on all three.
+
 ## Search: a virtual list that grows costs a read of every key
 
 - **Feature:** Search in This Folder (NORTHSTAR Core: "live walk, no index, streaming"). Results

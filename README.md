@@ -45,13 +45,15 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 20,600 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
-`ops.rs` (copy, move, trash, batch rename and undo on a worker), `noclobber.rs` (moves, copies and file ids
-that never replace anything), `trash.rs` (each platform's trash), `app.rs`
+About 22,600 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
+`ops.rs` (copy, move, trash, permanent delete, batch rename and undo on a worker), `noclobber.rs` (moves, copies and file ids
+that never replace anything), `trash.rs` (each platform's trash, and telling a disk with none),
+`delete.rs` (deleting permanently without following links), `confirm.rs` (Arbor's one dialog), `app.rs`
 (state, startup, key dispatch, what each command does), `folder.rs` (one folder on screen: its
 listing, selection, filter, sort and history, and what a hidden tab keeps), `panes.rs` (tabs and
 split view), `commands.rs` (the command table and keymap), `palette.rs` (the command palette),
 `config.rs` (the settings file), `actions.rs` (clipboard, rename, drag and drop, context menu),
+`menu.rs` (the context menu in the window, on Linux),
 `preview.rs` (quick preview: reading, sniffing and decoding on a worker), `jump.rs` (Jump to
 Folder: the history's writer thread, frecency and ranking), `search.rs` (Search in This Folder:
 the walk, its threads and the results), `pattern.rs` (globs), `select.rs`
@@ -120,7 +122,9 @@ Typing, outside the palette:
 Off macOS, ⌘ is Ctrl. Mouse: click to select, ⇧-click and ⌘-click to select several,
 double-click to open, click a breadcrumb or place to jump there (in a narrow pane the
 leading folders fold into “…”, which opens the deepest hidden one), click a column header to sort
-(click again to reverse). Right-click opens a native context menu (macOS and Windows). Drag rows
+(click again to reverse). Right-click opens a context menu: native on macOS and Windows, and on
+Linux, where Rune has none, Arbor's own in the window with the same items (↑↓, Home, End or a
+letter move, Enter or Space runs, Esc or a click outside closes; see `RUNE-GAPS.md`). Drag rows
 out to Finder or other apps (macOS). Drop files on a folder row or on the list: same disk moves,
 another disk copies, and ⌥ forces a copy.
 
@@ -311,6 +315,47 @@ built. Not checked: two names that are the same to APFS only after Unicode norma
 one character or as e and an accent); the no-replace rename still refuses the second, and the
 batch is put back.
 
+### Trash and Delete Permanently
+
+**⌘⌫** (or Delete) moves the selection to the Trash (the Recycle Bin on Windows), and ⌘Z puts it
+back on macOS and Linux. **A trash never silently becomes a permanent delete.** When an item's
+disk has no trash that will take it, it stays where it is, and Arbor asks, in its one dialog,
+whether to delete it permanently ("“a.txt” and “b.txt” can't go to the Trash: … Delete them
+permanently? This can't be undone."). With several items, those that can go to the trash go
+first (that part can be undone as usual), and the rest are gathered into that one question,
+since nothing permanent has happened yet and only the disk can say which items it takes.
+Cancel has the focus, and Esc keeps them.
+
+- **macOS:** `NSFileManager` puts the item in the Trash, or fails on a disk without one (many
+  network shares, some FAT, exFAT and NTFS disks); that failure is the question.
+- **Linux:** the freedesktop.org trash: the home trash (`~/.local/share/Trash`) for items on its
+  disk; on another disk its own `$top/.Trash/$uid` (only if `.Trash` is a sticky folder, not a
+  link) or `$top/.Trash-$uid` (made if missing). An item is only ever renamed into a trash on its
+  own disk, never copied. If neither can be used (a read-only top folder, no permission, a FUSE
+  disk that refuses), the question; if the item's own folder can't be changed either, an error,
+  since a delete couldn't remove it.
+- **Windows:** only a fixed local disk can have a Recycle Bin, so items on network shares and
+  mapped drives, removable drives, discs and RAM disks get the question without the shell being
+  asked. On a fixed disk, the shell's `IFileOperation` recycles each item, and Arbor stops the
+  delete before it begins unless the shell says it's about to recycle the item (it doesn't for
+  an item too big for the bin, a bin turned off for the drive, or a virtual drive such as
+  Cryptomator's or another WinFsp one that doesn't support it). If the shell ever deleted an item
+  without putting it in the bin anyway, the status bar says so plainly. Restore from the Recycle
+  Bin: Windows doesn't say where an item went, so Arbor can't undo it.
+
+**Delete Permanently…** (⌥⌘⌫ on macOS, as in Finder; Shift+Delete on Windows and Linux, as in
+Explorer and Files) always asks first. The dialog names the count and the first few items, says
+folders go with everything in them, and that it can't be undone. It runs as a file operation on
+the worker, with progress, and Esc cancels it: what's already deleted stays deleted, and the
+status bar says how many went and which folder was left partly deleted. There's no undo entry.
+Each item is deleted only while it's still the item you chose (its identity from the listing, or
+the walk's for search results, checked right before it goes); one replaced or removed since is
+left alone and named. Folders go with everything inside, and links are removed, never followed
+(on Unix each folder is opened relative to its parent without following links, so one swapped
+for a link meanwhile is refused). Unix deletes a read-only file as it is (its folder's
+permission is what counts) and reports what it can't remove; Windows clears the read-only
+attribute first, as Explorer does.
+
 ### Search in This Folder
 
 **⌘F** turns the active tab into a search of its folder and everything inside it: a query field
@@ -450,7 +495,8 @@ was asked for in, each paste on its own (two asked before the clipboard answers 
 folders), and is refused if that folder was moved or replaced before the clipboard answered.
 Two panes on one folder by different paths (a symlink to it) are known to be the same folder.
 The palette names ⌘\ "Split View" or "Close Split View", and Space "Quick Preview" or "Close
-Preview", whichever it will do. Undo refuses if any item changed since. Rename selects the name before the extension; Enter saves, Esc cancels. With two or more items selected, Rename opens Batch Rename. Esc also cancels
+Preview", whichever it will do. Delete Permanently is ⌥⌘⌫ on macOS and Shift+Delete on Windows and
+Linux, each platform's own convention. Undo refuses if any item changed since. Rename selects the name before the extension; Enter saves, Esc cancels. With two or more items selected, Rename opens Batch Rename. Esc also cancels
 a running copy or move.
 
 ## Settings
@@ -512,20 +558,39 @@ All three build, pass tests and pass clippy in CI. How much has been run for rea
   Sidebar places include `/mnt` and `/media`. Checked at runtime only under Xvfb with Mesa's
   software Vulkan (Ubuntu 24.04): the window opens and lists a folder, and synthetic X key
   presses (XTest) filter, move the selection and drive the command palette and settings reload.
-  Not yet checked: Wayland, a real GPU, a real keyboard and input methods, drag and drop,
-  clipboard, trash and undo, `xdg-open`.
+  Under Xvfb too: the in-window context menu, Delete Permanently, and a trash on a disk with no
+  usable trash (a folder on `/`, which this user can't write, with the home trash on another
+  disk) asking before it deletes. Not yet checked: Wayland, a real GPU, a real keyboard and
+  input methods, drag and drop, clipboard, undoing a trash, `xdg-open`.
 - **Windows**: drive letters, hidden attribute, Recycle Bin, `explorer /select,`. Compiles and
   passes tests in CI but **has never been run**: everything at runtime is unchecked.
 
 Trash uses NSFileManager on macOS, the freedesktop.org spec on Linux, and the Recycle Bin on
-Windows. Undoing a trash puts the item back on macOS and Linux (on Linux its `.trashinfo` is
-removed too). Windows doesn't report where
-the item went, so restore it from the Recycle Bin there.
+Windows (see [Trash and Delete Permanently](#trash-and-delete-permanently)). Undoing a trash puts
+the item back on macOS and Linux (on Linux its `.trashinfo` is removed too). Windows doesn't
+report where the item went, so restore it from the Recycle Bin there.
+
+### Test by hand on Windows
+
+CI builds and tests Windows (including a real Recycle Bin trash of a file on `C:` and a refused
+one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine, check:
+
+- [ ] Trash a file and a folder on `C:`: they're in the Recycle Bin, and Restore puts them back.
+- [ ] Trash on a USB stick: the "Can't Move to the Recycle Bin" question appears; Cancel keeps
+      the files, Delete Permanently removes them.
+- [ ] Trash on a network share (a mapped drive and a `\\server\share` path): the question.
+- [ ] Trash on a Cryptomator or other WinFsp drive: the question, and nothing disappears
+      without it (the reported case where Windows deleted for good with no warning).
+- [ ] Trash a file bigger than the drive's Recycle Bin limit (Recycle Bin properties, "Custom
+      size"): the question, and the file is still there after Cancel.
+- [ ] Shift+Delete asks, names the items, and deletes; a read-only file and a folder with a
+      junction inside (the junction's target stays) go too.
+- [ ] Right-click opens the native menu with the same items as on macOS.
 
 ## Not yet
 
-Permanent delete (on purpose, for now), file watching (use ⌘R), previews of PDF, video, audio
+Emptying the Trash, file watching (use ⌘R), previews of PDF, video, audio
 and office documents (they need each platform's preview API), syntax highlighting in the text
 preview, regular expressions in Select by Pattern, Tab-completion in go-to mode, redo, more than one operation
-at a time, a context menu on Linux, reordering tabs or dragging them between panes, and
+at a time, reordering tabs or dragging them between panes, and
 dragging rows out to Finder while the window is split on macOS (see `RUNE-GAPS.md`).
