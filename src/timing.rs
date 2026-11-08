@@ -25,6 +25,10 @@
 //! - `jump`: the key that opened Jump to Folder, to the frame showing its ranked folders.
 //!   `cold=1` when that open read the history log (the first of a session), `folders=N` the
 //!   history's size, `same_frame=1` when the load landed within the open's bounded wait.
+//! - `search-first` and `search-done`: the key that started a search walk (⌘F's first letter,
+//!   or any change to the query), to the frame showing its first results, and to the frame
+//!   after it finished (`stopped=1` when Esc ended it), with `found=N` and `visited=N`. A `key`
+//!   line has `search=1` when a walk was streaming into the frame it drew.
 //! - `first-listing`: only when the first folder was too slow for the first frame (the window
 //!   waits at most `app::FIRST_PAINT_WAIT` for it): from the top of `main` to the frame showing
 //!   it. `ARBOR_SLOW_FIRST_READ_MS=N` (read only when timing is on) slows that read by N ms to
@@ -43,7 +47,9 @@
 //! decodes), Space; opening waits for the preview to land. With `ARBOR_BENCH_JUMP=1` each
 //! round opens Jump to Folder (waiting for the history to land; the first open of a run reads
 //! and aggregates the log, the rest rank what's in memory), types `a` and `r`, and closes it
-//! with Esc. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
+//! with Esc. With `ARBOR_BENCH_SEARCH=1` each round opens Search in This Folder, types `1`
+//! (in a large tree, so the walk streams for many frames), presses ↓ once a frame while it
+//! streams, and leaves with Esc once it's done. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
 //! parent folder instead, then does N rounds of "previous tab (the start folder), next tab". The ↓ is synthetic, so its `key` time starts when the handler
 //! is called rather than at an OS event. The window opens without taking focus and ignores real
 //! keys, so typing in another app while it runs can't reach it (and its ⌘⌫ can't trash anything).
@@ -95,6 +101,18 @@ thread_local! {
     static KEY_PREVIEW: Cell<bool> = const { Cell::new(false) };
     /// `ARBOR_BENCH_JUMP`: the bench opens Jump to Folder and types in it.
     static JUMP: Cell<bool> = const { Cell::new(false) };
+    /// `ARBOR_BENCH_SEARCH`: the bench searches and moves through the results as they stream.
+    static SEARCH: Cell<bool> = const { Cell::new(false) };
+    /// Where the search bench is in its round: ⌘F, the query, ↓ while it streams.
+    static SEARCH_PHASE: Cell<u8> = const { Cell::new(0) };
+    /// The handled key's frame has a walk streaming into it.
+    static KEY_SEARCH: Cell<bool> = const { Cell::new(false) };
+    /// A search walk in flight: the key that started it, and whether its first results showed.
+    static SEARCH_ASKED: Cell<Option<(Instant, bool)>> = const { Cell::new(None) };
+    /// The search's first results land in the frame being built: its key, and how many.
+    static SEARCH_FIRST: Cell<Option<(Instant, usize)>> = const { Cell::new(None) };
+    /// The search finished (or stopped) in the frame being built: its key, found, visited, stopped.
+    static SEARCH_DONE: Cell<Option<(Instant, usize, u64, bool)>> = const { Cell::new(None) };
     /// Jump opened and its history is still loading: when, and whether it reads the log.
     static JUMP_ASKED: Cell<Option<(Instant, bool)>> = const { Cell::new(None) };
     /// Jump's rows land in the frame being built: the open's time, cold, folders, same frame.
@@ -130,7 +148,10 @@ pub fn init() -> bool {
     TABS.set(set("ARBOR_BENCH_TABS"));
     PREVIEW.set(set("ARBOR_BENCH_PREVIEW"));
     JUMP.set(set("ARBOR_BENCH_JUMP"));
-    let steps = if PREVIEW.get() {
+    SEARCH.set(set("ARBOR_BENCH_SEARCH"));
+    let steps = if SEARCH.get() {
+        rounds
+    } else if PREVIEW.get() {
         rounds * PREVIEW_STEPS
     } else if JUMP.get() {
         rounds * JUMP_STEPS
@@ -191,7 +212,11 @@ fn measured(s: &mut State, tx: &mut Tx, t: Instant, f: impl FnOnce(&mut State, &
     let (lands, tab) = (s.lands, tab_of(s));
     let (reads, closed) = (s.preview_reads, s.preview.is_none());
     let (no_jump, cold) = (s.jump.is_none(), s.history.loads == 0);
+    let generation = search_generation(s);
     let handled = f(s, tx);
+    if handled && search_generation(s) != generation && searching(s) {
+        SEARCH_ASKED.set(Some((t, false)));
+    }
     if handled
         && no_jump
         && let Some(j) = &s.jump
@@ -206,6 +231,7 @@ fn measured(s: &mut State, tx: &mut Tx, t: Instant, f: impl FnOnce(&mut State, &
     if handled {
         KEY.set(Some(t));
         KEY_PREVIEW.set(s.preview.is_some());
+        KEY_SEARCH.set(searching(s));
         if s.preview_reads != reads {
             PREVIEW_ASKED.set(Some((t, closed)));
         }
@@ -217,6 +243,16 @@ fn measured(s: &mut State, tx: &mut Tx, t: Instant, f: impl FnOnce(&mut State, &
         }
     }
     handled
+}
+
+/// The active pane's search walk, if any (`None` when it isn't searching).
+fn search_generation(s: &State) -> Option<u64> {
+    s.cur().search.as_ref().map(|x| x.generation)
+}
+
+/// A search walk is running in the active pane.
+fn searching(s: &State) -> bool {
+    s.cur().search.as_ref().is_some_and(|x| x.walking())
 }
 
 /// The active pane and its visible tab.
@@ -234,6 +270,20 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     let previews = s.preview_lands;
     let jump_loads = s.history.loads;
     let mut changed = s.poll(tx);
+    if let Some((t, seen)) = SEARCH_ASKED.get() {
+        let f = s.cur();
+        let found = f.entries.len();
+        if !seen && found > 0 && f.searching() {
+            SEARCH_FIRST.set(Some((t, found)));
+            SEARCH_ASKED.set(Some((t, true)));
+        }
+        if let Some(x) = f.search.as_ref().filter(|x| !x.walking()) {
+            SEARCH_DONE.set(Some((t, found, x.visited, x.stopped)));
+            SEARCH_ASKED.set(None);
+        } else if !f.searching() {
+            SEARCH_ASKED.set(None);
+        }
+    }
     if s.history.loads != jump_loads
         && let Some((t, cold)) = JUMP_ASKED.take()
     {
@@ -305,8 +355,30 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
     if JUMP.get() && s.jump.as_ref().is_some_and(|j| j.loading) {
         return false;
     }
-    BENCH.set((left - 1, n + 1));
     let now = Instant::now();
+    if SEARCH.get() {
+        let key = |k: Key| KeyEvent { key: k, mods: Mods::default() };
+        match SEARCH_PHASE.get() {
+            0 => {
+                measured(s, tx, now, |s, tx| run(s, Cmd::Search, tx));
+                SEARCH_PHASE.set(1);
+            }
+            1 => {
+                keyed(s, &key(Key::Text("1".into())), tx, now);
+                SEARCH_PHASE.set(2);
+            }
+            _ if searching(s) => {
+                keyed(s, &key(Key::Down), tx, now);
+            }
+            _ => {
+                keyed(s, &key(Key::Escape), tx, now);
+                SEARCH_PHASE.set(0);
+                BENCH.set((left - 1, n + 1));
+            }
+        }
+        return true;
+    }
+    BENCH.set((left - 1, n + 1));
     if JUMP.get() {
         let key = |k: Key| KeyEvent { key: k, mods: Mods::default() };
         match n % JUMP_STEPS {
@@ -375,6 +447,7 @@ pub fn frame(f: &FrameEncoded) {
     // Rune runs a frame's input handlers and `poll` before building it, so whatever they marked
     // belongs to this frame, drawn or not.
     let (key, landed, preview, jump) = (KEY.take(), LANDED.take(), PREVIEW_LANDED.take(), JUMP_LANDED.take());
+    let (search_first, search_done) = (SEARCH_FIRST.take(), SEARCH_DONE.take());
     if f.outcome() != FrameOutcome::Drawn {
         return;
     }
@@ -401,7 +474,18 @@ pub fn frame(f: &FrameEncoded) {
         );
     } else {
         if let Some(t) = key {
-            eprintln!("arbor-timing key ms={:.2} {split} preview={}", ms(t), u8::from(KEY_PREVIEW.get()));
+            eprintln!(
+                "arbor-timing key ms={:.2} {split} preview={} search={}",
+                ms(t),
+                u8::from(KEY_PREVIEW.get()),
+                u8::from(KEY_SEARCH.get())
+            );
+        }
+        if let Some((t, found)) = search_first {
+            eprintln!("arbor-timing search-first ms={:.2} found={found} {split}", ms(t));
+        }
+        if let Some((t, found, visited, stopped)) = search_done {
+            eprintln!("arbor-timing search-done ms={:.2} found={found} visited={visited} stopped={} {split}", ms(t), u8::from(stopped));
         }
         if let Some((t, cold, folders, inside)) = jump {
             eprintln!(
