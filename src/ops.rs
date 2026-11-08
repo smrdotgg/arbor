@@ -213,14 +213,13 @@ impl Kind {
 
 impl Print {
     fn of(path: &Path, m: &Metadata) -> Print {
+        Print::with_id(m, noclobber::file_id(path, m))
+    }
+
+    /// From metadata and an identity read off a handle (`noclobber::Made`), not by name.
+    fn with_id(m: &Metadata, id: Option<(u64, u64)>) -> Print {
         let kind = Kind::of(m);
-        Print {
-            kind,
-            size: if kind == Kind::Folder { 0 } else { m.len() },
-            mtime: m.modified().ok(),
-            id: noclobber::file_id(path, m),
-            tree: None,
-        }
+        Print { kind, size: if kind == Kind::Folder { 0 } else { m.len() }, mtime: m.modified().ok(), id, tree: None }
     }
 }
 
@@ -419,6 +418,9 @@ struct Hooks {
     /// Called with each file or folder a copy makes, right after it's made: where a test
     /// replaces it or cancels.
     after_made: Option<PathHook>,
+    /// Called with each file a copy wrote, before anything else looks at it: where a test
+    /// replaces it as if another app did so while a stalled copy was still writing.
+    copied: Option<PathHook>,
 }
 
 struct Worker<'a> {
@@ -509,6 +511,17 @@ impl<'a> Worker<'a> {
     #[cfg(not(test))]
     #[inline(always)]
     fn after_made(&mut self, _: &Path) {}
+
+    #[cfg(test)]
+    fn copied(&mut self, dst: &Path) {
+        if let Some(h) = &mut self.hooks.copied {
+            h(dst);
+        }
+    }
+
+    #[cfg(not(test))]
+    #[inline(always)]
+    fn copied(&mut self, _: &Path) {}
 
     fn rename_excl(&self, from: &Path, to: &Path) -> io::Result<()> {
         #[cfg(test)]
@@ -901,8 +914,12 @@ impl<'a> Worker<'a> {
                 self.copy_tree(&de.path(), &dst.join(&name), &rel, tree, made, for_move)?;
             }
         } else {
-            noclobber::copy_file(src, dst).map_err(fail)?;
-            made.push(Made { src: src.into(), dst: dst.into(), dir: false, was, made: print(dst) });
+            // Fingerprinted from the handle that made it, not by name: the copy may have stalled
+            // on a slow source while another app put a file of its own at `dst`, which cleanup
+            // must then leave alone.
+            let file = noclobber::copy_file(src, dst).map_err(fail)?;
+            self.copied(dst);
+            made.push(Made { src: src.into(), dst: dst.into(), dir: false, was, made: Some(Print::with_id(&file.meta, file.id)) });
             self.tick(meta.len());
             self.after_made(dst);
         }
@@ -1905,6 +1922,84 @@ mod tests {
                 assert_eq!(fs::read_to_string(d.join("src").join(n)).unwrap(), n, "the source is untouched");
             }
         }
+    }
+
+    /// Another app moves a file aside and puts its own at the name while Arbor is still
+    /// writing it (a copy stalls as long as its source does), then the copy is cancelled. The
+    /// file Arbor made is known by the handle that wrote it, so cleanup leaves the other app's
+    /// file alone and says so. With a move across disks, which copies first, the same.
+    #[test]
+    fn a_file_replaced_while_it_was_copied_is_never_taken_for_arbors() {
+        for cross_device in [false, true] {
+            let d = tmp(&format!("replaced-mid-copy-{cross_device}"));
+            fs::create_dir_all(d.join("src")).unwrap();
+            for n in ["a", "b"] {
+                fs::write(d.join("src").join(n), n).unwrap();
+            }
+            fs::create_dir(d.join("into")).unwrap();
+            let p = Arc::new(Progress::default());
+            let (pp, dd) = (p.clone(), d.clone());
+            let hook = Box::new(move |dst: &Path| {
+                if !dd.join("aside").exists() {
+                    fs::rename(dst, dd.join("aside")).unwrap();
+                    fs::write(dst, "OTHER APP DATA").unwrap();
+                    pp.cancel.store(true, Relaxed);
+                }
+            });
+            let mut w = Worker::new(&p, None, fake_trash);
+            w.hooks = Hooks { copied: Some(hook), cross_device, ..Hooks::default() };
+            let op = if cross_device {
+                Op::Move { sources: vec![d.join("src")], dest: d.join("into") }
+            } else {
+                Op::Copy { sources: vec![d.join("src")], dest: d.join("into") }
+            };
+            let o = w.run(op);
+            assert!(o.cancelled && o.results.is_empty(), "{:?}", o.errors);
+            let left: Vec<_> = fs::read_dir(d.join("into/src")).unwrap().map(|e| e.unwrap().file_name()).collect();
+            assert_eq!(left.len(), 1, "{left:?}");
+            assert_eq!(fs::read_to_string(d.join("into/src").join(&left[0])).unwrap(), "OTHER APP DATA", "never removed");
+            assert!(o.errors[0].contains("it changed after Arbor made it"), "and said: {:?}", o.errors);
+            for n in ["a", "b"] {
+                assert_eq!(fs::read_to_string(d.join("src").join(n)).unwrap(), n, "the source is untouched");
+            }
+        }
+    }
+
+    /// The reviewer's case, for real: the source is a FIFO, so the copy stalls inside the byte
+    /// copy until something writes to it.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_replaced_during_a_stalled_copy_is_kept() {
+        use std::io::Write;
+        let d = tmp("stalled-copy");
+        let (src, into) = (d.join("src"), d.join("into"));
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&into).unwrap();
+        let gate = src.join("gate");
+        let c = std::ffi::CString::new(gate.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        fs::write(src.join("last"), "last").unwrap();
+        let progress = Arc::new(Progress::default());
+        let p = progress.clone();
+        let dst = into.join("src/gate");
+        let op = Op::Copy { sources: vec![src], dest: into };
+        let worker = std::thread::spawn(move || Worker::new(&p, None, fake_trash).run(op));
+        // Opening the FIFO's writing end waits for the copy to open its reading end.
+        let mut writer = fs::OpenOptions::new().write(true).open(&gate).unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        while !dst.exists() && Instant::now() < until {
+            std::thread::yield_now();
+        }
+        fs::rename(&dst, d.join("aside")).unwrap();
+        fs::write(&dst, "OTHER APP DATA").unwrap();
+        progress.cancel.store(true, Relaxed);
+        writer.write_all(b"gate").unwrap();
+        drop(writer);
+        let o = worker.join().unwrap();
+        assert!(o.cancelled);
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "OTHER APP DATA");
+        assert!(o.errors[0].contains("it changed after Arbor made it"), "{:?}", o.errors);
     }
 
     // ---- known limits -----------------------------------------------------------------------

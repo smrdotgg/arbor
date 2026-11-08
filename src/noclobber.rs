@@ -161,16 +161,30 @@ pub fn is_cross_device(e: &io::Error) -> bool {
     e.kind() == ErrorKind::CrossesDevices || (cfg!(unix) && e.raw_os_error() == Some(18)) || (cfg!(windows) && e.raw_os_error() == Some(17))
 }
 
-/// Copies the file (or its clone) at `from` to a new file `to`, with its permissions. Fails with
-/// `AlreadyExists` if anything is at `to`; a destination it made itself is removed on failure.
+/// The file a copy made, read from a handle on it rather than by its name, so it's the file
+/// Arbor made even if another app has replaced the name since (a copy can stall for as long as
+/// its source does). `id` is [`file_id`]'s identity.
+#[derive(Debug)]
+pub struct Made {
+    pub meta: std::fs::Metadata,
+    pub id: Option<FileId>,
+}
+
+/// Copies the file (or its clone) at `from` to a new file `to`, with its permissions, and says
+/// what it made ([`Made`]). Fails with `AlreadyExists` if anything is at `to`; a destination it
+/// made itself is removed on failure.
 #[cfg(target_vendor = "apple")]
-pub fn copy_file(from: &Path, to: &Path) -> io::Result<()> {
+pub fn copy_file(from: &Path, to: &Path) -> io::Result<Made> {
     // `<sys/clonefile.h>`; not in the libc crate.
     const CLONE_NOFOLLOW: u32 = 0x0001;
     // On APFS a clone: instant and no extra space. Fails if `to` exists.
     let (f, t) = (cstr(from)?, cstr(to)?);
     if unsafe { libc::clonefile(f.as_ptr(), t.as_ptr(), CLONE_NOFOLLOW) } == 0 {
-        return Ok(());
+        // The clone is made whole in that one call; open it at once to know it by handle.
+        // O_EVTONLY needs no read permission (a clone keeps the source's mode).
+        use std::os::unix::fs::OpenOptionsExt;
+        let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_EVTONLY | libc::O_NOFOLLOW).open(to)?;
+        return made(&f);
     }
     let e = io::Error::last_os_error();
     match e.raw_os_error() {
@@ -181,27 +195,59 @@ pub fn copy_file(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
-pub fn copy_file(from: &Path, to: &Path) -> io::Result<()> {
+pub fn copy_file(from: &Path, to: &Path) -> io::Result<Made> {
     copy_bytes(from, to)
 }
 
 #[cfg(windows)]
-pub fn copy_file(from: &Path, to: &Path) -> io::Result<()> {
-    use windows_sys::Win32::Storage::FileSystem::CopyFileW;
+pub fn copy_file(from: &Path, to: &Path) -> io::Result<Made> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CopyFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
     let (f, t) = (wide(from), wide(to));
     // bFailIfExists: fails with ERROR_FILE_EXISTS rather than replacing. Copies attributes and
-    // alternate streams like Explorer.
-    if unsafe { CopyFileW(f.as_ptr(), t.as_ptr(), 1) } != 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+    // alternate streams like Explorer. It holds the new file open while it writes, so the name
+    // can't be taken over meanwhile; it's opened again at once, with no access rights, to know
+    // it by handle.
+    if unsafe { CopyFileW(f.as_ptr(), t.as_ptr(), 1) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let f = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(to)?;
+    made(&f)
+}
+
+/// What the open file `f` is: its metadata and identity, from the handle.
+#[cfg(unix)]
+fn made(f: &std::fs::File) -> io::Result<Made> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = f.metadata()?;
+    Ok(Made { id: Some((meta.dev(), meta.ino())), meta })
+}
+
+#[cfg(windows)]
+fn made(f: &std::fs::File) -> io::Result<Made> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+    let meta = f.metadata()?;
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let id = (unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } != 0)
+        .then(|| (u64::from(info.dwVolumeSerialNumber), (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)));
+    Ok(Made { meta, id })
 }
 
 /// `O_CREAT | O_EXCL`, then the bytes (`copy_file_range` on Linux, which clones on Btrfs and XFS).
 #[cfg(unix)]
-fn copy_bytes(from: &Path, to: &Path) -> io::Result<()> {
+fn copy_bytes(from: &Path, to: &Path) -> io::Result<Made> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut src = std::fs::File::open(from)?;
     let perm = src.metadata()?.permissions();
     let mut dst = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(to)?;
-    let done = io::copy(&mut src, &mut dst).and_then(|_| dst.set_permissions(perm));
+    let done = io::copy(&mut src, &mut dst).and_then(|_| dst.set_permissions(perm)).and_then(|_| made(&dst));
     if done.is_err() {
         // Only the file this made: if another app replaced it at `to` meanwhile, that stays.
         use std::os::unix::fs::MetadataExt;
