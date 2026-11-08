@@ -250,6 +250,7 @@ impl State {
             p.f.loader.set_waker(waker.clone());
         }
         self.settings_loader.set_waker(waker.clone());
+        self.history.waker = Some(waker.clone());
         if let Some(b) = &self.boot
             && let Ok(mut w) = b.waker.lock()
         {

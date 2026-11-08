@@ -16,13 +16,19 @@
 //! - **Folders that are gone** aren't checked: going to one says so and drops it (and the log
 //!   records the drop). Nothing stats the whole list.
 //! - All history I/O runs on that one thread, in order, so a load sees every visit sent before
-//!   it, and a compaction never races an append. (Two Arbor processes appending at once each
-//!   write whole lines; one compacting while the other appends can lose that append.)
+//!   it. Every append, load (with its compaction) and clear holds the history's lock file, so
+//!   two Arbor processes never interleave them: a compaction can't drop another process's
+//!   append, and each writes through a temporary file of its own.
+//! - Failures are said: a write that fails shows in the status bar (once, until one works
+//!   again), and Clear says "cleared" only when the writer has removed the log (and any
+//!   compaction's leftover temporary files). At exit the writer gets up to [`DRAIN_WAIT`] to
+//!   finish what's queued.
 //!
 //! The log: one line per event, `<unix seconds>\t<rank>\t<path>` for a visit (rank 1) or a
 //! compacted folder, `<unix seconds>\t-\t<path>` for a drop. A last line without its newline
-//! (a write cut short) is ignored, and the next append starts a new line. Paths that aren't
-//! UTF-8 or hold a line break aren't recorded.
+//! (a write cut short) is ignored, and the next append ends it with a NUL first, so it stays
+//! invalid. The log is read a line at a time, however long. Paths that aren't UTF-8 or hold a
+//! line break aren't recorded.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -156,6 +162,10 @@ impl Event {
     }
 
     fn parse(line: &str) -> Option<Event> {
+        // A NUL marks a line cut short by a crash (see `append`): never a record.
+        if line.contains('\0') {
+            return None;
+        }
         let mut it = line.splitn(3, '\t');
         let at: u64 = it.next()?.trim().parse().ok()?;
         let mid = it.next()?;
@@ -237,19 +247,25 @@ impl Frecency {
     /// newline was cut short (a crash mid-write), so it's left out; so is any line that
     /// doesn't parse.
     pub fn from_log(text: &str) -> (Frecency, usize) {
-        let whole = match text.rfind('\n') {
-            Some(i) => &text[..=i],
-            None => "",
-        };
+        Frecency::from_reader(text.as_bytes()).unwrap_or_default()
+    }
+
+    /// [`from_log`](Self::from_log), reading a line at a time, so a log of any size is read
+    /// whole without holding it in memory.
+    pub fn from_reader(mut r: impl std::io::BufRead) -> std::io::Result<(Frecency, usize)> {
         let mut f = Frecency::default();
-        let mut lines = 0;
-        for line in whole.lines() {
+        let (mut lines, mut buf) = (0, Vec::new());
+        loop {
+            buf.clear();
+            if r.read_until(b'\n', &mut buf)? == 0 || buf.last() != Some(&b'\n') {
+                return Ok((f, lines));
+            }
             lines += 1;
-            if let Some(e) = Event::parse(line.trim_end_matches('\r')) {
+            let line = String::from_utf8_lossy(&buf);
+            if let Some(e) = Event::parse(line.trim_end_matches(['\n', '\r'])) {
                 f.apply(&e);
             }
         }
-        (f, lines)
     }
 
     /// The log rewritten: one line per folder for the top [`KEEP`] by frecency.
@@ -373,8 +389,11 @@ pub struct Hit {
 
 enum Msg {
     Append(String),
-    Clear,
+    /// Forget everything; the answer says whether it's gone from the disk.
+    Clear(Sender<Result<(), String>>),
     Load(Sender<Loaded>, Option<rune::Waker>),
+    /// Answered once everything sent before it is done (at exit).
+    Flush(Sender<()>),
 }
 
 /// What a load sends back.
@@ -386,37 +405,68 @@ pub struct Loaded {
 /// The one thread that touches `history.log`.
 struct Store {
     tx: Sender<Msg>,
+    /// What went wrong writing, once per run of failures, for the status bar.
+    errors: Receiver<String>,
     /// Disk operations it has done (appends, reads, rewrites, removals), for tests.
     #[cfg_attr(not(test), allow(dead_code))]
     io: Arc<AtomicU64>,
 }
 
 impl Store {
-    fn spawn(log: Option<PathBuf>) -> Store {
+    fn spawn(log: Option<PathBuf>, waker: Option<rune::Waker>) -> Store {
         let (tx, rx) = std::sync::mpsc::channel::<Msg>();
+        let (err_tx, errors) = std::sync::mpsc::channel::<String>();
         let io = Arc::new(AtomicU64::new(0));
         let count = io.clone();
+        #[cfg(not(test))]
+        if let Ok(mut at_exit) = AT_EXIT.lock() {
+            *at_exit = Some(tx.clone());
+        }
         std::thread::Builder::new()
             .name("arbor-history".into())
             .spawn(move || {
                 // Without a file (tests), the log is kept here.
                 let mut memory = String::new();
+                // Writes are failing: said once, until one works again.
+                let mut failing = false;
+                let report = |e: String| {
+                    let _ = err_tx.send(e);
+                    if let Some(w) = &waker {
+                        w();
+                    }
+                };
                 for msg in rx {
                     match msg {
                         Msg::Append(line) => match &log {
                             Some(p) => {
                                 count.fetch_add(1, Relaxed);
-                                let _ = append(p, &line);
+                                match append(p, &line) {
+                                    Ok(()) => failing = false,
+                                    Err(e) if !failing => {
+                                        failing = true;
+                                        report(format!("Couldn't save the Jump history ({}): {e}", fs::pretty(p)));
+                                    }
+                                    Err(_) => {}
+                                }
                             }
                             None => memory.push_str(&line),
                         },
-                        Msg::Clear => match &log {
-                            Some(p) => {
-                                count.fetch_add(1, Relaxed);
-                                let _ = std::fs::remove_file(p);
+                        Msg::Clear(reply) => {
+                            let done = match &log {
+                                Some(p) => {
+                                    count.fetch_add(1, Relaxed);
+                                    clear(p).map_err(|e| e.to_string())
+                                }
+                                None => {
+                                    memory.clear();
+                                    Ok(())
+                                }
+                            };
+                            let _ = reply.send(done);
+                            if let Some(w) = &waker {
+                                w();
                             }
-                            None => memory.clear(),
-                        },
+                        }
                         Msg::Load(reply, waker) => {
                             let loaded = match &log {
                                 Some(p) => load(p, &count),
@@ -428,66 +478,134 @@ impl Store {
                                 w();
                             }
                         }
+                        Msg::Flush(reply) => {
+                            let _ = reply.send(());
+                        }
                     }
                 }
             })
             .expect("can't start the history thread");
-        Store { tx, io }
+        Store { tx, errors, io }
     }
 }
 
-/// Appends `line`, first ending a last line that was cut short.
-fn append(p: &Path, line: &str) -> std::io::Result<()> {
+/// The history's writer, for [`drain_at_exit`] (set when it starts; not in tests, which make
+/// many).
+#[cfg(not(test))]
+static AT_EXIT: std::sync::Mutex<Option<Sender<Msg>>> = std::sync::Mutex::new(None);
+
+/// How long quitting waits for history writes still queued.
+#[cfg_attr(test, allow(dead_code))]
+pub const DRAIN_WAIT: Duration = Duration::from_millis(100);
+
+/// Waits at most [`DRAIN_WAIT`] for the writer to finish what's queued: called as the window
+/// closes and after the app's loop ends, so the last visits aren't lost (a slow disk costs the
+/// exit that long at most, and what's still queued then is lost).
+pub fn drain_at_exit() {
+    #[cfg(not(test))]
+    if let Some(tx) = AT_EXIT.lock().ok().and_then(|t| t.clone()) {
+        flush(&tx, DRAIN_WAIT);
+    }
+}
+
+/// Waits up to `wait` for everything sent on `tx` before this to be done. True when it was.
+fn flush(tx: &Sender<Msg>, wait: Duration) -> bool {
+    let (done, rx) = std::sync::mpsc::channel();
+    tx.send(Msg::Flush(done)).is_ok() && rx.recv_timeout(wait).is_ok()
+}
+
+/// Runs `f` holding the history's lock file (`history.lock` beside it), so two Arbor processes
+/// never interleave a compaction (read, then rewrite) with an append or a clear: one waits for
+/// the other. The lock is the operating system's (`flock`, `LockFileEx`), released when the
+/// file closes, even if the process dies.
+fn locked<T>(p: &Path, f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut f = std::fs::OpenOptions::new().read(true).append(true).create(true).open(p)?;
-    let mut out = String::with_capacity(line.len() + 1);
-    if f.metadata()?.len() > 0 {
-        let mut last = [0u8];
-        f.seek(SeekFrom::End(-1))?;
-        f.read_exact(&mut last)?;
-        if last[0] != b'\n' {
-            out.push('\n');
-        }
-    }
-    out.push_str(line);
-    f.write_all(out.as_bytes())
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(p.with_extension("lock"))?;
+    lock.lock()?;
+    f()
 }
 
-/// The most of a log that's read: far more than [`COMPACT_AT`] lines.
-const MAX_LOG_BYTES: u64 = 64 << 20;
-
-fn load(p: &Path, io: &AtomicU64) -> Loaded {
-    io.fetch_add(1, Relaxed);
-    let bytes = match std::fs::File::open(p) {
-        Ok(f) => {
-            let mut b = Vec::new();
-            match f.take(MAX_LOG_BYTES).read_to_end(&mut b) {
-                Ok(_) => b,
-                Err(e) => return Loaded { agg: Frecency::default(), error: Some(format!("Couldn't read the Jump history: {e}")) },
+/// Appends `line`. A last line cut short (a crash mid-write) is first ended with a NUL, so it
+/// stays invalid: no path holds a NUL, and a line with one never parses.
+fn append(p: &Path, line: &str) -> std::io::Result<()> {
+    locked(p, || {
+        let mut f = std::fs::OpenOptions::new().read(true).append(true).create(true).open(p)?;
+        let mut out = String::with_capacity(line.len() + 2);
+        if f.metadata()?.len() > 0 {
+            let mut last = [0u8];
+            f.seek(SeekFrom::End(-1))?;
+            f.read_exact(&mut last)?;
+            if last[0] != b'\n' {
+                out.push_str("\0\n");
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Loaded { agg: Frecency::default(), error: Some(format!("Couldn't read the Jump history: {e}")) },
-    };
-    let text = String::from_utf8_lossy(&bytes);
-    let (agg, lines) = Frecency::from_log(&text);
-    let mut error = None;
-    if lines > COMPACT_AT {
-        io.fetch_add(1, Relaxed);
-        if let Err(e) = rewrite(p, &agg.compacted(now())) {
-            error = Some(format!("Couldn't compact the Jump history: {e}"));
-        }
-    }
-    Loaded { agg, error }
+        out.push_str(line);
+        f.write_all(out.as_bytes())
+    })
 }
 
-/// Replaces the log with `text`, through a temporary file renamed over it.
+/// Removes the log and any compaction's temporary files beside it (they hold the same paths).
+fn clear(p: &Path) -> std::io::Result<()> {
+    locked(p, || {
+        match std::fs::remove_file(p) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        let (Some(dir), Some(name)) = (p.parent(), p.file_name().map(|n| n.to_string_lossy().into_owned())) else { return Ok(()) };
+        for de in std::fs::read_dir(dir)?.flatten() {
+            let n = de.file_name().to_string_lossy().into_owned();
+            if n.starts_with(&format!("{name}.")) && n.ends_with(".tmp") {
+                std::fs::remove_file(de.path())?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Reads the whole log, a line at a time (however big it is: nothing is cut off), and compacts
+/// it when it's long, all under the lock so no other process's append falls between the read
+/// and the rewrite.
+fn load(p: &Path, io: &AtomicU64) -> Loaded {
+    io.fetch_add(1, Relaxed);
+    let res = locked(p, || {
+        let f = match std::fs::File::open(p) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Frecency::default(), None)),
+            Err(e) => return Err(e),
+        };
+        let (agg, lines) = Frecency::from_reader(std::io::BufReader::new(f))?;
+        let mut error = None;
+        if lines > COMPACT_AT {
+            io.fetch_add(1, Relaxed);
+            if let Err(e) = rewrite(p, &agg.compacted(now())) {
+                error = Some(format!("Couldn't compact the Jump history: {e}"));
+            }
+        }
+        Ok((agg, error))
+    });
+    match res {
+        Ok((agg, error)) => Loaded { agg, error },
+        Err(e) => Loaded { agg: Frecency::default(), error: Some(format!("Couldn't read the Jump history: {e}")) },
+    }
+}
+
+/// Replaces the log with `text`, through a temporary file of its own (unique to this process
+/// and call) renamed over it.
 fn rewrite(p: &Path, text: &str) -> std::io::Result<()> {
-    let tmp = p.with_extension("log.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, p)
+    let tmp = temp_for(p);
+    let res = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, p));
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
+
+/// A temporary file name beside `p`, never used before by any process: `history.log.<pid>-<n>.tmp`.
+fn temp_for(p: &Path) -> PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    p.with_extension(format!("log.{}-{}.tmp", std::process::id(), N.fetch_add(1, Relaxed)))
 }
 
 /// Where the history lives: beside the settings file.
@@ -516,11 +634,27 @@ pub struct History {
     pub loads: u64,
     /// What went wrong with the last load (shown once in the status bar).
     pub error: Option<String>,
+    /// A clear the writer hasn't answered yet.
+    clearing: Option<Receiver<Result<(), String>>>,
+    /// Wakes the window when the writer has something to say (a failed write, a clear done).
+    pub(crate) waker: Option<rune::Waker>,
 }
 
 impl History {
     pub fn new(log: Option<PathBuf>) -> History {
-        History { enabled: true, exclude: Vec::new(), log, store: None, agg: None, loading: None, since: Vec::new(), loads: 0, error: None }
+        History {
+            enabled: true,
+            exclude: Vec::new(),
+            log,
+            store: None,
+            agg: None,
+            loading: None,
+            since: Vec::new(),
+            loads: 0,
+            error: None,
+            clearing: None,
+            waker: None,
+        }
     }
 
     /// Disk operations so far (none until the writer starts).
@@ -536,7 +670,8 @@ impl History {
 
     fn store(&mut self) -> &Store {
         let log = self.log.clone();
-        self.store.get_or_insert_with(|| Store::spawn(log))
+        let waker = self.waker.clone();
+        self.store.get_or_insert_with(|| Store::spawn(log, waker))
     }
 
     /// Sends `e` to the log, and applies it to the aggregate if one is loaded.
@@ -572,12 +707,42 @@ impl History {
         self.send(Event::Drop { path: path.to_path_buf() });
     }
 
-    /// Forgets everything.
+    /// Forgets everything: at once in this session, and on the disk when the writer gets to it
+    /// ([`History::cleared`] says how that went).
     pub fn clear(&mut self) {
-        let _ = self.store().tx.send(Msg::Clear);
+        let (reply, rx) = std::sync::mpsc::channel();
+        let _ = self.store().tx.send(Msg::Clear(reply));
+        self.clearing = Some(rx);
         self.agg = Some(Frecency::default());
         self.loading = None;
         self.since.clear();
+    }
+
+    /// The writer's answer to a clear, once it has one: `Err` when the log is still on the
+    /// disk (then the session reads it again next time, rather than pretend it's gone).
+    pub fn cleared(&mut self) -> Option<Result<(), String>> {
+        let rx = self.clearing.as_ref()?;
+        let r = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the history's writer stopped".into()),
+        };
+        self.clearing = None;
+        if r.is_err() {
+            self.agg = None;
+        }
+        Some(r)
+    }
+
+    /// A write that failed since the last look (said once per run of failures).
+    pub fn write_error(&mut self) -> Option<String> {
+        self.store.as_ref()?.errors.try_recv().ok()
+    }
+
+    /// Waits up to `wait` for the writer to finish what's queued. True when it did.
+    #[cfg(test)]
+    pub fn drain(&self, wait: Duration) -> bool {
+        self.store.as_ref().is_none_or(|s| flush(&s.tx, wait))
     }
 
     /// Asks for the aggregate if it isn't here, waiting up to `wait` for it. True once it's in.
@@ -794,10 +959,23 @@ impl State {
         self.note = Some(format!("{} no longer exists, so it was removed from Jump", fs::pretty(path)));
     }
 
-    /// Called from `poll`: the history landed. True when the view changes.
+    /// Called from `poll`: the history landed, a clear was answered, or a write failed. True
+    /// when the view changes.
     pub(crate) fn poll_history(&mut self) -> bool {
+        let mut said = false;
+        if let Some(r) = self.history.cleared() {
+            self.note = Some(match r {
+                Ok(()) => "Jump history cleared".into(),
+                Err(e) => format!("Couldn't clear the Jump history, so it's still there: {e}"),
+            });
+            said = true;
+        }
+        if let Some(e) = self.history.write_error() {
+            self.note = Some(e);
+            said = true;
+        }
         if !self.history.poll() {
-            return false;
+            return said;
         }
         if let Some(e) = self.history.error.take() {
             self.note = Some(e);
@@ -809,12 +987,11 @@ impl State {
         true
     }
 
-    /// "Clear Jump History": it can't be undone, so the first run asks and the second, right
-    /// after, clears.
-    /// Forgets the whole history: run only from the confirmation dialog (`Cmd::permanent`).
+    /// Forgets the whole history: run only from the confirmation dialog (`Cmd::permanent`). It
+    /// says "cleared" only once the writer has removed it from the disk (`poll_history`).
     pub(crate) fn clear_jump_history(&mut self) {
         self.history.clear();
-        self.note = Some("Jump history cleared".into());
+        self.note = Some("Clearing Jump history…".into());
     }
 }
 
@@ -973,7 +1150,8 @@ mod tests {
     #[test]
     fn visits_append_to_the_log_and_load_back() {
         let log = scratch("append");
-        // A cut-short last line from an earlier crash: the next append starts a new line.
+        // A cut-short last line from an earlier crash: the next append ends it so it stays
+        // invalid, and starts a new line.
         std::fs::write(&log, format!("5\t1\t{}\n6\t1\t{}", p("/a").display(), p("/cut").display())).unwrap();
         let mut h = History::new(Some(log.clone()));
         h.record(&p("/b"));
@@ -985,7 +1163,7 @@ mod tests {
         assert!(h.load(Duration::from_secs(5), None));
         let a = h.agg.as_ref().unwrap();
         assert_eq!(a.get(&p("/b")).map(|d| d.rank), Some(2.0));
-        assert_eq!(a.get(&p("/cut")).map(|d| d.rank), Some(1.0), "once a newline follows it, it's whole");
+        assert!(a.get(&p("/cut")).is_none(), "a line cut short never comes back as a visit");
         assert!(a.get(&p("/a")).is_some());
         // Forgetting records a drop, which the next session's load honours.
         h.forget(&p("/b"));
@@ -993,11 +1171,163 @@ mod tests {
         let mut again = History::new(Some(log.clone()));
         assert!(again.load(Duration::from_secs(5), None));
         assert!(again.agg.as_ref().unwrap().get(&p("/b")).is_none());
-        // Clear removes the file.
+        // Clear removes the file, and says so once it has.
         again.clear();
-        settle_io(&again, 2);
-        assert!(!log.exists());
         assert!(again.agg.as_ref().unwrap().is_empty());
+        assert_eq!(cleared(&mut again), Ok(()));
+        assert!(!log.exists());
+    }
+
+    /// Waits for the writer's answer to a clear.
+    fn cleared(h: &mut History) -> Result<(), String> {
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(r) = h.cleared() {
+                return r;
+            }
+            assert!(std::time::Instant::now() < until, "the clear was never answered");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// The `.tmp` files beside `log`.
+    fn temps(log: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(log.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Clear takes a compaction's leftover temporary files with it (they hold the same paths).
+    #[test]
+    fn clear_removes_compaction_leftovers_and_says_cleared_only_when_done() {
+        let log = scratch("clear-tmp");
+        std::fs::write(&log, format!("5\t1\t{}\n", p("/private").display())).unwrap();
+        std::fs::write(log.with_extension("log.tmp"), "an old crash's").unwrap();
+        std::fs::write(log.with_extension("log.4242-0.tmp"), "another process's").unwrap();
+        let other = log.with_file_name("notes.tmp");
+        std::fs::write(&other, "not ours").unwrap();
+        let mut h = History::new(Some(log.clone()));
+        h.clear();
+        assert_eq!(cleared(&mut h), Ok(()));
+        assert!(!log.exists());
+        assert_eq!(temps(&log), ["notes.tmp"], "only the history's own");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_clear_that_fails_says_so_and_keeps_the_history_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let log = scratch("clear-ro");
+        std::fs::write(&log, format!("5\t1\t{}\n", p("/kept").display())).unwrap();
+        // The lock file first, so only the removal fails.
+        std::fs::write(log.with_extension("lock"), "").unwrap();
+        let dir = log.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let root = std::fs::write(dir.join("probe"), "").is_ok();
+        let mut s = crate::app::tests::state_in(&dir);
+        s.history = History::new(Some(log.clone()));
+        let mut tx = Tx::default();
+        s.run(Cmd::ClearJump, &mut tx);
+        s.answer(true, &mut tx);
+        assert_eq!(s.note.as_deref(), Some("Clearing Jump history…"), "not cleared until the writer says so");
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while s.history.clearing.is_some() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            s.poll(&mut tx);
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if root {
+            return;
+        }
+        assert!(s.note.as_deref().unwrap().starts_with("Couldn't clear the Jump history"), "{:?}", s.note);
+        assert!(log.exists());
+        assert!(s.history.agg.is_none(), "read again next time, not shown as empty");
+    }
+
+    /// A write that fails (here the log's folder is a file) is said in the status bar, once.
+    #[test]
+    fn a_failed_write_says_so_once() {
+        let log = scratch("write-fails");
+        let blocker = log.with_file_name("not-a-folder");
+        std::fs::write(&blocker, "").unwrap();
+        let mut h = History::new(Some(blocker.join("history.log")));
+        h.record(&p("/a"));
+        h.record(&p("/b"));
+        assert!(h.drain(Duration::from_secs(5)));
+        let e = h.write_error().expect("told");
+        assert!(e.starts_with("Couldn't save the Jump history"), "{e}");
+        assert_eq!(h.write_error(), None, "once, not for every visit");
+    }
+
+    /// Visits still queued at exit are written, within the drain's bound.
+    #[test]
+    fn queued_visits_are_written_before_exit() {
+        let log = scratch("drain");
+        let mut h = History::new(Some(log.clone()));
+        for i in 0..1000 {
+            h.record(&p(&format!("/d/{i}")));
+        }
+        assert!(h.drain(Duration::from_secs(10)));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1000, "none lost");
+    }
+
+    /// Another process holding the history's lock (compacting) holds up an append until it's
+    /// done, and each compaction writes through a temporary file of its own.
+    #[test]
+    fn appends_wait_for_another_process_holding_the_lock() {
+        let log = scratch("lock");
+        std::fs::write(&log, "").unwrap();
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(log.with_extension("lock")).unwrap();
+        lock.lock().unwrap();
+        let mut h = History::new(Some(log.clone()));
+        h.record(&p("/waits"));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "", "written while another held the lock");
+        drop(lock);
+        assert!(h.drain(Duration::from_secs(5)));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+        let names: std::collections::HashSet<PathBuf> = (0..3).map(|_| temp_for(&log)).collect();
+        assert_eq!(names.len(), 3, "each rewrite has a name of its own");
+        assert!(names.iter().all(|n| n.to_string_lossy().contains(&format!(".{}-", std::process::id()))));
+        rewrite(&log, "x\n").unwrap();
+        assert!(temps(&log).is_empty(), "no temporary file left behind");
+    }
+
+    /// A log bigger than any read limit is read whole, so compacting it keeps its newest visits.
+    #[test]
+    fn a_huge_log_is_read_to_its_end() {
+        /// 70 MB of old visits, then one new one, made as they're read.
+        struct Huge {
+            left: usize,
+            tail: Option<Vec<u8>>,
+            line: Vec<u8>,
+        }
+        impl Read for Huge {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.left == 0 {
+                    let Some(t) = self.tail.take() else { return Ok(0) };
+                    buf[..t.len()].copy_from_slice(&t);
+                    return Ok(t.len());
+                }
+                let n = (buf.len() / self.line.len()).min(self.left).max(1);
+                for k in 0..n {
+                    buf[k * self.line.len()..(k + 1) * self.line.len()].copy_from_slice(&self.line);
+                }
+                self.left -= n;
+                Ok(n * self.line.len())
+            }
+        }
+        let line = format!("100\t1\t{}\n", p("/old/folder/with/a/longish/name").display()).into_bytes();
+        let left = 70_000_000 / line.len();
+        let tail = Some(format!("{}\t1\t{}\n", now(), p("/newest").display()).into_bytes());
+        let (agg, lines) = Frecency::from_reader(std::io::BufReader::new(Huge { left, tail, line })).unwrap();
+        assert_eq!(lines, left + 1);
+        assert!(agg.get(&p("/newest")).is_some(), "the end of the log was read");
     }
 
     #[test]
@@ -1015,7 +1345,7 @@ mod tests {
         let n = h.agg.as_ref().unwrap().len();
         assert!(n > 0);
         assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), n.min(KEEP));
-        assert!(!log.with_extension("log.tmp").exists());
+        assert!(temps(&log).is_empty());
     }
 
     /// Opening waits at most `OPEN_WAIT`; a slow load lands later through `poll`, with the
