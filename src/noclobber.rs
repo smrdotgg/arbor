@@ -214,28 +214,63 @@ fn copy_bytes(from: &Path, to: &Path) -> io::Result<()> {
     done
 }
 
+/// An item's identity on its disk (see [`file_id`]).
+pub type FileId = (u64, u64);
+
 /// The item's identity on its disk: device and inode on Unix; volume serial number and file
 /// index on Windows (`GetFileInformationByHandle`), which stays with the file through renames
 /// and changes when it's replaced.
 #[cfg(unix)]
-pub fn file_id(_: &Path, m: &std::fs::Metadata) -> Option<(u64, u64)> {
+pub fn file_id(_: &Path, m: &std::fs::Metadata) -> Option<FileId> {
     use std::os::unix::fs::MetadataExt;
     Some((m.dev(), m.ino()))
 }
 
 /// Opens the item itself (not a link's target) without reading or locking it.
 #[cfg(windows)]
-pub fn file_id(path: &Path, _: &std::fs::Metadata) -> Option<(u64, u64)> {
+pub fn file_id(path: &Path, _: &std::fs::Metadata) -> Option<FileId> {
+    handle_id(path, false)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn file_id(_: &Path, _: &std::fs::Metadata) -> Option<FileId> {
+    None
+}
+
+/// The identity of the folder `path` leads to, following links (a symlink or junction to a
+/// folder is that folder), so two paths to one folder compare equal. One `stat` on Unix; on
+/// Windows one open, without reading or locking anything. Run it off the UI thread.
+#[cfg(unix)]
+pub fn dir_id(path: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+#[cfg(windows)]
+pub fn dir_id(path: &Path) -> Option<FileId> {
+    handle_id(path, true)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn dir_id(_: &Path) -> Option<FileId> {
+    None
+}
+
+/// Volume serial number and file index from a handle on `path`: the link itself, or with
+/// `follow` what it leads to.
+#[cfg(windows)]
+fn handle_id(path: &Path, follow: bool) -> Option<FileId> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
         FILE_SHARE_WRITE, GetFileInformationByHandle,
     };
+    let flags = if follow { FILE_FLAG_BACKUP_SEMANTICS } else { FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT };
     let f = std::fs::OpenOptions::new()
         .access_mode(0)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .custom_flags(flags)
         .open(path)
         .ok()?;
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
@@ -243,11 +278,6 @@ pub fn file_id(path: &Path, _: &std::fs::Metadata) -> Option<(u64, u64)> {
         return None;
     }
     Some((u64::from(info.dwVolumeSerialNumber), (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)))
-}
-
-#[cfg(not(any(unix, windows)))]
-pub fn file_id(_: &Path, _: &std::fs::Metadata) -> Option<(u64, u64)> {
-    None
 }
 
 #[cfg(unix)]

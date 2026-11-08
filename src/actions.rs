@@ -102,7 +102,7 @@ impl State {
             Ok(path) => {
                 self.undo.extend(Undo::new_folder(path.clone()));
                 self.rename = None;
-                self.refresh(std::slice::from_ref(&dir), std::slice::from_ref(&path));
+                self.refresh(&[(dir.clone(), self.cur().dir_id)], std::slice::from_ref(&path));
                 if let Some(p) = self.cur_mut().pending.as_mut().filter(|p| p.path == dir && p.nav == Nav::Reload) {
                     p.rename = true;
                 }
@@ -151,11 +151,12 @@ impl State {
                 // One lstat to fingerprint it, so undo can tell whether it changed since.
                 self.undo.extend(Undo::renamed(to, from));
                 self.note = None;
-                let (dir, new) = (self.cur().cwd.clone(), OsString::from(new));
-                for p in self.panes.iter_mut().filter(|p| p.f.cwd == dir) {
+                // Every pane on this folder, by whatever path (a symlink to it too).
+                let (dir, id, new) = (self.cur().cwd.clone(), self.cur().dir_id, OsString::from(new));
+                for p in self.panes.iter_mut().filter(|p| p.f.shows(&dir, id)) {
                     p.f.renamed(&r.os, &new);
                 }
-                self.refresh(&[dir], &[]);
+                self.refresh(&[(dir, id)], &[]);
             }
             Err(e) => self.note = Some(e),
         }
@@ -226,25 +227,30 @@ impl State {
         true
     }
 
-    /// After `folders` changed on disk: every pane whose visible tab shows one of them reads it
-    /// again (a hidden tab reads when it's shown). Items in `select` land selected in the pane
-    /// showing their folder; elsewhere the selection stays. A pane on its way to another folder
-    /// keeps going there: its read is asked again only when that folder changed too, since it
-    /// may have been read before the change.
-    pub(crate) fn refresh(&mut self, folders: &[PathBuf], select: &[PathBuf]) {
+    /// After `folders` (each with its identity, when known) changed on disk: every pane whose
+    /// visible tab shows one of them reads it again (a hidden tab reads when it's shown). A pane
+    /// shows a folder when it has the same identity (so a pane on a symlink to it counts), or
+    /// failing that the same path. Items in `select` land selected in the pane showing their
+    /// folder; elsewhere the selection stays. A pane on its way to another folder keeps going
+    /// there: its read is asked again only when that folder changed too, since it may have been
+    /// read before the change.
+    pub(crate) fn refresh(&mut self, folders: &[(PathBuf, Option<crate::noclobber::FileId>)], select: &[PathBuf]) {
         for p in &mut self.panes {
             let f = &mut p.f;
             let going = f.pending.as_ref().is_some_and(|p| matches!(p.nav, Nav::New | Nav::Back | Nav::Forward));
-            let at = match &f.pending {
-                Some(p) if going => p.path.clone(),
-                _ => f.cwd.clone(),
+            let (at, at_id) = match &f.pending {
+                // Not listed yet: its identity isn't known.
+                Some(p) if going => (p.path.clone(), None),
+                _ => (f.cwd.clone(), f.dir_id),
             };
-            if !folders.contains(&at) {
-                continue;
-            }
+            let same = |(path, id): &&(PathBuf, Option<crate::noclobber::FileId>)| match (at_id, id) {
+                (Some(a), Some(b)) => a == *b,
+                _ => *path == at,
+            };
+            let Some((changed, _)) = folders.iter().find(same) else { continue };
             let here: Vec<OsString> = select
                 .iter()
-                .filter(|r| r.parent() == Some(at.as_path()))
+                .filter(|r| r.parent() == Some(changed.as_path()))
                 .filter_map(|r| r.file_name().map(|n| n.to_os_string()))
                 .collect();
             match f.pending.take_if(|_| going) {

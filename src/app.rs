@@ -185,7 +185,10 @@ impl State {
         let f = &mut s.panes[0].f;
         match listing {
             Some(first) => match first.result {
-                Ok(v) => f.entries = v,
+                Ok(v) => {
+                    f.entries = v;
+                    f.dir_id = first.dir_id;
+                }
                 Err(e) => s.note = Some(s.note.take().map_or(e.clone(), |n| format!("{e} · {n}"))),
             },
             // The folder is slow: open on an empty list showing "Loading…", like any navigation.
@@ -453,6 +456,7 @@ impl State {
                     fs::sort_entries(&mut entries, f.sort);
                 }
                 let old = std::mem::replace(&mut f.cwd, p.path);
+                f.dir_id = a.listing.dir_id;
                 let moved = old != f.cwd;
                 match p.nav {
                     Nav::New => {
@@ -644,7 +648,7 @@ impl State {
             CopyToOther | MoveToOther => when(!self.split(), NOT_SPLIT)
                 .or(when(busy, BUSY))
                 .or(when(nothing, "Select an item first"))
-                .or(when(self.other().is_some_and(|o| o.cwd == f.cwd), "Both panes show the same folder")),
+                .or(when(self.other().is_some_and(|o| o.shows(&f.cwd, f.dir_id)), "Both panes show the same folder")),
             // Paste always shows as available otherwise: Rune can't ask the clipboard what it
             // holds without reading it (RUNE-GAPS.md). Pasting nothing says so.
             Paste | PasteMove => when(busy, BUSY),

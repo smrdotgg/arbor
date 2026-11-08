@@ -607,6 +607,44 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&s.target_paths()[0]).unwrap(), "first", "its actions act on the file it shows");
     }
 
+    /// One pane on a folder, the other on a symlink to it: one folder, so a rename in either
+    /// re-reads both, and no row in the pane on the real path names a file that's gone (or now
+    /// another file). The same for a new folder, which goes through `refresh` like every file
+    /// operation.
+    #[cfg(unix)]
+    #[test]
+    fn a_pane_on_a_symlink_to_the_folder_is_the_same_folder() {
+        let a = folder("ren-alias", &[]);
+        std::fs::write(a.join("f0"), "first").unwrap();
+        std::fs::write(a.join("f1"), "second-file").unwrap();
+        let alias = a.with_extension("link");
+        let _ = std::fs::remove_file(&alias);
+        std::os::unix::fs::symlink(&a, &alias).unwrap();
+        let mut s = state_in(&a);
+        run(&mut s, Cmd::Split);
+        go(&mut s, &alias);
+        assert_eq!(s.unavailable(Cmd::CopyToOther), Some("Both panes show the same folder"));
+        rename_to(&mut s, "renamed-first");
+        assert_eq!(s.panes[0].f.selected().map(|e| e.name.as_str()), Some("renamed-first"), "at once, by identity");
+        settle(&mut s);
+        let i = s.cur().visible.iter().position(|&i| s.cur().entries[i as usize].name == "f1").unwrap();
+        s.cur_mut().select(i);
+        rename_to(&mut s, "f0");
+        settle(&mut s);
+        let real = &s.panes[0].f;
+        let mut rows: Vec<(String, u64)> = real.entries.iter().map(|e| (e.name.clone(), e.size)).collect();
+        rows.sort();
+        assert_eq!(rows, [("f0".to_string(), 11), ("renamed-first".to_string(), 5)], "the real path's pane shows what's on disk");
+        let e = real.selected().unwrap();
+        assert_eq!(e.name, "renamed-first");
+        assert_eq!(std::fs::read_to_string(&real.target_paths()[0]).unwrap(), "first", "and acts on the file it shows");
+        // A new folder made through the link shows up in the pane on the real path.
+        run(&mut s, Cmd::NewFolder);
+        settle(&mut s);
+        s.rename = None;
+        assert!(s.panes[0].f.entries.iter().any(|e| e.name == "untitled folder"));
+    }
+
     /// A new folder shows up in the other pane on the same folder too.
     #[test]
     fn a_new_folder_refreshes_the_other_pane_on_the_same_folder() {

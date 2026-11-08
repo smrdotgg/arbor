@@ -84,6 +84,9 @@ pub struct Folder {
     /// a scroll viewport, and a pane keeps its scroll when the other one closes.
     pub id: u64,
     pub cwd: PathBuf,
+    /// `cwd`'s identity, from the read that listed it (links followed): two panes on one folder
+    /// by different paths compare equal by it (`shows`).
+    pub dir_id: Option<crate::noclobber::FileId>,
     /// The whole folder, sorted.
     pub entries: Vec<Entry>,
     /// Indices into `entries` that pass the hidden-file and filter rules, in display order.
@@ -132,6 +135,7 @@ impl Folder {
         Folder {
             id,
             cwd,
+            dir_id: None,
             entries: Vec::new(),
             visible: Vec::new(),
             sel: 0,
@@ -200,6 +204,15 @@ impl Folder {
             self.target_paths()
         } else {
             self.visible.get(i).map(|&e| self.cwd.join(&self.entries[e as usize].os)).into_iter().collect()
+        }
+    }
+
+    /// Whether this folder is the one at `path` (with identity `id`): the same identity when
+    /// both are known (a symlink and its target are one folder), else the same path.
+    pub fn shows(&self, path: &Path, id: Option<crate::noclobber::FileId>) -> bool {
+        match (self.dir_id, id) {
+            (Some(a), Some(b)) => a == b,
+            _ => self.cwd == path,
         }
     }
 
@@ -272,6 +285,7 @@ impl Folder {
         self.anchor = 0;
         self.drop_target = None;
         self.version = next_version();
+        self.dir_id = None;
         self.cwd = m.path;
         self.back = m.back;
         self.fwd = m.fwd;
@@ -294,6 +308,7 @@ impl Folder {
     pub fn same_as(id: u64, other: &Folder, waker: Option<rune::Waker>) -> Folder {
         let mut f = Folder::new(id, other.cwd.clone(), other.sort, other.show_hidden, waker);
         f.sort_set = other.sort_set;
+        f.dir_id = other.dir_id;
         if other.is_loading() {
             f.request(other.cwd.clone(), Nav::Reload, Vec::new(), false);
         } else {

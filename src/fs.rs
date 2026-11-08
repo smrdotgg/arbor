@@ -43,6 +43,9 @@ pub struct Sort {
 pub struct Listing {
     pub path: PathBuf,
     pub result: Result<Vec<Entry>, String>,
+    /// The folder's own identity (links followed), so two panes showing one folder by different
+    /// paths (a symlink, a junction) are known to be the same. `None` when it can't be had.
+    pub dir_id: Option<crate::noclobber::FileId>,
 }
 
 /// Reads `path` and sorts it. Runs on a worker thread.
@@ -61,7 +64,8 @@ pub fn list_until(path: PathBuf, sort: Sort, stop: &AtomicBool) -> Option<Listin
     if let Ok(v) = &mut result {
         sort_entries(v, sort);
     }
-    Some(Listing { path, result })
+    let dir_id = result.is_ok().then(|| crate::noclobber::dir_id(&path)).flatten();
+    Some(Listing { path, result, dir_id })
 }
 
 /// `None` when stopped. One relaxed load per entry: nothing next to its `lstat`.

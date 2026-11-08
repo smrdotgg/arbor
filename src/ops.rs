@@ -298,8 +298,9 @@ pub struct Outcome {
     /// An undo that changed nothing because the disk changed since the operation: why.
     pub refused: Option<String>,
     pub cancelled: bool,
-    /// The folders the operation may have changed, so the panes showing them read them again.
-    pub folders: Vec<PathBuf>,
+    /// The folders the operation may have changed, with their identities (links followed), so
+    /// the panes showing them, by any path, read them again.
+    pub folders: Vec<(PathBuf, Option<noclobber::FileId>)>,
 }
 
 pub struct Running {
@@ -521,8 +522,16 @@ impl<'a> Worker<'a> {
     }
 
     fn run(&mut self, op: Op) -> Outcome {
-        let mut out =
-            Outcome { results: Vec::new(), undo: None, errors: Vec::new(), refused: None, cancelled: false, folders: op.folders() };
+        // Identities from before: an operation never replaces the folders it works in.
+        let folders = op
+            .folders()
+            .into_iter()
+            .map(|p| {
+                let id = noclobber::dir_id(&p);
+                (p, id)
+            })
+            .collect();
+        let mut out = Outcome { results: Vec::new(), undo: None, errors: Vec::new(), refused: None, cancelled: false, folders };
         match op {
             Op::Copy { sources, dest } => {
                 self.p.items_total.store(sources.len(), Relaxed);
