@@ -388,6 +388,26 @@ impl Folder {
         }
     }
 
+    /// The item `old` was just renamed `new` on disk: shows it under its new name at once (a
+    /// fresh read follows), keeping it selected if it was, so nothing on screen names a file
+    /// that's gone or now another one.
+    pub fn renamed(&mut self, old: &OsStr, new: &OsStr) {
+        let Some(ix) = self.entries.iter().position(|e| e.os == old) else { return };
+        let keep = self.visible.get(self.sel) == Some(&(ix as u32));
+        let e = &mut self.entries[ix];
+        e.os = new.to_os_string();
+        e.name = new.to_string_lossy().into_owned();
+        e.lower = e.name.to_lowercase();
+        e.key = format!("f:{}", e.name);
+        // A dot hides it, everywhere; other ways of hiding (a flag) come with the fresh read.
+        e.hidden = e.name.starts_with('.') || (e.hidden && !old.to_string_lossy().starts_with('.'));
+        if self.marked.remove(old) {
+            self.marked.insert(new.to_os_string());
+        }
+        let cursor = if keep { Some(new.to_os_string()) } else { self.cursor_name() };
+        self.refilter(cursor.as_deref());
+    }
+
     pub fn type_filter(&mut self, text: &str) {
         let keep = self.cursor_name();
         self.filter.push_str(text);

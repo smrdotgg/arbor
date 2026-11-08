@@ -94,12 +94,18 @@ impl State {
 
     // ---- rename and new folder --------------------------------------------------------------
 
+    /// Makes "untitled folder" here and starts renaming it once it's listed. Every pane showing
+    /// this folder reads it again (and selects the new folder).
     pub fn new_folder(&mut self) {
-        match ops::new_folder(&self.cur().cwd, "untitled folder") {
+        let dir = self.cur().cwd.clone();
+        match ops::new_folder(&dir, "untitled folder") {
             Ok(path) => {
                 self.undo.extend(Undo::new_folder(path.clone()));
-                let name = path.file_name().map(|n| n.to_os_string()).into_iter().collect();
-                self.reload_selecting(name, true);
+                self.rename = None;
+                self.refresh(std::slice::from_ref(&dir), std::slice::from_ref(&path));
+                if let Some(p) = self.cur_mut().pending.as_mut().filter(|p| p.path == dir && p.nav == Nav::Reload) {
+                    p.rename = true;
+                }
             }
             Err(e) => self.note = Some(format!("Couldn't make a folder: {e}")),
         }
@@ -122,7 +128,8 @@ impl State {
     }
 
     /// Return in the rename field. Renames on the spot (it's one syscall), never over an
-    /// existing name.
+    /// existing name. Every pane showing the folder reads it again; until then each shows the
+    /// item under its new name, and its selection follows it.
     pub fn commit_rename(&mut self, tx: &mut Tx) {
         let Some(r) = self.rename.take() else { return };
         tx.blur();
@@ -144,7 +151,11 @@ impl State {
                 // One lstat to fingerprint it, so undo can tell whether it changed since.
                 self.undo.extend(Undo::renamed(to, from));
                 self.note = None;
-                self.reload_selecting(vec![OsString::from(new)], false);
+                let (dir, new) = (self.cur().cwd.clone(), OsString::from(new));
+                for p in self.panes.iter_mut().filter(|p| p.f.cwd == dir) {
+                    p.f.renamed(&r.os, &new);
+                }
+                self.refresh(&[dir], &[]);
             }
             Err(e) => self.note = Some(e),
         }

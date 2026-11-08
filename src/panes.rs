@@ -527,6 +527,50 @@ mod tests {
         assert_eq!(s.cur().entries.len(), 1, "the copy is there");
     }
 
+    fn rename_to(s: &mut State, name: &str) {
+        s.start_rename();
+        s.rename.as_mut().expect("renaming").edit.text = name.into();
+        s.commit_rename(&mut Tx::default());
+    }
+
+    /// Both panes on one folder: a rename in one re-reads the other too, so no row there names
+    /// a file that's gone (or, worse, now another file), and its selection follows the item.
+    #[test]
+    fn a_rename_refreshes_the_other_pane_on_the_same_folder() {
+        let a = folder("ren-other", &[]);
+        std::fs::write(a.join("f0"), "first").unwrap();
+        std::fs::write(a.join("f1"), "second-file-different-length").unwrap();
+        let mut s = state_in(&a);
+        run(&mut s, Cmd::Split);
+        assert_eq!(cursor(&s), "f0");
+        rename_to(&mut s, "renamed-first");
+        // At once, before any read lands: the other pane shows the new name, still selected.
+        assert_eq!(s.panes[0].f.selected().map(|e| e.name.as_str()), Some("renamed-first"));
+        settle(&mut s);
+        let i = s.cur().visible.iter().position(|&i| s.cur().entries[i as usize].name == "f1").unwrap();
+        s.cur_mut().select(i);
+        rename_to(&mut s, "f0");
+        settle(&mut s);
+        run(&mut s, Cmd::OtherPane);
+        let mut rows: Vec<(String, u64)> = s.cur().entries.iter().map(|e| (e.name.clone(), e.size)).collect();
+        rows.sort();
+        assert_eq!(rows, [("f0".to_string(), 28), ("renamed-first".to_string(), 5)], "what's on disk");
+        assert_eq!(cursor(&s), "renamed-first");
+        assert_eq!(std::fs::read_to_string(&s.target_paths()[0]).unwrap(), "first", "its actions act on the file it shows");
+    }
+
+    /// A new folder shows up in the other pane on the same folder too.
+    #[test]
+    fn a_new_folder_refreshes_the_other_pane_on_the_same_folder() {
+        let a = folder("nf-other", &["x"]);
+        let mut s = state_in(&a);
+        run(&mut s, Cmd::Split);
+        run(&mut s, Cmd::NewFolder);
+        settle(&mut s);
+        assert!(s.rename.is_some(), "renaming the new folder");
+        assert_eq!(s.panes[0].f.entries.len(), 2);
+    }
+
     /// A handler from a frame drawn before a pane closed names a pane that's gone: nothing.
     #[test]
     fn stale_pane_handlers_do_nothing() {
