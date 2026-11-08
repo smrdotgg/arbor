@@ -22,7 +22,10 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   "rename unless the name is taken" (`renameat2(RENAME_NOREPLACE)` on Linux,
   `renamex_np(RENAME_EXCL)` on macOS, `MoveFileExW` without replace on Windows), and copies
   create each file and folder exclusively, so a name another app takes at the same instant is
-  never replaced (`src/noclobber.rs`). On APFS, copies are clones (instant). A move to another
+  never replaced (`src/noclobber.rs`). A case-only rename (`a.txt` to `A.txt` on a
+  case-insensitive disk) that the no-replace rename refuses takes two such steps through a
+  temporary name. On a disk without a no-replace rename, files move by hard link and folders
+  can't be moved or renamed at all, since every way to do it there could replace an empty folder. On APFS, copies are clones (instant). A move to another
   disk copies, then removes only the originals that haven't changed since they were copied.
 - **Undo refuses rather than guesses.** When an operation finishes, each result gets a
   fingerprint: identity (device and inode; volume and file id on Windows), type, size and
