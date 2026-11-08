@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Draws Arbor's icon: a pale tree glyph (a trunk, two branches, three round crowns) on a green
+rounded square. Pure Python (no PIL): every shape is a signed distance, sampled once per pixel
+with analytic anti-aliasing, at each size it's written at, so small sizes stay crisp.
+
+    python3 scripts/icon.py                 # assets/icon/: arbor.svg, png/arbor-N.png, arbor.ico
+    python3 scripts/icon.py --mac DIR       # DIR/icon_*.png for iconutil (scripts/package.sh)
+
+The geometry is in a 1024-unit square. `full` fills the square (Windows, Linux); `mac` sits in
+macOS's icon grid (an 824-unit tile with a 100-unit margin), as Finder and the Dock expect.
+"""
+import math
+import os
+import struct
+import sys
+import zlib
+
+# Colours (sRGB): a deep green, lighter at the top, and a warm off-white glyph.
+TOP = (0x3A, 0x9D, 0x6A)
+BOTTOM = (0x1B, 0x5E, 0x3F)
+GLYPH = (0xF6, 0xF2, 0xE6)
+
+# The glyph, in the 1024 square of the full variant: capsules (x0, y0, x1, y1, width) and
+# circles (x, y, radius).
+STROKES = [
+    (512, 840, 512, 400, 92),  # trunk
+    (512, 640, 330, 470, 70),  # left branch
+    (512, 560, 694, 420, 70),  # right branch
+]
+CROWNS = [
+    (512, 300, 132),
+    (300, 430, 104),
+    (724, 380, 104),
+]
+
+
+def tile(variant):
+    """The rounded square's (inset, corner radius) in the 1024 square."""
+    return (100, 185) if variant == "mac" else (40, 210)
+
+
+def glyph_scale(variant):
+    """The glyph's scale about the centre: inside the mac tile it's smaller."""
+    return 824 / 944 if variant == "mac" else 1.0
+
+
+def sd_round_rect(x, y, inset, r):
+    # Distance to a rounded square from inset to 1024 - inset.
+    cx = cy = 512
+    half = 512 - inset
+    qx = abs(x - cx) - (half - r)
+    qy = abs(y - cy) - (half - r)
+    outside = math.hypot(max(qx, 0.0), max(qy, 0.0))
+    inside = min(max(qx, qy), 0.0)
+    return outside + inside - r
+
+
+def sd_capsule(px, py, x0, y0, x1, y1, w):
+    dx, dy = x1 - x0, y1 - y0
+    t = ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)
+    t = 0.0 if t < 0 else 1.0 if t > 1 else t
+    return math.hypot(px - (x0 + t * dx), py - (y0 + t * dy)) - w / 2
+
+
+def shapes(variant, boost):
+    """The glyph's shapes in 1024 units, scaled for the variant; `boost` thickens strokes at
+    small sizes so they don't vanish."""
+    k = glyph_scale(variant)
+
+    def at(v):
+        return 512 + (v - 512) * k
+
+    strokes = [(at(a), at(b), at(c), at(d), w * k * boost) for a, b, c, d, w in STROKES]
+    crowns = [(at(x), at(y), r * k) for x, y, r in CROWNS]
+    return strokes, crowns
+
+
+def render(size, variant):
+    """RGBA rows (bytes) of the icon at `size` pixels."""
+    inset, radius = tile(variant)
+    unit = 1024 / size  # 1024 units per image, so a pixel is this many units
+    boost = 1.0 if size >= 64 else 1.0 + (64 - size) / 64 * 0.45
+    strokes, crowns = shapes(variant, boost)
+    rows = []
+    for j in range(size):
+        y = (j + 0.5) * unit
+        shade = (y - inset) / (1024 - 2 * inset)
+        shade = min(max(shade, 0.0), 1.0)
+        bg = tuple(TOP[i] + (BOTTOM[i] - TOP[i]) * shade for i in range(3))
+        row = bytearray()
+        for i in range(size):
+            x = (i + 0.5) * unit
+            d_tile = sd_round_rect(x, y, inset, radius)
+            a_tile = min(max(0.5 - d_tile / unit, 0.0), 1.0)
+            if a_tile == 0.0:
+                row += b"\0\0\0\0"
+                continue
+            d = min(
+                min(sd_capsule(x, y, *s) for s in strokes),
+                min(math.hypot(x - cx, y - cy) - r for cx, cy, r in crowns),
+            )
+            g = min(max(0.5 - d / unit, 0.0), 1.0)
+            rgb = [round(bg[c] + (GLYPH[c] - bg[c]) * g) for c in range(3)]
+            row += bytes(rgb + [round(255 * a_tile)])
+        rows.append(bytes(row))
+    return rows
+
+
+def png(size, rows):
+    def chunk(kind, data):
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    raw = b"".join(b"\0" + r for r in rows)
+    header = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+
+
+def ico(images):
+    """An .ico of PNG images (Windows Vista and later read PNG at every size)."""
+    out = struct.pack("<HHH", 0, 1, len(images))
+    offset = 6 + 16 * len(images)
+    entries, data = b"", b""
+    for size, blob in images:
+        dim = 0 if size >= 256 else size
+        entries += struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(blob), offset + len(data))
+        data += blob
+    return out + entries + data
+
+
+def svg(variant="full"):
+    inset, radius = tile(variant)
+    strokes, crowns = shapes(variant, 1.0)
+    side = 1024 - 2 * inset
+    lines = [
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">',
+        "  <!-- Generated by scripts/icon.py; edit the geometry there. -->",
+        '  <defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">'
+        f'<stop offset="0" stop-color="#{TOP[0]:02x}{TOP[1]:02x}{TOP[2]:02x}"/>'
+        f'<stop offset="1" stop-color="#{BOTTOM[0]:02x}{BOTTOM[1]:02x}{BOTTOM[2]:02x}"/></linearGradient></defs>',
+        f'  <rect x="{inset}" y="{inset}" width="{side}" height="{side}" rx="{radius}" fill="url(#bg)"/>',
+        f'  <g fill="#{GLYPH[0]:02x}{GLYPH[1]:02x}{GLYPH[2]:02x}" stroke="#{GLYPH[0]:02x}{GLYPH[1]:02x}{GLYPH[2]:02x}" stroke-linecap="round">',
+    ]
+    for x0, y0, x1, y1, w in strokes:
+        lines.append(f'    <line x1="{x0:g}" y1="{y0:g}" x2="{x1:g}" y2="{y1:g}" stroke-width="{w:g}"/>')
+    for cx, cy, r in crowns:
+        lines.append(f'    <circle cx="{cx:g}" cy="{cy:g}" r="{r:g}" stroke="none"/>')
+    lines += ["  </g>", "</svg>", ""]
+    return "\n".join(lines)
+
+
+def write(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+
+
+def main():
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "icon")
+    if len(sys.argv) == 3 and sys.argv[1] == "--mac":
+        # iconutil's names: icon_NxN.png and icon_NxN@2x.png.
+        out = sys.argv[2]
+        for base in (16, 32, 128, 256, 512):
+            for scale, suffix in ((1, ""), (2, "@2x")):
+                n = base * scale
+                write(os.path.join(out, f"icon_{base}x{base}{suffix}.png"), png(n, render(n, "mac")))
+        return
+    if len(sys.argv) != 1:
+        sys.exit(__doc__)
+    write(os.path.join(root, "arbor.svg"), svg().encode())
+    pngs = {}
+    for n in (16, 24, 32, 48, 64, 128, 256, 512):
+        pngs[n] = png(n, render(n, "full"))
+        write(os.path.join(root, "png", f"arbor-{n}.png"), pngs[n])
+    write(os.path.join(root, "arbor.ico"), ico([(n, pngs[n]) for n in (16, 24, 32, 48, 64, 128, 256)]))
+    write(os.path.join(root, "arbor-mac-1024.png"), png(1024, render(1024, "mac")))
+
+
+if __name__ == "__main__":
+    main()
