@@ -394,6 +394,10 @@ pub struct Item {
     /// Why it can't be renamed, found when its folder was read for the preview: it isn't
     /// there any more, or isn't the item the search found.
     pub gone: Option<&'static str>,
+    /// The other items of the batch it's inside (search results can be a folder and things in
+    /// it). It can't change along with any of them: renaming the folder moves it from under
+    /// its own plan, and undo couldn't find it.
+    pub inside: Vec<u32>,
 }
 
 /// One of the batch's folders: its name (for `{parent}`), what else is in it, and whether its
@@ -512,6 +516,15 @@ pub fn plan(r: &Compiled, items: &[Item], dirs: &[Dir], p: Platform) -> Plan {
             format!("“{}” already exists here", new[i])
         });
     }
+    // An item inside another one that changes too: rename them separately.
+    for (i, it) in items.iter().enumerate() {
+        if status[i] != Status::Change {
+            continue;
+        }
+        if let Some(&j) = it.inside.iter().find(|&&j| status[j as usize] == Status::Change) {
+            status[i] = Status::Problem(format!("Inside “{}”, which is being renamed too: rename them separately", items[j as usize].name));
+        }
+    }
     let changes = status.iter().filter(|s| **s == Status::Change).count();
     let problems = status.iter().filter(|s| matches!(s, Status::Problem(_))).count();
     Plan { new, status, changes, problems }
@@ -530,7 +543,7 @@ mod tests {
     }
 
     fn items(names: &[&str]) -> Vec<Item> {
-        names.iter().map(|n| Item { name: n.to_string(), is_dir: false, dir: 0, keep: None, gone: None }).collect()
+        names.iter().map(|n| Item { name: n.to_string(), is_dir: false, dir: 0, keep: None, gone: None, inside: Vec::new() }).collect()
     }
 
     fn dir(others: &[&str], ignores_case: bool) -> Dir {
@@ -749,11 +762,27 @@ mod tests {
 
     /// Every key while the dialog is open runs the whole plan: `cargo test --release --
     /// --ignored --nocapture plan_speed`.
+    /// An item inside another one of the batch can't change along with it; either alone can.
+    #[test]
+    fn an_item_inside_another_that_changes_is_a_problem() {
+        let r = rule("", "new-{name}").compile().unwrap();
+        let mut its = items(&["outer", "inner", "beside"]);
+        its[1].inside = vec![0];
+        let dirs = vec![Dir { known: true, ..Dir::default() }; 1];
+        let p = plan(&r, &its, &dirs, Platform::Linux);
+        assert_eq!(p.status[1], Status::Problem("Inside “outer”, which is being renamed too: rename them separately".into()));
+        assert_eq!((p.status[0].clone(), p.status[2].clone()), (Status::Change, Status::Change));
+        // The outer one keeps its name: the inner one can change.
+        let r = rule("inner", "x").compile().unwrap();
+        assert_eq!(plan(&r, &its, &dirs, Platform::Linux).status[1], Status::Change);
+    }
+
     #[test]
     #[ignore = "benchmark"]
     fn plan_speed() {
         let names: Vec<String> = (0..10_000).map(|i| format!("IMG_{i:05} holiday in Rome.JPG")).collect();
-        let its: Vec<Item> = names.iter().map(|n| Item { name: n.clone(), is_dir: false, dir: 0, keep: None, gone: None }).collect();
+        let its: Vec<Item> =
+            names.iter().map(|n| Item { name: n.clone(), is_dir: false, dir: 0, keep: None, gone: None, inside: Vec::new() }).collect();
         let others: Vec<String> = (0..10_000).map(|i| format!("other {i}.txt")).collect();
         let d = Dir { name: "Rome".into(), others: others.into_iter().collect(), ignores_case: false, known: true };
         let cases = [

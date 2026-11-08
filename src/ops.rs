@@ -233,16 +233,23 @@ struct Split {
 }
 
 impl Undo {
-    /// Fingerprints each `(at, back)` as it is now. Items already gone are left out.
-    fn record(what: What, items: impl IntoIterator<Item = (PathBuf, Option<PathBuf>)>) -> Option<Undo> {
-        let steps: Vec<Step> = items
-            .into_iter()
-            .filter_map(|(at, back)| {
-                let print = Print::of(&at, &at.symlink_metadata().ok()?);
-                Some(Step { at, print, back, split: None })
-            })
-            .collect();
+    /// Fingerprints each `(at, back)` as it is now. An item that can't be read (gone already)
+    /// can't be undone: it's left out, and said so in `errors`, never silently.
+    fn record_or_say(what: What, items: impl IntoIterator<Item = (PathBuf, Option<PathBuf>)>, errors: &mut Vec<String>) -> Option<Undo> {
+        let mut steps = Vec::new();
+        for (at, back) in items {
+            match at.symlink_metadata() {
+                Ok(m) => steps.push(Step { print: Print::of(&at, &m), at, back, split: None }),
+                Err(e) => errors.push(format!("“{}” can't be undone: it couldn't be read right after ({e})", name_of(&at))),
+            }
+        }
         (!steps.is_empty()).then_some(Undo { what, steps })
+    }
+
+    /// [`Undo::record_or_say`] for one item done on the window's thread: `None` (with nothing
+    /// to undo) when it can't be read.
+    fn record(what: What, items: impl IntoIterator<Item = (PathBuf, Option<PathBuf>)>) -> Option<Undo> {
+        Undo::record_or_say(what, items, &mut Vec::new())
     }
 
     /// A rename that just happened (`from` is now `to`).
@@ -812,7 +819,7 @@ impl<'a> Worker<'a> {
                     }
                     self.p.items_done.fetch_add(1, Relaxed);
                 }
-                out.undo = Undo::record(What::Move, pairs);
+                out.undo = Undo::record_or_say(What::Move, pairs, &mut out.errors);
             }
             Op::Trash { sources } => {
                 self.p.items_total.store(sources.len(), Relaxed);
@@ -852,7 +859,7 @@ impl<'a> Worker<'a> {
                     self.tick(0);
                 }
                 if restorable {
-                    out.undo = Undo::record(What::Trash, pairs);
+                    out.undo = Undo::record_or_say(What::Trash, pairs, &mut out.errors);
                 }
             }
             Op::Delete { items } => self.delete(items, &mut out),
@@ -1441,7 +1448,8 @@ impl Worker<'_> {
         }
         if self.rename_all(&moves, &seen, out) {
             out.results = moves.iter().map(|(_, to)| to.clone()).collect();
-            out.undo = Undo::record(What::BatchRename, moves.iter().map(|(from, to)| (to.clone(), Some(from.clone()))));
+            out.undo =
+                Undo::record_or_say(What::BatchRename, moves.iter().map(|(from, to)| (to.clone(), Some(from.clone()))), &mut out.errors);
             out.moved = moves;
         }
     }
@@ -1477,6 +1485,17 @@ impl Worker<'_> {
                     Diff::Unreachable(e) => format!("{name} can't be checked ({e})"),
                     d => format!("{} since the preview", d.say(&name, was.kind)),
                 });
+            }
+        }
+        // An item inside another one being renamed: the folder's rename would move it from under
+        // its own step, and undo couldn't find it (the preview says so first).
+        for (inner, _) in moves {
+            if let Some((outer, _)) = moves.iter().find(|(o, _)| o != inner && inner.starts_with(o)) {
+                return Err(format!(
+                    "“{}” is inside “{}”, which is being renamed too; rename them separately",
+                    name_of(inner),
+                    name_of(outer)
+                ));
             }
         }
         let ids: std::collections::HashSet<(u64, u64)> = seen.iter().filter_map(|p| p.id).collect();
@@ -3087,5 +3106,37 @@ mod tests {
             assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "replacement");
             assert!(o.errors.len() == 1 && o.errors[0].contains("“b” was replaced while the operation ran"), "{:?}", o.errors);
         }
+    }
+
+    /// The review's case at the worker: a folder and something inside it, in either order, are
+    /// refused before anything is renamed (the child first used to rename both and then lose
+    /// the child's undo step).
+    #[test]
+    fn batch_rename_refuses_a_folder_and_something_inside_it() {
+        let d = tmp("batch-nested");
+        fs::create_dir_all(d.join("parent/child")).unwrap();
+        fs::write(d.join("parent/child/payload"), "precious").unwrap();
+        for pairs in
+            [[("parent", "renamed"), ("parent/child", "parent/newchild")], [("parent/child", "parent/newchild"), ("parent", "renamed")]]
+        {
+            let o = run_now(batch(&d, &pairs));
+            let why = o.refused.expect("refused");
+            assert!(why.contains("“child” is inside “parent”, which is being renamed too"), "{why}");
+            assert!(o.undo.is_none());
+            assert!(d.join("parent/child/payload").exists() && !d.join("renamed").exists());
+        }
+    }
+
+    /// An item that can't be read right after a batch rename can't be undone, and the outcome
+    /// says so instead of leaving it out of the undo silently.
+    #[test]
+    fn an_item_that_cant_be_recorded_for_undo_is_said() {
+        let d = tmp("record-or-say");
+        files(&d, &["a"]);
+        let mut errors = Vec::new();
+        let u =
+            Undo::record_or_say(What::BatchRename, [(d.join("a"), Some(d.join("x"))), (d.join("gone"), Some(d.join("y")))], &mut errors);
+        assert_eq!(u.map(|u| u.steps.len()), Some(1));
+        assert!(errors.len() == 1 && errors[0].starts_with("“gone” can't be undone"), "{errors:?}");
     }
 }

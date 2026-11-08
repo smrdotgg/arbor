@@ -766,6 +766,41 @@ fn batch_rename_renames_results_in_their_own_folders() {
     assert_eq!(rule(&mut s), crate::rename::Status::Problem("“two.txt” already exists here".into()));
 }
 
+/// The review's case: results that are a folder and a folder inside it. Renamed together, the
+/// inner one would move with the outer one's rename and undo couldn't find it, so the preview
+/// says so and Rename stays off; one at a time works.
+#[test]
+fn batch_rename_refuses_a_folder_and_something_inside_it() {
+    let d = tree("batch-nested", &["hit-z/hit-a/payload.txt"]);
+    let mut s = state_in(&d);
+    search(&mut s, "hit");
+    finish_walk(&mut s);
+    assert_eq!(results(&s), ["hit-z", "hit-z/hit-a"]);
+    s.run(Cmd::SelectAll, &mut tx());
+    s.run(Cmd::Rename, &mut tx());
+    let b = s.batch.as_mut().expect("Batch Rename on the results");
+    b.find = rune::TextEdit::new("");
+    b.replace = rune::TextEdit::new("new-{name}");
+    s.batch_replan();
+    let b = s.batch.as_ref().unwrap();
+    assert!(b.known());
+    let inner = b.items.iter().position(|i| i.name == "hit-a").unwrap();
+    assert_eq!(
+        b.plan.status[inner],
+        crate::rename::Status::Problem("Inside “hit-z”, which is being renamed too: rename them separately".into())
+    );
+    assert!(b.blocked().is_some());
+    s.batch_apply(&mut tx());
+    assert!(s.job.is_none(), "nothing runs");
+    assert!(d.join("hit-z/hit-a/payload.txt").exists());
+    // Only the inner one changing is fine.
+    let b = s.batch.as_mut().unwrap();
+    b.find = rune::TextEdit::new("hit-a");
+    b.replace = rune::TextEdit::new("new-a");
+    s.batch_replan();
+    assert_eq!(s.batch.as_ref().unwrap().blocked(), None);
+}
+
 /// Starting a walk touches no disk on the window's thread: the root's device is looked up by
 /// the thread that reads it. Here that lookup is held (as a sleeping disk would hold it): the
 /// key that started the search returns at once, and the walk goes on when it's let go.

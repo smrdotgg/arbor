@@ -286,7 +286,9 @@ allow (everywhere `/`, NUL, an empty name, `.` and `..`; on Windows also `<>:"\|
 characters, a trailing dot or space, and CON, PRN, AUX, NUL, COM1–9 and LPT1–9 with or without
 an extension); a name over 255 bytes (255 UTF-16 units on Windows); and names that differ only
 in case on a disk that ignores case (each folder's disk is asked, by looking up one of its names
-with the case swapped). A summary says "12 will change · 2 problems". Rename is disabled while
+with the case swapped). An item inside another item that's being renamed too (search results can be a
+folder and something in it) is a problem as well: the folder's rename would move it from under
+its own, so rename them separately. A summary says "12 will change · 2 problems". Rename is disabled while
 there are problems; Enter renames (every field is one line), Esc or a click outside closes, and
 the rule is kept for the next time this session.
 

@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
@@ -159,7 +159,7 @@ impl State {
             // A folder: one folder, and each entry's name is its own.
             dir_paths.push(f.cwd.clone());
             for e in &targets {
-                items.push(Item { name: e.name.clone(), is_dir: e.is_dir, dir: 0, keep: keep(&e.os), gone: None });
+                items.push(Item { name: e.name.clone(), is_dir: e.is_dir, dir: 0, keep: keep(&e.os), gone: None, inside: Vec::new() });
                 paths.push(f.cwd.join(&e.os));
             }
         }
@@ -174,9 +174,21 @@ impl State {
                 }),
             };
             let os = p.file_name().unwrap_or_default();
-            items.push(Item { name: e.name.clone(), is_dir: e.is_dir, dir, keep: keep(os), gone: None });
+            items.push(Item { name: e.name.clone(), is_dir: e.is_dir, dir, keep: keep(os), gone: None, inside: Vec::new() });
             expect.push(e.id);
             paths.push(p);
+        }
+        // Search results can be a folder and things in it: each item learns which others it's
+        // inside, through its folder and the folders above it, up to the search's root.
+        if f.searching() {
+            let at: HashMap<&Path, u32> = paths.iter().enumerate().map(|(i, p)| (p.as_path(), i as u32)).collect();
+            let above: Vec<Vec<u32>> = dir_paths
+                .iter()
+                .map(|d| d.ancestors().take_while(|a| a.starts_with(&f.cwd)).filter_map(|a| at.get(a).copied()).collect())
+                .collect();
+            for it in &mut items {
+                it.inside.clone_from(&above[it.dir as usize]);
+            }
         }
         let dirs: Vec<Dir> =
             dir_paths.iter().map(|d| Dir { name: crate::app::title(d), ignores_case: PLATFORM.ignores_case(), ..Dir::default() }).collect();

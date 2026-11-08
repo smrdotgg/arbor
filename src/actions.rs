@@ -188,8 +188,9 @@ impl State {
         match ops::rename(&from, &to) {
             Ok(()) => {
                 // One lstat to fingerprint it, so undo can tell whether it changed since.
-                self.undo.extend(Undo::renamed(to.clone(), from.clone()));
-                self.note = None;
+                let undo = Undo::renamed(to.clone(), from.clone());
+                self.note = undo.is_none().then(|| format!("Renamed, but it can't be undone: “{new}” couldn't be read right after"));
+                self.undo.extend(undo);
                 let f = self.cur();
                 let id = if dir == f.cwd && !f.searching() { f.dir_id } else { crate::noclobber::dir_id(&dir) };
                 // Every pane on this folder, by whatever path (a symlink to it too), and every
