@@ -44,7 +44,7 @@ before, after (a first after pass was lost to a driver argument bug).
 | … of which `main` → first frame | 117.6, 117.3, 118.6 ms | 119.6, 118.8 ms |
 | Listing visible (10k), request → frame | 36.8 / 38.6, 36.8 / 41.1, 36.8 / 43.5 ms | 36.9 / 38.4, 36.7 / 38.0 ms |
 | Key → frame (synthetic ↓) | 0.7 / 0.8 ms | 0.7 / 0.8 ms |
-| **Tab switch to 10k** (key → frame) | — | **36.2 / 50.2, 36.2 / 38.0 ms** (under the 50 ms listing budget) |
+| **Tab switch to 10k** (key → frame) | — | **36.2 / 50.2, 36.2 / 38.0 ms** (medians under the 50 ms listing budget; one pass's p95 over it, at 50.2 ms) |
 | 10k listing in the first frame | 33 of 33 runs | 22 of 22 runs |
 
 ### tabot-dev (Xvfb, lavapipe; not representative)
