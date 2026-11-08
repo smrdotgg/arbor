@@ -100,6 +100,10 @@ impl Backup {
     }
 
     fn decode(s: &str) -> Result<Backup, String> {
+        // An empty or truncated file isn't a backup with nothing in it: it's damaged.
+        if s.lines().next() != Some(BACKUP_HEADER) {
+            return Err("it isn't a backup Arbor wrote (its first line is missing or changed)".into());
+        }
         let mut b = Backup::default();
         for (n, line) in s.lines().enumerate() {
             if line.starts_with('#') || line.trim().is_empty() {
@@ -124,7 +128,7 @@ impl Backup {
     /// The saved backup, or `None` when there's none.
     pub(crate) fn read(path: &Path) -> Result<Option<Backup>, String> {
         match std::fs::read_to_string(path) {
-            Ok(s) => Backup::decode(&s).map(Some).map_err(|e| format!("{}: {e}", crate::fs::pretty(path))),
+            Ok(s) => Backup::decode(&s).map(Some).map_err(|e| format!("{}: {e}, so nothing was changed", crate::fs::pretty(path))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("{}: {e}", crate::fs::pretty(path))),
         }
@@ -132,6 +136,21 @@ impl Backup {
 
     pub(crate) fn write(&self, path: &Path) -> Result<(), String> {
         write_file(path, self.encode().as_bytes())
+    }
+
+    /// Checks that `backup` (read from `path`) records every one of `keys`, as every backup
+    /// this platform's Make writes does; otherwise it's damaged, and nothing should be changed
+    /// on its word.
+    fn require(backup: Option<Backup>, keys: &[String], path: &Path) -> Result<Option<Backup>, String> {
+        if let Some(b) = &backup
+            && let Some(k) = keys.iter().find(|k| b.get(k).is_none())
+        {
+            return Err(format!(
+                "{} isn't complete (it has no “{k}”), so nothing was changed. Put back a good copy, or delete it to have Restore take back only what Arbor wrote",
+                crate::fs::pretty(path)
+            ));
+        }
+        Ok(backup)
     }
 }
 
@@ -395,7 +414,7 @@ pub(crate) mod linux {
         let service = service_file(&d.data_home);
         let old_service = read(&service)?;
         // The backup is on the disk before anything changes.
-        let fresh = Backup::read(backup)?.is_none();
+        let fresh = Backup::require(Backup::read(backup)?, &required(), backup)?.is_none();
         if fresh {
             let mut b = Backup::default();
             b.put(MIME_KEY, default_app(&text, MIME).as_deref().map(str::as_bytes));
@@ -445,8 +464,13 @@ pub(crate) mod linux {
         ))
     }
 
+    /// What every backup Make writes here records.
+    fn required() -> Vec<String> {
+        vec![MIME_KEY.into(), SERVICE_KEY.into()]
+    }
+
     fn restore(d: &Dirs, backup: &Path) -> Result<String, String> {
-        let saved = Backup::read(backup)?;
+        let saved = Backup::require(Backup::read(backup)?, &required(), backup)?;
         let b = saved.clone().unwrap_or_default();
         let (mut kept, mut changed) = (Vec::new(), false);
         let mimeapps = d.config_home.join("mimeapps.list");
@@ -639,6 +663,12 @@ pub(crate) mod windows {
         Ok(b)
     }
 
+    /// What every backup Make writes records for `plan`: whether each key existed, and each
+    /// value before.
+    fn required(plan: &[Set], root: &str) -> Vec<String> {
+        keys(plan, root).iter().map(|k| existed_key(k)).chain(plan.iter().map(before_key)).collect()
+    }
+
     /// Puts back what `backup` recorded, for each value that still holds what Arbor wrote, then
     /// removes the keys Arbor made once they're empty. Without a backup, removes what this plan
     /// writes. Returns the values left alone because they changed since.
@@ -677,7 +707,7 @@ pub(crate) mod windows {
 
     pub fn run(change: Change, store: &mut dyn Store, root: &str, exe: &str, backup: &Path) -> Result<String, String> {
         let plan = plan(root, exe);
-        let saved = Backup::read(backup)?;
+        let saved = Backup::require(Backup::read(backup)?, &required(&plan, root), backup)?;
         match change {
             Change::Make => {
                 // The whole snapshot is on the disk before the registry changes at all.
@@ -874,7 +904,7 @@ pub(crate) mod mac {
                     return Err("Only Arbor.app can be the default for folders: macOS asks the app bundle (this Arbor runs as a bare program). Open Arbor.app and run it there".into());
                 }
                 // The backup is on the disk before LaunchServices is changed.
-                if Backup::read(backup)?.is_none() {
+                if Backup::require(Backup::read(backup)?, &[BEFORE.into()], backup)?.is_none() {
                     let mut b = Backup::default();
                     b.put(BEFORE, ls.chosen().filter(|c| !c.eq_ignore_ascii_case(BUNDLE_ID)).as_deref().map(str::as_bytes));
                     b.write(backup)?;
@@ -883,7 +913,7 @@ pub(crate) mod mac {
                 Ok("Arbor is now the default for folders that apps open. Finder still opens the desktop, the Dock's folders and \"Show in Finder\" from other apps. Restore the System Default for Folders undoes it.".into())
             }
             Change::Restore => {
-                let b = Backup::read(backup)?.unwrap_or_default();
+                let b = Backup::require(Backup::read(backup)?, &[BEFORE.into()], backup)?.unwrap_or_default();
                 let to = b.get(BEFORE).flatten().map_or_else(|| FINDER.to_string(), |v| String::from_utf8_lossy(v).into_owned());
                 let now = ls.current();
                 if now.as_deref().is_some_and(|c| !c.eq_ignore_ascii_case(BUNDLE_ID)) {
@@ -1348,6 +1378,50 @@ mod tests {
             "the first backup's record stays"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An empty or cut-short backup is damaged, not a record of "nothing was there": Restore
+    /// (and Make) refuse it and change nothing, on every platform.
+    #[test]
+    fn damaged_backups_are_refused_before_anything_changes() {
+        let root = windows::CLASSES;
+        for damaged in ["", "\n", &format!("{BACKUP_HEADER}\n"), &format!("{BACKUP_HEADER}\n-\tsomething else\n")] {
+            let d = tmp("damaged");
+            let backup = d.join(BACKUP_FILE);
+            // Windows.
+            let mut reg = Reg::default();
+            windows::run(Change::Make, &mut reg, root, EXE, &backup).unwrap();
+            let made = reg.clone();
+            std::fs::write(&backup, damaged).unwrap();
+            for change in [Change::Restore, Change::Make] {
+                let e = windows::run(change, &mut reg, root, EXE, &backup).unwrap_err();
+                assert!(e.contains("so nothing was changed"), "{damaged:?}: {e}");
+                assert_eq!(reg, made, "{damaged:?}: the registry is as it was");
+            }
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), damaged, "and the backup is kept");
+            // Linux.
+            let dirs = linux_dirs(&d, true);
+            let mimeapps = dirs.config_home.join("mimeapps.list");
+            std::fs::create_dir_all(&dirs.config_home).unwrap();
+            std::fs::write(&mimeapps, "[Default Applications]\ninode/directory=old.desktop\n").unwrap();
+            let _ = std::fs::remove_file(&backup);
+            linux::run(Change::Make, &dirs, &backup).unwrap();
+            let made = std::fs::read_to_string(&mimeapps).unwrap();
+            std::fs::write(&backup, damaged).unwrap();
+            let e = linux::run(Change::Restore, &dirs, &backup).unwrap_err();
+            assert!(e.contains("so nothing was changed"), "{damaged:?}: {e}");
+            assert_eq!(std::fs::read_to_string(&mimeapps).unwrap(), made);
+            assert!(linux::service_file(&dirs.data_home).exists(), "the activation file stays");
+            // macOS.
+            let _ = std::fs::remove_file(&backup);
+            let mut ls = FakeLs(Some("com.cocoatech.PathFinder".into()), true);
+            mac::run(Change::Make, &mut ls, Some(mac::BUNDLE_ID), &backup).unwrap();
+            std::fs::write(&backup, damaged).unwrap();
+            let e = mac::run(Change::Restore, &mut ls, Some(mac::BUNDLE_ID), &backup).unwrap_err();
+            assert!(e.contains("so nothing was changed"), "{damaged:?}: {e}");
+            assert_eq!(ls.0.as_deref(), Some(mac::BUNDLE_ID));
+            let _ = std::fs::remove_dir_all(&d);
+        }
     }
 
     #[test]
