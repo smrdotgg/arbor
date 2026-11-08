@@ -16,7 +16,15 @@
 //! "Cold start" is from just before this process spawns Arbor to Arbor's first frame being
 //! submitted, so it includes exec, dynamic linking, window and GPU setup and reading the
 //! folder. The folder's metadata is in the OS cache after the first run (a true cold cache
-//! needs root to drop it).
+//! needs root to drop it). The window waits only a bounded time for the folder, so each run
+//! also says whether the listing made the first frame, and when it showed if it didn't.
+//!
+//! All times end when the frame is submitted to the GPU: a proxy for pixels on screen, which
+//! come at least one refresh later.
+//!
+//! A run counts only if Arbor exits successfully and logs its first frame and exactly ROUNDS
+//! listings and ROUNDS key presses. Otherwise the run is reported INVALID, and the bench exits
+//! non-zero after printing what it has.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -46,12 +54,15 @@ fn main() {
     make_folder(&big);
 
     let (mut cold, mut main, mut nav, mut key) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut each = Vec::new();
+    let (mut each, mut late, mut invalid) = (Vec::new(), Vec::new(), Vec::new());
     let mut first = None;
     for run in 0..runs {
         match run_once(&bin, &big, rounds) {
             Ok(r) => {
                 each.push(format!("{:.0}/{:.0}", r.cold, r.main));
+                if let Some(ms) = r.first_listing {
+                    late.push(format!("run {run}: {ms:.0} ms from main"));
+                }
                 if run == 0 && runs > 1 {
                     first = Some((r.cold, r.main));
                 } else {
@@ -61,7 +72,10 @@ fn main() {
                 nav.extend(r.nav);
                 key.extend(r.key);
             }
-            Err(e) => eprintln!("run {run}: {e}"),
+            Err(e) => {
+                eprintln!("run {run}: INVALID: {e}");
+                invalid.push(run);
+            }
         }
     }
     if !keep {
@@ -69,7 +83,7 @@ fn main() {
     }
 
     println!("{} {} · {runs} runs × {rounds} rounds · {ENTRIES} entries", std::env::consts::OS, std::env::consts::ARCH);
-    println!("{:<34} {:>5} {:>9} {:>9} {:>8}  result", "measure", "n", "median", "p95", "budget");
+    println!("{:<34} {:>5} {:>9} {:>9} {:>8}  result (submission proxy)", "measure", "n", "median", "p95", "budget");
     let rows: [(&str, &mut Vec<f64>, Option<f64>); 4] = [
         ("cold start (spawn → first frame)*", &mut cold, Some(100.0)),
         ("  of which main → first frame", &mut main, None),
@@ -87,11 +101,11 @@ fn main() {
             Some(b) => (
                 format!("{b:.0} ms"),
                 if p95 < b {
-                    "pass"
+                    "under"
                 } else if med < b {
                     "p95 over"
                 } else {
-                    "FAIL"
+                    "OVER"
                 },
             ),
             None => (String::new(), ""),
@@ -102,7 +116,17 @@ fn main() {
         println!("* first run left out: {c:.0} ms cold, {m:.0} ms of it from main");
     }
     println!("each run, cold/main ms: {}", each.join(" "));
-    println!("Times end when the frame is submitted to the GPU; it reaches the screen at the next refresh.");
+    let valid = each.len();
+    println!(
+        "listing in the first frame: {} of {valid} runs{}",
+        valid - late.len(),
+        if late.is_empty() { String::new() } else { format!(" (late: {})", late.join(", ")) }
+    );
+    println!("Times end when the frame is submitted to the GPU (a proxy): pixels reach the screen at least one refresh later.");
+    if !invalid.is_empty() {
+        println!("INVALID: {} of {runs} runs ({invalid:?}); see above. These numbers don't count.", invalid.len());
+        std::process::exit(1);
+    }
 }
 
 struct Run {
@@ -110,6 +134,8 @@ struct Run {
     main: f64,
     nav: Vec<f64>,
     key: Vec<f64>,
+    /// When the first listing showed, if it missed the first frame (from `main`).
+    first_listing: Option<f64>,
 }
 
 fn run_once(bin: &Path, dir: &Path, rounds: u32) -> Result<Run, String> {
@@ -126,19 +152,22 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32) -> Result<Run, String> {
     let err = child.stderr.take().expect("piped");
     let reader = std::thread::spawn(move || BufReader::new(err).lines().map_while(Result::ok).collect::<Vec<_>>());
     let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
+    let status = loop {
         match child.try_wait().map_err(|e| e.to_string())? {
-            Some(_) => break,
+            Some(status) => break status,
             None if Instant::now() > deadline => {
                 let _ = child.kill();
                 return Err("timed out after 60 s".into());
             }
             None => std::thread::sleep(Duration::from_millis(20)),
         }
-    }
+    };
     let lines = reader.join().map_err(|_| "reader panicked")?;
+    if !status.success() {
+        return Err(format!("arbor exited with {status}:\n{}", lines.join("\n")));
+    }
     let spawn_us = spawned.duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_micros() as f64;
-    let mut run = Run { cold: f64::NAN, main: f64::NAN, nav: Vec::new(), key: Vec::new() };
+    let mut run = Run { cold: f64::NAN, main: f64::NAN, nav: Vec::new(), key: Vec::new(), first_listing: None };
     for line in &lines {
         let Some(rest) = line.strip_prefix("arbor-timing ") else { continue };
         let field = |k: &str| rest.split_whitespace().find_map(|f| f.strip_prefix(k)?.strip_prefix('=')?.parse::<f64>().ok());
@@ -147,13 +176,23 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32) -> Result<Run, String> {
                 run.cold = (field("epoch_us").unwrap_or(f64::NAN) - spawn_us) / 1000.0;
                 run.main = field("main_ms").unwrap_or(f64::NAN);
             }
+            Some("first-listing") => run.first_listing = field("main_ms"),
             Some("nav") if field("entries").is_some_and(|n| n as usize >= ENTRIES) => run.nav.extend(field("ms")),
             Some("key") => run.key.extend(field("ms")),
             _ => {}
         }
     }
-    if run.cold.is_nan() {
+    if run.cold.is_nan() || run.main.is_nan() {
         return Err(format!("no first frame logged:\n{}", lines.join("\n")));
+    }
+    let want = rounds as usize;
+    if run.nav.len() != want || run.key.len() != want {
+        return Err(format!(
+            "expected {want} listings of {ENTRIES} and {want} key presses, got {} and {}:\n{}",
+            run.nav.len(),
+            run.key.len(),
+            lines.join("\n")
+        ));
     }
     Ok(run)
 }
