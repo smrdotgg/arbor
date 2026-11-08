@@ -29,6 +29,9 @@
 //!   or any change to the query), to the frame showing its first results, and to the frame
 //!   after it finished (`stopped=1` when Esc ended it), with `found=N` and `visited=N`. A `key`
 //!   line has `search=1` when a walk was streaming into the frame it drew.
+//! - `rename`: a key that changed Batch Rename's rule, to the frame showing the preview for it,
+//!   with `items=N`, `same_frame=1` when it was worked out inside the key (small batches) rather
+//!   than on a worker, and `regex=1` in regex mode.
 //! - `first-listing`: only when the first folder was too slow for the first frame (the window
 //!   waits at most `app::FIRST_PAINT_WAIT` for it): from the top of `main` to the frame showing
 //!   it. `ARBOR_SLOW_FIRST_READ_MS=N` (read only when timing is on) slows that read by N ms to
@@ -49,7 +52,9 @@
 //! and aggregates the log, the rest rank what's in memory), types `a` and `r`, and closes it
 //! with Esc. With `ARBOR_BENCH_SEARCH=1` each round opens Search in This Folder, types `1`
 //! (in a large tree, so the walk streams for many frames), presses ↓ once a frame while it
-//! streams, and leaves with Esc once it's done. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
+//! streams, and leaves with Esc once it's done. With `ARBOR_BENCH_RENAME=1` each round selects
+//! everything, opens Batch Rename (waiting for the folder's read), types `e`, turns on regex,
+//! types `$` (each waiting for its preview) and closes it with Esc. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
 //! parent folder instead, then does N rounds of "previous tab (the start folder), next tab". The ↓ is synthetic, so its `key` time starts when the handler
 //! is called rather than at an OS event. The window opens without taking focus and ignores real
 //! keys, so typing in another app while it runs can't reach it (and its ⌘⌫ can't trash anything).
@@ -117,6 +122,12 @@ thread_local! {
     static JUMP_ASKED: Cell<Option<(Instant, bool)>> = const { Cell::new(None) };
     /// Jump's rows land in the frame being built: the open's time, cold, folders, same frame.
     static JUMP_LANDED: Cell<Option<(Instant, bool, usize, bool)>> = const { Cell::new(None) };
+    /// `ARBOR_BENCH_RENAME`: the bench selects everything, opens Batch Rename and types in it.
+    static RENAME: Cell<bool> = const { Cell::new(false) };
+    /// A Batch Rename plan being worked out on a worker: the key that changed the rule.
+    static RENAME_ASKED: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// A Batch Rename plan lands in the frame being built: its key, items, same frame, regex.
+    static RENAME_LANDED: Cell<Option<(Instant, usize, bool, bool)>> = const { Cell::new(None) };
     static FIRST: Cell<bool> = const { Cell::new(true) };
     /// Entries in the first listing.
     static FIRST_ENTRIES: Cell<usize> = const { Cell::new(0) };
@@ -149,8 +160,11 @@ pub fn init() -> bool {
     PREVIEW.set(set("ARBOR_BENCH_PREVIEW"));
     JUMP.set(set("ARBOR_BENCH_JUMP"));
     SEARCH.set(set("ARBOR_BENCH_SEARCH"));
+    RENAME.set(set("ARBOR_BENCH_RENAME"));
     let steps = if SEARCH.get() {
         rounds
+    } else if RENAME.get() {
+        rounds * RENAME_STEPS
     } else if PREVIEW.get() {
         rounds * PREVIEW_STEPS
     } else if JUMP.get() {
@@ -213,7 +227,18 @@ fn measured(s: &mut State, tx: &mut Tx, t: Instant, f: impl FnOnce(&mut State, &
     let (reads, closed) = (s.preview_reads, s.preview.is_none());
     let (no_jump, cold) = (s.jump.is_none(), s.history.loads == 0);
     let generation = search_generation(s);
+    let (had_batch, plans) = (s.batch.is_some(), s.batch_plans);
     let handled = f(s, tx);
+    if handled
+        && had_batch
+        && let Some(b) = &s.batch
+    {
+        if b.stale() {
+            RENAME_ASKED.set(Some(t));
+        } else if s.batch_plans != plans {
+            RENAME_LANDED.set(Some((t, b.items.len(), true, b.regex)));
+        }
+    }
     if handled && search_generation(s) != generation && searching(s) {
         SEARCH_ASKED.set(Some((t, false)));
     }
@@ -269,7 +294,14 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     }
     let previews = s.preview_lands;
     let jump_loads = s.history.loads;
+    let plans = s.batch_plans;
     let mut changed = s.poll(tx);
+    if s.batch_plans != plans
+        && let Some(b) = s.batch.as_ref().filter(|b| !b.stale())
+        && let Some(t) = RENAME_ASKED.take()
+    {
+        RENAME_LANDED.set(Some((t, b.items.len(), false, b.regex)));
+    }
     if let Some((t, seen)) = SEARCH_ASKED.get() {
         let f = s.cur();
         let found = f.entries.len();
@@ -320,6 +352,8 @@ fn preview_kind(s: &State) -> &'static str {
 const PREVIEW_STEPS: u32 = 8;
 /// Steps in a Jump bench round: open, `a`, `r`, Esc.
 const JUMP_STEPS: u32 = 4;
+/// Steps in a Batch Rename bench round: select all, open, `e`, regex on, `$`, Esc.
+const RENAME_STEPS: u32 = 6;
 
 /// One step of the preview bench: the keys, and whether to wait for the preview to land first.
 fn preview_step(s: &mut State, tx: &mut Tx, n: u32, now: Instant) -> bool {
@@ -351,8 +385,12 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
         }
         return false;
     }
-    // The Jump bench waits for the history to land before typing.
+    // The Jump bench waits for the history to land before typing, and the Batch Rename bench
+    // for the folder's read and each plan.
     if JUMP.get() && s.jump.as_ref().is_some_and(|j| j.loading) {
+        return false;
+    }
+    if RENAME.get() && s.batch.as_ref().is_some_and(|b| !b.known() || b.stale()) {
         return false;
     }
     let now = Instant::now();
@@ -379,6 +417,35 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
         return true;
     }
     BENCH.set((left - 1, n + 1));
+    if RENAME.get() {
+        let key = |k: Key| KeyEvent { key: k, mods: Mods::default() };
+        match n % RENAME_STEPS {
+            0 => {
+                measured(s, tx, now, |s, tx| run(s, Cmd::SelectAll, tx));
+            }
+            1 => {
+                s.batch_rule = crate::rename::Rule::default();
+                measured(s, tx, now, |s, tx| run(s, Cmd::BatchRename, tx));
+            }
+            2 => {
+                keyed(s, &key(Key::Text("e".into())), tx, now);
+            }
+            3 => {
+                // ⌥R, as the field would take it.
+                measured(s, tx, now, |s, _| {
+                    s.batch_set(|b| b.regex = true);
+                    true
+                });
+            }
+            4 => {
+                keyed(s, &key(Key::Text("$".into())), tx, now);
+            }
+            _ => {
+                keyed(s, &key(Key::Escape), tx, now);
+            }
+        }
+        return true;
+    }
     if JUMP.get() {
         let key = |k: Key| KeyEvent { key: k, mods: Mods::default() };
         match n % JUMP_STEPS {
@@ -450,6 +517,7 @@ struct Marked {
     jump: Option<(Instant, bool, usize, bool)>,
     search_first: Option<(Instant, usize)>,
     search_done: Option<(Instant, usize, u64, bool)>,
+    rename: Option<(Instant, usize, bool, bool)>,
 }
 
 /// What was marked since the last drawn frame, taken only if this frame was `drawn`. Rune runs
@@ -469,12 +537,14 @@ fn take_marked(drawn: bool) -> Option<Marked> {
         jump: JUMP_LANDED.take(),
         search_first: SEARCH_FIRST.take(),
         search_done: SEARCH_DONE.take(),
+        rename: RENAME_LANDED.take(),
     })
 }
 
 /// Rune's per-frame report.
 pub fn frame(f: &FrameEncoded) {
-    let Some(Marked { key, landed, preview, jump, search_first, search_done }) = take_marked(f.outcome() == FrameOutcome::Drawn) else {
+    let Some(Marked { key, landed, preview, jump, search_first, search_done, rename }) = take_marked(f.outcome() == FrameOutcome::Drawn)
+    else {
         // The bench's next step comes from a frame, drawn or not.
         if benching()
             && let Some(w) = WAKER.get()
@@ -525,6 +595,14 @@ pub fn frame(f: &FrameEncoded) {
                 ms(t),
                 u8::from(cold),
                 u8::from(inside)
+            );
+        }
+        if let Some((t, items, inside, regex)) = rename {
+            eprintln!(
+                "arbor-timing rename ms={:.2} items={items} same_frame={} regex={} {split}",
+                ms(t),
+                u8::from(inside),
+                u8::from(regex)
             );
         }
         if let Some((t, opened, kind)) = preview {

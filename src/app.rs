@@ -111,6 +111,12 @@ pub struct State {
     pub jump: Option<JumpBox>,
     /// Select by Pattern's box, while it's open (`select.rs`).
     pub pick: Option<PickBox>,
+    /// Batch Rename's dialog, while it's open (`batch.rs`).
+    pub batch: Option<crate::batch::BatchBox>,
+    /// The rule Batch Rename last had, which it opens with (this session only).
+    pub(crate) batch_rule: crate::rename::Rule,
+    /// Plans Batch Rename has put on screen, for tests and timing.
+    pub batch_plans: u64,
     /// The folders visited, for Jump: nothing is read until it first opens.
     pub history: History,
     /// The read a Jump asked for, so a folder that's gone is dropped from the history.
@@ -231,6 +237,9 @@ impl State {
             palette: None,
             jump: None,
             pick: None,
+            batch: None,
+            batch_rule: crate::rename::Rule::default(),
+            batch_plans: 0,
             history,
             jump_req: None,
             asking: None,
@@ -450,6 +459,7 @@ impl State {
         }
         changed |= self.poll_history();
         changed |= self.poll_search();
+        changed |= self.poll_batch();
         // Select by Pattern's count follows the rows it counts (a listing that landed).
         changed |= self.pick_refresh();
         // After everything that can move the selection this frame.
@@ -698,6 +708,9 @@ impl State {
         if self.pick.is_some() {
             return self.pick_key(ev, tx);
         }
+        if self.batch.is_some() {
+            return self.batch_key(ev, tx);
+        }
         // In a search with the results focused, ⌫ edits the query (as typing does, below).
         let m = ev.mods;
         if self.cur().searching() && ev.key == Key::Backspace && !m.cmd && !m.ctrl && !m.alt {
@@ -816,7 +829,7 @@ impl State {
             Paste | PasteMove => when(busy, BUSY).or(when(searching, "Leave the search (Esc) to paste into this folder")),
             Undo => when(busy, BUSY).or(when(self.undo.is_empty(), "Nothing to undo")),
             Cancel => when(!busy, "No file operation is running"),
-            Open | Copy | Cut | Rename => when(nothing, "Select an item first"),
+            Open | Copy | Cut | Rename | BatchRename => when(nothing, "Select an item first"),
             Into => when(!f.selected().is_some_and(|e| e.is_dir), "Select a folder first"),
             Parent => when(searching, "Leave the search first (Esc)").or(when(f.cwd.parent().is_none(), "Already at the top")),
             // In a search, Back leaves it.
@@ -857,6 +870,7 @@ impl State {
             Cmd::Split => "Split View".into(),
             Cmd::TogglePreview if self.preview.is_some() => "Close Preview".into(),
             Cmd::TogglePreview => "Quick Preview".into(),
+            Cmd::Rename if self.cur().marked.len() > 1 => Cmd::BatchRename.title().into(),
             _ => match cmd.place().and_then(|i| self.places.get(i)) {
                 Some((name, _)) => format!("Go to {name}").into(),
                 None => cmd.title().into(),
@@ -951,7 +965,10 @@ impl State {
             }
             CopyPath => self.copy_path(tx),
             Duplicate => self.duplicate(),
+            // Two or more: Batch Rename, as Finder does.
+            Rename if self.cur().marked.len() > 1 => self.open_batch(tx),
             Rename => self.start_rename(),
+            BatchRename => self.open_batch(tx),
             NewFolder => self.new_folder(),
             Trash => self.trash_selected(),
             Undo => self.undo_last(),
@@ -1081,12 +1098,13 @@ impl State {
         self.history.exclude = crate::jump::exclude_globs(&s.jump_exclude);
     }
 
-    /// Closes the palette, Jump and Select by Pattern (at most one is open).
+    /// Closes the palette, Jump, Select by Pattern and Batch Rename (at most one is open).
     pub fn close_overlays(&mut self, tx: &mut Tx) {
         self.asking = None;
         self.close_palette(tx);
         self.close_jump(tx);
         self.close_pick(tx);
+        self.close_batch(tx);
     }
 }
 

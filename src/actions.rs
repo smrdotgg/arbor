@@ -241,6 +241,12 @@ impl State {
         let verb = job.verb;
         self.job = None;
         self.undo.extend(out.undo);
+        // Renamed items show under their new names at once (a fresh read follows).
+        if !out.renamed.is_empty() {
+            for p in &mut self.panes {
+                p.f.renamed_paths(&out.renamed);
+            }
+        }
         let n = out.results.len();
         self.note = Some(if let Some(why) = out.refused {
             why
@@ -254,6 +260,7 @@ impl State {
                 "Copying" => "Copied",
                 "Moving" => "Moved",
                 "Moving to Trash" => "Moved to Trash",
+                "Renaming" => "Renamed",
                 _ => "Restored",
             };
             format!("{done} {n} item{}", plural(n))
@@ -358,13 +365,15 @@ impl State {
         let has = row.is_some() && !self.cur().visible.is_empty();
         let n = if has { self.cur().targets().len() } else { 0 };
         let item = |cmd: Cmd| {
-            // Commands on the selection need a row under the pointer; Rename takes one item.
+            // Commands on the selection need a row under the pointer; with several, Rename is
+            // Batch Rename.
             let on_selection = matches!(
                 cmd,
                 Cmd::Open | Cmd::Rename | Cmd::Duplicate | Cmd::Trash | Cmd::Copy | Cmd::Cut | Cmd::CopyToOther | Cmd::MoveToOther
             );
-            let on = self.unavailable(cmd).is_none() && (!on_selection || has) && (cmd != Cmd::Rename || n == 1);
+            let on = self.unavailable(cmd).is_none() && (!on_selection || has);
             let title = match cmd {
+                Cmd::Rename if n > 1 => format!("{} ({n} items)", Cmd::BatchRename.title()),
                 Cmd::Duplicate | Cmd::Trash | Cmd::Copy | Cmd::Cut | Cmd::CopyToOther | Cmd::MoveToOther if n > 1 => {
                     format!("{} ({n} items)", cmd.title())
                 }

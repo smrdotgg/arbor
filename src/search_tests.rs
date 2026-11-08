@@ -712,3 +712,55 @@ fn the_list_grows_only_so_far_while_the_walk_goes_on() {
     assert!(f.entries.len() >= 2100 && f.visible.len() == f.entries.len(), "{} of {}", f.visible.len(), f.entries.len());
     assert!(!State::search_status(f).unwrap().contains("showing the first"));
 }
+
+/// Batch Rename on search results: each item is renamed in its own folder, two of one name in
+/// different folders are no clash, and the results show the new names (and stay selected).
+#[test]
+fn batch_rename_renames_results_in_their_own_folders() {
+    let d = tree("batch", &["one/report.txt", "two/report.txt", "two/report-old.txt", "x.md"]);
+    let mut s = state_in(&d);
+    search(&mut s, "report");
+    finish_walk(&mut s);
+    s.run(Cmd::SelectAll, &mut tx());
+    s.run(Cmd::Rename, &mut tx());
+    let b = s.batch.as_mut().expect("Batch Rename on the results");
+    b.find = rune::TextEdit::new("report");
+    b.replace = rune::TextEdit::new("{parent}");
+    s.batch_replan();
+    let b = s.batch.as_ref().unwrap();
+    assert!(b.known());
+    let mut planned: Vec<(String, String)> = b.items.iter().map(|i| i.name.clone()).zip(b.plan.new.iter().cloned()).collect();
+    planned.sort();
+    assert_eq!(
+        planned,
+        [("report-old.txt".into(), "two-old.txt".into()), ("report.txt".into(), "one.txt".into()), ("report.txt".into(), "two.txt".into())]
+    );
+    assert_eq!(b.blocked(), None);
+    s.batch_apply(&mut tx());
+    finish_job(&mut s);
+    for (path, was) in [("one/one.txt", "one/report.txt"), ("two/two.txt", "two/report.txt"), ("two/two-old.txt", "two/report-old.txt")] {
+        assert_eq!(std::fs::read_to_string(d.join(path)).unwrap(), format!("contents of {was}"));
+    }
+    frames(&mut s, 5);
+    let mut shown = results(&s);
+    shown.sort();
+    assert_eq!(shown, ["one/one.txt", "two/two-old.txt", "two/two.txt"]);
+    assert_eq!(s.cur().marked.len(), 3, "still selected, under their new names");
+    // Onto another item of the batch, which keeps its name: a duplicate.
+    let rule = |s: &mut State| {
+        let b = s.batch.as_mut().unwrap();
+        b.find = rune::TextEdit::new("two-old");
+        b.replace = rune::TextEdit::new("two");
+        s.batch_replan();
+        let b = s.batch.as_ref().unwrap();
+        let i = b.items.iter().position(|i| i.name == "two-old.txt").unwrap();
+        b.plan.status[i].clone()
+    };
+    s.run(Cmd::Rename, &mut tx());
+    assert_eq!(rule(&mut s), crate::rename::Status::Problem("Same new name as “two.txt”".into()));
+    // Onto a name in the item's own folder, outside the batch: already there.
+    s.close_batch(&mut tx());
+    pick(&mut s, "two/two-old.txt");
+    s.run(Cmd::BatchRename, &mut tx());
+    assert_eq!(rule(&mut s), crate::rename::Status::Problem("“two.txt” already exists here".into()));
+}

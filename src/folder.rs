@@ -494,6 +494,62 @@ impl Folder {
         self.refilter(cursor.as_deref());
     }
 
+    /// Items renamed on disk (`(from, to)`, absolute, each within its own folder): shows the
+    /// ones in this folder (or, in a search, among the results) under their new names at once,
+    /// keeping them selected if they were (a fresh read follows). In a search, results inside a
+    /// renamed folder follow it. One pass, however many were renamed.
+    pub fn renamed_paths(&mut self, pairs: &[(PathBuf, PathBuf)]) {
+        let searching = self.searching();
+        let cwd = self.cwd.clone();
+        let map: std::collections::HashMap<PathBuf, PathBuf> = pairs
+            .iter()
+            .filter_map(|(f, t)| {
+                if searching {
+                    Some((f.strip_prefix(&cwd).ok()?.to_path_buf(), t.strip_prefix(&cwd).ok()?.to_path_buf()))
+                } else if f.parent() == Some(cwd.as_path()) {
+                    Some((PathBuf::from(f.file_name()?), PathBuf::from(t.file_name()?)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if map.is_empty() {
+            return;
+        }
+        let moved = |rel: &Path| -> Option<(PathBuf, bool)> {
+            if let Some(n) = map.get(rel) {
+                return Some((n.clone(), true));
+            }
+            if !searching {
+                return None;
+            }
+            let a = rel.ancestors().skip(1).find(|a| !a.as_os_str().is_empty() && map.contains_key(*a))?;
+            Some((map[a].join(rel.strip_prefix(a).ok()?), false))
+        };
+        let cursor = self.cursor_name();
+        let keep = cursor.as_ref().map(|c| moved(Path::new(c)).map_or_else(|| c.clone(), |(n, _)| n.into_os_string()));
+        let mut marked = std::mem::take(&mut self.marked);
+        for e in &mut self.entries {
+            let Some((new, own)) = moved(Path::new(&e.os)) else { continue };
+            if own {
+                let old = std::mem::take(&mut e.name);
+                let name = new.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                e.hidden = name.starts_with('.') || (e.hidden && !old.starts_with('.'));
+                e.lower = name.to_lowercase();
+                if !searching {
+                    e.key = format!("f:{name}");
+                }
+                e.name = name;
+            }
+            let was = std::mem::replace(&mut e.os, new.into_os_string());
+            if marked.remove(&was) {
+                marked.insert(e.os.clone());
+            }
+        }
+        self.marked = marked;
+        self.refilter(keep.as_deref());
+    }
+
     pub fn type_filter(&mut self, text: &str) {
         let keep = self.cursor_name();
         self.filter.push_str(text);

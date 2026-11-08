@@ -322,6 +322,7 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Copy Path | ⇧⌘C, ⌥⌘C | Ctrl+Shift+C, Ctrl+Alt+C | `file.copy_path` |
 | Duplicate | ⌘D | Ctrl+D | `file.duplicate` |
 | Rename… | F2, ⇧⌘R | F2, Ctrl+Shift+R | `file.rename` |
+| Batch Rename… |  |  | `file.batch_rename` |
 | New Folder | ⇧⌘N | Ctrl+Shift+N | `file.new_folder` |
 | Move to Trash | ⌘⌫, ⌦ | Ctrl+Backspace, Delete | `file.trash` |
 | Undo | ⌘Z | Ctrl+Z | `file.undo` |

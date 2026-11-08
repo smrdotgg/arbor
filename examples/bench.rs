@@ -2,7 +2,7 @@
 //! Run through `scripts/bench.sh`, which builds first:
 //!
 //! ```text
-//! bench [RUNS] [ROUNDS] [--bin PATH] [--keep] [--tabs N] [--preview N] [--jump N] [--search N]
+//! bench [RUNS] [ROUNDS] [--bin PATH] [--keep] [--tabs N] [--preview N] [--jump N] [--search N] [--rename N]
 //! ```
 //!
 //! Makes a folder of 10,000 entries in the temp dir, then cold-starts Arbor on it RUNS times
@@ -52,6 +52,12 @@
 //! ↓ pressed while results streamed in. Such a run counts only with exactly ROUNDS first
 //! results and ROUNDS finished walks logged.
 //!
+//! `--rename N` adds N more cold starts with `ARBOR_BENCH_RENAME=1` in the 10k folder: each
+//! round selects all 10,000 entries, opens Batch Rename, types `e` (plain text: every name
+//! loses its e's), turns on regex and types `$` (`e$`), each timed from the key to the frame
+//! showing the whole preview for it (worked out on a worker at this size), and closes it. Such
+//! a run counts only with exactly ROUNDS plain and 2 × ROUNDS regex previews of 10,000 items.
+//!
 //! Every run gets its own settings folder (`RUNE_DIRS_ROOT`), so the user's settings don't
 //! change the numbers and the navigations don't land in their Jump history.
 
@@ -75,6 +81,7 @@ fn main() {
     let mut preview_runs = 0;
     let mut jump_runs = 0;
     let mut search_runs = 0;
+    let mut rename_runs = 0;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -84,6 +91,7 @@ fn main() {
             "--preview" => preview_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--preview N"),
             "--jump" => jump_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--jump N"),
             "--search" => search_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--search N"),
+            "--rename" => rename_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--rename N"),
             n => nums.push(n.parse::<u32>().unwrap_or_else(|_| panic!("not a number: {n}"))),
         }
     }
@@ -191,6 +199,20 @@ fn main() {
             }
         }
     }
+    let (mut rename_plain, mut rename_regex, mut rename_key) = (Vec::new(), Vec::new(), Vec::new());
+    for run in 0..rename_runs {
+        match run_once(&bin, &big, rounds, Mode::Rename) {
+            Ok(r) => {
+                rename_plain.extend(r.rename_plain);
+                rename_regex.extend(r.rename_regex);
+                rename_key.extend(r.rename_key);
+            }
+            Err(e) => {
+                eprintln!("rename run {run}: INVALID: {e}");
+                invalid.push(runs + tab_runs + preview_runs + jump_runs + search_runs + run);
+            }
+        }
+    }
     if !keep {
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -201,7 +223,8 @@ fn main() {
     let previews = preview_runs > 0;
     let jumps = jump_runs > 0;
     let searches = search_runs > 0;
-    let rows: [(&str, &mut Vec<f64>, Option<f64>); 16] = [
+    let renames = rename_runs > 0;
+    let rows: [(&str, &mut Vec<f64>, Option<f64>); 19] = [
         ("cold start (spawn → first frame)*", &mut cold, Some(100.0)),
         ("  of which main → first frame", &mut main, None),
         ("listing visible (10k, nav → frame)", &mut nav, Some(50.0)),
@@ -218,12 +241,16 @@ fn main() {
         ("search 120k: key → walk done", &mut search_total, None),
         ("key → frame, query (starts walk)", &mut search_query, Some(8.0)),
         ("key → frame while results stream", &mut search_key, Some(8.0)),
+        ("rename 10k: key → preview (plain)", &mut rename_plain, None),
+        ("rename 10k: key → preview (regex)", &mut rename_regex, None),
+        ("key → frame, typing in rename (10k)", &mut rename_key, Some(8.0)),
     ];
     for (name, v, budget) in rows {
         let off = (name.starts_with("tab") && !tabs)
             || ((name.contains("preview") || name.contains("JPEG")) && !previews)
             || (name.contains("ump") && !jumps)
-            || ((name.contains("search") || name.contains("stream") || name.contains("query")) && !searches);
+            || ((name.contains("search") || name.contains("stream") || name.contains("query")) && !searches)
+            || (name.contains("rename") && !renames);
         if v.is_empty() && off {
             continue;
         }
@@ -287,6 +314,7 @@ enum Mode {
     Preview,
     Jump,
     Search,
+    Rename,
 }
 
 struct Run {
@@ -316,6 +344,10 @@ struct Run {
     search_query: Vec<f64>,
     search_key: Vec<f64>,
     search_found: Vec<(u64, u64)>,
+    /// Batch Rename over 10k items: key → preview frame, plain and regex; keys typed in it.
+    rename_plain: Vec<f64>,
+    rename_regex: Vec<f64>,
+    rename_key: Vec<f64>,
 }
 
 fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, String> {
@@ -329,6 +361,7 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         ("ARBOR_BENCH_PREVIEW", mode == Mode::Preview),
         ("ARBOR_BENCH_JUMP", mode == Mode::Jump),
         ("ARBOR_BENCH_SEARCH", mode == Mode::Search),
+        ("ARBOR_BENCH_RENAME", mode == Mode::Rename),
     ] {
         if on {
             cmd.env(var, "1");
@@ -383,6 +416,9 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         search_query: Vec::new(),
         search_key: Vec::new(),
         search_found: Vec::new(),
+        rename_plain: Vec::new(),
+        rename_regex: Vec::new(),
+        rename_key: Vec::new(),
     };
     let mut keys = 0;
     let mut streaming = false;
@@ -434,6 +470,20 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
                 }
                 streaming = walk;
             }
+            Some("key") if mode == Mode::Rename => {
+                // Each round's keys: select all, open, e, regex on, $, Esc.
+                if matches!(keys % 6, 2..=4) {
+                    run.rename_key.extend(field("ms"));
+                }
+                keys += 1;
+            }
+            Some("rename") if field("items").is_some_and(|n| n as usize >= ENTRIES) => {
+                if field("regex") == Some(1.0) {
+                    run.rename_regex.extend(field("ms"));
+                } else {
+                    run.rename_plain.extend(field("ms"));
+                }
+            }
             Some("search-first") => run.search_first.extend(field("ms")),
             Some("search-done") => {
                 run.search_total.extend(field("ms"));
@@ -453,6 +503,19 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         return Err(format!("no first frame logged:\n{}", lines.join("\n")));
     }
     let want = rounds as usize;
+    if mode == Mode::Rename {
+        if keys != want * 6 || run.rename_plain.len() != want || run.rename_regex.len() != want * 2 {
+            return Err(format!(
+                "expected {} keys, {want} plain and {} regex previews of {ENTRIES}, got {keys}, {} and {}:\n{}",
+                want * 6,
+                want * 2,
+                run.rename_plain.len(),
+                run.rename_regex.len(),
+                lines.join("\n")
+            ));
+        }
+        return Ok(run);
+    }
     if mode == Mode::Search {
         if run.search_first.len() != want || run.search_total.len() != want {
             return Err(format!(

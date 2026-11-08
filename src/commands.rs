@@ -83,6 +83,7 @@ commands! {
     CopyPath "file.copy_path" "Copy Path", ["cmd+shift+c", "cmd+alt+c"];
     Duplicate "file.duplicate" "Duplicate", ["cmd+d"];
     Rename "file.rename" "Rename…", ["f2", "cmd+shift+r"];
+    BatchRename "file.batch_rename" "Batch Rename…", [];
     NewFolder "file.new_folder" "New Folder", ["cmd+shift+n"];
     Trash "file.trash" "Move to Trash", ["cmd+backspace", "delete"];
     Undo "file.undo" "Undo", ["cmd+z"];

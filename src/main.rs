@@ -5,6 +5,7 @@
 
 mod actions;
 mod app;
+mod batch;
 mod commands;
 mod config;
 mod confirm;
