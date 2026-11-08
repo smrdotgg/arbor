@@ -26,6 +26,70 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-09, the Mac's floor, Batch Rename on the Mac, Jump's long paths, the bench's hangs
+
+From the owner's Mac investigation (MacBook Pro, M4 Pro, macOS 27.2, external 60 Hz display
+awake, Brave and WindowServer busy throughout), plus the fixes it led to.
+
+### Cold start: the macOS budget is met
+
+Spawn → first frame submitted, back-to-back, 20 launches after a warm-up, display awake:
+
+| App | Median / p95 |
+| --- | --- |
+| Bare AppKit + Metal (NSWindow, CAMetalLayer, one clear pass) | 125.5 / 126.8 ms |
+| Bare Rune (one empty element; Arbor's prewarm, chrome and inactive open) | 126.4 / 131.8 ms |
+| **Arbor** (10k folder, 110df34) | **132.6 / 147.5 ms** |
+
+NORTHSTAR's macOS budget is "within 25 ms of a bare native window": Arbor is **+7 ms**, so it's
+**met**. macOS itself takes ~87 ms before `applicationDidFinishLaunching` and ~32 ms more to make
+and show a window, even bare. Rune adds ~1 ms; Arbor ~6 ms, nearly all its first view build
+(`update_ms` 5.3). A second of idle between launches adds ~45 ms to every app alike (AppKit
+175, Rune 168, Arbor 168 ms), so never compare a paced pass with a back-to-back one.
+
+An earlier 145.5 ms run that evening was noise, not a regression: four commits alternated (bench
+`11 1`, four passes each) gave pass medians spread 7 ms within each build and means of 138.3
+(9eecac3), 134.0 (3a357b1), 135.2 (8a3d86d) and 138.1 ms (110df34), with the same splits in each
+(`init_at` 70–76 ms, `init` 0.2 ms, first `update` 5.2–5.3 ms).
+
+### Batch Rename on the Mac (10,000 items, 110df34, `--rename 5`, 2 passes)
+
+| Measure (median / p95) | Back-to-back | CPU kept hot |
+| --- | --- | --- |
+| Key → preview, plain | 2.6 / 2.8 ms | 2.3 / 2.8 ms |
+| Key → preview, regex | 17.4 / 21.8 ms (the CPU clocks down after the first rounds) | 4.1 / 4.5 ms |
+| Key → frame, typing | 4.5 / 5.0 ms | 4.0 / 4.5 ms |
+
+Plain previews land in the key's own frame; regex ones do for the first rounds, then go to the
+worker once the CPU has clocked down (the key's frame at ~4.9 ms including the 3 ms bounded wait,
+the preview ~17 ms later). At human typing pace the cooled numbers are the real ones.
+
+### Jump: long paths cut before Rune lays them out (191cca7)
+
+On the Mac, 45% of a Jump frame with a fresh query was Rune's head truncation, which shapes each
+long path about 8 times (RUNE-GAPS.md): keys took 6.3–8.6 ms of `update_ms` hot and 14–19 ms
+cooled, against 1.1–1.7 ms for short paths. Arbor now cuts paths to whole trailing folders that
+fit before Rune sees them. On tabot-dev (Xvfb; CPU-bound `update_ms`, 12 rounds × 2 keys, fresh
+query each round, 5,000 folders all ~100+ characters, alternating, 2 runs each):
+
+| Jump key `update_ms` | Without the cut | With it |
+| --- | --- | --- |
+| Median | 9.4, 9.8 ms | 5.9, 6.3 ms |
+| p90 | 13.8, 15.5 ms | 8.3, 10.0 ms |
+
+With the bench's own realistic history (most paths fit whole; p90 length 90 characters) the gain
+is smaller (median 7.1–7.6 → 6.0–6.7 ms). **The Mac needs measuring**, back-to-back and paced:
+`scripts/bench.sh 1 12 --jump 5` and `scripts/bench.sh 1 12 --jump 5 --pace 120 --gap 1000`.
+
+### The bench's 60 s hangs (26755b3)
+
+13 of 63 Jump and tab runs (and every run with the display asleep) hung until the timeout: a wake
+from a frame that wasn't drawn was handled in the same run-loop turn, so AppKit never reported
+the window visible (RUNE-GAPS.md). The owner's one-line patch (wake once per run of undrawn
+frames) took that to 0 of 12. The bench now never wakes from an undrawn frame and steps only
+after the last step's frame was drawn; on tabot-dev every run since has been valid (24 Jump and
+rename runs, back-to-back and paced). Not yet re-run on the Mac.
+
 ## 2026-11-08, rich previews through the OS's thumbnailer (milestone 9)
 
 What changed on the measured path: nothing at startup or per key. The preview's worker now waits
