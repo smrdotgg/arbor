@@ -378,7 +378,12 @@ the worker, with progress, and Esc cancels it: what's already deleted stays dele
 status bar says how many went and which folder was left partly deleted. There's no undo entry.
 Each item is deleted only while it's still the item you chose (its identity from the listing, or
 the walk's for search results, checked right before it goes); one replaced or removed since is
-left alone and named. Folders go with everything inside, and links are removed, never followed
+left alone and named. It never crosses into another disk: a folder something is mounted on
+(a USB disk, a FUSE or network mount, a bind mount; on Linux the mount table is read once per
+operation, elsewhere a different device gives it away; on Windows a volume mounted in a folder)
+is neither entered nor removed, the delete stops there and says "Skipped “x”: another disk is
+mounted there", and so does deleting a mount point itself. A move to another disk leaves the
+originals of anything mounted inside the moved folder where they are, and says so. Folders go with everything inside, and links are removed, never followed
 (on Unix each folder is opened relative to its parent without following links, so one swapped
 for a link meanwhile is refused). Unix deletes a read-only file as it is (its folder's
 permission is what counts) and reports what it can't remove; Windows clears the read-only

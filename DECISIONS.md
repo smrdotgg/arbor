@@ -33,6 +33,15 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-08 · Permanent delete stops at a mount point** (it doesn't skip it and carry on with
+  the rest of the folder): the owner said "stop and report". Deleting a mount point itself is
+  refused the same way, since its own folder can't be removed while mounted and the confirm said
+  "and everything in it". A btrfs subvolume has its own device number, so it's treated as a mount
+  too (safe; its removal needs btrfs's own tools anyway). Undo: `src/delete.rs`, `Halt::Mounted`.
+- **2026-11-08 · A cross-disk move leaves the originals of a disk mounted inside the moved
+  folder** (they were copied; the move is reported as split, as for any original it couldn't
+  remove). Undo: the `Fence` check in `Worker::remove_sources`.
+
 - **2026-11-08 · Quick Look is asked for a thumbnail, never an icon** (representation types
   Thumbnail and LowQualityThumbnail). A generic file-type icon says less than the card. Undo: add
   `Types::Icon` in `src/thumb.rs`.

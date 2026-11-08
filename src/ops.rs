@@ -561,6 +561,8 @@ struct Hooks {
     /// Called with each file a copy wrote, before anything else looks at it: where a test
     /// replaces it as if another app did so while a stalled copy was still writing.
     copied: Option<PathHook>,
+    /// The mount table, instead of the system's (a folder a test says is a mount point).
+    mounts: Option<crate::delete::Mounts>,
 }
 
 struct Worker<'a> {
@@ -575,6 +577,9 @@ struct Worker<'a> {
     seen: std::collections::HashMap<PathBuf, crate::fs::Ident>,
     /// `seen` came from a search's walk (its words name the search).
     seen_by_search: bool,
+    /// Where other disks are mounted, read once per operation when a recursive removal first
+    /// needs it, so none crosses into one.
+    mounts: std::cell::OnceCell<crate::delete::Mounts>,
     #[cfg(test)]
     hooks: Hooks,
 }
@@ -618,9 +623,21 @@ impl<'a> Worker<'a> {
             trash,
             seen: std::collections::HashMap::new(),
             seen_by_search: false,
+            mounts: std::cell::OnceCell::new(),
             #[cfg(test)]
             hooks: Hooks::default(),
         }
+    }
+
+    /// The mount table (read on first use, then kept for this operation).
+    fn mounts(&self) -> &crate::delete::Mounts {
+        self.mounts.get_or_init(|| {
+            #[cfg(test)]
+            if let Some(m) = &self.hooks.mounts {
+                return m.clone();
+            }
+            crate::delete::Mounts::read()
+        })
     }
 
     fn cancelled(&self) -> bool {
@@ -955,23 +972,29 @@ impl<'a> Worker<'a> {
                 continue;
             }
             let mut removed = 0;
+            let mounts = self.mounts().clone();
             let w = &mut *self;
             let mut go = |at: &Path| {
                 w.cancel_hook(at);
                 w.tick(0);
                 !w.cancelled()
             };
-            match crate::delete::remove_tree(&d.path, &mut go, &mut removed) {
+            match crate::delete::remove_tree(&d.path, &mounts, &mut go, &mut removed) {
                 Ok(()) => out.removed.push(d.path.clone()),
                 Err(crate::delete::Halt::Cancelled) => {
                     if removed > 0 {
                         out.partly = Some(d.path.clone());
                     }
                 }
-                Err(crate::delete::Halt::Failed { at, err }) => {
-                    let shown = d.path.parent().and_then(|p| at.strip_prefix(p).ok()).unwrap_or(&at);
-                    let part = if removed > 0 { " (the rest of it was deleted)" } else { "" };
-                    out.errors.push(format!("Couldn't delete “{}”: {err}{part}", shown.display()));
+                Err(halt) => {
+                    let Some((at, why)) = halt.why() else { continue };
+                    let shown = d.path.parent().and_then(|p| at.strip_prefix(p).ok()).unwrap_or(at).display().to_string();
+                    if matches!(halt, crate::delete::Halt::Mounted { .. }) {
+                        out.errors.push(format!("Skipped “{shown}”: {why}"));
+                    } else {
+                        let part = if removed > 0 { " (the rest of it was deleted)" } else { "" };
+                        out.errors.push(format!("Couldn't delete “{shown}”: {why}{part}"));
+                    }
                 }
             }
             self.p.items_done.fetch_add(1, Relaxed);
@@ -1353,7 +1376,22 @@ impl<'a> Worker<'a> {
     /// changed or appeared meanwhile stays. Says what couldn't be removed.
     fn remove_sources(&self, made: &[Made]) -> Result<(), String> {
         let (mut kept, mut first) = (0, None);
+        // The first item made is the moved item itself: nothing on another disk mounted inside
+        // it is removed (it was copied; the original stays where it's mounted).
+        let fence = made.first().map(|m| crate::delete::Fence::new(&m.src, self.mounts()));
         for m in made.iter().rev() {
+            if let (Some(f), Ok(meta)) = (&fence, m.src.symlink_metadata())
+                && f.crosses(&m.src, &meta)
+            {
+                // Counted and named once, at its mount point (what's in it comes first, deepest
+                // first, and is left alone without a word).
+                let parent_crosses = m.src.parent().and_then(|p| p.symlink_metadata().ok().map(|pm| f.crosses(p, &pm)));
+                if parent_crosses == Some(false) {
+                    kept += 1;
+                    first.get_or_insert_with(|| format!("“{}”: another disk is mounted there", m.src.display()));
+                }
+                continue;
+            }
             let removed = match &m.was {
                 Some(was) => match m.src.symlink_metadata() {
                     Ok(now) if Print::of(&m.src, &now) == *was => self.remove_one(&m.src, false),
@@ -1384,7 +1422,8 @@ impl<'a> Worker<'a> {
     /// just before), deepest first, folders only once empty.
     fn remove_rest(&mut self, at: &Path, copy: &Print) -> Result<(), MoveError> {
         let mut kept = None;
-        self.remove_tree_checked(at, &mut kept);
+        let fence = crate::delete::Fence::new(at, self.mounts());
+        self.remove_tree_checked(at, &fence, &mut kept);
         match kept {
             None => Ok(()),
             Some(why) => self.split(at, copy.clone(), why),
@@ -1392,8 +1431,9 @@ impl<'a> Worker<'a> {
     }
 
     /// Only an item that's really gone counts as removed: one that can't be read (its folder
-    /// lost its permissions, say) is kept, and the step's record with it.
-    fn remove_tree_checked(&self, p: &Path, kept: &mut Option<String>) {
+    /// lost its permissions, say) is kept, and the step's record with it. Never enters or
+    /// removes a mount point (`fence`).
+    fn remove_tree_checked(&self, p: &Path, fence: &crate::delete::Fence, kept: &mut Option<String>) {
         let keep = |kept: &mut Option<String>, e: io::Error| {
             kept.get_or_insert_with(|| format!("“{}”: {e}", p.display()));
         };
@@ -1402,12 +1442,16 @@ impl<'a> Worker<'a> {
             Err(e) if is_gone(&e) => return,
             Err(e) => return keep(kept, e),
         };
+        if fence.crosses(p, &m) {
+            kept.get_or_insert_with(|| format!("“{}”: another disk is mounted there", p.display()));
+            return;
+        }
         if m.is_dir() {
             match std::fs::read_dir(p) {
                 Ok(rd) => {
                     for de in rd {
                         match de {
-                            Ok(de) => self.remove_tree_checked(&de.path(), kept),
+                            Ok(de) => self.remove_tree_checked(&de.path(), fence, kept),
                             Err(e) => keep(kept, e),
                         }
                     }
@@ -2926,6 +2970,44 @@ mod tests {
         let left = fs::read_dir(d.join("big")).unwrap().count();
         assert!(left > 0 && left < 20, "{left} left");
         assert!(d.join("later").exists() && !d.join("first").exists());
+    }
+
+    /// A permanent delete never crosses into a mounted disk: it stops at the mount point, names
+    /// it, and leaves what's in it; the folders above it stay, and the counts say so.
+    #[test]
+    fn delete_stops_at_a_mount_point() {
+        let d = tmp("del-mount");
+        fs::create_dir_all(d.join("doomed/mnt")).unwrap();
+        fs::write(d.join("doomed/mnt/precious"), "keep").unwrap();
+        let canon = fs::canonicalize(&d).unwrap();
+        let mounts = crate::delete::Mounts::of(&[&canon.join("doomed/mnt")]);
+        let o =
+            run_hooked(Op::Delete { items: doomed(&[d.join("doomed")]) }, fake_trash, Hooks { mounts: Some(mounts), ..Hooks::default() });
+        assert!(o.removed.is_empty());
+        assert_eq!(o.errors, ["Skipped “doomed/mnt”: another disk is mounted there"]);
+        assert_eq!(fs::read_to_string(d.join("doomed/mnt/precious")).unwrap(), "keep");
+    }
+
+    /// A cross-disk move removes the originals it copied, but never those on a disk mounted
+    /// inside the moved folder: they stay (the move is split and says why).
+    #[test]
+    fn a_cross_disk_move_leaves_mounted_originals() {
+        let d = tmp("mv-mount");
+        fs::create_dir_all(d.join("src/mnt")).unwrap();
+        fs::write(d.join("src/mnt/precious"), "keep").unwrap();
+        fs::write(d.join("src/plain"), "x").unwrap();
+        fs::create_dir(d.join("into")).unwrap();
+        let canon = fs::canonicalize(&d).unwrap();
+        let mounts = crate::delete::Mounts::of(&[&canon.join("src/mnt")]);
+        let o = run_hooked(
+            Op::Move { sources: vec![d.join("src")], dest: d.join("into") },
+            fake_trash,
+            Hooks { cross_device: true, mounts: Some(mounts), ..Hooks::default() },
+        );
+        assert_eq!(fs::read_to_string(d.join("src/mnt/precious")).unwrap(), "keep", "the mounted original stays");
+        assert!(!d.join("src/plain").exists(), "the rest moved");
+        assert!(d.join("into/src/mnt/precious").exists() && d.join("into/src/plain").exists());
+        assert!(o.errors.iter().any(|e| e.contains("another disk is mounted there")), "{:?}", o.errors);
     }
 
     /// A trash of items some of which can't go to the trash: the others go (and can be undone);
