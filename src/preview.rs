@@ -62,6 +62,17 @@ pub const MAX_PIXELS: u64 = 100_000_000;
 /// decode a GIF on this class of machine (a 49 MP one took 423 ms). Serialized, one at a time,
 /// that's at most about 200 MB for a moment on an 8 GB machine, however fast Space is tapped.
 pub const MAX_PIXELS_WHOLE: u64 = 24_000_000;
+/// The widest or tallest image decoded: JPEG's own limit. A pixel limit alone lets a
+/// 99,999,999 × 1 image through, whose rows and column map would take gigabytes; with each side
+/// at most this, a row is at most 512 KB (16-bit RGBA) and the column map 256 KB.
+pub const MAX_SIDE: u64 = 65_535;
+/// The most metadata (APPn and comment segments) a JPEG may carry. The decoder keeps every ICC
+/// profile segment it meets, so thousands of them would pile up in memory before any pixel
+/// limit is checked; real files carry a few hundred KB at most (an ICC profile, EXIF with a
+/// thumbnail, XMP).
+pub const MAX_JPEG_META: u64 = 16 << 20;
+/// What every "too big" refusal starts with: the panel shows it as a card, not an error.
+pub const TOO_LARGE: &str = "Too large to preview";
 
 /// The panel's state while it's open.
 pub struct Preview {
@@ -568,6 +579,7 @@ fn file(job: &Job, stop: &AtomicBool) -> Option<Loaded> {
             Ok(Some((picture, rgba))) => Some(Loaded { body: Body::Image(picture), link: None, rgba: Some(rgba) }),
             Ok(None) => None,
             Err(_) if stop.load(Relaxed) => None,
+            Err(e) if e.starts_with(TOO_LARGE) => Some(Loaded::body(Body::Card(Card { items: None, note: Some(e) }))),
             Err(e) => Some(Loaded::body(Body::Error(e))),
         };
     }
@@ -766,13 +778,12 @@ pub fn sniff_image(b: &[u8]) -> Option<Format> {
 /// Why an image of `w` × `h` isn't decoded, when it's too big (checked from its header, before
 /// anything is allocated for its pixels). `whole`: the decoder holds the whole image at once.
 pub fn too_big(w: u64, h: u64, whole: bool) -> Option<String> {
+    if w > MAX_SIDE || h > MAX_SIDE {
+        return Some(format!("{TOO_LARGE}: {w} × {h} is wider or taller than {MAX_SIDE} pixels"));
+    }
     let limit = if whole { MAX_PIXELS_WHOLE } else { MAX_PIXELS };
     (w.saturating_mul(h) > limit).then(|| {
-        format!(
-            "{w} × {h} is {:.0} megapixels: too big to preview (the limit is {} for this format)",
-            (w * h) as f64 / 1e6,
-            limit / 1_000_000
-        )
+        format!("{TOO_LARGE}: {w} × {h} is {:.0} megapixels (the limit is {} for this format)", (w * h) as f64 / 1e6, limit / 1_000_000)
     })
 }
 
@@ -791,7 +802,10 @@ type Decoded = (Picture, (u32, u32, Vec<u8>));
 
 /// Decodes an image shrunk to fit `fit`. `Ok(None)` when stopped; `Err` says why it can't show.
 fn image<R: BufRead + Seek>(format: Format, r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Option<Decoded>, String> {
-    let bad = |e: &dyn std::fmt::Display| format!("Couldn't decode this {}: {e}", format.name());
+    let bad = |e: &dyn std::fmt::Display| {
+        let e = e.to_string();
+        if e.starts_with(TOO_LARGE) { e } else { format!("Couldn't decode this {}: {e}", format.name()) }
+    };
     match format {
         Format::Png => png(r, fit, stop).map_err(|e| bad(&e)),
         Format::Jpeg => jpeg(r, fit, stop),
@@ -909,7 +923,18 @@ fn picture(format: Format, w: u32, h: u32, rgba: (u32, u32, Vec<u8>)) -> Decoded
     (Picture { width: w, height: h, format, shown: [rgba.0, rgba.1] }, rgba)
 }
 
-fn png<R: BufRead + Seek>(r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Option<Decoded>, String> {
+fn png<R: BufRead + Seek>(mut r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Option<Decoded>, String> {
+    // The size and interlacing from the header chunk, which always comes first, so a refusal
+    // says why rather than the decoder's own limits error.
+    if let Ok(head) = r.fill_buf()
+        && head.len() >= 29
+        && &head[12..16] == b"IHDR"
+    {
+        let be = |i: usize| u32::from_be_bytes([head[i], head[i + 1], head[i + 2], head[i + 3]]) as u64;
+        if let Some(why) = too_big(be(16), be(20), head[28] != 0) {
+            return Err(why);
+        }
+    }
     let mut d = png::Decoder::new_with_limits(r, png::Limits { bytes: MAX_PIXELS_WHOLE as usize * 4 });
     d.set_transformations(png::Transformations::normalize_to_color8());
     // The header only: nothing is allocated for pixels until the size is known to be fine.
@@ -947,8 +972,21 @@ fn png<R: BufRead + Seek>(r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Opti
     Ok(Some(picture(Format::Png, w, h, (dw, dh, s.finish()))))
 }
 
-fn jpeg<R: BufRead + Seek>(r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Option<Decoded>, String> {
+fn jpeg<R: BufRead + Seek>(mut r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Option<Decoded>, String> {
     let bad = |e: jpeg_decoder::Error| format!("Couldn't decode this JPEG: {e}");
+    // Its markers first: the metadata's size, and the frame's size before the decoder
+    // allocates anything for either.
+    match jpeg_scan(&mut r) {
+        Ok(Some((w, h, whole))) => {
+            if let Some(why) = too_big(w as u64, h as u64, whole) {
+                return Err(why);
+            }
+        }
+        Ok(None) => {}
+        Err(_) if stop.load(Relaxed) => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    r.seek(SeekFrom::Start(0)).map_err(|e| format!("Couldn't read it again from the start: {e}"))?;
     let mut d = jpeg_decoder::Decoder::new(r);
     d.read_info().map_err(bad)?;
     let info = d.info().ok_or("Couldn't decode this JPEG: no header")?;
@@ -1000,6 +1038,119 @@ fn jpeg<R: BufRead + Seek>(r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Opt
     Ok(Some(picture(Format::Jpeg, w, h, (dw, dh, rgba))))
 }
 
+/// Walks a JPEG's markers to its end (skipping the entropy-coded data between them): refuses
+/// one with more than [`MAX_JPEG_META`] of metadata, and gives its first frame's size and
+/// whether it's decoded whole (progressive, or 16-bit). Reads every byte once, never holding
+/// more than a buffer. Anything it can't follow is left to the decoder to report.
+fn jpeg_scan<R: BufRead + Seek>(r: &mut R) -> Result<Option<(u32, u32, bool)>, String> {
+    let io = |e: std::io::Error| format!("Couldn't read it: {e}");
+    let mut two = [0u8; 2];
+    r.read_exact(&mut two).map_err(io)?;
+    if two != [0xFF, 0xD8] {
+        return Ok(None);
+    }
+    let (mut meta, mut frame) = (0u64, None);
+    let mut pending = None;
+    loop {
+        let m = match pending.take() {
+            Some(m) => m,
+            None => match jpeg_marker(r).map_err(io)? {
+                Some(m) => m,
+                None => break,
+            },
+        };
+        match m {
+            0xD9 => break,
+            0x01 | 0xD0..=0xD8 => continue,
+            _ => {}
+        }
+        if r.read_exact(&mut two).is_err() {
+            break;
+        }
+        let mut body = (u16::from_be_bytes(two) as u64).saturating_sub(2);
+        if matches!(m, 0xE0..=0xEF | 0xFE) {
+            meta += body;
+            if meta > MAX_JPEG_META {
+                return Err(format!("{TOO_LARGE}: its metadata is over {} MB", MAX_JPEG_META >> 20));
+            }
+        }
+        // A start of frame: precision, height, width.
+        if matches!(m, 0xC0..=0xCF) && !matches!(m, 0xC4 | 0xC8 | 0xCC) && frame.is_none() && body >= 5 {
+            let mut sof = [0u8; 5];
+            r.read_exact(&mut sof).map_err(io)?;
+            body -= 5;
+            let (h, w) = (u16::from_be_bytes([sof[1], sof[2]]) as u32, u16::from_be_bytes([sof[3], sof[4]]) as u32);
+            let whole = matches!(m, 0xC2 | 0xC6 | 0xCA | 0xCE) || sof[0] > 8;
+            frame = Some((w, h, whole));
+        }
+        r.seek(SeekFrom::Current(body as i64)).map_err(io)?;
+        if m == 0xDA {
+            pending = jpeg_skip_scan(r).map_err(io)?;
+        }
+    }
+    Ok(frame)
+}
+
+/// The next marker's code, after its 0xFF (and any fill bytes); `None` at the end or where
+/// there's no marker.
+fn jpeg_marker<R: BufRead>(r: &mut R) -> std::io::Result<Option<u8>> {
+    let mut b = [0u8; 1];
+    if r.read(&mut b)? == 0 || b[0] != 0xFF {
+        return Ok(None);
+    }
+    loop {
+        if r.read(&mut b)? == 0 {
+            return Ok(None);
+        }
+        if b[0] != 0xFF {
+            return Ok(Some(b[0]));
+        }
+    }
+}
+
+/// Skips a scan's entropy-coded data: up to the next 0xFF that isn't a stuffed zero or a
+/// restart marker. The marker's code, consumed.
+fn jpeg_skip_scan<R: BufRead>(r: &mut R) -> std::io::Result<Option<u8>> {
+    let mut ff = false;
+    loop {
+        let (used, found) = {
+            let buf = r.fill_buf()?;
+            if buf.is_empty() {
+                return Ok(None);
+            }
+            let mut i = 0;
+            let mut found = None;
+            while i < buf.len() {
+                if ff {
+                    match buf[i] {
+                        0x00 | 0xD0..=0xD7 => ff = false,
+                        0xFF => {}
+                        m => {
+                            found = Some(m);
+                            i += 1;
+                            break;
+                        }
+                    }
+                    i += 1;
+                } else {
+                    match buf[i..].iter().position(|&b| b == 0xFF) {
+                        Some(k) => {
+                            i += k + 1;
+                            ff = true;
+                        }
+                        None => i = buf.len(),
+                    }
+                }
+            }
+            (i, found)
+        };
+        r.consume(used);
+        if found.is_some() {
+            return Ok(found);
+        }
+    }
+}
+
 fn cmyk_to_rgb(px: &[u8]) -> Vec<u8> {
     px.as_chunks::<4>()
         .0
@@ -1047,16 +1198,80 @@ fn gif<R: BufRead + Seek>(r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Opti
     Ok(shrink_whole(w, h, &canvas, 4, fit, stop).map(|px| picture(Format::Gif, w, h, px)))
 }
 
-fn webp<R: BufRead + Seek>(r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Option<Decoded>, String> {
+fn webp<R: BufRead + Seek>(mut r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Option<Decoded>, String> {
+    // The sizes in its bitstreams, before the decoder: its canvas size alone can hide a bigger
+    // image inside, which would be decoded before it's refused.
+    let frames = webp_frames(&mut r).map_err(|e| e.to_string())?;
+    r.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let mut d = image_webp::WebPDecoder::new(r).map_err(|e| e.to_string())?;
     let (w, h) = d.dimensions();
     if let Some(why) = too_big(w as u64, h as u64, true) {
         return Err(why);
     }
+    for (fw, fh) in frames {
+        if let Some(why) = too_big(fw as u64, fh as u64, true) {
+            return Err(why);
+        }
+        if fw > w || fh > h {
+            return Err(format!("its image ({fw} × {fh}) is bigger than its canvas ({w} × {h})"));
+        }
+    }
     let mut buf = vec![0; d.output_buffer_size().ok_or("too big")?];
     d.read_image(&mut buf).map_err(|e| e.to_string())?;
     let channels = if d.has_alpha() { 4 } else { 3 };
     Ok(shrink_whole(w, h, &buf, channels, fit, stop).map(|px| picture(Format::Webp, w, h, px)))
+}
+
+/// The width and height each image bitstream in a WebP file says it has (`VP8 `, `VP8L`, and
+/// those inside animation frames), read from their headers without decoding. At most
+/// [`WEBP_CHUNKS`] chunks are looked at.
+fn webp_frames<R: Read + Seek>(r: &mut R) -> std::io::Result<Vec<(u32, u32)>> {
+    let mut head = [0u8; 12];
+    r.read_exact(&mut head)?;
+    let end = (u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as u64).saturating_add(8);
+    let mut out = Vec::new();
+    webp_chunks(r, 12, end, &mut out, 0)?;
+    Ok(out)
+}
+
+const WEBP_CHUNKS: usize = 100_000;
+
+fn webp_chunks<R: Read + Seek>(r: &mut R, mut at: u64, end: u64, out: &mut Vec<(u32, u32)>, depth: u8) -> std::io::Result<()> {
+    let mut seen = 0;
+    while at + 8 <= end && seen < WEBP_CHUNKS {
+        seen += 1;
+        r.seek(SeekFrom::Start(at))?;
+        let mut h = [0u8; 8];
+        if r.read_exact(&mut h).is_err() {
+            break;
+        }
+        let size = u32::from_le_bytes([h[4], h[5], h[6], h[7]]) as u64;
+        let body = at + 8;
+        match &h[..4] {
+            b"VP8 " => {
+                // Frame tag (3 bytes), start code 9d 01 2a, then 14-bit width and height.
+                let mut b = [0u8; 10];
+                if r.read_exact(&mut b).is_ok() && b[3..6] == [0x9d, 0x01, 0x2a] {
+                    let w = u16::from_le_bytes([b[6], b[7]]) as u32 & 0x3fff;
+                    let h = u16::from_le_bytes([b[8], b[9]]) as u32 & 0x3fff;
+                    out.push((w, h));
+                }
+            }
+            b"VP8L" => {
+                // Signature 0x2f, then 14 bits of width − 1 and 14 of height − 1.
+                let mut b = [0u8; 5];
+                if r.read_exact(&mut b).is_ok() && b[0] == 0x2f {
+                    let v = u32::from_le_bytes([b[1], b[2], b[3], b[4]]);
+                    out.push(((v & 0x3fff) + 1, ((v >> 14) & 0x3fff) + 1));
+                }
+            }
+            // An animation frame: 16 bytes of its own header, then its chunks.
+            b"ANMF" if depth == 0 => webp_chunks(r, body + 16, (body + size).min(end), out, 1)?,
+            _ => {}
+        }
+        at = body + size + (size & 1);
+    }
+    Ok(())
 }
 
 fn bmp<R: BufRead + Seek>(r: R, fit: [u32; 2], stop: &AtomicBool) -> Result<Option<Decoded>, String> {
@@ -1298,7 +1513,84 @@ mod tests {
             drop(w);
         }
         let err = image(Format::Png, std::io::Cursor::new(bytes), DEFAULT_FIT, &never()).unwrap_err();
-        assert!(err.contains("400 megapixels") && err.contains("too big"), "{err}");
+        assert!(err.contains("400 megapixels") && err.starts_with(TOO_LARGE), "{err}");
+    }
+
+    /// A PNG header with `w` × `h` and one empty data chunk.
+    fn png_header(w: u32, h: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut e = png::Encoder::new(&mut bytes, w, h);
+            e.set_color(png::ColorType::Grayscale);
+            let mut wr = e.write_header().unwrap();
+            wr.write_chunk(png::chunk::IDAT, &[0; 8]).unwrap();
+        }
+        bytes
+    }
+
+    /// 99,999,999 × 1 is under the pixel limit, but its row and column map would take a
+    /// gigabyte: each side is capped too, and the refusal is a card.
+    #[test]
+    fn a_very_wide_image_is_refused_from_its_header() {
+        let err = image(Format::Png, std::io::Cursor::new(png_header(99_999_999, 1)), DEFAULT_FIT, &never()).unwrap_err();
+        assert!(err.starts_with(TOO_LARGE) && err.contains("wider or taller"), "{err}");
+        assert!(too_big(65_535, 1, false).is_none() && too_big(65_536, 1, false).is_some() && too_big(1, 70_000, true).is_some());
+        let d = folder("wide");
+        let p = d.join("wide.png");
+        std::fs::write(&p, png_header(99_999_999, 1)).unwrap();
+        let job = Job { path: p, is_dir: false, is_link: false, ext: "png".into(), size: 1, fit: DEFAULT_FIT };
+        let Body::Card(c) = load(&job, &never()).unwrap().body else { panic!("a card") };
+        assert!(c.note.unwrap().starts_with(TOO_LARGE));
+    }
+
+    /// Thousands of ICC segments would pile up in the decoder: the markers are walked first.
+    #[test]
+    fn a_jpeg_full_of_metadata_is_refused_before_decoding() {
+        use image::ImageEncoder;
+        let mut jpg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpg).write_image(&[128; 16 * 16 * 3], 16, 16, image::ExtendedColorType::Rgb8).unwrap();
+        // APP2 "ICC_PROFILE" segments of 64 KB each, 300 of them: 19 MB.
+        let mut seg = vec![0xFF, 0xE2, 0xFF, 0xFF];
+        seg.extend_from_slice(b"ICC_PROFILE\0\x01\x01");
+        seg.resize(2 + 0xFFFF, 0);
+        let bomb = [&jpg[..2], &seg.repeat(300), &jpg[2..]].concat();
+        let err = image(Format::Jpeg, std::io::Cursor::new(&bomb), DEFAULT_FIT, &never()).unwrap_err();
+        assert!(err.starts_with(TOO_LARGE) && err.contains("metadata"), "{err}");
+        // A few segments are fine, and so is a scan with stuffed bytes and restart markers.
+        let ok = [&jpg[..2], &seg.repeat(3), &jpg[2..]].concat();
+        assert!(image(Format::Jpeg, std::io::Cursor::new(&ok), DEFAULT_FIT, &never()).unwrap().is_some());
+        assert_eq!(jpeg_scan(&mut std::io::Cursor::new(&ok)).unwrap(), Some((16, 16, false)));
+        // The size in the frame header is checked before the decoder runs.
+        let mut huge = jpg.clone();
+        let sof = huge.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        huge[sof + 5..sof + 9].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        let err = image(Format::Jpeg, std::io::Cursor::new(&huge), DEFAULT_FIT, &never()).unwrap_err();
+        assert!(err.starts_with(TOO_LARGE), "{err}");
+    }
+
+    /// A 1 × 1 canvas around a 16,000 × 16,000 bitstream: refused from the bitstream's header,
+    /// never decoded.
+    #[test]
+    fn a_webp_hiding_a_bigger_image_is_refused_before_decoding() {
+        let chunk =
+            |id: &[u8], body: &[u8]| [id, &(body.len() as u32).to_le_bytes(), body, if body.len() % 2 == 1 { &[0] } else { &[] }].concat();
+        // VP8X: flags, canvas 1 × 1 (each stored minus one, 24 bits).
+        let vp8x = chunk(b"VP8X", &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // VP8: a key frame tag, the start code, 16,000 × 16,000, and a little filler.
+        let mut vp8 = vec![0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a];
+        vp8.extend_from_slice(&16_000u16.to_le_bytes());
+        vp8.extend_from_slice(&16_000u16.to_le_bytes());
+        vp8.extend_from_slice(&[0; 64]);
+        let body = [b"WEBP".as_slice(), &vp8x, &chunk(b"VP8 ", &vp8)].concat();
+        let file = [b"RIFF".as_slice(), &(body.len() as u32).to_le_bytes(), &body].concat();
+        assert_eq!(webp_frames(&mut std::io::Cursor::new(&file)).unwrap(), [(16_000, 16_000)]);
+        let err = image(Format::Webp, std::io::Cursor::new(&file), DEFAULT_FIT, &never()).unwrap_err();
+        assert!(err.starts_with(TOO_LARGE), "{err}");
+        // An ordinary WebP's bitstream is its own size.
+        let d = folder("webp-frames");
+        let imgs = write_images(&d, 64, 48);
+        let real = std::fs::read(&imgs[3].0).unwrap();
+        assert_eq!(webp_frames(&mut std::io::Cursor::new(&real)).unwrap(), [(64, 48)]);
     }
 
     fn gradient(w: u32, h: u32) -> Vec<u8> {

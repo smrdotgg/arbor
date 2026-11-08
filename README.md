@@ -170,8 +170,10 @@ clears the filter or cancels a file operation.
   by row as it decodes, and a JPEG decodes at 1/2, 1/4 or 1/8 size straight from its DCT. JPEGs
   are turned as their EXIF orientation says. The header gives the size first, and anything over
   100 megapixels (24 for GIF, WebP, BMP, interlaced PNG and progressive JPEG, which decode whole
-  first and can't stop partway, so one that can't be cancelled is short) is refused with a
-  message, so a huge image never takes gigabytes.
+  first and can't stop partway, so one that can't be cancelled is short), or wider or taller
+  than 65,535 pixels, is refused with a "Too large to preview" card, so a huge image never
+  takes gigabytes. So is a JPEG with over 16 MB of metadata (its markers are walked before it's
+  decoded), and a WebP's bitstreams are checked against its canvas before decoding.
 - **Everything else**, and folders: name, kind, size and date, and for a folder how many items
   it has (one read of it). PDF, video, audio, office documents and other image formats (HEIC,
   TIFF, RAW) say they need the platform's own preview API, which Arbor doesn't use yet.
