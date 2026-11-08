@@ -8,6 +8,7 @@ mod app;
 mod commands;
 mod config;
 mod fs;
+mod noclobber;
 mod ops;
 mod palette;
 mod timing;

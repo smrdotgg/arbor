@@ -1,18 +1,27 @@
 //! File operations: copy, move, trash, and undo. Each runs on its own worker thread and reports
 //! progress through atomics; the UI reads them in `poll`.
 //!
-//! Safety rules: nothing is ever overwritten. A name that's taken gets a free one instead
-//! ("name copy" in the same folder, "name 2" elsewhere). Folders can't go into themselves.
-//! Undo refuses rather than guesses: every result is fingerprinted when the operation finishes,
-//! and undo checks all of them before touching anything (see [`Print`]).
+//! Safety rules: nothing is ever overwritten. Every move, rename and copy uses the no-replace
+//! primitives in [`crate::noclobber`], so a name taken between choosing it and using it fails
+//! instead of destroying what took it; operations then pick another free name ("name copy" in
+//! the same folder, "name 2" elsewhere), and undo leaves that item where it is. Folders can't go
+//! into themselves. Undo refuses rather than guesses: every result is fingerprinted when the
+//! operation finishes, undo checks all of them before touching anything, and checks each again
+//! right before its own step (see [`Print`]).
 
 use std::fs::Metadata;
 use std::hash::{Hash, Hasher};
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+
+use crate::noclobber;
+
+/// How many free names an operation tries for one item when each is taken before it can be
+/// used (another app creating files there at the same moment).
+const TRIES: usize = 32;
 
 pub enum Op {
     Copy {
@@ -81,6 +90,20 @@ struct Step {
     print: Print,
     /// Where it goes back to; `None` trashes it (a copy, duplicate or new folder).
     back: Option<PathBuf>,
+    /// An earlier try at this step moved it back across disks (copy, then delete) and the
+    /// delete didn't finish.
+    split: Option<Split>,
+}
+
+/// A move back across disks that copied everything to `back` but couldn't remove all of the
+/// original from `at`. Both halves are fingerprinted as that try left them, so a retry can
+/// finish removing the rest only while neither has changed, and otherwise says where things are.
+#[derive(Debug, Clone)]
+struct Split {
+    /// The complete copy at `back`.
+    copy: Print,
+    /// What's still at `at`.
+    rest: Print,
 }
 
 impl Undo {
@@ -89,8 +112,8 @@ impl Undo {
         let steps: Vec<Step> = items
             .into_iter()
             .filter_map(|(at, back)| {
-                let print = Print::of(&at.symlink_metadata().ok()?);
-                Some(Step { at, print, back })
+                let print = Print::of(&at, &at.symlink_metadata().ok()?);
+                Some(Step { at, print, back, split: None })
             })
             .collect();
         (!steps.is_empty()).then_some(Undo { what, steps })
@@ -112,10 +135,9 @@ impl Undo {
 /// A cheap fingerprint of what an operation left on disk, taken when it finished. Undo compares
 /// it with the disk and refuses on any difference, so a wrong undo can't happen silently.
 ///
-/// - Identity: device and inode on Unix, so a file deleted and recreated under the same name
-///   reads as replaced. Windows has no stable file id in std (`file_index` is unstable), so it
-///   uses the creation time, which also changes when a file is replaced (except within NTFS's
-///   15-second "tunnelling" window, where size and mtime still have to match).
+/// - Identity: device and inode on Unix, volume serial number and file index on Windows
+///   ([`noclobber::file_id`]), so a file deleted and recreated under the same name reads as
+///   replaced.
 /// - Type, size (files and links) and modified time. A folder's own mtime changes when an
 ///   entry directly inside it is added, removed or renamed.
 /// - `tree`: for folders whose undo trashes them (copies, duplicates, new folders), a sum over
@@ -124,8 +146,15 @@ impl Undo {
 ///   don't walk: moving a folder back carries whatever is inside with it and loses nothing, so a
 ///   walk would cost O(tree) to protect nothing.
 ///
-/// Not seen: an edit that keeps the size and restores the mtime exactly (that needs content
-/// hashing, far too slow), and changes in the instant between the check and the undo.
+/// Known limits (contents are never hashed: far too slow for big files):
+///
+/// - An edit that keeps the size and leaves the mtime where it was isn't seen. That includes an
+///   edit made within the disk's timestamp granularity of the fingerprint: 2 s on FAT, 1 s on
+///   HFS+ and ext3, 100 ns on NTFS, 1 ns on APFS and ext4 (but ext4 and NTFS stamp from a clock
+///   that ticks every few ms, so two writes in the same tick look alike). Pinned by the test
+///   `same_size_edit_within_mtime_granularity_is_not_seen`.
+/// - The instant between the last check and the act. Each step is checked right before it runs,
+///   and moves can't overwrite whatever appears in that instant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Print {
     kind: Kind,
@@ -163,27 +192,43 @@ impl Kind {
 }
 
 impl Print {
-    fn of(m: &Metadata) -> Print {
+    fn of(path: &Path, m: &Metadata) -> Print {
         let kind = Kind::of(m);
-        Print { kind, size: if kind == Kind::Folder { 0 } else { m.len() }, mtime: m.modified().ok(), id: file_id(m), tree: None }
+        Print {
+            kind,
+            size: if kind == Kind::Folder { 0 } else { m.len() },
+            mtime: m.modified().ok(),
+            id: noclobber::file_id(path, m),
+            tree: None,
+        }
     }
 }
 
-#[cfg(unix)]
-fn file_id(m: &Metadata) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    Some((m.dev(), m.ino()))
+/// How an item differs from its fingerprint.
+enum Diff {
+    Gone,
+    Kind(Kind),
+    Replaced,
+    Edited,
+    Inside(std::cmp::Ordering),
+    Unreadable,
 }
 
-#[cfg(windows)]
-fn file_id(m: &Metadata) -> Option<(u64, u64)> {
-    let d = m.created().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
-    Some((d.as_secs(), u64::from(d.subsec_nanos())))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn file_id(_: &Metadata) -> Option<(u64, u64)> {
-    None
+impl Diff {
+    /// "“name” was edited", for an item that was `was`.
+    fn say(&self, name: &str, was: Kind) -> String {
+        match self {
+            Diff::Gone => format!("{name} was moved or deleted"),
+            Diff::Kind(k) => format!("{name} was replaced by {}", k.name()),
+            Diff::Replaced => format!("{name} was replaced by another item with the same name"),
+            Diff::Edited if was == Kind::Folder => format!("items were added, removed or renamed in {name}"),
+            Diff::Edited => format!("{name} was edited"),
+            Diff::Inside(std::cmp::Ordering::Greater) => format!("items were added inside {name}"),
+            Diff::Inside(std::cmp::Ordering::Less) => format!("items were removed from inside {name}"),
+            Diff::Inside(std::cmp::Ordering::Equal) => format!("something inside {name} was edited"),
+            Diff::Unreadable => format!("something inside {name} can't be read any more"),
+        }
+    }
 }
 
 /// Everything inside a folder, in one order-independent sum: each entry's path below the folder,
@@ -197,8 +242,10 @@ struct Tree {
 }
 
 impl Tree {
-    fn add(&mut self, rel: &Path, m: &Metadata) {
-        let p = Print::of(m);
+    /// No limit, for `walk`.
+    const ALL: Tree = Tree { items: u64::MAX, bytes: 0, sum: 0 };
+
+    fn add(&mut self, rel: &Path, p: &Print) {
         let mut h = std::hash::DefaultHasher::new();
         (rel, p.kind, p.size, p.mtime, p.id).hash(&mut h);
         self.items += 1;
@@ -271,11 +318,72 @@ pub fn start(op: Op, waker: Option<rune::Waker>) -> Running {
     Running { verb, progress, done }
 }
 
+/// Renames `from` to `to` in place (the inline rename), never over another item. A case-only
+/// change on a case-insensitive disk names the item itself and goes through. The error is the
+/// whole status-bar message.
+pub fn rename(from: &Path, to: &Path) -> Result<(), String> {
+    rename_between(from, to, || {})
+}
+
+/// [`rename`], running `between` after the up-front check (tests put an item at `to` there).
+fn rename_between(from: &Path, to: &Path, between: impl FnOnce()) -> Result<(), String> {
+    let taken = || format!("“{}” already exists", name_of(to));
+    if to.symlink_metadata().is_ok() && !noclobber::same_item(from, to) {
+        return Err(taken());
+    }
+    between();
+    match noclobber::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(taken()),
+        Err(e) => Err(format!("Couldn't rename: {e}")),
+    }
+}
+
+/// Makes a new empty folder named `name` (or a free variant) in `dir`; returns its path.
+pub fn new_folder(dir: &Path, name: &str) -> io::Result<PathBuf> {
+    let mut last = None;
+    for _ in 0..TRIES {
+        let path = free_name(dir, std::ffi::OsStr::new(name), false);
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            // Taken since `free_name` looked: try the next free name.
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::from(ErrorKind::AlreadyExists)))
+}
+
 /// Runs an operation on this thread, trashing with `trash` (tests).
 #[cfg(test)]
 fn run_with(op: Op, trash: TrashFn) -> Outcome {
+    run_hooked(op, trash, Hooks::default())
+}
+
+#[cfg(test)]
+fn run_hooked(op: Op, trash: TrashFn, hooks: Hooks) -> Outcome {
     let p = Progress::default();
-    Worker::new(&p, None, trash).run(op)
+    let mut w = Worker::new(&p, None, trash);
+    w.hooks = hooks;
+    w.run(op)
+}
+
+#[cfg(test)]
+type PathHook = Box<dyn FnMut(&Path)>;
+#[cfg(test)]
+type PathTest = Box<dyn Fn(&Path) -> bool>;
+
+/// Test-only ways to make the worker meet the disk at its worst. Not compiled outside tests.
+#[cfg(test)]
+#[derive(Default)]
+struct Hooks {
+    /// Called with the destination right before each destructive step, after every check:
+    /// where a test makes another app's file appear.
+    before_act: Option<PathHook>,
+    /// Treat every rename as crossing disks, so moves copy then delete.
+    cross_device: bool,
+    /// Fail removing these items (a permission error halfway through a delete).
+    fail_remove: Option<PathTest>,
 }
 
 struct Worker<'a> {
@@ -283,11 +391,47 @@ struct Worker<'a> {
     waker: Option<&'a rune::Waker>,
     last_wake: Instant,
     trash: TrashFn,
+    #[cfg(test)]
+    hooks: Hooks,
+}
+
+/// Why a move didn't happen.
+enum MoveError {
+    /// Something is at the destination. Nothing changed.
+    Taken,
+    /// Nothing changed (a half-made copy was removed again).
+    Failed(String),
+    /// Across disks: everything was copied to the destination, but part of the original
+    /// couldn't be removed (`why`). Both halves fingerprinted as they are now.
+    Split { split: Box<Split>, why: String },
+}
+
+enum CopyError {
+    /// Something is at the destination. Nothing was made.
+    Taken,
+    Failed(String),
+}
+
+/// An item a copy made, and what it was copied from.
+struct Made {
+    src: PathBuf,
+    dst: PathBuf,
+    dir: bool,
+    /// For a move, the source file or link as it was copied, so the delete afterwards removes
+    /// it only if it hasn't changed since. Folders are removed only once empty.
+    was: Option<Print>,
 }
 
 impl<'a> Worker<'a> {
     fn new(p: &'a Progress, waker: Option<&'a rune::Waker>, trash: TrashFn) -> Self {
-        Worker { p, waker, last_wake: Instant::now(), trash }
+        Worker {
+            p,
+            waker,
+            last_wake: Instant::now(),
+            trash,
+            #[cfg(test)]
+            hooks: Hooks::default(),
+        }
     }
 
     fn cancelled(&self) -> bool {
@@ -306,6 +450,34 @@ impl<'a> Worker<'a> {
         }
     }
 
+    #[cfg(test)]
+    fn before_act(&mut self, dest: &Path) {
+        if let Some(h) = &mut self.hooks.before_act {
+            h(dest);
+        }
+    }
+
+    #[cfg(not(test))]
+    #[inline(always)]
+    fn before_act(&mut self, _: &Path) {}
+
+    fn rename_excl(&self, from: &Path, to: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        if self.hooks.cross_device {
+            return Err(io::Error::from(ErrorKind::CrossesDevices));
+        }
+        noclobber::rename(from, to)
+    }
+
+    /// Removes one file or link, or one empty folder.
+    fn remove_one(&self, p: &Path, dir: bool) -> io::Result<()> {
+        #[cfg(test)]
+        if self.hooks.fail_remove.as_ref().is_some_and(|f| f(p)) {
+            return Err(io::Error::new(ErrorKind::PermissionDenied, "permission denied"));
+        }
+        if dir { std::fs::remove_dir(p) } else { std::fs::remove_file(p) }
+    }
+
     fn run(&mut self, op: Op) -> Outcome {
         let mut out = Outcome { results: Vec::new(), undo: None, errors: Vec::new(), refused: None, cancelled: false };
         match op {
@@ -320,7 +492,7 @@ impl<'a> Worker<'a> {
                     match self.copy_one(src, &dest) {
                         Ok((to, print)) => {
                             out.results.push(to.clone());
-                            steps.push(Step { at: to, print, back: None });
+                            steps.push(Step { at: to, print, back: None, split: None });
                         }
                         Err(e) => out.errors.push(format!("{}: {e}", name_of(src))),
                     }
@@ -378,7 +550,8 @@ impl<'a> Worker<'a> {
     }
 
     /// Checks every step first and changes nothing unless all pass (no partial undo of a
-    /// changed disk). Then undoes them, keeping the steps that fail in `out.undo`.
+    /// changed disk). Then undoes them one by one, checking each again right before its own
+    /// step, and keeps the steps that don't go back in `out.undo`.
     fn undo(&mut self, undo: Undo, out: &mut Outcome) {
         self.p.items_total.store(undo.steps.len(), Relaxed);
         let problems: Vec<String> = undo.steps.iter().filter_map(|s| self.check(undo.what, s).err()).collect();
@@ -393,27 +566,22 @@ impl<'a> Worker<'a> {
             return;
         }
         let Undo { what, steps } = undo;
+        // With one step, the check above ran just now; with more, the others' checks (walks,
+        // possibly) ran in between, so each is checked again right before it's undone.
+        let recheck = steps.len() > 1;
         let mut left = Vec::new();
         for step in steps {
             if self.cancelled() {
                 left.push(step);
                 continue;
             }
-            let done = match &step.back {
-                Some(back) => self.rename_or_copy(&step.at, back).map(|()| back.clone()),
-                None => (self.trash)(&step.at).map(|_| step.at.clone()),
-            };
-            match done {
-                Ok(p) => {
-                    if what == What::Trash {
-                        crate::trash::forget(&step.at);
-                    }
-                    out.results.push(p);
-                }
-                Err(e) => {
-                    out.errors.push(format!("{}: {e}", name_of(&step.at)));
-                    left.push(step);
-                }
+            if recheck && let Err(why) = self.check(what, &step) {
+                out.errors.push(format!("Not undone: {why}"));
+                left.push(step);
+                continue;
+            }
+            if let Some(kept) = self.undo_step(what, step, out) {
+                left.push(kept);
             }
             self.p.items_done.fetch_add(1, Relaxed);
             self.tick(0);
@@ -423,51 +591,75 @@ impl<'a> Worker<'a> {
         }
     }
 
+    /// Undoes one checked step. Hands it back (updated if it got halfway) when it didn't go.
+    fn undo_step(&mut self, what: What, step: Step, out: &mut Outcome) -> Option<Step> {
+        let name = name_of(&step.at);
+        let Some(back) = step.back.clone() else {
+            self.before_act(&step.at);
+            return match (self.trash)(&step.at) {
+                Ok(_) => {
+                    out.results.push(step.at);
+                    None
+                }
+                Err(e) => {
+                    out.errors.push(format!("{name}: {e}"));
+                    Some(step)
+                }
+            };
+        };
+        self.before_act(&back);
+        let moved = match &step.split {
+            // An earlier try copied it back across disks; remove what's left of the original.
+            Some(split) => self.remove_rest(&step.at, &split.copy),
+            None => self.relocate(&step.at, &back),
+        };
+        match moved {
+            Ok(()) => {
+                if what == What::Trash {
+                    crate::trash::forget(&step.at);
+                }
+                out.results.push(back);
+                None
+            }
+            Err(MoveError::Taken) => {
+                out.errors.push(format!("“{}” was taken just now, so “{name}” stayed where it is", back.display()));
+                Some(step)
+            }
+            Err(MoveError::Failed(e)) => {
+                out.errors.push(format!("{name}: {e}"));
+                Some(step)
+            }
+            Err(MoveError::Split { split, why }) => {
+                out.errors.push(format!(
+                    "“{name}” is back in “{}”, but part of the original couldn't be removed from “{}” ({why}). Undo again to remove the rest once that's fixed",
+                    parent_of(&back),
+                    parent_of(&step.at),
+                ));
+                Some(Step { split: Some(*split), ..step })
+            }
+        }
+    }
+
     /// Whether `step` can be undone: its item is still exactly as the operation left it, and
     /// where it goes back to is free. Says what changed when not.
     fn check(&self, what: What, step: &Step) -> Result<(), String> {
         let name = format!("“{}”", name_of(&step.at));
-        let m = match step.at.symlink_metadata() {
-            Ok(m) => m,
-            Err(_) if what == What::Trash => return Err(format!("{name} is no longer in the Trash")),
-            Err(_) if step.at.parent().is_some_and(|p| p.symlink_metadata().is_err()) => {
+        if let (Some(split), Some(back)) = (&step.split, &step.back) {
+            return self.check_split(&name, step, split, back);
+        }
+        match self.diff(&step.at, &step.print) {
+            None => {}
+            Some(Diff::Gone) if what == What::Trash => return Err(format!("{name} is no longer in the Trash")),
+            Some(Diff::Gone) if step.at.parent().is_some_and(|p| p.symlink_metadata().is_err()) => {
                 return Err(format!("the folder {name} was in is gone (moved, deleted, or its drive was ejected)"));
             }
-            Err(_) => return Err(format!("{name} was moved or deleted")),
-        };
-        let now = Print::of(&m);
-        let was = &step.print;
-        if now.kind != was.kind {
-            return Err(format!("{name} was replaced by {}", now.kind.name()));
+            Some(d) => return Err(d.say(&name, step.print.kind)),
         }
-        if now.id != was.id {
-            return Err(format!("{name} was replaced by another item with the same name"));
-        }
-        if now.size != was.size || now.mtime != was.mtime {
-            return Err(match was.kind {
-                Kind::Folder => format!("items were added, removed or renamed in {name}"),
-                _ => format!("{name} was edited"),
-            });
-        }
-        if let Some(tree) = &was.tree {
-            let mut seen = Tree::default();
-            let read = self.walk(&step.at, Path::new(""), tree, &mut seen);
-            if self.cancelled() {
-                return Ok(()); // the caller sees the cancel and changes nothing
-            }
-            if read.is_err() || seen != *tree {
-                return Err(match seen.items.cmp(&tree.items) {
-                    _ if read.is_err() => format!("something inside {name} can't be read any more"),
-                    std::cmp::Ordering::Greater => format!("items were added inside {name}"),
-                    std::cmp::Ordering::Less => format!("items were removed from inside {name}"),
-                    std::cmp::Ordering::Equal => format!("something inside {name} was edited"),
-                });
-            }
+        if self.cancelled() {
+            return Ok(()); // the caller sees the cancel and changes nothing
         }
         if let Some(back) = &step.back {
-            if let Ok(there) = back.symlink_metadata()
-                && !same_file(&step.at, &m, back, &there)
-            {
+            if back.symlink_metadata().is_ok() && !noclobber::same_item(&step.at, back) {
                 return Err(format!("“{}” is already taken, so {name} can't go back", back.display()));
             }
             if let Some(parent) = back.parent().filter(|p| !p.is_dir()) {
@@ -477,21 +669,76 @@ impl<'a> Worker<'a> {
         Ok(())
     }
 
+    /// For a step an earlier try left split across disks: the copy at `back` and the rest at
+    /// `at` must both be as that try left them (the rest may have been removed since).
+    fn check_split(&self, name: &str, step: &Step, split: &Split, back: &Path) -> Result<(), String> {
+        let (here, there) = (parent_of(&step.at), parent_of(back));
+        if self.diff(back, &split.copy).is_some() {
+            return Err(format!(
+                "{name} was copied back to “{there}”, but that copy changed since, and part of the original is still in “{here}”"
+            ));
+        }
+        match self.diff(&step.at, &split.rest) {
+            None | Some(Diff::Gone) => Ok(()),
+            Some(_) => {
+                Err(format!("{name} is back in “{there}”, but what's left of the original in “{here}” changed since, so it was left alone"))
+            }
+        }
+    }
+
+    /// How `path` differs from `was` (including everything inside when `was` has a tree).
+    fn diff(&self, path: &Path, was: &Print) -> Option<Diff> {
+        let Ok(m) = path.symlink_metadata() else { return Some(Diff::Gone) };
+        let now = Print::of(path, &m);
+        if now.kind != was.kind {
+            return Some(Diff::Kind(now.kind));
+        }
+        if now.id != was.id {
+            return Some(Diff::Replaced);
+        }
+        if now.size != was.size || now.mtime != was.mtime {
+            return Some(Diff::Edited);
+        }
+        let tree = was.tree.as_ref()?;
+        let mut seen = Tree::default();
+        let read = self.walk(path, Path::new(""), tree, &mut seen);
+        if self.cancelled() {
+            return None; // the caller sees the cancel and changes nothing
+        }
+        match read {
+            Err(_) => Some(Diff::Unreadable),
+            Ok(()) if seen != *tree => Some(Diff::Inside(seen.items.cmp(&tree.items))),
+            Ok(()) => None,
+        }
+    }
+
     /// Adds everything under `dir` to `seen`, stopping once it has seen more than `cap` has.
-    fn walk(&self, dir: &Path, rel: &Path, cap: &Tree, seen: &mut Tree) -> std::io::Result<()> {
+    fn walk(&self, dir: &Path, rel: &Path, cap: &Tree, seen: &mut Tree) -> io::Result<()> {
         for de in std::fs::read_dir(dir)? {
             if self.cancelled() || seen.items > cap.items {
                 return Ok(());
             }
             let de = de?;
-            let m = de.path().symlink_metadata()?;
+            let path = de.path();
+            let m = path.symlink_metadata()?;
             let rel = rel.join(de.file_name());
-            seen.add(&rel, &m);
+            seen.add(&rel, &Print::of(&path, &m));
             if m.is_dir() {
-                self.walk(&de.path(), &rel, cap, seen)?;
+                self.walk(&path, &rel, cap, seen)?;
             }
         }
         Ok(())
+    }
+
+    /// `path`'s fingerprint, with everything inside when it's a folder.
+    fn print_all(&self, path: &Path) -> io::Result<Print> {
+        let mut p = Print::of(path, &path.symlink_metadata()?);
+        if p.kind == Kind::Folder {
+            let mut t = Tree::default();
+            self.walk(path, Path::new(""), &Tree::ALL, &mut t)?;
+            p.tree = Some(t);
+        }
+        Ok(p)
     }
 
     /// Copies `src` into `dest_dir` under a free name; returns where it went and its fingerprint.
@@ -501,50 +748,79 @@ impl<'a> Worker<'a> {
             return Err("can't copy a folder into itself".into());
         }
         let same_dir = src.parent() == Some(dest_dir);
-        let to = free_name(dest_dir, name, same_dir);
-        let mut tree = Some(Tree::default());
-        if let Err(e) = self.copy_tree(src, &to, Path::new(""), &mut tree) {
-            // Don't leave a half-made copy behind.
-            remove_tree(&to);
-            return Err(e);
+        for _ in 0..TRIES {
+            let to = free_name(dest_dir, name, same_dir);
+            self.before_act(&to);
+            let mut tree = Some(Tree::default());
+            let mut made = Vec::new();
+            match self.copy_tree(src, &to, Path::new(""), &mut tree, &mut made, false) {
+                Ok(()) => {
+                    let mut print = Print::of(&to, &to.symlink_metadata().map_err(|e| e.to_string())?);
+                    if print.kind == Kind::Folder {
+                        print.tree = tree;
+                    }
+                    return Ok((to, print));
+                }
+                // Taken since `free_name` looked: try the next free name.
+                Err(CopyError::Taken) => {}
+                Err(CopyError::Failed(e)) => {
+                    // Don't leave a half-made copy behind.
+                    unmake(&made);
+                    return Err(e);
+                }
+            }
         }
-        let mut print = Print::of(&to.symlink_metadata().map_err(|e| e.to_string())?);
-        if print.kind == Kind::Folder {
-            print.tree = tree;
-        }
-        Ok((to, print))
+        Err("every free name was taken before it could be used".into())
     }
 
-    /// Copies `src` to `dst`. With `tree`, adds each item made below the top (`rel` is its path
-    /// from the top) as it lands, which costs one `lstat` per item and no second walk.
-    fn copy_tree(&mut self, src: &Path, dst: &Path, rel: &Path, tree: &mut Option<Tree>) -> Result<(), String> {
+    /// Copies `src` to `dst`, never over anything. Each item made is pushed to `made` as it
+    /// lands; with `for_move`, with the source's fingerprint. With `tree`, adds each item made
+    /// below the top (`rel` is its path from the top), which costs one `lstat` per item.
+    fn copy_tree(
+        &mut self,
+        src: &Path,
+        dst: &Path,
+        rel: &Path,
+        tree: &mut Option<Tree>,
+        made: &mut Vec<Made>,
+        for_move: bool,
+    ) -> Result<(), CopyError> {
         if self.cancelled() {
-            return Err("cancelled".into());
+            return Err(CopyError::Failed("cancelled".into()));
         }
-        let meta = src.symlink_metadata().map_err(|e| e.to_string())?;
+        let top = rel.as_os_str().is_empty();
+        let fail = |e: io::Error| match e.kind() {
+            ErrorKind::AlreadyExists if top => CopyError::Taken,
+            ErrorKind::AlreadyExists => CopyError::Failed(format!("something else appeared at “{}” during the copy", dst.display())),
+            _ => CopyError::Failed(e.to_string()),
+        };
+        let meta = src.symlink_metadata().map_err(fail)?;
         let ft = meta.file_type();
+        let was = (for_move && !ft.is_dir()).then(|| Print::of(src, &meta));
         if ft.is_symlink() {
-            let target = std::fs::read_link(src).map_err(|e| e.to_string())?;
-            make_symlink(&target, dst, src.is_dir()).map_err(|e| e.to_string())?;
+            let target = std::fs::read_link(src).map_err(fail)?;
+            make_symlink(&target, dst, src.is_dir()).map_err(fail)?;
+            made.push(Made { src: src.into(), dst: dst.into(), dir: false, was });
         } else if ft.is_dir() {
-            std::fs::create_dir(dst).map_err(|e| e.to_string())?;
+            std::fs::create_dir(dst).map_err(fail)?;
+            made.push(Made { src: src.into(), dst: dst.into(), dir: true, was });
             let _ = std::fs::set_permissions(dst, meta.permissions());
-            for de in std::fs::read_dir(src).map_err(|e| e.to_string())? {
-                let de = de.map_err(|e| e.to_string())?;
+            for de in std::fs::read_dir(src).map_err(fail)? {
+                let de = de.map_err(fail)?;
                 let name = de.file_name();
-                let rel = if tree.is_some() { rel.join(&name) } else { PathBuf::new() };
-                self.copy_tree(&de.path(), &dst.join(&name), &rel, tree)?;
+                let rel = if tree.is_some() { rel.join(&name) } else { rel.join("_") };
+                self.copy_tree(&de.path(), &dst.join(&name), &rel, tree, made, for_move)?;
             }
         } else {
-            // On macOS this clones on APFS: instant, and no extra space.
-            std::fs::copy(src, dst).map_err(|e| e.to_string())?;
+            noclobber::copy_file(src, dst).map_err(fail)?;
+            made.push(Made { src: src.into(), dst: dst.into(), dir: false, was });
             self.tick(meta.len());
         }
         // A folder's own entry goes in after its contents, once its mtime has settled.
         if let Some(t) = tree
-            && !rel.as_os_str().is_empty()
+            && !top
         {
-            t.add(rel, &dst.symlink_metadata().map_err(|e| e.to_string())?);
+            t.add(rel, &Print::of(dst, &dst.symlink_metadata().map_err(fail)?));
         }
         Ok(())
     }
@@ -557,52 +833,147 @@ impl<'a> Worker<'a> {
         if src.is_dir() && dest_dir.starts_with(src) {
             return Err("can't move a folder into itself".into());
         }
-        let to = free_name(dest_dir, name, false);
-        self.rename_or_copy(src, &to)?;
-        Ok(to)
+        for _ in 0..TRIES {
+            let to = free_name(dest_dir, name, false);
+            self.before_act(&to);
+            match self.relocate(src, &to) {
+                Ok(()) => return Ok(to),
+                // Taken since `free_name` looked: try the next free name.
+                Err(MoveError::Taken) => {}
+                Err(MoveError::Failed(e)) => return Err(e),
+                Err(MoveError::Split { why, .. }) => {
+                    return Err(format!("copied to “{}”, but part of the original couldn't be removed ({why})", to.display()));
+                }
+            }
+        }
+        Err("every free name was taken before it could be used".into())
     }
 
-    /// `rename`, or copy then delete when the destination is on another disk.
-    fn rename_or_copy(&mut self, from: &Path, to: &Path) -> Result<(), String> {
-        match std::fs::rename(from, to) {
+    /// Moves `from` to `to`, never over anything: a no-replace rename, or across disks a copy
+    /// and then a delete of exactly what was copied.
+    fn relocate(&mut self, from: &Path, to: &Path) -> Result<(), MoveError> {
+        match self.rename_excl(from, to) {
             Ok(()) => Ok(()),
-            Err(e) if is_cross_device(&e) => {
-                self.p.bytes_total.fetch_add(tree_size(from), Relaxed);
-                if let Err(e) = self.copy_tree(from, to, Path::new(""), &mut None) {
-                    remove_tree(to);
-                    return Err(e);
-                }
-                let removed = if from.symlink_metadata().is_ok_and(|m| m.is_dir()) {
-                    std::fs::remove_dir_all(from)
-                } else {
-                    std::fs::remove_file(from)
-                };
-                removed.map_err(|e| format!("copied, but couldn't remove the original: {e}"))
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(MoveError::Taken),
+            Err(e) if noclobber::is_cross_device(&e) => self.copy_then_remove(from, to),
+            Err(e) => Err(MoveError::Failed(e.to_string())),
+        }
+    }
+
+    /// Across disks: copies `from` to `to`, then removes the original. If the copy fails, what
+    /// it made is removed and nothing has changed. If the delete fails partway, everything is at
+    /// `to` and the rest stays at `from`: [`MoveError::Split`] says so, fingerprinting both.
+    fn copy_then_remove(&mut self, from: &Path, to: &Path) -> Result<(), MoveError> {
+        self.p.bytes_total.fetch_add(tree_size(from), Relaxed);
+        let mut tree = Some(Tree::default());
+        let mut made = Vec::new();
+        match self.copy_tree(from, to, Path::new(""), &mut tree, &mut made, true) {
+            Ok(()) => {}
+            Err(CopyError::Taken) => return Err(MoveError::Taken),
+            Err(CopyError::Failed(e)) => {
+                unmake(&made);
+                return Err(MoveError::Failed(e));
             }
-            Err(e) => Err(e.to_string()),
+        }
+        let Err(why) = self.remove_sources(&made) else { return Ok(()) };
+        let copy = match to.symlink_metadata() {
+            Ok(m) => Print { tree: tree.filter(|_| m.is_dir()), ..Print::of(to, &m) },
+            Err(e) => return Err(MoveError::Failed(format!("copied, then the copy vanished: {e}"))),
+        };
+        self.split(from, copy, why)
+    }
+
+    /// After a failed delete, fingerprints what's left at `from` so a retry can finish.
+    fn split(&self, from: &Path, copy: Print, why: String) -> Result<(), MoveError> {
+        match self.print_all(from) {
+            Ok(rest) => Err(MoveError::Split { split: Box::new(Split { copy, rest }), why }),
+            // The rest is gone after all (or unreadable, and the retry will say it changed).
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            // Unreadable: a fingerprint nothing matches, so a retry refuses and says where things are.
+            Err(e) => Err(MoveError::Split { split: Box::new(Split { copy, rest: unmatchable() }), why: format!("{why}; {e}") }),
+        }
+    }
+
+    /// Removes the originals of a cross-disk move, deepest first: each file or link only if
+    /// it's unchanged since it was copied, each folder only once it's empty. Anything that
+    /// changed or appeared meanwhile stays. Says what couldn't be removed.
+    fn remove_sources(&self, made: &[Made]) -> Result<(), String> {
+        let (mut kept, mut first) = (0, None);
+        for m in made.iter().rev() {
+            let removed = match &m.was {
+                Some(was) => match m.src.symlink_metadata() {
+                    Ok(now) if Print::of(&m.src, &now) == *was => self.remove_one(&m.src, false),
+                    Ok(_) => Err(io::Error::other("it changed during the move")),
+                    Err(e) => Err(e),
+                },
+                None => self.remove_one(&m.src, m.dir),
+            };
+            match removed {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                // A folder that keeps something kept below it: that one's already counted.
+                Err(_) if m.dir && first.is_some() => {}
+                Err(e) => {
+                    kept += 1;
+                    first.get_or_insert_with(|| format!("“{}”: {e}", m.src.display()));
+                }
+            }
+        }
+        match first {
+            None => Ok(()),
+            Some(f) if kept == 1 => Err(f),
+            Some(f) => Err(format!("{f}, and {} more", kept - 1)),
+        }
+    }
+
+    /// Finishes a split step: removes what's left of the original at `at` (checked unchanged
+    /// just before), deepest first, folders only once empty.
+    fn remove_rest(&mut self, at: &Path, copy: &Print) -> Result<(), MoveError> {
+        let mut kept = None;
+        self.remove_tree_checked(at, &mut kept);
+        match kept {
+            None => Ok(()),
+            Some(why) => self.split(at, copy.clone(), why),
+        }
+    }
+
+    fn remove_tree_checked(&self, p: &Path, kept: &mut Option<String>) {
+        let Ok(m) = p.symlink_metadata() else { return };
+        if m.is_dir()
+            && let Ok(rd) = std::fs::read_dir(p)
+        {
+            for de in rd.flatten() {
+                self.remove_tree_checked(&de.path(), kept);
+            }
+        }
+        if let Err(e) = self.remove_one(p, m.is_dir())
+            && e.kind() != ErrorKind::NotFound
+            && !(m.is_dir() && kept.is_some())
+        {
+            *kept = Some(format!("“{}”: {e}", p.display()));
         }
     }
 }
 
-fn is_cross_device(e: &std::io::Error) -> bool {
-    e.kind() == ErrorKind::CrossesDevices || (cfg!(unix) && e.raw_os_error() == Some(18)) || (cfg!(windows) && e.raw_os_error() == Some(17))
+/// A fingerprint nothing on disk matches.
+fn unmatchable() -> Print {
+    Print { kind: Kind::Link, size: u64::MAX, mtime: None, id: None, tree: None }
 }
 
-/// Whether `a` and `b` are the same item (a case-only rename on a case-insensitive disk).
-#[cfg(unix)]
-fn same_file(_: &Path, a: &Metadata, _: &Path, b: &Metadata) -> bool {
-    file_id(a) == file_id(b)
-}
-
-/// Whether `a` and `b` are the same item. Without a file id in std, a case-only difference in
-/// the same folder (Windows disks are case-insensitive).
-#[cfg(not(unix))]
-fn same_file(a: &Path, _: &Metadata, b: &Path, _: &Metadata) -> bool {
-    a.parent() == b.parent() && a.as_os_str().to_string_lossy().to_lowercase() == b.as_os_str().to_string_lossy().to_lowercase()
+/// Removes what a failed copy made, deepest first. Folders go only once empty, so anything
+/// another app put inside a half-made copy stays.
+fn unmake(made: &[Made]) {
+    for m in made.iter().rev() {
+        let _ = if m.dir { std::fs::remove_dir(&m.dst) } else { std::fs::remove_file(&m.dst) };
+    }
 }
 
 fn name_of(p: &Path) -> String {
     p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+fn parent_of(p: &Path) -> String {
+    p.parent().map_or_else(|| p.display().to_string(), |d| d.display().to_string())
 }
 
 /// Total bytes of regular files under `p`, not following links.
@@ -617,26 +988,19 @@ fn tree_size(p: &Path) -> u64 {
     }
 }
 
-fn remove_tree(p: &Path) {
-    match p.symlink_metadata() {
-        Ok(m) if m.is_dir() => drop(std::fs::remove_dir_all(p)),
-        Ok(_) => drop(std::fs::remove_file(p)),
-        Err(_) => {}
-    }
-}
-
 #[cfg(unix)]
-fn make_symlink(target: &Path, at: &Path, _is_dir: bool) -> std::io::Result<()> {
+fn make_symlink(target: &Path, at: &Path, _is_dir: bool) -> io::Result<()> {
     std::os::unix::fs::symlink(target, at)
 }
 
 #[cfg(windows)]
-fn make_symlink(target: &Path, at: &Path, is_dir: bool) -> std::io::Result<()> {
+fn make_symlink(target: &Path, at: &Path, is_dir: bool) -> io::Result<()> {
     if is_dir { std::os::windows::fs::symlink_dir(target, at) } else { std::os::windows::fs::symlink_file(target, at) }
 }
 
 /// A free path for `name` in `dir`: the name itself if nothing's there, else
 /// "stem copy.ext", "stem copy 2.ext" (same folder) or "stem 2.ext" (elsewhere).
+/// Free when it looked: callers use it with a no-replace primitive and try again if it's taken.
 pub fn free_name(dir: &Path, name: &std::ffi::OsStr, same_dir: bool) -> PathBuf {
     let first = dir.join(name);
     if !same_dir && first.symlink_metadata().is_err() {
@@ -665,6 +1029,7 @@ pub fn free_name(dir: &Path, name: &std::ffi::OsStr, same_dir: bool) -> PathBuf 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::fs;
 
     fn tmp(name: &str) -> PathBuf {
@@ -798,9 +1163,6 @@ mod tests {
         assert!(d.join("b").exists() && !d.join("a").exists());
     }
 
-    /// Unix only: on Windows a file renamed onto a just-freed name inherits its creation time
-    /// (NTFS tunnelling), so a replacement with the same size and mtime can't be told apart there.
-    #[cfg(unix)]
     #[test]
     fn undo_rename_refuses_when_replaced() {
         let d = tmp("ren-repl");
@@ -1067,5 +1429,255 @@ mod tests {
         assert_eq!(left.steps.iter().map(|s| s.at.clone()).collect::<Vec<_>>(), vec![d.join("to/b")]);
         undo_ok(left);
         assert!(!d.join("to/b").exists() && d.join("to/.trash/a").exists());
+    }
+
+    // ---- never overwrite, even when a name is taken after the check ---------------------------
+
+    /// A hook that puts another app's file at the first destination it's shown.
+    fn intruder() -> PathHook {
+        let mut done = false;
+        Box::new(move |dest: &Path| {
+            if !std::mem::replace(&mut done, true) {
+                fs::write(dest, "intruder").unwrap();
+            }
+        })
+    }
+
+    fn hooked(before_act: PathHook, cross_device: bool) -> Hooks {
+        Hooks { before_act: Some(before_act), cross_device, fail_remove: None }
+    }
+
+    #[test]
+    fn rename_never_overwrites_a_name_taken_after_the_check() {
+        let d = tmp("race-ren");
+        fs::write(d.join("a"), "a").unwrap();
+        let e = rename_between(&d.join("a"), &d.join("b"), || fs::write(d.join("b"), "intruder").unwrap()).unwrap_err();
+        assert_eq!(e, "“b” already exists");
+        assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "intruder");
+        assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "a");
+    }
+
+    #[test]
+    fn move_never_overwrites_a_name_taken_after_it_was_chosen() {
+        for cross_device in [false, true] {
+            let d = tmp(&format!("race-mv-{cross_device}"));
+            fs::create_dir(d.join("into")).unwrap();
+            fs::write(d.join("f.txt"), "mine").unwrap();
+            let op = Op::Move { sources: vec![d.join("f.txt")], dest: d.join("into") };
+            let o = run_hooked(op, fake_trash, hooked(intruder(), cross_device));
+            assert!(o.errors.is_empty(), "{:?}", o.errors);
+            assert_eq!(o.results, vec![d.join("into/f 2.txt")], "cross-device: {cross_device}");
+            assert_eq!(fs::read_to_string(d.join("into/f.txt")).unwrap(), "intruder");
+            assert_eq!(fs::read_to_string(d.join("into/f 2.txt")).unwrap(), "mine");
+            assert!(!d.join("f.txt").exists());
+        }
+    }
+
+    #[test]
+    fn copy_never_overwrites_a_name_taken_after_it_was_chosen() {
+        for cross_device in [false, true] {
+            let d = tmp(&format!("race-cp-{cross_device}"));
+            fs::create_dir(d.join("to")).unwrap();
+            fs::write(d.join("a.txt"), "mine").unwrap();
+            fs::create_dir_all(d.join("dir/sub")).unwrap();
+            fs::write(d.join("dir/sub/x"), "x").unwrap();
+            let op = Op::Copy { sources: vec![d.join("a.txt"), d.join("dir")], dest: d.join("to") };
+            // Another app takes each name the copy picks first: a file, then a folder's name.
+            let hook = Box::new(move |dest: &Path| {
+                if [OsStr::new("a.txt"), OsStr::new("dir")].contains(&dest.file_name().unwrap()) {
+                    fs::write(dest, "intruder").unwrap();
+                }
+            });
+            let o = run_hooked(op, fake_trash, hooked(hook, cross_device));
+            assert!(o.errors.is_empty(), "{:?}", o.errors);
+            assert_eq!(o.results, vec![d.join("to/a 2.txt"), d.join("to/dir 2")]);
+            assert_eq!(fs::read_to_string(d.join("to/a.txt")).unwrap(), "intruder");
+            assert_eq!(fs::read_to_string(d.join("to/dir")).unwrap(), "intruder");
+            assert_eq!(fs::read_to_string(d.join("to/a 2.txt")).unwrap(), "mine");
+            assert_eq!(fs::read_to_string(d.join("to/dir 2/sub/x")).unwrap(), "x");
+        }
+        // A duplicate in the same folder too.
+        let d = tmp("race-dup");
+        fs::write(d.join("a.txt"), "mine").unwrap();
+        let o = run_hooked(Op::Copy { sources: vec![d.join("a.txt")], dest: d.clone() }, fake_trash, hooked(intruder(), false));
+        assert_eq!(o.results, vec![d.join("a copy 2.txt")]);
+        assert_eq!(fs::read_to_string(d.join("a copy.txt")).unwrap(), "intruder");
+    }
+
+    /// The undo passes its check, then another app takes the spot before the move back: that
+    /// item stays put, its record stays on the stack, and the newcomer is untouched.
+    #[test]
+    fn undo_never_overwrites_a_spot_taken_after_the_check() {
+        for cross_device in [false, true] {
+            let d = tmp(&format!("race-undo-{cross_device}"));
+            fs::create_dir(d.join("into")).unwrap();
+            fs::write(d.join("f.txt"), "mine").unwrap();
+            let u = take(run_now(Op::Move { sources: vec![d.join("f.txt")], dest: d.join("into") }));
+            let o = run_hooked(Op::Undo(u), fake_trash, hooked(intruder(), cross_device));
+            assert!(o.refused.is_none());
+            assert_eq!(o.errors.len(), 1);
+            assert!(o.errors[0].contains("was taken just now, so “f.txt” stayed where it is"), "{:?}", o.errors);
+            assert_eq!(o.undo.map(|u| u.steps.len()), Some(1));
+            assert_eq!(fs::read_to_string(d.join("f.txt")).unwrap(), "intruder");
+            assert_eq!(fs::read_to_string(d.join("into/f.txt")).unwrap(), "mine");
+        }
+    }
+
+    /// A trash undo too: the spot it goes back to is taken after the check.
+    #[test]
+    fn undo_trash_never_overwrites_a_spot_taken_after_the_check() {
+        let d = tmp("race-undo-tr");
+        fs::write(d.join("a"), "mine").unwrap();
+        let u = take(run_now(Op::Trash { sources: vec![d.join("a")] }));
+        let o = run_hooked(Op::Undo(u), fake_trash, hooked(intruder(), false));
+        assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
+        assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "intruder");
+        assert_eq!(fs::read_to_string(d.join(".trash/a")).unwrap(), "mine");
+    }
+
+    /// Each step is checked again right before it runs: an item edited while an earlier step
+    /// was being undone stays put.
+    #[test]
+    fn undo_rechecks_each_step_right_before_it() {
+        let d = tmp("recheck");
+        fs::create_dir(d.join("into")).unwrap();
+        fs::write(d.join("a"), "a").unwrap();
+        fs::write(d.join("b"), "b").unwrap();
+        let u = take(run_now(Op::Move { sources: vec![d.join("a"), d.join("b")], dest: d.join("into") }));
+        let b = d.join("into/b");
+        let mut once = false;
+        let hook = Box::new(move |_: &Path| {
+            if !std::mem::replace(&mut once, true) {
+                edit(&b);
+            }
+        });
+        let o = run_hooked(Op::Undo(u), fake_trash, hooked(hook, false));
+        assert!(o.refused.is_none());
+        assert_eq!(o.results, vec![d.join("a")]);
+        assert_eq!(o.errors, vec!["Not undone: “b” was edited".to_string()]);
+        let left = o.undo.expect("b's step is kept");
+        assert_eq!(left.steps.iter().map(|s| s.at.clone()).collect::<Vec<_>>(), vec![d.join("into/b")]);
+        assert!(d.join("into/b").exists() && !d.join("b").exists());
+    }
+
+    // ---- cross-disk moves (copy, then delete) -------------------------------------------------
+
+    fn across(fail_remove: Option<PathTest>) -> Hooks {
+        Hooks { before_act: None, cross_device: true, fail_remove }
+    }
+
+    #[test]
+    fn move_across_disks() {
+        let d = tmp("x-mv");
+        fs::create_dir_all(d.join("f/sub")).unwrap();
+        fs::write(d.join("f/sub/x"), "x").unwrap();
+        fs::create_dir(d.join("into")).unwrap();
+        let o = run_hooked(Op::Move { sources: vec![d.join("f")], dest: d.join("into") }, fake_trash, across(None));
+        let u = take(o);
+        assert!(!d.join("f").exists());
+        assert_eq!(fs::read_to_string(d.join("into/f/sub/x")).unwrap(), "x");
+        let o = run_hooked(Op::Undo(u), fake_trash, across(None));
+        assert!(o.errors.is_empty() && o.undo.is_none(), "{:?}", o.errors);
+        assert!(!d.join("into/f").exists());
+        assert_eq!(fs::read_to_string(d.join("f/sub/x")).unwrap(), "x");
+    }
+
+    /// Moves `f` (holding `x` and `y`) into `into`, then undoes it across disks with removing
+    /// `into/f/y` failing: everything is back in `f`, `y` is left in `into/f`, and the record
+    /// says so. Returns the dir and the record.
+    fn split_undo(name: &str) -> (PathBuf, Undo) {
+        let d = tmp(name);
+        fs::create_dir(d.join("f")).unwrap();
+        fs::write(d.join("f/x"), "x").unwrap();
+        fs::write(d.join("f/y"), "y").unwrap();
+        fs::create_dir(d.join("into")).unwrap();
+        let u = take(run_now(Op::Move { sources: vec![d.join("f")], dest: d.join("into") }));
+        let stuck = d.join("into/f/y");
+        let o = run_hooked(Op::Undo(u), fake_trash, across(Some(Box::new(move |p: &Path| p == stuck))));
+        assert!(o.refused.is_none());
+        assert_eq!(o.errors.len(), 1);
+        let msg = &o.errors[0];
+        assert!(msg.starts_with("“f” is back in “") && msg.contains("but part of the original couldn't be removed from “"), "{msg}");
+        assert!(msg.contains(&d.join("into").display().to_string()), "{msg}");
+        // Nothing lost: all of it is back, and the rest is where it was.
+        assert_eq!(fs::read_to_string(d.join("f/x")).unwrap(), "x");
+        assert_eq!(fs::read_to_string(d.join("f/y")).unwrap(), "y");
+        assert_eq!(fs::read_to_string(d.join("into/f/y")).unwrap(), "y");
+        assert!(!d.join("into/f/x").exists());
+        let u = o.undo.expect("the step is kept");
+        assert!(u.steps[0].split.is_some());
+        (d, u)
+    }
+
+    #[test]
+    fn split_undo_across_disks_finishes_on_retry() {
+        let (d, u) = split_undo("x-split-ok");
+        undo_ok(u);
+        assert!(!d.join("into/f").exists());
+        assert_eq!(fs::read_to_string(d.join("f/x")).unwrap(), "x");
+        assert_eq!(fs::read_to_string(d.join("f/y")).unwrap(), "y");
+    }
+
+    #[test]
+    fn split_undo_refuses_when_the_rest_changed() {
+        let (d, u) = split_undo("x-split-rest");
+        edit(&d.join("into/f/y"));
+        let why = undo_refused(u);
+        assert!(why.contains("“f” is back in “") && why.contains("what's left of the original in “"), "{why}");
+        assert_eq!(fs::read_to_string(d.join("into/f/y")).unwrap(), "z");
+        assert_eq!(fs::read_to_string(d.join("f/y")).unwrap(), "y");
+    }
+
+    #[test]
+    fn split_undo_refuses_when_the_copy_changed() {
+        let (d, u) = split_undo("x-split-copy");
+        fs::write(d.join("f/new"), "mine").unwrap();
+        let why = undo_refused(u);
+        assert!(why.contains("was copied back to “") && why.contains("that copy changed since"), "{why}");
+        assert!(d.join("into/f/y").exists() && d.join("f/new").exists());
+    }
+
+    /// The rest removed by hand since: the retry has nothing left to do, and finishes.
+    #[test]
+    fn split_undo_finishes_when_the_rest_is_gone() {
+        let (d, u) = split_undo("x-split-gone");
+        fs::remove_dir_all(d.join("into/f")).unwrap();
+        undo_ok(u);
+        assert_eq!(fs::read_to_string(d.join("f/y")).unwrap(), "y");
+    }
+
+    /// A forward move across disks whose delete fails says where the copy is, and keeps the rest.
+    #[test]
+    fn move_across_disks_that_cant_remove_the_original_says_where_it_is() {
+        let d = tmp("x-mv-split");
+        fs::create_dir(d.join("f")).unwrap();
+        fs::write(d.join("f/x"), "x").unwrap();
+        fs::create_dir(d.join("into")).unwrap();
+        let stuck = d.join("f/x");
+        let op = Op::Move { sources: vec![d.join("f")], dest: d.join("into") };
+        let o = run_hooked(op, fake_trash, across(Some(Box::new(move |p: &Path| p == stuck))));
+        assert_eq!(o.errors.len(), 1);
+        assert!(o.errors[0].contains(&format!("copied to “{}”", d.join("into/f").display())), "{:?}", o.errors);
+        assert_eq!(fs::read_to_string(d.join("into/f/x")).unwrap(), "x");
+        assert_eq!(fs::read_to_string(d.join("f/x")).unwrap(), "x");
+    }
+
+    // ---- known limits -----------------------------------------------------------------------
+
+    /// Pins a documented limit (see [`Print`]): contents aren't hashed, so a same-size edit that
+    /// leaves the mtime where it was (as one inside the disk's timestamp granularity does) isn't
+    /// seen, and the undo goes through. If this starts failing, the check got stronger: update
+    /// the docs.
+    #[test]
+    fn same_size_edit_within_mtime_granularity_is_not_seen() {
+        let d = tmp("coarse");
+        fs::write(d.join("a"), "1").unwrap();
+        fs::rename(d.join("a"), d.join("b")).unwrap();
+        let u = Undo::renamed(d.join("b"), d.join("a")).unwrap();
+        let t = fs::metadata(d.join("b")).unwrap().modified().unwrap();
+        fs::write(d.join("b"), "2").unwrap();
+        fs::File::options().write(true).open(d.join("b")).unwrap().set_modified(t).unwrap();
+        undo_ok(u);
+        assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "2");
     }
 }

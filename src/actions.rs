@@ -90,9 +90,8 @@ impl State {
     // ---- rename and new folder --------------------------------------------------------------
 
     pub fn new_folder(&mut self) {
-        let path = ops::free_name(&self.cwd, "untitled folder".as_ref(), false);
-        match std::fs::create_dir(&path) {
-            Ok(()) => {
+        match ops::new_folder(&self.cwd, "untitled folder") {
+            Ok(path) => {
                 self.undo.extend(Undo::new_folder(path.clone()));
                 let name = path.file_name().map(|n| n.to_os_string()).into_iter().collect();
                 self.reload_selecting(name, true);
@@ -133,20 +132,16 @@ impl State {
         }
         let from = self.cwd.join(&r.os);
         let to = self.cwd.join(&new);
-        // A case-only change is the same file on case-insensitive disks; let it through.
-        let case_only = new.to_lowercase() == old_name.to_lowercase();
-        if !case_only && to.symlink_metadata().is_ok() {
-            self.note = Some(format!("“{new}” already exists"));
-            return;
-        }
-        match std::fs::rename(&from, &to) {
+        // Never over an existing item, even one that appears this instant (a case-only change
+        // on a case-insensitive disk is the item itself, and goes through).
+        match ops::rename(&from, &to) {
             Ok(()) => {
                 // One lstat to fingerprint it, so undo can tell whether it changed since.
                 self.undo.extend(Undo::renamed(to, from));
                 self.note = None;
                 self.reload_selecting(vec![OsString::from(new)], false);
             }
-            Err(e) => self.note = Some(format!("Couldn't rename: {e}")),
+            Err(e) => self.note = Some(e),
         }
     }
 

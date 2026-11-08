@@ -19,7 +19,11 @@ rune = { path = "vendor/rune/crates/rune", default-features = false, features = 
 toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
 
 # Trash: NSFileManager on macOS, the shell's Recycle Bin on Windows (Linux follows the XDG spec).
-# windows-sys also lists the drive letters.
+# windows-sys also lists the drive letters, and does no-replace moves and copies and reads file ids.
+# No-replace renames and clones (renameat2, renamex_np, clonefile). Already in the lock file through Rune.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
 

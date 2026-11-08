@@ -31,27 +31,31 @@ fn trash_in(root: &Path, path: &Path) -> Result<Option<PathBuf>, String> {
     std::fs::create_dir_all(&files).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&info).map_err(|e| e.to_string())?;
     let name = path.file_name().ok_or("no file name")?.to_string_lossy().into_owned();
-    // Reserve a unique name by creating its .trashinfo exclusively.
-    let mut n = 1;
-    let (stem, info_file) = loop {
-        let stem = if n == 1 { name.clone() } else { format!("{name}.{n}") };
-        let p = info.join(format!("{stem}.trashinfo"));
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
-            Ok(f) => break (stem, (p, f)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
-            Err(e) => return Err(e.to_string()),
-        }
-    };
-    let (info_path, mut f) = info_file;
     let abs = std::path::absolute(path).map_err(|e| e.to_string())?;
     let body = format!("[Trash Info]\nPath={}\nDeletionDate={}\n", url_escape(&abs), deletion_date());
-    let dest = files.join(&stem);
-    let res = f.write_all(body.as_bytes()).map_err(|e| e.to_string()).and_then(|_| std::fs::rename(path, &dest).map_err(|e| e.to_string()));
-    if let Err(e) = res {
-        let _ = std::fs::remove_file(&info_path);
-        return Err(e);
+    // Reserve a unique name by creating its .trashinfo exclusively, then move the item in
+    // without replacing anything (a stray file under that name in `files` gets the next name).
+    for n in 1..10_000 {
+        let stem = if n == 1 { name.clone() } else { format!("{name}.{n}") };
+        let info_path = info.join(format!("{stem}.trashinfo"));
+        let mut f = match std::fs::OpenOptions::new().write(true).create_new(true).open(&info_path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        let dest = files.join(&stem);
+        let res = f.write_all(body.as_bytes()).and_then(|_| crate::noclobber::rename(path, &dest));
+        match res {
+            Ok(()) => return Ok(Some(dest)),
+            Err(e) => {
+                let _ = std::fs::remove_file(&info_path);
+                if e.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(e.to_string());
+                }
+            }
+        }
     }
-    Ok(Some(dest))
+    Err("no free name in the Trash".into())
 }
 
 /// After an item at `trashed` (`Trash/files/NAME`) was put back: removes its
@@ -146,6 +150,23 @@ mod tests {
         std::fs::rename(&at, &f).unwrap();
         super::forget(&at);
         assert!(!d.join("Trash/info/a b.txt.trashinfo").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A file in `Trash/files` with no `.trashinfo` (left by another app) isn't replaced.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn freedesktop_trash_never_overwrites_a_stray_file() {
+        let d = std::env::temp_dir().join(format!("arbor-xdg-stray-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Trash/files")).unwrap();
+        std::fs::write(d.join("Trash/files/a"), "stray").unwrap();
+        std::fs::write(d.join("a"), "mine").unwrap();
+        let at = super::trash_in(&d.join("Trash"), &d.join("a")).unwrap().unwrap();
+        assert_eq!(at, d.join("Trash/files/a.2"));
+        assert_eq!(std::fs::read_to_string(d.join("Trash/files/a")).unwrap(), "stray");
+        assert_eq!(std::fs::read_to_string(&at).unwrap(), "mine");
+        assert!(!d.join("Trash/info/a.trashinfo").exists() && d.join("Trash/info/a.2.trashinfo").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -18,17 +18,30 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
 
 - **File operations never block and never overwrite.** Copies and moves run on a worker with
   progress in the status bar (Esc cancels). A name that's taken gets a free one instead:
-  "name copy" in the same folder, "name 2" elsewhere. On APFS, copies are clones (instant).
+  "name copy" in the same folder, "name 2" elsewhere. Every move and rename is an atomic
+  "rename unless the name is taken" (`renameat2(RENAME_NOREPLACE)` on Linux,
+  `renamex_np(RENAME_EXCL)` on macOS, `MoveFileExW` without replace on Windows), and copies
+  create each file and folder exclusively, so a name another app takes at the same instant is
+  never replaced (`src/noclobber.rs`). On APFS, copies are clones (instant). A move to another
+  disk copies, then removes only the originals that haven't changed since they were copied.
 - **Undo refuses rather than guesses.** When an operation finishes, each result gets a
-  fingerprint: identity (device and inode; creation time on Windows), type, size and modified
-  time. For copies and new folders, which undo sends to the Trash, it also covers everything
-  inside. Before undoing, the worker re-checks every item. If anything was moved, deleted,
-  replaced or edited, or its spot is taken, nothing is undone and the status bar says which
-  item changed and how. A refused or failed undo stays on the stack. A partly failed one keeps
-  only what didn't go back.
+  fingerprint: identity (device and inode; volume and file id on Windows), type, size and
+  modified time. For copies and new folders, which undo sends to the Trash, it also covers
+  everything inside. Before undoing, the worker re-checks every item. If anything was moved,
+  deleted, replaced or edited, or its spot is taken, nothing is undone and the status bar says
+  which item changed and how. Each item is checked again right before it goes back, and one
+  whose spot is taken in between stays where it is. A refused or failed undo stays on the
+  stack. A partly failed one keeps only what didn't go back; an undo across disks that copied
+  an item back but couldn't remove all of the original says where both halves are, and undoing
+  again finishes the job if neither has changed.
+- **Known limit:** contents aren't hashed (too slow for big files), so an edit that keeps a
+  file's size and leaves its modified time unchanged isn't seen. That includes an edit within
+  the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
+  a clock that ticks every few milliseconds).
 
-About 4,500 lines in `src/` (a third of it tests): `fs.rs` (reading folders, opening files),
-`ops.rs` (copy, move, trash and undo on a worker), `trash.rs` (each platform's trash), `app.rs`
+About 5,500 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
+`ops.rs` (copy, move, trash and undo on a worker), `noclobber.rs` (moves, copies and file ids
+that never replace anything), `trash.rs` (each platform's trash), `app.rs`
 (state, selection, key dispatch, what each command does), `commands.rs` (the command table and
 keymap), `palette.rs` (the command palette), `config.rs` (the settings file), `actions.rs`
 (clipboard, rename, drag and drop, context menu), `view.rs` (UI) and `timing.rs` (opt-in speed
