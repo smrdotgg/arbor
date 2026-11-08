@@ -287,6 +287,7 @@ impl State {
                     select: Vec::new(),
                     rename: false,
                     scroll: 0.0,
+                    picks: 0,
                 });
                 s.boot = Some(boot);
                 s.boot_req = Some(req);
@@ -551,7 +552,14 @@ impl State {
     pub(crate) fn land(&mut self, ix: usize, a: Answer, tx: &mut Tx) -> bool {
         let active = ix == self.active;
         let f = &mut self.panes[ix].f;
-        let Some(p) = f.pending.take_if(|p| p.req == a.req && p.path == a.listing.path) else { return false };
+        let Some(mut p) = f.pending.take_if(|p| p.req == a.req && p.path == a.listing.path) else { return false };
+        // A reload (after a rename, a copy, a new folder) asked to select what the operation
+        // made; if the user picked something else meanwhile, their choice stands, so a ⌘C right
+        // after a click copies what was clicked.
+        if p.nav == Nav::Reload && f.picks != p.picks {
+            p.select = f.picked();
+            p.rename = false;
+        }
         let jumped = self.jump_req.take_if(|&mut r| r == p.req).is_some();
         match a.listing.result {
             Err(_) if jumped && a.listing.missing => self.jump_missed(&p.path),
@@ -1381,6 +1389,32 @@ pub(crate) mod tests {
     pub(crate) fn state_in(d: &Path) -> State {
         let dir = d.to_path_buf();
         State::boot(Booting::spawn(Duration::ZERO, move || settings_for(dir, Settings::default())), Duration::from_secs(5))
+    }
+
+    /// The QA's "can't copy a folder into itself": New Folder asks for a reload that selects the
+    /// new folder; the user clicks a file before it lands, then ⌘C. The landing used to put the
+    /// selection back on the new folder, so ⌘C copied it and a paste into it failed. The click
+    /// now stands, and ⌘C copies the file.
+    #[test]
+    fn a_reload_keeps_a_selection_made_while_it_was_on_its_way() {
+        let d = folder("reload-keeps-pick", 0);
+        std::fs::write(d.join("delete-me-1.txt"), "x").unwrap();
+        std::fs::write(d.join("other.txt"), "x").unwrap();
+        let mut s = state_in(&d);
+        s.new_folder();
+        assert!(s.is_loading(), "the reload is on its way");
+        let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "delete-me-1.txt").unwrap();
+        s.cur_mut().select(i);
+        settle_all(&mut s);
+        assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("delete-me-1.txt"));
+        assert!(s.rename.is_none(), "no rename started on a folder the user moved away from");
+        s.copy_selected(false, &mut Tx::default());
+        assert_eq!(s.clip.as_ref().map(|c| c.paths.clone()), Some(vec![d.join("delete-me-1.txt")]));
+        // With nothing picked meanwhile, the reload still selects the new folder, renaming it.
+        s.new_folder();
+        settle_all(&mut s);
+        assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("untitled folder 2"));
+        assert!(s.rename.is_some());
     }
 
     #[test]

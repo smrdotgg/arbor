@@ -38,6 +38,9 @@ pub(crate) struct Pending {
     pub rename: bool,
     /// Where to scroll the list once it lands ([`Nav::Show`]).
     pub scroll: f32,
+    /// [`Folder::picks`] when it was asked for: a reload that lands after a newer pick keeps
+    /// the user's choice instead of `select`.
+    pub picks: u64,
 }
 
 /// What a hidden tab keeps. No entries: its folder is read again when it's shown.
@@ -98,6 +101,9 @@ pub struct Folder {
     pub sel: usize,
     /// Extra selection by name (⇧-arrows, ⌘-click, ⌘A). Empty means "just the cursor".
     pub marked: HashSet<OsString>,
+    /// How many times the user has picked a selection (a click, an arrow, ⌘A, Select by
+    /// Pattern…): a reload asked for before the latest pick keeps it ([`Pending::picks`]).
+    pub picks: u64,
     pub(crate) anchor: usize,
     /// Typed filter. Starting with `/`, `~` (or a drive on Windows) it's a path to go to instead.
     pub filter: String,
@@ -146,6 +152,7 @@ impl Folder {
             visible: Vec::new(),
             sel: 0,
             marked: HashSet::new(),
+            picks: 0,
             anchor: 0,
             filter: String::new(),
             show_hidden,
@@ -245,7 +252,8 @@ impl Folder {
         // Going anywhere ends a search (its walk stops).
         self.search = None;
         let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
-        self.pending = Some(Pending { req, path: path.clone(), nav, select, rename, scroll: 0.0 });
+        let picks = self.picks;
+        self.pending = Some(Pending { req, path: path.clone(), nav, select, rename, scroll: 0.0, picks });
         self.loader.request_opt(path, move |p| Some(Answer { req, sort, listing: fs::list_until(p, sort, &stop)? }));
     }
 
@@ -325,6 +333,7 @@ impl Folder {
             select: m.select,
             rename: false,
             scroll: m.scroll,
+            picks: self.picks,
         });
     }
 
@@ -376,6 +385,14 @@ impl Folder {
         self.version = next_version();
     }
 
+    /// The selection by name: the cursor's first, then the rest, sorted.
+    pub fn picked(&self) -> Vec<OsString> {
+        let cursor = self.cursor_name();
+        let mut rest: Vec<OsString> = self.marked.iter().filter(|n| Some(*n) != cursor.as_ref()).cloned().collect();
+        rest.sort();
+        cursor.into_iter().chain(rest).collect()
+    }
+
     pub fn cursor_name(&self) -> Option<OsString> {
         self.selected().map(|e| e.os.clone())
     }
@@ -423,6 +440,7 @@ impl Folder {
 
     /// A plain click: just this row.
     pub fn select(&mut self, i: usize) {
+        self.picks += 1;
         if !self.visible.is_empty() {
             self.sel = i.min(self.visible.len() - 1);
             self.anchor = self.sel;
@@ -432,6 +450,7 @@ impl Folder {
 
     /// ⌘-click: add or remove this row.
     pub fn toggle_mark(&mut self, i: usize) {
+        self.picks += 1;
         if i >= self.visible.len() {
             return;
         }
@@ -450,6 +469,7 @@ impl Folder {
 
     /// ⇧-click or ⇧-arrow: everything from the anchor to row `i`.
     pub fn extend_to(&mut self, i: usize) {
+        self.picks += 1;
         if self.visible.is_empty() {
             return;
         }
@@ -460,6 +480,7 @@ impl Folder {
     }
 
     pub fn select_all(&mut self) {
+        self.picks += 1;
         self.marked = self.visible.iter().map(|&e| self.entries[e as usize].os.clone()).collect();
     }
 

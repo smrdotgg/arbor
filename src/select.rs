@@ -77,6 +77,7 @@ impl Folder {
     /// can't be had (the cursor's row is the selection then), so an empty set puts the cursor on
     /// the nearest row not in `avoid` instead. False when every row is in `avoid`.
     pub fn set_selection(&mut self, names: HashSet<OsString>, avoid: &HashSet<OsString>) -> bool {
+        self.picks += 1;
         fn name(f: &Folder, i: usize) -> &OsString {
             &f.entries[f.visible[i] as usize].os
         }
