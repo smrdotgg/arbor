@@ -831,9 +831,7 @@ fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
                 r = r.drag_out(move |s: &State| if s.pane(id)?.f.version == version { s.drag_item(id, i) } else { None }).on_drag_end(
                     |s: &mut State, outcome, tx| {
                         tx.instant();
-                        if outcome == rune::DragOutcome::Moved {
-                            s.reload();
-                        }
+                        s.drag_out_ended(outcome);
                     },
                 );
             }

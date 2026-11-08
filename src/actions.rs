@@ -116,6 +116,19 @@ impl State {
         }
     }
 
+    /// A drag out of the list ended (macOS: an OS drag session). Moved: what went is gone from
+    /// here. Nothing took it: say how to move files into a folder here, since an OS drag can't
+    /// land in the window it came from, and Rune doesn't say where it was let go (RUNE-GAPS.md).
+    pub(crate) fn drag_out_ended(&mut self, outcome: rune::DragOutcome) {
+        match outcome {
+            rune::DragOutcome::Moved => self.reload(),
+            rune::DragOutcome::Cancelled => {
+                self.note = Some(DRAG_NOT_TAKEN.into());
+            }
+            _ => {}
+        }
+    }
+
     // ---- rename and new folder --------------------------------------------------------------
 
     /// Makes "untitled folder" here and starts renaming it once it's listed. Every pane showing
@@ -514,6 +527,10 @@ fn deleted_note(out: &ops::Outcome, n: usize, total: usize) -> String {
         }
     }
 }
+
+/// What a drag out of the list that nothing took says.
+pub(crate) const DRAG_NOT_TAKEN: &str =
+    "Nothing took the drop. To move files into a folder in this window, cut and paste them (⌘X, ⌘V) or use split view (⌘\\).";
 
 fn name(p: &Path) -> String {
     p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())

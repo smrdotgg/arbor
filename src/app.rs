@@ -1391,6 +1391,22 @@ pub(crate) mod tests {
         State::boot(Booting::spawn(Duration::ZERO, move || settings_for(dir, Settings::default())), Duration::from_secs(5))
     }
 
+    /// A drag out of the list that nothing took (as a drop on a folder row in the same window
+    /// ends on macOS) says how to move files instead of doing nothing silently; one that moved
+    /// files reads the folder again; a copy changes nothing here.
+    #[test]
+    fn a_drag_nothing_took_says_how_to_move_files() {
+        let d = folder("drag-end", 2);
+        let mut s = state_in(&d);
+        s.drag_out_ended(rune::DragOutcome::Copied);
+        assert_eq!(s.note, None);
+        s.drag_out_ended(rune::DragOutcome::Cancelled);
+        assert_eq!(s.note.as_deref(), Some(crate::actions::DRAG_NOT_TAKEN));
+        s.drag_out_ended(rune::DragOutcome::Moved);
+        assert!(s.is_loading());
+        settle_all(&mut s);
+    }
+
     /// The QA's "can't copy a folder into itself": New Folder asks for a reload that selects the
     /// new folder; the user clicks a file before it lands, then ⌘C. The landing used to put the
     /// selection back on the new folder, so ⌘C copied it and a paste into it failed. The click

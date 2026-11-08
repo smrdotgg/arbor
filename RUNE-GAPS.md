@@ -190,11 +190,23 @@ Newest first.
   release goes through the same code as a file drop (`State::drop_on_pane` in `src/panes.rs`:
   same disk moves, another copies, ⌥ copies). Unsplit, rows keep `drag_out` as before. Checked
   under X11 (Xvfb, XTest pointer).
+- **Unsplit, too:** a row dropped on a folder row of the same window does nothing on macOS (the
+  QA session's "folder-row drop does nothing"): the OS drag offers nothing to its own window.
+  Arbor can't even tell that's where it was let go: AppKit passes the end point to
+  `draggingSession:endedAtPoint:operation:` (`drag_out/macos.rs`), but `on_drag_end` gets only
+  the outcome. So any drag nothing took now says how to move files instead ("Nothing took the
+  drop. To move files into a folder in this window, cut and paste them (⌘X, ⌘V) or use split
+  view (⌘\\)", `State::drag_out_ended` in `src/actions.rs`), also after an Escape or a refused
+  drop elsewhere. Starting every row drag as Arbor's own and handing it to the OS only when the
+  pointer leaves the window isn't possible either: which of the two a press becomes is fixed per
+  element when it starts (above).
 - **What users lose:** on macOS, while split, a row can't be dragged out to Finder or another
   app; closing the split (⌘\\) brings that back. The in-window drag shows no drag image under the
   pointer, only the target pane's highlight, and can't drop on a folder row in the other pane
   (only into its folder).
-- **Suggested Rune change:** either an opt-in for a `drag_out` session to drop in its own app
+- **Suggested Rune change:** at the least, pass where a `drag_out` ended to `on_drag_end` (window
+  points, or whether it was over one of the app's own windows). Better, either an opt-in for a
+  `drag_out` session to drop in its own app
   (`DragItem::allow_in_app()`, routed to `on_drop_files` and `on_drop_hover` like any drop), or
   let an element have both: run `on_drag` while the pointer stays in the window and start the
   system session only when it leaves.
