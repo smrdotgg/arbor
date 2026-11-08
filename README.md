@@ -202,7 +202,9 @@ clears the filter or cancels a file operation.
   device pixels, shown like an image under the same header (`src/thumb.rs`). Video shows a still
   frame and audio its artwork, whatever the OS's thumbnailer gives; nothing plays. Arbor stores
   nothing; the OS may keep what it makes in its own thumbnail cache, the one Finder and Explorer
-  fill. When the OS has nothing, the card shows (no error).
+  fill. When the OS has nothing (a broken file, nothing that reads it), the card says "Can't
+  preview this file", never a blank panel; a request that hasn't answered in 10 s is cancelled
+  and gets the same card.
   - **macOS:** Quick Look (`QLThumbnailGenerator`), asked for its best thumbnail (never a
     generic icon). Moving on or closing calls `cancelRequest:` at once, and a late answer is
     dropped.

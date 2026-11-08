@@ -502,8 +502,9 @@ pub(crate) fn load_with(job: &Job, stop: &AtomicBool, bell: &Arc<Bell>) -> Optio
         match os_preview(job, stop, bell) {
             Some(Thumb::Image(px)) => thumbnail(px),
             Some(Thumb::Stopped) => return None,
-            // The OS has nothing to show: the header says what it is, with no error.
-            Some(Thumb::Nothing) => Loaded::body(Body::Card(Card::default())),
+            // The OS has nothing to show (a broken file, no thumbnailer for it, out of time): the
+            // card, saying so, never a blank panel.
+            Some(Thumb::Nothing) => Loaded::body(Body::Card(Card { items: None, note: Some(CANT.into()) })),
             None => Loaded::body(Body::Card(Card { items: None, note: Some(no_preview_here(what)) })),
         }
     } else {
@@ -553,6 +554,9 @@ pub(crate) fn platform_kind(ext: &str) -> Option<&'static str> {
         _ => return None,
     })
 }
+
+/// The card's note when the OS's thumbnailer has nothing for a file it should know.
+const CANT: &str = "Can't preview this file.";
 
 /// The card's note where the OS has no thumbnailer Arbor uses (Linux).
 fn no_preview_here(what: &str) -> String {
@@ -2405,9 +2409,9 @@ mod tests {
         settle(&mut s);
         let Body::Card(c) = &s.preview.as_ref().unwrap().body else { panic!() };
         // Linux has no thumbnailer Arbor uses, and says so; elsewhere the OS has nothing for an
-        // eight-byte PDF, and the card says nothing more than the header.
+        // eight-byte PDF, and the card says it can't preview it.
         if cfg!(any(target_os = "macos", windows)) {
-            assert_eq!(c.note, None);
+            assert_eq!(c.note.as_deref(), Some(CANT));
         } else {
             assert!(c.note.as_deref().unwrap().starts_with("PDF: no preview on this system"), "{:?}", c.note);
         }
@@ -2480,8 +2484,8 @@ mod tests {
         assert_eq!(p.pixels.size(), (30, 20));
     }
 
-    /// When the OS has nothing, the panel shows the card: no error for a format it should know
-    /// (the header says what it is), and "Binary file" for anything else.
+    /// When the OS has nothing, the panel shows the card, never a blank panel: "Can't preview
+    /// this file" for a format it should know, and "Binary file" for anything else.
     #[test]
     fn the_card_shows_when_the_os_has_nothing() {
         let d = folder("os-nothing");
@@ -2492,12 +2496,29 @@ mod tests {
         let mut s = state_in(&d);
         space(&mut s);
         settle(&mut s);
-        assert_eq!(s.preview.as_ref().unwrap().body, Body::Card(Card { items: None, note: None }));
+        assert_eq!(s.preview.as_ref().unwrap().body, Body::Card(Card { items: None, note: Some(CANT.into()) }));
         key(&mut s, Key::Down);
         settle(&mut s);
         let body = &s.preview.as_ref().unwrap().body;
         assert!(matches!(body, Body::Card(c) if c.note.as_deref().unwrap().starts_with("Binary file")), "{body:?}");
         assert!(hook::seen(&d.join("b.blob")).contains(&"os".to_string()));
+    }
+
+    /// An OS request that never answers is given up on after its limit: cancelled, and the card
+    /// shows ("Can't preview this file"), not "Loading…" for good.
+    #[test]
+    fn an_os_request_that_never_answers_is_given_up_on() {
+        let d = folder("os-limit");
+        std::fs::write(d.join("a.pdf"), "%PDF-1.4").unwrap();
+        let os = Arc::new(thumb::fake::Os { limit: Some(Duration::from_millis(50)), ..Default::default() });
+        thumb::fake::set(&d.join("a.pdf"), thumb::fake::Fake::Hang(os.clone()));
+        let mut s = state_in(&d);
+        let t = Instant::now();
+        space(&mut s);
+        settle(&mut s);
+        assert!(t.elapsed() < Duration::from_secs(5));
+        assert_eq!(s.preview.as_ref().unwrap().body, Body::Card(Card { items: None, note: Some(CANT.into()) }));
+        assert_eq!(os.cancelled.load(Relaxed), 1);
     }
 
     /// The selection moves (or the panel closes) while the OS works on a thumbnail: the request

@@ -61,6 +61,12 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The longest the preview waits for the OS's thumbnailer: then the request is cancelled and
+/// the panel shows the card. Quick Look's own generators give up on a broken file well before
+/// this; it bounds one that hangs.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub const OS_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Wakes a thread waiting for an OS answer or a stop, without polling. Whoever changes what the
 /// waiter looks at (an answer, a stop flag) does so first, then rings.
 #[derive(Default)]
@@ -75,14 +81,20 @@ impl Bell {
         self.cv.notify_all();
     }
 
-    /// Returns once `done()` is true. It's checked with the bell's lock held, and a ringer takes
-    /// that lock, so a ring after the check can't be missed.
+    /// Returns once `done()` is true (true) or `limit` has passed (false). It's checked with the
+    /// bell's lock held, and a ringer takes that lock, so a ring after the check can't be missed.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-    pub fn wait_until(&self, done: impl Fn() -> bool) {
+    pub fn wait_until(&self, done: impl Fn() -> bool, limit: std::time::Duration) -> bool {
+        let end = std::time::Instant::now() + limit;
         let mut g = lock(&self.m);
         while !done() {
-            g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            g = self.cv.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner()).0;
         }
+        true
     }
 }
 
@@ -97,7 +109,7 @@ pub(crate) trait Pending {
 pub(crate) enum Waited<T> {
     Answer(T),
     Stopped,
-    /// The request couldn't be made.
+    /// The request couldn't be made, or didn't answer within its limit (it's cancelled).
     Failed,
 }
 
@@ -106,12 +118,13 @@ pub(crate) enum Waited<T> {
 pub(crate) type Done<T> = Box<dyn FnOnce(T) + Send>;
 
 /// Starts an asynchronous OS request with `start` (which gets the function its completion
-/// handler calls) and waits for its answer or a stop. Stopped first: the request is cancelled,
-/// and an answer that comes later is dropped.
+/// handler calls) and waits for its answer or a stop, at most `limit`. Stopped first, or out of
+/// time: the request is cancelled, and an answer that comes later is dropped.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn wait<T: Send + 'static>(
     stop: &AtomicBool,
     bell: &Arc<Bell>,
+    limit: std::time::Duration,
     start: impl FnOnce(Done<T>) -> Option<Box<dyn Pending>>,
 ) -> Waited<T> {
     let slot: Arc<Mutex<Option<T>>> = Arc::default();
@@ -122,10 +135,14 @@ pub(crate) fn wait<T: Send + 'static>(
     })) else {
         return Waited::Failed;
     };
-    bell.wait_until(|| stop.load(Relaxed) || lock(&slot).is_some());
+    let answered = bell.wait_until(|| stop.load(Relaxed) || lock(&slot).is_some(), limit);
     if stop.load(Relaxed) {
         pending.cancel();
         return Waited::Stopped;
+    }
+    if !answered {
+        pending.cancel();
+        return Waited::Failed;
     }
     lock(&slot).take().map_or(Waited::Failed, Waited::Answer)
 }
@@ -192,7 +209,7 @@ mod mac {
         // request is done, not when the thread ends.
         autoreleasepool(|_| {
             let Some(url) = NSURL::from_file_path(path) else { return Thumb::Nothing };
-            let waited = wait(stop, bell, |done: Done<Answer>| {
+            let waited = wait(stop, bell, OS_LIMIT, |done: Done<Answer>| {
                 let size = CGSize::new(fit[0].max(1) as f64, fit[1].max(1) as f64);
                 // The thumbnail, or a quick low-quality one if that's all there is; never the
                 // file type's icon (the card says more than a generic icon).
@@ -449,6 +466,8 @@ pub(crate) mod fake {
         pub started: AtomicUsize,
         pub cancelled: AtomicUsize,
         pub done: Mutex<Option<Done<Option<Rgba>>>>,
+        /// How long the preview waits for it ([`OS_LIMIT`] when `None`).
+        pub limit: Option<std::time::Duration>,
     }
 
     struct Request(Arc<Os>);
@@ -471,7 +490,7 @@ pub(crate) mod fake {
         Some(match f {
             Fake::Image(w, h) => Thumb::Image((w, h, [9, 99, 199, 255].repeat((w * h) as usize))),
             Fake::Nothing => Thumb::Nothing,
-            Fake::Hang(os) => match wait(stop, bell, |done| {
+            Fake::Hang(os) => match wait(stop, bell, os.limit.unwrap_or(OS_LIMIT), |done| {
                 *lock(&os.done) = Some(done);
                 os.started.fetch_add(1, Relaxed);
                 Some(Box::new(Request(os.clone())))
@@ -502,7 +521,7 @@ mod tests {
     #[test]
     fn a_wait_returns_the_answer() {
         let (stop, bell) = (AtomicBool::new(false), Arc::new(Bell::default()));
-        let r = wait(&stop, &bell, |done: Done<u32>| {
+        let r = wait(&stop, &bell, OS_LIMIT, |done: Done<u32>| {
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(20));
                 done(7);
@@ -526,7 +545,7 @@ mod tests {
         let (stop, bell) = (Arc::new(AtomicBool::new(false)), Arc::new(Bell::default()));
         let (o, s, b) = (os.clone(), stop.clone(), bell.clone());
         let waiter = std::thread::spawn(move || {
-            wait(&s, &b, |done: Done<Option<Rgba>>| {
+            wait(&s, &b, OS_LIMIT, |done: Done<Option<Rgba>>| {
                 *lock(&o.done) = Some(done);
                 o.started.fetch_add(1, Relaxed);
                 struct P(Arc<fake::Os>);
@@ -609,6 +628,13 @@ mod tests {
         assert!(w > 0 && h > 0 && w <= 400 && h <= 400, "{w} × {h}");
         assert_eq!(px.len(), (w * h * 4) as usize);
         assert!(px.as_chunks::<4>().0.iter().any(|p| p[2] > 200 && p[0] < 80), "the blue band is there");
+        // A broken PDF (a header and filler, as the QA's was): an answer within the limit.
+        let broken = d.join("broken.pdf");
+        std::fs::write(&broken, [b"%PDF-1.4\n".as_slice(), &[b'A'; 200_000]].concat()).unwrap();
+        let t = Instant::now();
+        let r = thumbnail(&broken, [400, 400], &AtomicBool::new(false), &bell).unwrap();
+        eprintln!("Quick Look: broken PDF answered in {:.1} ms: {:?}", t.elapsed().as_secs_f64() * 1000.0, std::mem::discriminant(&r));
+        assert!(t.elapsed() < OS_LIMIT + Duration::from_secs(2));
         // A file Quick Look has no thumbnail for: nothing, not an icon.
         let junk = d.join("junk.arborjunk");
         std::fs::write(&junk, [0u8, 1, 2, 3, 255, 254].repeat(100)).unwrap();
@@ -683,8 +709,9 @@ mod tests {
     #[ignore = "benchmark"]
     fn os_thumbnail_speed() {
         let d = scratch("speed");
-        let mut files = vec![d.join("page.pdf")];
+        let mut files = vec![d.join("page.pdf"), d.join("broken.pdf")];
         std::fs::write(&files[0], pdf()).unwrap();
+        std::fs::write(&files[1], [b"%PDF-1.4\n".as_slice(), &[b'A'; 200_000]].concat()).unwrap();
         if let Some(dir) = std::env::var_os("ARBOR_THUMB_DIR") {
             let mut more: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
             more.sort();
