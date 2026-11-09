@@ -97,7 +97,7 @@ pub fn identity(path: &Path) -> Option<String> {
 /// The UUID of the file system on device `source`: the name of the link in `by_uuid` (udev's
 /// `/dev/disk/by-uuid`) that leads to it. `None` without one (no udev, a file system with no
 /// UUID, a source that isn't a device).
-#[cfg_attr(not(any(test, all(unix, not(target_os = "macos")))), allow(dead_code))]
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
 pub fn fs_uuid(source: &Path, by_uuid: &Path) -> Option<String> {
     let dev = std::fs::canonicalize(source).ok()?;
     std::fs::read_dir(by_uuid)
