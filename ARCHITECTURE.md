@@ -100,8 +100,9 @@ Nothing runs in the background unless the user did something, and nothing polls.
   macOS's birth time). Every listing reads it for each entry from the metadata it reads anyway
   (Windows: `fs::win_dir` enumerates with `FileIdBothDirectoryInfo`, which adds the volume and
   NTFS file id at no cost per entry); so does the search walk. Every action on chosen items
-  carries it (`ops::Checks`, `Op::Checked`, `ops::Doomed`, a drag's paths, Empty Trash's
-  items, which on Linux add the file handle) and the worker compares it immediately before each
+  carries it (`ops::Checks`, `Op::Checked`, `ops::Doomed`, a drop on the other pane, Empty
+  Trash's items, which on Linux add the file handle; a drag reads nothing when it starts, and an
+  item whose identity couldn't be read is never moved or removed) and the worker compares it immediately before each
   item is touched (`fs::ident_of`, which on Windows reads the file id through a handle). An item
   replaced since is left alone ("…was replaced since the folder was read; press ⌘R"), and one
   with no identity is never deleted. Size and times of change aren't in it, so a file edited

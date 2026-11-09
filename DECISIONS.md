@@ -195,6 +195,27 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-09 · A drag starts with the rows as listed; a drop out to another app is that app's
+  to check** (review: starting a drag stat'ed every selected item, and opened it on Windows, on
+  the window's thread). Nothing is read when a drag starts. A drop on the other pane goes to
+  the worker as an `Op::Checked` with each row's listing identity, so a replaced item is left
+  alone there; a drop in another app (Finder, Explorer, a file manager, an editor) happens after
+  Arbor's part ends, so Arbor can't check it, and a row replaced since the listing is offered as
+  its path. Undo: `State::drag_item`.
+- **2026-11-09 · A row listed without an identity is never moved or removed** until its folder
+  is read again ("Couldn't verify “x” when the folder was read, so it was left alone; press ⌘R
+  to read it again"; for search results, "search again"): trash, move, paste of a cut, F6, a
+  drop, inline and batch rename, Put Back and Delete. A copy (F5, paste, Duplicate) still goes
+  ahead: it leaves the item where it is. Undo: `ops::Checks` (`Option` identities), `run_checked`.
+- **2026-11-09 · Where identity is told by ctime alone, Arbor's own changes carry over**
+  (review: two hard links trashed together had the second refused; an item Arbor just renamed
+  was refused until its folder was read again). After each rename, move, trash, delete or Put
+  Back, the worker reads what its change made of the item, where it went or through another name
+  for it the same operation still has to act on (a name still linking the inode means it can't
+  have been reused), and the rows still showing the old identity take the new one. Left: a hard
+  link Arbor wasn't asked to act on, in a folder it doesn't read again, after the other name was
+  deleted for good (nothing left to read the new ctime through), is refused until reloaded.
+  Another app's change is still refused. Undo: `Worker::acted`, `Folder::reidentify`.
 - **2026-11-09 · Actions on listed items check the listing's identity (the PM's call), and
   Windows lists with file ids** (review of milestone 15's fixes). Trash, move, copy, rename,
   F5/F6, paste, drag and Duplicate on a folder's rows now carry each row's `fs::Ident` from
