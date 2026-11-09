@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds Arbor's package for the platform it runs on, into dist/:
 #
-#   macOS    dist/Arbor.app (ad-hoc signed) and dist/Arbor-<version>-macos-<arch>.zip
+#   macOS    dist/Arbor.app (ad-hoc signed) and dist/Arbor-<version>-macos-universal.zip: one
+#            binary with an Apple silicon and an Intel slice (lipo), both for macOS 11 or later
 #   Linux    dist/arbor-<version>-linux-<arch>.tar.gz: the binary, arbor.desktop, icons,
 #            install.sh and uninstall.sh (installs into ~/.local, no root)
 #   Windows  dist/arbor-<version>-windows-<arch>.zip: arbor.exe (icon and version info built
@@ -10,6 +11,11 @@
 #   scripts/package.sh                 # builds the `dist` profile first (stripped, LTO)
 #   PROFILE=release scripts/package.sh # a quicker build
 #   NO_BUILD=1 scripts/package.sh      # package what target/$PROFILE already has
+#   ARCH=native scripts/package.sh     # macOS: this Mac's architecture only (no lipo)
+#
+# The universal build needs the other architecture's Rust target once:
+#   rustup target add x86_64-apple-darwin    # on Apple silicon (aarch64-apple-darwin on Intel)
+# This Mac's slice is the usual build (target/$PROFILE); the other one is built with --target.
 #
 # The macOS icon (assets/icon/Arbor.icns) is committed; `scripts/package.sh --icns` makes it
 # again from scripts/icon.py with iconutil (macOS only).
@@ -30,8 +36,25 @@ if [ "${1:-}" = --icns ]; then
 	exit 0
 fi
 
+# macOS: both slices are built for macOS 11, the Info.plist's LSMinimumSystemVersion (Big Sur
+# is the first macOS on Apple silicon; Intel's default would be 10.12, which nothing tests).
+other=
+if [ "$(uname -s)" = Darwin ]; then
+	export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-11.0}
+	if [ "${ARCH:-universal}" = universal ]; then
+		case "$arch" in arm64) other=x86_64-apple-darwin ;; *) other=aarch64-apple-darwin ;; esac
+		if ! rustup target list --installed 2>/dev/null | grep -qx "$other"; then
+			echo "package.sh: the universal build needs: rustup target add $other (or ARCH=native)" >&2
+			exit 1
+		fi
+	fi
+fi
+
 if [ "${NO_BUILD:-}" != 1 ]; then
 	cargo build --profile "$profile" --locked
+	if [ -n "$other" ]; then
+		cargo build --profile "$profile" --locked --target "$other"
+	fi
 fi
 
 out=dist
@@ -42,7 +65,13 @@ case "$(uname -s)" in
 Darwin)
 	app=$out/Arbor.app
 	mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-	cp "target/$profile/arbor" "$app/Contents/MacOS/arbor"
+	if [ -n "$other" ]; then
+		lipo -create "target/$profile/arbor" "target/$other/$profile/arbor" -output "$app/Contents/MacOS/arbor"
+		lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/arbor"
+		arch=universal
+	else
+		cp "target/$profile/arbor" "$app/Contents/MacOS/arbor"
+	fi
 	sed "s/@VERSION@/$version/g" packaging/macos/Info.plist >"$app/Contents/Info.plist"
 	printf 'APPL????' >"$app/Contents/PkgInfo"
 	cp assets/icon/Arbor.icns "$app/Contents/Resources/Arbor.icns"

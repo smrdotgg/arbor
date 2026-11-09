@@ -60,6 +60,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --release --locked --all-targets -- -D warnings
 
+      # The Mac package is universal (scripts/package.sh): the Intel slice needs its target.
+      - name: Intel target (macOS)
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin
+
       # The installable package for this platform (scripts/package.sh), from the stripped `dist`
       # build: Arbor.app and its zip on macOS, the tarball on Linux, the zip on Windows. Every
       # run uploads it; a v* tag also publishes it as a GitHub Release (the release job).
@@ -94,6 +99,22 @@ jobs:
           plutil -p dist/Arbor.app/Contents/Info.plist
           codesign -dv dist/Arbor.app 2>&1 | grep -E "Identifier|Signature"
           sips -g pixelWidth -g pixelHeight dist/Arbor.app/Contents/Resources/Arbor.icns
+          bin=dist/Arbor.app/Contents/MacOS/arbor
+          # Both slices, each built for the Info.plist's LSMinimumSystemVersion.
+          lipo -archs "$bin" && lipo -verify_arch arm64 x86_64 "$bin"
+          min=$(plutil -extract LSMinimumSystemVersion raw dist/Arbor.app/Contents/Info.plist)
+          for a in arm64 x86_64; do
+            vtool -arch "$a" -show-build "$bin" | tee /dev/stderr | grep -Eq "minos $min$"
+          done
+          test "$("$bin" --version)" = "arbor $(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+          # The Intel slice, run under Rosetta (installed first if the runner lacks it).
+          arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license || true
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            arch -x86_64 "$bin" --version
+          else
+            echo "::warning::No Rosetta on this runner: the Intel slice was built and checked, not run"
+          fi
+          ls dist/Arbor-*-macos-universal.zip
 
       - uses: actions/upload-artifact@v4
         with:

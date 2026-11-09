@@ -56,6 +56,12 @@ use rune::{App, AppSpec, Chrome};
 use app::State;
 
 fn main() {
+    // `arbor --version`: what's installed, without a window (CI runs the Mac package's Intel
+    // slice this way, under Rosetta).
+    if std::env::args_os().nth(1).is_some_and(|a| a == "--version") {
+        println!("arbor {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     // For uninstallers: put back the folder default Arbor replaced, without opening a window.
     if std::env::args_os().nth(1).is_some_and(|a| a == "--restore-folder-default") {
         match handler::run(handler::Change::Restore) {
