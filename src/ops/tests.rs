@@ -1494,7 +1494,7 @@ fn trash_rechecks_each_item_right_before_it_goes() {
         let op = Op::Trash { sources: paths.clone() };
         let op = if search {
             let expect = paths.iter().map(|p| (p.clone(), crate::fs::ident(&p.symlink_metadata().unwrap()).unwrap())).collect();
-            Op::Checked { expect, op: Box::new(op) }
+            Op::Checked { expect: Checks::search(expect), op: Box::new(op) }
         } else {
             op
         };
@@ -1667,7 +1667,7 @@ fn an_item_with_a_reused_inode_is_never_acted_on() {
     let d = tmp("inode-reuse");
     let target = d.join("t");
     fs::create_dir(d.join("into")).unwrap();
-    let checked = |op: Op, id: crate::fs::Ident| Op::Checked { expect: vec![(target.clone(), id)], op: Box::new(op) };
+    let checked = |op: Op, id: crate::fs::Ident| Op::Checked { expect: Checks::search(vec![(target.clone(), id)]), op: Box::new(op) };
     type MakeOp<'a> = Box<dyn Fn(crate::fs::Ident) -> Op + 'a>;
     let ops: Vec<(&str, MakeOp)> = vec![
         ("delete", Box::new(|id| Op::Delete { items: vec![Doomed { path: target.clone(), id: Some(id), dir: false }] })),
@@ -1691,7 +1691,8 @@ fn an_item_with_a_reused_inode_is_never_acted_on() {
     assert!(o.removed.is_empty() && root.join("files/a").exists() && root.join("info/a.trashinfo").exists(), "empty trash");
     let item = root.join("files/a");
     let id = reused(&item);
-    let o = run_now(Op::Checked { expect: vec![(item.clone(), id)], op: Box::new(Op::PutBack { items: vec![item.clone()] }) });
+    let o =
+        run_now(Op::Checked { expect: Checks::search(vec![(item.clone(), id)]), op: Box::new(Op::PutBack { items: vec![item.clone()] }) });
     assert!(o.refused.is_some() && item.exists() && !d.join("a").exists(), "put back");
     let _ = fs::remove_dir_all(&d);
 }
@@ -1710,7 +1711,12 @@ fn without_birth_times_a_reused_inode_is_still_refused() {
     let d = tmp("no-btime");
     let target = d.join("t");
     let delete = |id| run_now(Op::Delete { items: vec![Doomed { path: target.clone(), id: Some(id), dir: false }] });
-    let trash = |id| run_now(Op::Checked { expect: vec![(target.clone(), id)], op: Box::new(Op::Trash { sources: vec![target.clone()] }) });
+    let trash = |id| {
+        run_now(Op::Checked {
+            expect: Checks::search(vec![(target.clone(), id)]),
+            op: Box::new(Op::Trash { sources: vec![target.clone()] }),
+        })
+    };
     // Handles only on Linux; elsewhere the ctime is all there is.
     for no_handle in if cfg!(target_os = "linux") { vec![false, true] } else { vec![true] } {
         let _p = crate::fs::pretend::without_birth_times(no_handle);
@@ -1733,6 +1739,32 @@ fn without_birth_times_a_reused_inode_is_still_refused() {
     let _ = fs::remove_dir_all(&d);
 }
 
+/// Windows: a file made under a name within 15 s of one leaving it gets the old one's creation
+/// time (NTFS's tunnelling), so creation time alone took it for the item listed. The listing
+/// reads each entry's file id, which the newcomer doesn't share: trashing the listed row is
+/// refused, and the newcomer stays.
+#[cfg(windows)]
+#[test]
+fn windows_a_tunnelled_replacement_is_refused() {
+    use super::{Checks, Chosen};
+    let d = tmp("tunnelled");
+    fs::write(d.join("a"), "the item listed").unwrap();
+    let listed = crate::fs::list(d.clone(), crate::fs::Sort { key: crate::fs::SortKey::Name, desc: false });
+    let id = listed.result.unwrap().iter().find(|e| e.name == "a").unwrap().id.unwrap();
+    let born = fs::symlink_metadata(d.join("a")).unwrap().created().unwrap();
+    fs::remove_file(d.join("a")).unwrap();
+    fs::write(d.join("a"), "another item").unwrap();
+    // (The newcomer has the old creation time when tunnelling is on, as it is by default.)
+    eprintln!("tunnelled: {}", fs::symlink_metadata(d.join("a")).unwrap().created().unwrap() == born);
+    let o = run_now(Op::Checked {
+        expect: Checks::new(Chosen::Listing, vec![(d.join("a"), id)]),
+        op: Box::new(Op::Trash { sources: vec![d.join("a")] }),
+    });
+    assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "another item", "left alone");
+    assert!(o.refused.as_deref().is_some_and(|r| r.contains("was replaced since the folder was read")), "{:?}", o.refused);
+    let _ = fs::remove_dir_all(&d);
+}
+
 /// A file edited after its folder was listed (Arbor doesn't watch folders) is still the item
 /// the user chose: delete, trash, move, rename and Put Back go ahead (identity is the object,
 /// not its contents), and so does Empty Trash. Undo still refuses once it's edited again: its
@@ -1742,7 +1774,7 @@ fn an_item_edited_since_it_was_chosen_is_still_acted_on() {
     let d = tmp("edited-since");
     let target = d.join("t");
     fs::create_dir(d.join("into")).unwrap();
-    let checked = |op: Op, id: crate::fs::Ident| Op::Checked { expect: vec![(target.clone(), id)], op: Box::new(op) };
+    let checked = |op: Op, id: crate::fs::Ident| Op::Checked { expect: Checks::search(vec![(target.clone(), id)]), op: Box::new(op) };
     type MakeOp<'a> = Box<dyn Fn(crate::fs::Ident) -> Op + 'a>;
     let ops: Vec<(&str, MakeOp, PathBuf)> = vec![
         ("delete", Box::new(|id| Op::Delete { items: vec![Doomed { path: target.clone(), id: Some(id), dir: false }] }), PathBuf::new()),
@@ -1779,7 +1811,10 @@ fn an_item_edited_since_it_was_chosen_is_still_acted_on() {
         let id = crate::fs::ident_at(&item).unwrap();
         fs::write(&item, "edited in the Trash").unwrap();
         bump(&item);
-        let o = run_now(Op::Checked { expect: vec![(item.clone(), id)], op: Box::new(Op::PutBack { items: vec![item.clone()] }) });
+        let o = run_now(Op::Checked {
+            expect: Checks::search(vec![(item.clone(), id)]),
+            op: Box::new(Op::PutBack { items: vec![item.clone()] }),
+        });
         assert!(o.refused.is_none() && o.errors.is_empty(), "put back: {:?} {:?}", o.refused, o.errors);
         // Empty Trash: an item edited in the Trash after the count is still the one counted.
         let (items, _) = contents::list(&[trash_bin(&root)], &|| false).unwrap();
@@ -1969,7 +2004,8 @@ fn put_back_checks_each_item_is_still_the_one_listed() {
     fs::create_dir(d.join("folder")).unwrap();
     fs::remove_file(&item).unwrap();
     fs::rename(d.join("folder"), &item).unwrap();
-    let o = run_now(Op::Checked { expect: vec![(item.clone(), id)], op: Box::new(Op::PutBack { items: vec![item.clone()] }) });
+    let o =
+        run_now(Op::Checked { expect: Checks::search(vec![(item.clone(), id)]), op: Box::new(Op::PutBack { items: vec![item.clone()] }) });
     assert!(o.refused.is_some_and(|r| r.contains("“a.txt”")));
     assert!(item.exists() && !d.join("docs/a.txt").exists());
     let _ = fs::remove_dir_all(&d);

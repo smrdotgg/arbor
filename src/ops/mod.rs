@@ -83,13 +83,44 @@ pub enum Op {
     },
     /// Reverse an earlier operation, if the disk still looks the way it left it.
     Undo(Undo),
-    /// `op` on search results: each item in `expect` must still be the one the walk found at
-    /// its path (its [`crate::fs::ident`]); one that isn't (moved or deleted since, and maybe
-    /// something else put there) is left out and said so, and the rest go ahead.
+    /// `op` on items chosen from a listing or search results: each item in `expect` must still
+    /// be the object the listing or the walk found at its path (its [`crate::fs::Ident`],
+    /// edited or not); one that isn't (moved or deleted since, and maybe something else put
+    /// there) is left out and said so, and the rest go ahead.
     Checked {
-        expect: Vec<(PathBuf, crate::fs::Ident)>,
+        expect: Checks,
         op: Box<Op>,
     },
+}
+
+/// Where the items an operation was asked for were chosen, for what a refusal says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Chosen {
+    /// A folder's listing: reading it again shows what's there now.
+    #[default]
+    Listing,
+    /// Search results.
+    Search,
+}
+
+/// The items an operation was asked for, each with the identity it had when its listing or
+/// search walk read it ([`Op::Checked`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Checks {
+    pub from: Chosen,
+    pub items: Vec<(PathBuf, crate::fs::Ident)>,
+}
+
+impl Checks {
+    pub fn new(from: Chosen, items: Vec<(PathBuf, crate::fs::Ident)>) -> Checks {
+        Checks { from, items }
+    }
+
+    /// From search results (tests).
+    #[cfg(test)]
+    pub fn search(items: Vec<(PathBuf, crate::fs::Ident)>) -> Checks {
+        Checks { from: Chosen::Search, items }
+    }
 }
 
 /// Making a new folder, as the status bar says it.

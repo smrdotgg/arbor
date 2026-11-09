@@ -619,24 +619,25 @@ impl Folder {
         self.renamed_paths(&pairs);
     }
 
-    /// From search results, each selected item's path and the identity the walk saw there,
-    /// for an action to check first (`ops::Op::Checked`). Empty for a folder's listing.
-    pub fn target_checks(&self) -> Vec<(PathBuf, fs::Ident)> {
-        if !self.searching() {
-            return Vec::new();
-        }
-        self.targets().into_iter().filter_map(|e| Some((self.cwd.join(&e.os), e.id?))).collect()
+    /// Each selected item's path and the identity its listing (or the search walk) read there,
+    /// for an action to check first (`ops::Op::Checked`): an item replaced since is left alone.
+    pub fn target_checks(&self) -> crate::ops::Checks {
+        crate::ops::Checks::new(self.chosen(), self.targets().into_iter().filter_map(|e| Some((self.cwd.join(&e.os), e.id?))).collect())
     }
 
     /// [`Folder::target_checks`] for what a drag from row `i` carries.
-    pub fn drag_checks(&self, i: usize) -> Vec<(PathBuf, fs::Ident)> {
-        if !self.searching() {
-            return Vec::new();
-        }
+    pub fn drag_checks(&self, i: usize) -> crate::ops::Checks {
         if self.is_selected(i) {
             return self.target_checks();
         }
-        self.visible.get(i).map(|&e| &self.entries[e as usize]).and_then(|e| Some((self.cwd.join(&e.os), e.id?))).into_iter().collect()
+        let items =
+            self.visible.get(i).map(|&e| &self.entries[e as usize]).and_then(|e| Some((self.cwd.join(&e.os), e.id?))).into_iter().collect();
+        crate::ops::Checks::new(self.chosen(), items)
+    }
+
+    /// Where this folder's rows come from, for what a refusal says.
+    pub fn chosen(&self) -> crate::ops::Chosen {
+        if self.searching() { crate::ops::Chosen::Search } else { crate::ops::Chosen::Listing }
     }
 }
 
@@ -947,4 +948,4 @@ impl State {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

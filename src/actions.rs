@@ -198,12 +198,14 @@ impl State {
             self.note = Some(format!("“{new}” isn't a valid name"));
             return;
         }
-        // A search result must still be the item the walk found there (checked on the worker).
-        let found = self.cur().searching().then(|| self.cur().entries.iter().find(|e| e.os == r.os).and_then(|e| e.id)).flatten();
+        // It must still be the item its listing (or the search walk) found there, edited or not
+        // (checked on the worker).
+        let found = self.cur().entries.iter().find(|e| e.os == r.os).and_then(|e| e.id);
+        let chosen = self.cur().chosen();
         // Beside it, in its own folder: never "the folder on screen + the new name".
         let Some(dir) = from.parent().map(Path::to_path_buf) else { return };
         let to = dir.join(&new);
-        let expect: Vec<(PathBuf, crate::fs::Ident)> = found.map(|id| (from.clone(), id)).into_iter().collect();
+        let expect = ops::Checks::new(chosen, found.map(|id| (from.clone(), id)).into_iter().collect());
         if !self.start(checked(Op::RenameOne { from, to }, expect)) {
             return;
         }
@@ -437,13 +439,13 @@ impl State {
     // ---- drag and drop ----------------------------------------------------------------------
 
     /// Files to drag out of row `i` of pane `id`: the whole selection if the row is in it,
-    /// else the row. From search results, only the items still the ones the walk found (one
-    /// lstat each, here: the drop happens in another app, too late to check).
+    /// else the row. Only the items still the ones the listing or the walk found (one lstat
+    /// each, here: the drop happens in another app, too late to check).
     pub fn drag_item(&self, id: u64, i: usize) -> Option<DragItem> {
         let f = &self.pane(id)?.f;
         let mut paths = f.drag_paths(i);
         let stale: Vec<PathBuf> =
-            f.drag_checks(i).into_iter().filter(|(p, id)| crate::fs::ident_at(p) != Some(*id)).map(|(p, _)| p).collect();
+            f.drag_checks(i).items.into_iter().filter(|(p, id)| crate::fs::ident_at(p) != Some(*id)).map(|(p, _)| p).collect();
         paths.retain(|p| !stale.contains(p));
         if paths.is_empty() {
             return None;
@@ -458,12 +460,12 @@ impl State {
     /// Files dropped on a folder (or on the list, for the current folder). Same disk moves,
     /// another disk copies, as in Finder; ⌥ always copies.
     pub fn drop_files(&mut self, files: &[PathBuf], into: PathBuf, tx: &mut Tx) {
-        self.drop_checked(files, into, Vec::new(), tx);
+        self.drop_checked(files, into, ops::Checks::default(), tx);
     }
 
-    /// [`State::drop_files`] for rows dragged from search results, each checked against the
-    /// identity the walk saw.
-    pub(crate) fn drop_checked(&mut self, files: &[PathBuf], into: PathBuf, expect: Vec<(PathBuf, crate::fs::Ident)>, tx: &mut Tx) {
+    /// [`State::drop_files`] for rows dragged from a pane, each checked against the identity
+    /// its listing or the walk saw.
+    pub(crate) fn drop_checked(&mut self, files: &[PathBuf], into: PathBuf, expect: ops::Checks, tx: &mut Tx) {
         for p in &mut self.panes {
             p.f.drop_target = None;
         }
@@ -692,8 +694,8 @@ impl State {
 }
 
 /// `op`, checked against `expect` first when there's anything to check (`Op::Checked`).
-pub(crate) fn checked(op: Op, expect: Vec<(PathBuf, crate::fs::Ident)>) -> Op {
-    if expect.is_empty() { op } else { Op::Checked { expect, op: Box::new(op) } }
+pub(crate) fn checked(op: Op, expect: ops::Checks) -> Op {
+    if expect.items.is_empty() { op } else { Op::Checked { expect, op: Box::new(op) } }
 }
 
 /// What a permanent delete did, in words: how many items are gone (they stay gone, even after a

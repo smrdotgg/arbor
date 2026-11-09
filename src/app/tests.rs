@@ -559,3 +559,83 @@ fn an_item_edited_after_the_listing_is_still_acted_on() {
     assert!(d.join("c-renamed").exists() && !d.join("c-rename").exists(), "rename");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The review's case: a row of a folder's listing whose file was replaced since (another app
+/// saving over it by rename, or deleting it and making another) was trashed, renamed, moved or
+/// copied as the newcomer: only search results were checked. Now every action checks each item
+/// against the identity its listing read, and says to read the folder again.
+#[test]
+fn a_listed_item_replaced_since_is_left_alone() {
+    let d = folder("replaced-since-listed", 0);
+    let into = folder("replaced-since-listed-into", 0);
+    let names = ["a-trash", "b-rename", "c-cut", "d-f6", "e-f5", "f-delete", "g-drag"];
+    for n in names {
+        std::fs::write(d.join(n), "as listed").unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.run(Cmd::Split, &mut Tx::default());
+    settle_all(&mut s);
+    s.panes[1].f.cwd = into.clone();
+    s.activate(0, &mut Tx::default());
+    let at = |s: &State, n: &str| s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == n).unwrap();
+    // The folder as listed, then the item replaced: what each action finds at its path.
+    let replaced = |s: &mut State, n: &str| {
+        settle_all(s);
+        let i = at(s, n);
+        s.cur_mut().select(i);
+        crate::search::tests::replace(&d.join(n));
+        s.note = None;
+    };
+    let untouched = |s: &State, n: &str, said: &str| {
+        assert_eq!(std::fs::read_to_string(d.join(n)).unwrap(), "SOMEONE ELSE'S FILE", "{n}: the newcomer stays");
+        assert!(s.note.as_deref().is_some_and(|t| t.contains(said)), "{n}: {:?}", s.note);
+    };
+    let since = "was replaced since the folder was read";
+    replaced(&mut s, "a-trash");
+    s.run(Cmd::Trash, &mut Tx::default());
+    finish_job(&mut s);
+    untouched(&s, "a-trash", since);
+    replaced(&mut s, "b-rename");
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "b-renamed".into();
+    s.commit_rename(&mut Tx::default());
+    finish_job(&mut s);
+    untouched(&s, "b-rename", since);
+    assert!(!d.join("b-renamed").exists());
+    replaced(&mut s, "c-cut");
+    s.run(Cmd::Cut, &mut Tx::default());
+    let content = rune::ClipboardContent::new("").with_files(s.clip.as_ref().unwrap().paths.clone());
+    s.paste_reqs.push(PasteReq { id: 0, dest: into.clone(), dest_id: None, mv: false });
+    s.paste_reply(0, &content);
+    finish_job(&mut s);
+    untouched(&s, "c-cut", since);
+    replaced(&mut s, "d-f6");
+    s.run(Cmd::MoveToOther, &mut Tx::default());
+    finish_job(&mut s);
+    untouched(&s, "d-f6", since);
+    replaced(&mut s, "e-f5");
+    s.run(Cmd::CopyToOther, &mut Tx::default());
+    finish_job(&mut s);
+    untouched(&s, "e-f5", since);
+    assert!(std::fs::read_dir(&into).unwrap().next().is_none(), "nothing went into the other folder");
+    replaced(&mut s, "f-delete");
+    s.run(Cmd::Delete, &mut Tx::default());
+    s.answer(true, &mut Tx::default());
+    finish_job(&mut s);
+    untouched(&s, "f-delete", "isn't the item you chose");
+    replaced(&mut s, "g-drag");
+    let (i, id) = (s.cur().sel, s.cur().id);
+    assert!(s.drag_item(id, i).is_none(), "a drag carries nothing");
+    // Read again, the newcomer is what the row is: it goes.
+    settle_all(&mut s);
+    s.run(Cmd::Reload, &mut Tx::default());
+    settle_all(&mut s);
+    let i = at(&s, "a-trash");
+    s.cur_mut().select(i);
+    s.run(Cmd::Trash, &mut Tx::default());
+    finish_job(&mut s);
+    assert!(!d.join("a-trash").exists(), "{:?}", s.note);
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&into);
+}

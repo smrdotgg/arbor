@@ -15,7 +15,8 @@ pub(super) struct Worker<'a> {
     /// ([`Worker::changed`]).
     pub(super) seen: std::collections::HashMap<PathBuf, crate::fs::Ident>,
     /// `seen` came from a search's walk (its words name the search).
-    pub(super) seen_by_search: bool,
+    /// Where the items in `seen` were chosen (`None`: when the operation began).
+    pub(super) chosen: Option<Chosen>,
     /// Where other disks are mounted, read once per operation when a recursive removal first
     /// needs it, so none crosses into one.
     pub(super) mounts: std::cell::OnceCell<crate::mounts::Mounts>,
@@ -61,7 +62,7 @@ impl<'a> Worker<'a> {
             last_wake: Instant::now(),
             trash,
             seen: std::collections::HashMap::new(),
-            seen_by_search: false,
+            chosen: None,
             mounts: std::cell::OnceCell::new(),
             #[cfg(test)]
             hooks: Hooks::default(),
@@ -368,25 +369,24 @@ impl<'a> Worker<'a> {
         out
     }
 
-    /// [`Op::Checked`]: leaves out each item that isn't the one the search found, says why,
-    /// and runs the rest.
-    pub(super) fn run_checked(&mut self, expect: &[(PathBuf, crate::fs::Ident)], op: Op) -> Outcome {
+    /// [`Op::Checked`]: leaves out each item that isn't the one its listing or the search
+    /// found, says why, and runs the rest.
+    pub(super) fn run_checked(&mut self, expect: &Checks, op: Op) -> Outcome {
         let mut why = Vec::new();
         let mut left_out = std::collections::HashSet::new();
-        for (path, id) in expect {
-            let name = name_of(path);
+        for (path, id) in &expect.items {
             let problem = match path.symlink_metadata() {
                 Ok(m) if crate::fs::ident_of(path, &m) == Some(*id) => continue,
-                Ok(_) => format!("“{name}” isn't the item the search found (something else is at its path now), so it was left alone"),
-                Err(_) => format!("“{name}” isn't where the search found it any more, so it was left alone"),
+                Ok(_) => not_chosen(path, expect.from, true),
+                Err(_) => not_chosen(path, expect.from, false),
             };
             why.push(problem);
             left_out.insert(path.as_path());
         }
         let (op, any) = op.without(&left_out);
         // Each item is checked again right before it's acted on (`Worker::changed`).
-        self.seen.extend(expect.iter().cloned());
-        self.seen_by_search = true;
+        self.seen.extend(expect.items.iter().cloned());
+        self.chosen = Some(expect.from);
         if !any {
             let more = if why.len() > 1 { format!(" (and {} more)", why.len() - 1) } else { String::new() };
             return Outcome {
@@ -420,12 +420,12 @@ impl<'a> Worker<'a> {
     pub(super) fn changed(&self, src: &Path) -> Option<String> {
         let want = self.seen.get(src)?;
         let name = name_of(src);
-        Some(match (src.symlink_metadata(), self.seen_by_search) {
+        Some(match (src.symlink_metadata(), self.chosen) {
             (Ok(m), _) if crate::fs::ident_of(src, &m) == Some(*want) => return None,
-            (Ok(_), true) => format!("“{name}” isn't the item the search found (something else is at its path now), so it was left alone"),
-            (Err(_), true) => format!("“{name}” isn't where the search found it any more, so it was left alone"),
-            (Ok(_), false) => format!("“{name}” was replaced while the operation ran, so it was left alone"),
-            (Err(_), false) => format!("“{name}” was moved or deleted while the operation ran, so it was left alone"),
+            (Ok(_), Some(from)) => not_chosen(src, from, true),
+            (Err(_), Some(from)) => not_chosen(src, from, false),
+            (Ok(_), None) => format!("“{name}” was replaced while the operation ran, so it was left alone"),
+            (Err(_), None) => format!("“{name}” was moved or deleted while the operation ran, so it was left alone"),
         })
     }
 
@@ -777,3 +777,24 @@ impl<'a> Worker<'a> {
         }
     }
 }
+
+/// Why `path`, chosen from `from`, was left alone: something else is at its path now
+/// (`there`), or nothing is.
+fn not_chosen(path: &Path, from: Chosen, there: bool) -> String {
+    let name = name_of(path);
+    match (from, there) {
+        (Chosen::Search, true) => {
+            format!("“{name}” isn't the item the search found (something else is at its path now), so it was left alone")
+        }
+        (Chosen::Search, false) => format!("“{name}” isn't where the search found it any more, so it was left alone"),
+        (Chosen::Listing, true) => {
+            format!("“{name}” was replaced since the folder was read, so it was left alone; press {RELOAD} to read it again")
+        }
+        (Chosen::Listing, false) => {
+            format!("“{name}” was moved or deleted since the folder was read, so it was left alone; press {RELOAD} to read it again")
+        }
+    }
+}
+
+/// The default key for Reload, as each platform writes it.
+const RELOAD: &str = if cfg!(target_os = "macos") { "⌘R" } else { "Ctrl+R" };

@@ -32,9 +32,12 @@ pub struct Entry {
 }
 
 /// Object identity: whether what's at a path is still the item chosen from a listing or a
-/// search, edited or not. Permanent delete, Empty Trash and every action on a search result
-/// compare it right before acting, from the metadata already read for the item (see [`ident`]
-/// and [`ident_of`]).
+/// search, edited or not. It's read for each entry when a folder is listed (or the search walk
+/// finds it), from the metadata read anyway, and compared on the worker right before each item
+/// is acted on: trash, move (paste of a cut, F6, a drop), copy (paste, F5, Duplicate), inline
+/// rename, permanent delete, Put Back (`ops::Op::Checked`, `ops::Doomed`) and what a drag
+/// carries; Empty Trash compares the one its count read. Batch rename compares the fuller
+/// `ops::Seen` from its preview. See [`ident`] and [`ident_of`].
 ///
 /// It's the object, not its contents: device and inode (Windows: creation time and whether
 /// it's a folder), type and birth time. Size and times of change aren't part of it, so a file
@@ -69,8 +72,9 @@ pub struct Ident {
     born: Option<i128>,
     /// Unix, only where there's no birth time: when its inode last changed (ctime), in ns.
     changed: Option<i128>,
-    /// The file system's own name for the object, where it was read: Linux's file handle
-    /// (its type and a hash of its bytes), only where there's no birth time.
+    /// The file system's own name for the object, where it was read: Linux's file handle (its
+    /// type and a hash of its bytes), only where there's no birth time; Windows' volume serial
+    /// number and file id, from a listing or a check right before acting.
     handle: Option<(u64, u64)>,
 }
 
@@ -106,6 +110,13 @@ impl Ident {
         };
         let born = born.filter(|_| !pretend::no_birth_time());
         Ident { node: (dev, ino), kind, born, changed: born.is_none().then_some(changed), handle: None }
+    }
+
+    /// Windows, from a directory record ([`win_dir`]): as [`ident`] gives it from the same
+    /// item's metadata, plus its volume and file id.
+    #[cfg(windows)]
+    pub(crate) fn of_windows(kind: u8, born: i128, is_dir: bool, handle: Option<(u64, u64)>) -> Ident {
+        Ident { node: (born as u64, u64::from(is_dir)), kind, born: Some(born), changed: None, handle }
     }
 
     /// Whether there's no birth time in it, so a handle would tell more (Linux).
@@ -204,8 +215,10 @@ pub fn ident(m: &std::fs::Metadata) -> Option<Ident> {
     }
 }
 
-/// [`ident`] for the item at `path`, whose metadata `m` is: on Linux, where there's no birth
-/// time, with the file system's handle for it too (one more call, only there).
+/// [`ident`] for the item at `path`, whose metadata `m` is, with the file system's own name for
+/// it where that tells more: on Linux, where there's no birth time, its handle (one more call,
+/// only there); on Windows its volume and file id (one open, without reading or locking it), to
+/// compare with what a listing read ([`win_dir`]). For checks right before acting, not walks.
 pub fn ident_of(path: &Path, m: &std::fs::Metadata) -> Option<Ident> {
     let id = ident(m)?;
     #[cfg(target_os = "linux")]
@@ -213,8 +226,16 @@ pub fn ident_of(path: &Path, m: &std::fs::Metadata) -> Option<Ident> {
         let handle = crate::ffi::cstr(path).ok().and_then(|p| crate::dirfd::handle_key(libc::AT_FDCWD, &p, 0));
         return Some(id.with_handle(handle));
     }
-    let _ = path;
-    Some(id)
+    #[cfg(windows)]
+    {
+        let handle = crate::noclobber::file_id(path, m).and_then(|(v, f)| win_dir::file_key(v, f));
+        return Some(Ident { handle, ..id });
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = path;
+        Some(id)
+    }
 }
 
 /// The identity of what's at `path` now (not following a link), `None` when nothing is or it
@@ -344,7 +365,25 @@ pub fn list_until(path: PathBuf, sort: Sort, stop: &AtomicBool) -> Option<Listin
 }
 
 /// `None` when stopped. One relaxed load per entry: nothing next to its `lstat`.
+#[cfg(not(windows))]
 fn read(path: &Path, stop: &AtomicBool) -> Option<Result<Vec<Entry>, String>> {
+    read_std(path, stop)
+}
+
+/// Windows: the folder's entries with their file ids, at no cost per entry ([`win_dir`]); where
+/// the file system can't give them that way (some network and FUSE ones), as everywhere else.
+#[cfg(windows)]
+fn read(path: &Path, stop: &AtomicBool) -> Option<Result<Vec<Entry>, String>> {
+    match win_dir::read(path, stop) {
+        Ok(Some(v)) => Some(Ok(v)),
+        Ok(None) => None,
+        Err(()) => read_std(path, stop),
+    }
+}
+
+/// [`read`] through `std::fs::read_dir`: one `lstat` (Linux: `statx`) per entry, free on
+/// Windows, where the directory listing already has it.
+fn read_std(path: &Path, stop: &AtomicBool) -> Option<Result<Vec<Entry>, String>> {
     let rd = match std::fs::read_dir(path) {
         Ok(rd) => rd,
         Err(e) => return Some(Err(e.to_string())),
@@ -389,6 +428,135 @@ fn read(path: &Path, stop: &AtomicBool) -> Option<Result<Vec<Entry>, String>> {
     #[cfg(test)]
     read_hook::done(path);
     Some(Ok(out))
+}
+
+/// Windows' listing with file ids: `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)` on
+/// the folder fills a buffer with entries (name, times, size, attributes, reparse tag and the
+/// file system's file id), as `FindFirstFileEx(FindExInfoBasic)` does without the id (and, like
+/// it, without the 8.3 short names `FileIdBothDirectoryInfo` would make NTFS look up); the
+/// volume's serial number comes once per folder. A file system that can't answer it (FAT, some
+/// network and FUSE ones) is read `std`'s way, without file ids. So each entry's identity has its volume and file id, which a file made
+/// under the name within NTFS's 15 s creation-time tunnelling doesn't share.
+#[cfg(windows)]
+pub(crate) mod win_dir {
+    use super::*;
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, GetLastError};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_EXTD_DIR_INFO, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileIdExtdDirectoryInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    };
+
+    /// From FILETIME's epoch (1601) to Unix's, in 100 ns.
+    const EPOCH: i64 = 116_444_736_000_000_000;
+    /// A reparse tag with this bit names another item (a symlink, a junction): `std`'s link.
+    const NAME_SURROGATE: u32 = 0x2000_0000;
+
+    /// `Err` when the folder can't be read this way (then `std`'s way says why); `Ok(None)`
+    /// when stopped.
+    pub(crate) fn read(path: &Path, stop: &AtomicBool) -> Result<Option<Vec<Entry>>, ()> {
+        let dir = std::fs::OpenOptions::new()
+            .access_mode(FILE_LIST_DIRECTORY)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .map_err(|_| ())?;
+        let h = dir.as_raw_handle();
+        // SAFETY: a zeroed BY_HANDLE_FILE_INFORMATION is a valid out-buffer for an open handle.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(h, &mut info) } == 0 || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            return Err(());
+        }
+        let volume = u64::from(info.dwVolumeSerialNumber);
+        // u64s, so each record's 8-byte fields are aligned as the call writes them.
+        let mut buf = vec![0u64; 64 * 1024 / 8];
+        let len = buf.len() * 8;
+        let fixed = std::mem::offset_of!(FILE_ID_EXTD_DIR_INFO, FileName);
+        let mut out = Vec::with_capacity(64);
+        loop {
+            // SAFETY: `buf` is writable for `len` bytes.
+            if unsafe { GetFileInformationByHandleEx(h, FileIdExtdDirectoryInfo, buf.as_mut_ptr().cast(), len as u32) } == 0 {
+                if unsafe { GetLastError() } == ERROR_NO_MORE_FILES {
+                    break;
+                }
+                return Err(());
+            }
+            // SAFETY: the call filled `buf`; it's read as bytes, each record bounds-checked.
+            let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), len) };
+            let mut at = 0;
+            loop {
+                if at + fixed > len {
+                    return Err(());
+                }
+                // SAFETY: `at + fixed` bytes are in `bytes`; the record is copied out unaligned.
+                let r: FILE_ID_EXTD_DIR_INFO = unsafe { std::ptr::read_unaligned(bytes.as_ptr().add(at).cast()) };
+                let n = r.FileNameLength as usize;
+                if at + fixed + n > len {
+                    return Err(());
+                }
+                let wide: Vec<u16> = bytes[at + fixed..at + fixed + n].as_chunks::<2>().0.iter().map(|&c| u16::from_ne_bytes(c)).collect();
+                if wide != [0x2e] && wide != [0x2e, 0x2e] {
+                    #[cfg(test)]
+                    read_hook::entry(path);
+                    if stop.load(Relaxed) {
+                        #[cfg(test)]
+                        read_hook::done(path);
+                        return Ok(None);
+                    }
+                    out.push(entry(path, OsString::from_wide(&wide), &r, volume));
+                }
+                if r.NextEntryOffset == 0 {
+                    break;
+                }
+                at += r.NextEntryOffset as usize;
+            }
+        }
+        #[cfg(test)]
+        read_hook::done(path);
+        Ok(Some(out))
+    }
+
+    /// One record as an [`Entry`], as `read_std` would make it (plus the file id).
+    fn entry(dir: &Path, os: OsString, r: &FILE_ID_EXTD_DIR_INFO, volume: u64) -> Entry {
+        let attrs = r.FileAttributes;
+        let is_link = attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && r.ReparsePointTag & NAME_SURROGATE != 0;
+        let own_dir = !is_link && attrs & FILE_ATTRIBUTE_DIRECTORY != 0;
+        let (mut is_dir, mut size, mut mtime_ms) = (own_dir, r.EndOfFile as u64, ms(r.LastWriteTime));
+        if is_link {
+            // Follow links once so a link to a folder behaves as a folder.
+            if let Ok(t) = std::fs::metadata(dir.join(&os)) {
+                is_dir = t.is_dir();
+                size = t.len();
+                mtime_ms = mtime(&t);
+            }
+        }
+        let name = os.to_string_lossy().into_owned();
+        let hidden = name.starts_with('.') || attrs & FILE_ATTRIBUTE_HIDDEN != 0;
+        let born = (i128::from(r.CreationTime) - i128::from(EPOCH)) * 100;
+        let kind = if is_link { 2 } else { u8::from(own_dir) };
+        // A 128-bit id: NTFS's 64-bit file reference in its low half (what a handle's file index
+        // is); one that needs the high half too (ReFS) isn't used.
+        let (low, high) = r.FileId.Identifier.split_at(8);
+        let file = high.iter().all(|&b| b == 0).then(|| u64::from_le_bytes(low.try_into().unwrap()));
+        let id = Ident::of_windows(kind, born, own_dir, file.and_then(|f| file_key(volume, f)));
+        let lower = name.to_lowercase();
+        let key = format!("f:{name}");
+        Entry { os, name, lower, key, is_dir, is_link, hidden, size: if is_dir { 0 } else { size }, mtime_ms, id: Some(id), pending: None }
+    }
+
+    /// A FILETIME as ms since the Unix epoch, 0 before it (as [`mtime`] gives it).
+    fn ms(ft: i64) -> i64 {
+        if ft <= EPOCH { 0 } else { (ft - EPOCH) / 10_000 }
+    }
+
+    /// Volume and file id, unless the file system gives none (0, or all ones where ReFS's
+    /// 128-bit id doesn't fit).
+    pub(crate) fn file_key(volume: u64, id: u64) -> Option<(u64, u64)> {
+        (id != 0 && id != u64::MAX).then_some((volume, id))
+    }
 }
 
 /// Test-only: holds a read of one folder at its first entry, and counts the entries it reads.
@@ -716,9 +884,79 @@ mod tests {
         let t = std::time::Instant::now();
         sort_entries(&mut v, Sort { key: SortKey::Modified, desc: true });
         let resort = t.elapsed().as_secs_f64() * 1000.0;
-        let _ = std::fs::remove_dir_all(&d);
         eprintln!("read+sort 10k: median {:.1} ms, p95 {:.1} ms; re-sort only {resort:.1} ms", times[15], times[28]);
+        // Linux without birth times (a file handle per entry): what those systems pay.
+        #[cfg(target_os = "linux")]
+        {
+            let _p = pretend::without_birth_times(false);
+            let mut t: Vec<f64> = (0..30)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    let l = list(d.clone(), sort);
+                    assert!(l.result.unwrap()[0].id.unwrap().handle.is_some());
+                    t.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            t.sort_by(f64::total_cmp);
+            eprintln!("  without birth times (a file handle each): median {:.1} ms, p95 {:.1} ms", t[15], t[28]);
+        }
+        // Windows: against `std`'s read (FindFirstFileEx, no file ids), on the same folder, taking
+        // turns so neither has the warmer cache.
+        #[cfg(windows)]
+        {
+            let (mut ours, mut theirs) = (Vec::new(), Vec::new());
+            for _ in 0..30 {
+                let t = std::time::Instant::now();
+                let mut v = read_std(&d, &AtomicBool::new(false)).unwrap().unwrap();
+                sort_entries(&mut v, sort);
+                theirs.push(t.elapsed().as_secs_f64() * 1000.0);
+                let t = std::time::Instant::now();
+                let l = list(d.clone(), sort);
+                assert!(l.result.unwrap()[0].id.unwrap().handle.is_some());
+                ours.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            ours.sort_by(f64::total_cmp);
+            theirs.sort_by(f64::total_cmp);
+            eprintln!(
+                "  taking turns: with file ids median {:.1} ms (p95 {:.1}); std's read median {:.1} ms (p95 {:.1})",
+                ours[15], ours[28], theirs[15], theirs[28]
+            );
+        }
+        let _ = std::fs::remove_dir_all(&d);
         assert!(times[15] < 50.0, "over the 50 ms listing budget before drawing anything");
+    }
+
+    /// Windows reads folders with file ids ([`win_dir`]): each entry is what `std`'s read gives,
+    /// and its identity, file id and all, is what a check right before acting reads.
+    #[cfg(windows)]
+    #[test]
+    fn windows_listing_with_file_ids_agrees_with_std() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let d = std::env::temp_dir().join(format!("arbor-win-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("folder")).unwrap();
+        std::fs::write(d.join("file.txt"), "12345").unwrap();
+        std::fs::write(d.join(".dot"), "").unwrap();
+        std::fs::OpenOptions::new().write(true).create_new(true).attributes(0x2).open(d.join("hidden")).unwrap();
+        for i in 0..3000 {
+            std::fs::write(d.join(format!("many {i}")), "x").unwrap();
+        }
+        let stop = AtomicBool::new(false);
+        let mut ours = win_dir::read(&d, &stop).expect("NTFS gives file ids").unwrap();
+        let mut theirs = read_std(&d, &stop).unwrap().unwrap();
+        ours.sort_by(|a, b| a.os.cmp(&b.os));
+        theirs.sort_by(|a, b| a.os.cmp(&b.os));
+        assert_eq!(ours.len(), 3004);
+        assert_eq!(ours.len(), theirs.len());
+        for (a, b) in ours.iter().zip(&theirs) {
+            let what = (&a.os, a.is_dir, a.is_link, a.hidden, a.size, a.mtime_ms);
+            assert_eq!(what, (&b.os, b.is_dir, b.is_link, b.hidden, b.size, b.mtime_ms));
+            assert_eq!(a.id, b.id, "{:?}", a.os);
+            let id = a.id.unwrap();
+            assert!(id.handle.is_some(), "{:?}: a file id", a.os);
+            assert_eq!(Some(id), ident_at(&d.join(&a.os)), "{:?}: as a check reads it", a.os);
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

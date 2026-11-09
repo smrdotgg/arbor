@@ -42,8 +42,8 @@ pub struct Rename {
 pub(crate) struct Clip {
     pub paths: Vec<PathBuf>,
     pub cut: bool,
-    /// From search results: each item's identity as the walk saw it, checked when it's pasted.
-    pub expect: Vec<(PathBuf, crate::fs::Ident)>,
+    /// Each item's identity as its listing or the search walk saw it, checked when it's pasted.
+    pub expect: crate::ops::Checks,
 }
 
 /// ⌘V or ⌥⌘V, waiting for the clipboard: the folder that was on screen in the active pane

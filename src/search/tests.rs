@@ -927,7 +927,7 @@ fn a_folder_reached_twice_is_walked_once() {
 
 /// Replaces the file at `p` with another of the same name (another inode), as another app
 /// saving over it by rename, or deleting it and making a new one, would.
-fn replace(p: &Path) {
+pub(crate) fn replace(p: &Path) {
     let aside = p.with_extension("aside");
     std::fs::rename(p, &aside).unwrap();
     std::fs::write(p, "SOMEONE ELSE'S FILE").unwrap();
