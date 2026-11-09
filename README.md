@@ -806,11 +806,13 @@ grey in the other, with an accent line along the active pane's top), the caret i
 ring on the dialog's focused button, the menu's highlight, and Rune's focus ring on the
 preview's contents.
 
-**It costs nothing until a reader connects.** Rune builds the tree only when an assistive client
-asks for it (`AccessibilityLink`; until then a frame does no accessibility work), and Arbor adds
-no per-row work for it: rows are named from the text they already draw. The test
+**The tree is built only when a screen reader asks.** Rune builds it only when an assistive
+client asks for it (`AccessibilityLink`; until then a frame builds no tree), and Arbor adds no
+per-row work for it: rows are named from the text they already draw. What does cost everyone a
+little is the roles and labels on the window's chrome, which Rune can't build lazily
+(`RUNE-GAPS.md`): about 0.05 ms per key, measured (BENCH.md, milestone 11). The test
 `nothing_is_built_until_a_client_asks` checks that nothing is sent before activation and
-nothing on an idle frame after it. Measured: BENCH.md (milestone 11).
+nothing on an idle frame after it.
 
 **OS settings.** Arbor never animates, so reduce motion changes nothing. Rune doesn't report
 increased contrast or a larger text size, so those settings don't change Arbor yet
