@@ -112,19 +112,38 @@ pub fn group(n: u64) -> String {
 /// A walk's count, shared with the window.
 pub type Shared = Arc<Mutex<Total>>;
 
+/// Where a walk starts, and what it must still be when it's opened.
+#[derive(Clone, Debug)]
+pub enum Root {
+    /// A selected folder: opened without following a link, and only while it's still the item
+    /// the listing showed (its identity), so one replaced by a link since is never followed.
+    Picked(PathBuf, Option<fs::Ident>),
+    /// The folder on screen, reached as the user reached it (a link in its path, or the path
+    /// itself, is how they navigated there), and only while it's still the folder listed.
+    Here(PathBuf, Option<crate::noclobber::FileId>),
+}
+
+impl Root {
+    pub fn path(&self) -> &Path {
+        match self {
+            Root::Picked(p, _) | Root::Here(p, _) => p,
+        }
+    }
+}
+
 /// Adds up `roots` (folders are walked; anything else counts as itself), never following
 /// links or entering another file system, until done or `stop` is set. `seed` is already
 /// counted (files whose sizes the listing had). Publishes into `out` as it goes, calling `wake`
 /// at most every [`WAKE_EVERY`].
-pub fn walk(roots: &[PathBuf], seed: Total, out: &Shared, stop: &AtomicBool, wake: &dyn Fn()) {
+pub fn walk(roots: &[Root], seed: Total, out: &Shared, stop: &AtomicBool, wake: &dyn Fn()) {
     walk_with(roots, seed, out, stop, wake, &Mounts::read());
 }
 
 /// [`walk`], with the mount points to stop at (besides another device).
-fn walk_with(roots: &[PathBuf], seed: Total, out: &Shared, stop: &AtomicBool, wake: &dyn Fn(), mounts: &Mounts) {
+fn walk_with(roots: &[Root], seed: Total, out: &Shared, stop: &AtomicBool, wake: &dyn Fn(), mounts: &Mounts) {
     let mut c = Counting { t: seed, n: 0, last: Instant::now(), out, wake };
     for root in roots {
-        let fence = Fence::below(root, mounts);
+        let fence = Fence::below(root.path(), mounts);
         c.t.folders += 1;
         if !walk_tree(root, &fence, &mut c, stop) {
             return;
@@ -161,22 +180,33 @@ impl Counting<'_> {
     }
 }
 
-/// Counts everything under folder `root` (reached as the user reached it, links in its path
-/// followed). Below it nothing is followed: each folder is opened without following a link
-/// and only if it's still the folder that was listed, and its entries are `lstat`ed through
-/// it, so a folder swapped for a link mid-walk is never entered. A folder whose entries can't
-/// be described (readable but not searchable) counts as one that couldn't be read. False when
-/// stopped.
+/// Counts everything under folder `root` (see [`Root`] for how it's opened: a selected folder
+/// without following a link, the folder on screen as the user reached it; either only while
+/// it's still the one listed). Below it nothing is followed: each folder is opened without
+/// following a link and only if it's still the folder that was listed, and its entries are
+/// `lstat`ed through it, so a folder swapped for a link mid-walk is never entered. A folder
+/// whose entries can't be described (readable but not searchable) counts as one that couldn't
+/// be read. False when stopped.
 #[cfg(unix)]
-fn walk_tree(root: &Path, fence: &Fence, c: &mut Counting, stop: &AtomicBool) -> bool {
+fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) -> bool {
     use crate::dirfd::{Names, fstat, is_dir, open_dir, same, stat_at};
     use std::os::unix::ffi::OsStrExt;
-    let opened = crate::ffi::cstr(root).and_then(|r| open_dir(libc::AT_FDCWD, &r, true)).and_then(|fd| Ok((fstat(&fd)?, fd)));
-    let Ok((st, fd)) = opened else {
-        c.t.unreadable += 1;
-        return true;
+    let (path, follow, want) = match root {
+        Root::Picked(p, id) => (p, false, *id),
+        Root::Here(p, id) => (p, true, *id),
     };
-    let mut stack = vec![(root.to_path_buf(), st, Some(fd))];
+    let opened = crate::ffi::cstr(path).and_then(|r| open_dir(libc::AT_FDCWD, &r, follow)).and_then(|fd| Ok((fstat(&fd)?, fd)));
+    // As `MetadataExt` gives them (`dev_t` is i32 on macOS).
+    #[allow(clippy::unnecessary_cast)]
+    let still = |st: &libc::stat| want.is_none_or(|w| w == (st.st_dev as u64, st.st_ino as u64));
+    let (st, fd) = match opened {
+        Ok((st, fd)) if still(&st) => (st, fd),
+        _ => {
+            c.t.unreadable += 1;
+            return true;
+        }
+    };
+    let mut stack = vec![(path.to_path_buf(), st, Some(fd))];
     while let Some((dir, want, fd)) = stack.pop() {
         if stop.load(Relaxed) {
             return false;
@@ -246,8 +276,18 @@ fn walk_tree(root: &Path, fence: &Fence, c: &mut Counting, stop: &AtomicBool) ->
 /// checked right before it's read to be a folder, not a link or junction, with the identity it
 /// was listed with.
 #[cfg(not(unix))]
-fn walk_tree(root: &Path, fence: &Fence, c: &mut Counting, stop: &AtomicBool) -> bool {
-    let mut stack: Vec<(PathBuf, Option<fs::Ident>)> = vec![(root.to_path_buf(), None)];
+fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) -> bool {
+    let still = match root {
+        Root::Picked(p, id) => {
+            p.symlink_metadata().is_ok_and(|m| m.is_dir() && !m.is_symlink() && id.is_none_or(|id| fs::ident(&m) == Some(id)))
+        }
+        Root::Here(p, id) => id.is_none_or(|id| crate::noclobber::dir_id(p) == Some(id)),
+    };
+    if !still {
+        c.t.unreadable += 1;
+        return true;
+    }
+    let mut stack: Vec<(PathBuf, Option<fs::Ident>)> = vec![(root.path().to_path_buf(), None)];
     while let Some((dir, want)) = stack.pop() {
         if stop.load(Relaxed) {
             return false;
@@ -551,10 +591,10 @@ impl State {
         };
         let dir = f.cwd.clone();
         // Folders (not links to them) are walked; selected files count from the listing.
-        let walk_roots: Vec<PathBuf> = if picked.is_empty() {
-            paths.clone()
+        let walk_roots: Vec<Root> = if picked.is_empty() {
+            vec![Root::Here(f.cwd.clone(), f.dir_id)]
         } else {
-            picked.iter().filter(|e| e.is_dir && !e.is_link).map(|e| f.cwd.join(&e.os)).collect()
+            picked.iter().filter(|e| e.is_dir && !e.is_link).map(|e| Root::Picked(f.cwd.join(&e.os), e.id)).collect()
         };
         let seed = Total { bytes: size, files: files as u64, ..Total::default() };
         let stop = Arc::new(AtomicBool::new(false));
@@ -621,9 +661,13 @@ mod tests {
         d
     }
 
+    fn here(roots: &[PathBuf]) -> Vec<Root> {
+        roots.iter().map(|p| Root::Here(p.clone(), None)).collect()
+    }
+
     fn total_of(roots: &[PathBuf]) -> Total {
         let out: Shared = Arc::default();
-        walk(roots, Total::default(), &out, &AtomicBool::new(false), &|| {});
+        walk(&here(roots), Total::default(), &out, &AtomicBool::new(false), &|| {});
         out.lock().unwrap().clone()
     }
 
@@ -676,7 +720,14 @@ mod tests {
         std::fs::write(d.join("mine"), "abc").unwrap();
         let out: Shared = Arc::default();
         let canon = std::fs::canonicalize(&d).unwrap();
-        walk_with(std::slice::from_ref(&d), Total::default(), &out, &AtomicBool::new(false), &|| {}, &Mounts::of(&[&canon.join("disk")]));
+        walk_with(
+            &here(std::slice::from_ref(&d)),
+            Total::default(),
+            &out,
+            &AtomicBool::new(false),
+            &|| {},
+            &Mounts::of(&[&canon.join("disk")]),
+        );
         let t = out.lock().unwrap().clone();
         assert_eq!((t.bytes, t.files, t.folders, t.mounts, t.done), (3, 1, 1, 1, true), "{t:?}");
         assert_eq!(t.caveats().as_deref(), Some("1 mounted disk inside not counted"));
@@ -694,7 +745,7 @@ mod tests {
         let out: Shared = Arc::default();
         let canon = std::fs::canonicalize(&d).unwrap();
         walk_with(
-            std::slice::from_ref(&d),
+            &here(std::slice::from_ref(&d)),
             Total::default(),
             &out,
             &AtomicBool::new(false),
@@ -745,7 +796,7 @@ mod tests {
             hook::GATES.lock().unwrap().push((queued.clone(), reached_tx, go_rx));
             let out: Shared = Arc::default();
             let (o, r) = (out.clone(), root.clone());
-            let walker = std::thread::spawn(move || walk(&[r], Total::default(), &o, &AtomicBool::new(false), &|| {}));
+            let walker = std::thread::spawn(move || walk(&here(&[r]), Total::default(), &o, &AtomicBool::new(false), &|| {}));
             reached.recv_timeout(Duration::from_secs(5)).unwrap();
             std::fs::rename(&queued, d.join("aside")).unwrap();
             std::os::unix::fs::symlink(d.join("other"), &queued).unwrap();
@@ -775,7 +826,7 @@ mod tests {
         hook::GATES.lock().unwrap().push((big.clone(), reached_tx, go_rx));
         let (out, stop): (Shared, Arc<AtomicBool>) = (Arc::default(), Arc::default());
         let (o, st, r) = (out.clone(), stop.clone(), d.clone());
-        let walker = std::thread::spawn(move || walk(&[r], Total::default(), &o, &st, &|| {}));
+        let walker = std::thread::spawn(move || walk(&here(&[r]), Total::default(), &o, &st, &|| {}));
         reached.recv_timeout(Duration::from_secs(5)).unwrap();
         stop.store(true, Relaxed);
         go.send(()).unwrap();
@@ -801,6 +852,46 @@ mod tests {
         crate::dirfd::hook::WATCH.lock().unwrap().retain(|w| w.0 != ino);
         assert!(t.done && t.unreadable == 1 && t.files < 10, "{t:?}");
         assert_eq!(t.caveats().as_deref(), Some("1 folder couldn't be read"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The review's case: a selected folder replaced by a link after it was listed used to be
+    /// followed (12,345 bytes from outside counted). It's opened without following a link and
+    /// only while it's the item listed, so it counts as unreadable. The folder on screen,
+    /// reached through a link to it, is still counted (that's how the user got there).
+    #[cfg(unix)]
+    #[test]
+    fn a_selected_folder_replaced_by_a_link_isnt_followed() {
+        let d = temp("root-link");
+        std::fs::create_dir_all(d.join("here/sub")).unwrap();
+        // Hidden, so a folder showing it (hidden files hidden) has nothing selected.
+        std::fs::write(d.join("here/sub/.mine"), "abc").unwrap();
+        std::fs::create_dir_all(d.join("other")).unwrap();
+        std::fs::write(d.join("other/outside"), vec![0u8; 12345]).unwrap();
+        let mut s = state_in(&d.join("here"));
+        settle_all(&mut s);
+        let wait = |s: &State| {
+            let total = s.info.as_ref().unwrap().total.clone().unwrap();
+            let until = Instant::now() + Duration::from_secs(5);
+            while !total.lock().unwrap().done && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            total.lock().unwrap().clone()
+        };
+        s.cur_mut().select(0);
+        std::fs::rename(d.join("here/sub"), d.join("aside")).unwrap();
+        std::os::unix::fs::symlink(d.join("other"), d.join("here/sub")).unwrap();
+        s.toggle_info();
+        let t = wait(&s);
+        assert_eq!((t.bytes, t.unreadable), (0, 1), "{t:?}");
+        s.close_info();
+        // On screen through a link: counted.
+        std::os::unix::fs::symlink(d.join("aside"), d.join("alias")).unwrap();
+        let mut s = state_in(&d.join("alias"));
+        settle_all(&mut s);
+        s.toggle_info();
+        let t = wait(&s);
+        assert_eq!((t.bytes, t.files, t.unreadable), (3, 1, 0), "{t:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -834,7 +925,7 @@ mod tests {
     #[test]
     fn a_walk_of_dev_stops_at_its_mounts() {
         let out: Shared = Arc::default();
-        walk(&[PathBuf::from("/dev")], Total::default(), &out, &AtomicBool::new(false), &|| {});
+        walk(&here(&[PathBuf::from("/dev")]), Total::default(), &out, &AtomicBool::new(false), &|| {});
         let t = out.lock().unwrap().clone();
         use std::os::unix::fs::MetadataExt;
         let other = |p: &str| matches!((std::fs::metadata(p), std::fs::metadata("/dev")), (Ok(a), Ok(b)) if a.dev() != b.dev());
