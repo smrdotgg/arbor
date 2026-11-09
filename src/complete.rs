@@ -42,15 +42,26 @@ pub type Loader = Latest<Answer>;
 /// Whether capitals count when matching names: as each platform's usual file system does.
 pub const CASE_SENSITIVE: bool = cfg!(not(any(target_os = "macos", windows)));
 
-/// Whether `c` separates folders in a typed path here.
+/// Whether `c` separates folders in a typed path on Windows (`windows`) or elsewhere.
+fn is_sep_on(c: char, windows: bool) -> bool {
+    c == '/' || (windows && c == '\\')
+}
+
 fn is_sep(c: char) -> bool {
-    c == '/' || (cfg!(windows) && c == '\\')
+    is_sep_on(c, cfg!(windows))
 }
 
 /// The typed path split after its last separator: the folder as typed, and the start of the
 /// name to complete.
 pub fn split(typed: &str) -> (&str, &str) {
-    match typed.char_indices().rev().find(|&(_, c)| is_sep(c)) {
+    split_on(typed, cfg!(windows))
+}
+
+/// [`split`] as on Windows (`windows`: `\` separates too, so `C:\Users\me` and
+/// `\\server\share\x` split) or elsewhere (a backslash is part of a name): pure, so both are
+/// tested everywhere.
+pub fn split_on(typed: &str, windows: bool) -> (&str, &str) {
+    match typed.char_indices().rev().find(|&(_, c)| is_sep_on(c, windows)) {
         Some((i, c)) => typed.split_at(i + c.len_utf8()),
         None => ("", typed),
     }
@@ -303,6 +314,62 @@ mod tests {
             assert_eq!(split(r"/a\b"), ("/", r"a\b"), "a backslash is part of a name on Unix");
         }
         assert_eq!(folder_of("~/Doc"), crate::fs::home().join(""));
+    }
+
+    const TYPED: &[&str] = &["/", "\\", "~", "~/", "~\\", "C:", "C:\\", "\\\\server\\share\\", "..", ".", "a", "é", " ", "Users", "me"];
+
+    /// Any typed path, as on Windows and elsewhere: the folder and the name put back together
+    /// are what was typed; the name holds no separator; the folder is nothing or ends in one.
+    #[test]
+    fn any_typed_path_splits_into_its_folder_and_a_name() {
+        crate::prop::check("goto_split", 5000, |r| {
+            let typed = if r.one_in(4) { r.string(20) } else { r.from(TYPED, 8) };
+            for windows in [false, true] {
+                let (dir, name) = split_on(&typed, windows);
+                assert_eq!(format!("{dir}{name}"), typed);
+                assert!(!name.chars().any(|c| is_sep_on(c, windows)), "{typed:?} {windows}");
+                assert!(dir.is_empty() || dir.chars().last().is_some_and(|c| is_sep_on(c, windows)), "{typed:?} {windows}");
+            }
+        });
+    }
+
+    /// Windows' drive and UNC syntax, on every OS: they split at backslashes as Windows does,
+    /// and only there; a drive starts a path only there.
+    #[test]
+    fn windows_drives_and_shares_split_on_every_os() {
+        assert_eq!(split_on(r"C:\Users\me\Doc", true), (r"C:\Users\me\", "Doc"));
+        assert_eq!(split_on(r"\\server\share\dir\fi", true), (r"\\server\share\dir\", "fi"));
+        assert_eq!(split_on(r"C:/Users\x", true), (r"C:/Users\", "x"));
+        assert_eq!(split_on("C:", true), ("", "C:"));
+        assert_eq!(split_on(r"\\server\share\dir\fi", false), ("", r"\\server\share\dir\fi"), "a backslash is a name's elsewhere");
+        assert!(crate::app::is_path_like_on("C:\\x", true) && !crate::app::is_path_like_on("C:\\x", false));
+        assert!(crate::app::is_path_like_on(r"\\server\share", true) && crate::app::is_path_like_on("~", false));
+        assert!(!crate::app::is_path_like_on("report.txt", true) && !crate::app::is_path_like_on("1:", false));
+        assert_eq!(sep_for(r"C:\Users\"), if cfg!(windows) { '\\' } else { std::path::MAIN_SEPARATOR });
+    }
+
+    /// Found reading the go-to code: the typed path was trimmed, so a folder whose name ends in
+    /// a space (Tab completion writes it whole) went to the item without the space, and a file
+    /// there was opened. Now the exact path comes first; a stray space still finds its folder.
+    #[cfg(unix)]
+    #[test]
+    fn go_to_a_name_ending_in_a_space_goes_there() {
+        let d = tmp("trailing-space");
+        std::fs::write(d.join("report"), "another item").unwrap();
+        std::fs::create_dir(d.join("report ")).unwrap();
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        s.cur_mut().filter = format!("{}/report ", d.display());
+        s.on_key(&KeyEvent { key: Key::Enter, mods: Mods::default() }, &mut rune::Tx::default());
+        settle_all(&mut s);
+        assert_eq!(s.cur().cwd, d.join("report "), "the folder with the space");
+        // A stray space after a name that's there.
+        std::fs::create_dir(d.join("sub")).unwrap();
+        s.cur_mut().filter = format!("{}/sub  ", d.display());
+        s.on_key(&KeyEvent { key: Key::Enter, mods: Mods::default() }, &mut rune::Tx::default());
+        settle_all(&mut s);
+        assert_eq!(s.cur().cwd, d.join("sub"));
+        assert_eq!(crate::app::typed_targets(" /a b "), [std::path::PathBuf::from("/a b "), std::path::PathBuf::from("/a b")]);
     }
 
     #[test]

@@ -795,8 +795,8 @@ impl State {
     }
 
     fn submit_path(&mut self) {
-        let path = fs::expand(self.cur().filter.trim());
-        self.go_path(&path);
+        let targets = typed_targets(&self.cur().filter);
+        self.go_targets(targets);
     }
 
     /// Go-to: a folder navigates, a file opens, anything else says it isn't there. What's at
@@ -804,19 +804,29 @@ impl State {
     /// here at most a frame as showing a tab does; a slower answer acts when it lands, unless
     /// another go-to was asked for since.
     pub(crate) fn go_path(&mut self, path: &Path) {
-        let (id, path) = (crate::folder::next_request(), path.to_path_buf());
+        self.go_targets(vec![path.to_path_buf()]);
+    }
+
+    /// [`go_path`](Self::go_path) to the first of `targets` that's there (each a reading of
+    /// what was typed: [`typed_targets`]); "isn't there" names the first.
+    fn go_targets(&mut self, targets: Vec<PathBuf>) {
+        let id = crate::folder::next_request();
         self.going_to = Some(id);
         let wait = self.show_wait;
         let answer = crate::bounded::read_waiting(&self.path_check, wait, move || {
-            #[cfg(test)]
-            path_hook::check(&path);
-            let kind = if path.is_dir() {
-                PathKind::Folder
-            } else if path.exists() {
-                PathKind::File
-            } else {
-                PathKind::Missing
+            let kind = |path: &Path| {
+                #[cfg(test)]
+                path_hook::check(path);
+                if path.is_dir() {
+                    PathKind::Folder
+                } else if path.exists() {
+                    PathKind::File
+                } else {
+                    PathKind::Missing
+                }
             };
+            let found = targets.iter().map(|p| (p, kind(p))).find(|(_, k)| *k != PathKind::Missing);
+            let (path, kind) = found.map_or_else(|| (targets[0].clone(), PathKind::Missing), |(p, k)| (p.clone(), k));
             Some((id, path, kind))
         });
         if let Some(a) = answer {
@@ -961,11 +971,29 @@ pub(crate) fn reload_folder(f: &mut Folder, names: Vec<OsString>, rename: bool) 
 }
 
 pub fn is_path_like(s: &str) -> bool {
+    is_path_like_on(s, cfg!(windows))
+}
+
+/// [`is_path_like`] as on Windows (`windows`: a drive, `C:`, starts one too) or elsewhere.
+pub fn is_path_like_on(s: &str, windows: bool) -> bool {
     let b = s.as_bytes();
     s.starts_with('/')
         || s.starts_with('~')
         || s.starts_with('\\')
-        || (cfg!(windows) && b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+        || (windows && b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+}
+
+/// What a typed path (go-to) can mean, in order: exactly as typed (leading spaces aside), then,
+/// if it ends in spaces, without them. A name can end in a space (Tab completion writes it
+/// whole), so the exact path comes first; one typed with a stray space still goes where meant.
+pub fn typed_targets(text: &str) -> Vec<PathBuf> {
+    let exact = text.trim_start();
+    let mut v = vec![fs::expand(exact)];
+    let trimmed = exact.trim_end();
+    if trimmed.len() < exact.len() && !trimmed.is_empty() {
+        v.push(fs::expand(trimmed));
+    }
+    v
 }
 
 pub fn title(p: &Path) -> String {
