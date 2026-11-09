@@ -999,3 +999,30 @@ fn webp_decode_speed() {
         eprintln!("{}: {w} × {h} ({mp:.1} MP): {:.1} ms, {:.2} ms/MP", p.file_name().unwrap().to_string_lossy(), times[2], times[2] / mp);
     }
 }
+
+/// Any bytes, cut or whole: telling text from binary and laying it out never panics, every
+/// line is a range of the text on character boundaries, and no line is wider than the cap.
+#[test]
+fn any_bytes_preview_without_panicking() {
+    crate::prop::check("preview_any_bytes", 3000, |r| {
+        let bom: &[u8] = match r.below(5) {
+            0 => &[0xEF, 0xBB, 0xBF],
+            1 => &[0xFF, 0xFE],
+            2 => &[0xFE, 0xFF],
+            _ => &[],
+        };
+        let mut b = [bom, &r.bytes(300)].concat();
+        if r.one_in(4) {
+            b.extend(std::iter::repeat_n(b'\t', 300));
+        }
+        let cut = r.one_in(2);
+        let _ = sniff_text(&b, cut);
+        if let Some(t) = text(&b, cut, b.len() as u64 + 10) {
+            assert!(t.cols <= MAX_COLS + TAB, "{}", t.cols);
+            for l in &t.lines {
+                let (a, z) = (l.start as usize, l.end as usize);
+                assert!(a <= z && z <= t.text.len() && t.text.is_char_boundary(a) && t.text.is_char_boundary(z), "{l:?}");
+            }
+        }
+    });
+}

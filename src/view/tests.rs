@@ -175,3 +175,58 @@ fn a_tab_dropped_on_a_pane_lands_where_the_pointer_is() {
     assert_eq!(strip_slot(rect, &p, [300.0, 200.0]), 3, "over the list: the end");
     assert_eq!(strip_slot(rect, &pane(1, 0), [110.0, y]), 1, "no strip: after its one tab");
 }
+
+/// Any path (grapheme clusters, right-to-left text, combining marks, joiners) in any room: never
+/// a panic, the cut lands on a separator, and what's shown is "…" and the separator, then the
+/// path from there, byte for byte; marks moved with it stay on character boundaries.
+#[test]
+fn any_path_is_cut_on_a_boundary() {
+    crate::prop::check("fit_path_any", 3000, |r| {
+        let path = r.from(
+            &["/", "\\", "a", "é", "e\u{301}", "👩\u{200d}👩\u{200d}👧", "\u{202e}", "ש", "ا", "\u{200b}", "\u{fe0f}", " ", "…", "中"],
+            20,
+        );
+        let room = r.below(40) as f32 - 2.0;
+        let widths = r.below(3);
+        let adv = move |c: char| match widths {
+            0 => 1.0,
+            1 => (c as u32 % 7) as f32,
+            _ => {
+                if c.is_ascii() {
+                    0.5
+                } else {
+                    3.0
+                }
+            }
+        };
+        let (shown, cut) = fit_path_with(&path, room, &adv);
+        if cut == 0 {
+            assert_eq!(shown, path);
+            return;
+        }
+        assert!(path.is_char_boundary(cut) && matches!(&path[cut - 1..cut], "/" | "\\"), "{path:?} cut at {cut}");
+        assert_eq!(&shown[CUT.len()..], &path[cut..]);
+        let marks: Vec<(usize, usize)> = path.char_indices().map(|(i, c)| (i, i + c.len_utf8())).collect();
+        for (a, b) in shift_marks(&marks, cut) {
+            assert!(shown.is_char_boundary(a) && shown.is_char_boundary(b) && a <= b, "{path:?}: {a}..{b} in {shown:?}");
+        }
+    });
+}
+
+/// Any crumbs at any width: never a panic, and the current folder is always shown.
+#[test]
+fn any_crumbs_keep_the_current_folder() {
+    crate::prop::check("crumbs_any", 2000, |r| {
+        let names: Vec<String> =
+            (0..1 + r.below(8)).map(|_| r.from(&["a", "é", "e\u{301}", "👩\u{200d}👧", "\u{202e}", "ש", " ", "中"], 6)).collect();
+        let parts: Vec<Part> = std::iter::once(Part::Root).chain(names.iter().map(|n| Part::Normal(std::ffi::OsStr::new(n)))).collect();
+        let crumbs = crumbs_from(&parts, "/");
+        assert_eq!(crumbs.len(), parts.len());
+        let avail = r.below(400) as f32;
+        let width = |s: &str| s.chars().count() as f32 * 7.0;
+        match shown_crumbs(&crumbs, avail, width) {
+            Shown::All => {}
+            Shown::From { first, .. } => assert!(first < crumbs.len(), "{first} of {}", crumbs.len()),
+        }
+    });
+}
