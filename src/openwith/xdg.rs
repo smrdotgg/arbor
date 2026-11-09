@@ -1,6 +1,7 @@
 #![cfg_attr(not(any(test, all(unix, not(target_os = "macos")))), allow(dead_code))]
 
 use super::Handler;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 /// The MIME type `globs2` gives `name` (its `weight:type:glob` lines): the highest weight wins,
@@ -147,8 +148,9 @@ pub fn unescape_value(v: &str) -> String {
 
 /// The command lines an `Exec` line gives for `files`: its quoting undone, `%f`/`%u` with one
 /// file per run (so one run for each file), `%F`/`%U` with all of them, `%%` a percent sign, and
-/// the other field codes dropped. A line with no file field gets the files at the end.
-pub fn exec_argv(exec: &str, files: &[PathBuf]) -> Vec<Vec<String>> {
+/// the other field codes dropped. A line with no file field gets the files at the end. Each
+/// file goes in as it is, byte for byte (a name that isn't UTF-8 too), as one argument.
+pub fn exec_argv(exec: &str, files: &[PathBuf]) -> Vec<Vec<OsString>> {
     // Split into arguments: "…" quotes, where \" \` \$ \\ are escapes.
     let mut args: Vec<String> = Vec::new();
     let (mut cur, mut quoted, mut any) = (String::new(), false, false);
@@ -172,7 +174,7 @@ pub fn exec_argv(exec: &str, files: &[PathBuf]) -> Vec<Vec<String>> {
     if any || !cur.is_empty() {
         args.push(cur);
     }
-    let paths: Vec<String> = files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let paths: Vec<&OsStr> = files.iter().map(|p| p.as_os_str()).collect();
     // The field codes an argument holds, `%%` (a percent sign) skipped: "%%f" is the text "%f".
     let codes = |a: &str| {
         let mut out = Vec::new();
@@ -189,24 +191,24 @@ pub fn exec_argv(exec: &str, files: &[PathBuf]) -> Vec<Vec<String>> {
     };
     let single = args.iter().any(|a| codes(a).iter().any(|c| matches!(c, 'f' | 'u')));
     let multi = args.iter().any(|a| a == "%F" || a == "%U");
-    let expand = |one: Option<&str>| -> Vec<String> {
-        let mut out = Vec::new();
+    let expand = |one: Option<&OsStr>| -> Vec<OsString> {
+        let mut out: Vec<OsString> = Vec::new();
         for a in &args {
             if a == "%F" || a == "%U" {
-                out.extend(paths.iter().cloned());
+                out.extend(paths.iter().map(|p| p.to_os_string()));
                 continue;
             }
-            let mut s = String::new();
+            let mut s = OsString::new();
             let mut ch = a.chars();
             let mut dropped = false;
             while let Some(c) = ch.next() {
                 if c != '%' {
-                    s.push(c);
+                    s.push(c.encode_utf8(&mut [0; 4]));
                     continue;
                 }
                 match (ch.next(), one) {
-                    (Some('%'), _) => s.push('%'),
-                    (Some('f' | 'u'), Some(one)) => s.push_str(one),
+                    (Some('%'), _) => s.push("%"),
+                    (Some('f' | 'u'), Some(one)) => s.push(one),
                     _ => dropped = true,
                 }
             }
@@ -215,11 +217,11 @@ pub fn exec_argv(exec: &str, files: &[PathBuf]) -> Vec<Vec<String>> {
             }
         }
         if !single && !multi {
-            out.extend(paths.iter().cloned());
+            out.extend(paths.iter().map(|p| p.to_os_string()));
         }
         out
     };
-    let runs: Vec<Vec<String>> = if single && !multi { paths.iter().map(|p| expand(Some(p))).collect() } else { vec![expand(None)] };
+    let runs: Vec<Vec<OsString>> = if single && !multi { paths.iter().map(|p| expand(Some(p))).collect() } else { vec![expand(None)] };
     runs.into_iter().filter(|r| !r.is_empty()).collect()
 }
 

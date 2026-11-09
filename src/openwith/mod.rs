@@ -71,7 +71,8 @@ pub fn launch(h: &Handler, files: &[PathBuf]) -> Result<(), String> {
             return Err("its Exec line is empty".into());
         }
         for argv in runs {
-            let child = std::process::Command::new(&argv[0]).args(&argv[1..]).spawn().map_err(|e| format!("{}: {e}", argv[0]))?;
+            let child =
+                std::process::Command::new(&argv[0]).args(&argv[1..]).spawn().map_err(|e| format!("{}: {e}", argv[0].to_string_lossy()))?;
             reap(child);
         }
         Ok(())

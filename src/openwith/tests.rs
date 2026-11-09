@@ -86,7 +86,7 @@ fn desktop_files_give_a_translated_name() {
 #[test]
 fn exec_lines_expand_their_field_codes() {
     let f = |v: &[&str]| v.iter().map(PathBuf::from).collect::<Vec<_>>();
-    let s = |v: Vec<Vec<String>>| v.into_iter().map(|r| r.join("|")).collect::<Vec<_>>();
+    let s = |v: Vec<Vec<std::ffi::OsString>>| v.into_iter().map(|r| strings(r).join("|")).collect::<Vec<_>>();
     assert_eq!(s(exec_argv("gedit %U", &f(&["/a b.txt", "/c"]))), ["gedit|/a b.txt|/c"]);
     assert_eq!(s(exec_argv("viewer --one %f", &f(&["/a", "/b"]))), ["viewer|--one|/a", "viewer|--one|/b"]);
     assert_eq!(s(exec_argv("\"/opt/My App/run\" --file=%f %i %c", &f(&["/a"]))), ["/opt/My App/run|--file=/a"]);
@@ -96,6 +96,15 @@ fn exec_lines_expand_their_field_codes() {
 }
 
 // ---- robustness of desktop files and Exec lines ----
+
+fn strings(r: Vec<std::ffi::OsString>) -> Vec<String> {
+    r.into_iter().map(|a| a.into_string().expect("UTF-8")).collect()
+}
+
+/// [`exec_argv`] as text (every name here is UTF-8).
+fn argv(exec: &str, files: &[PathBuf]) -> Vec<Vec<String>> {
+    exec_argv(exec, files).into_iter().map(strings).collect()
+}
 
 /// A file name with anything in it: spaces, quotes, newlines, `%`, a leading `-`.
 fn any_file(r: &mut crate::prop::Rng) -> String {
@@ -124,7 +133,7 @@ fn every_file_is_one_argument_whatever_its_name() {
             ("app --literal=%%f", vec![[s(&["app", "--literal=%f"]), names.clone()].concat()]),
         ];
         for (exec, want) in cases {
-            assert_eq!(exec_argv(exec, &files), want, "{exec} with {names:?}");
+            assert_eq!(argv(exec, &files), want, "{exec} with {names:?}");
         }
     });
 }
@@ -138,7 +147,7 @@ fn any_exec_line_runs_something_sane() {
     crate::prop::check("exec_argv_any", 3000, |r| {
         let exec = r.from(BITS, 12);
         let files: Vec<PathBuf> = (0..r.below(3)).map(|_| PathBuf::from(any_file(r))).collect();
-        for run in exec_argv(&exec, &files) {
+        for run in argv(&exec, &files) {
             assert!(!run.is_empty() && run.iter().all(|a| !a.contains('\0')), "{exec:?}: {run:?}");
         }
     });
@@ -149,8 +158,22 @@ fn any_exec_line_runs_something_sane() {
 #[test]
 fn a_literal_percent_f_isnt_a_field_code() {
     let f = vec![PathBuf::from("/a"), PathBuf::from("/b")];
-    assert_eq!(exec_argv("app --x=%%f", &f), [["app", "--x=%f", "/a", "/b"]]);
-    assert_eq!(exec_argv("app %f %F", &f), [["app", "/a", "/b"]], "a stray %f with %F is dropped, not an empty argument");
+    assert_eq!(argv("app --x=%%f", &f), [["app", "--x=%f", "/a", "/b"]]);
+    assert_eq!(argv("app %f %F", &f), [["app", "/a", "/b"]], "a stray %f with %F is dropped, not an empty argument");
+}
+
+/// A file whose name isn't UTF-8 was passed with U+FFFD in its place: the app was asked to open
+/// a file that doesn't exist (or another one). Now it's passed byte for byte.
+#[cfg(unix)]
+#[test]
+fn a_name_that_isnt_utf8_is_passed_exactly() {
+    use std::os::unix::ffi::OsStringExt;
+    let f = PathBuf::from(std::ffi::OsString::from_vec(b"/caf\xe9.txt".to_vec()));
+    for exec in ["app %f", "app %F", "app", "app --file=%u"] {
+        let runs = exec_argv(exec, std::slice::from_ref(&f));
+        let last = runs[0].last().unwrap().clone().into_vec();
+        assert!(last.ends_with(b"/caf\xe9.txt"), "{exec}: {last:?}");
+    }
 }
 
 /// Any key file: parsing never panics (desktop files, mimeapps.list, mimeinfo.cache).
