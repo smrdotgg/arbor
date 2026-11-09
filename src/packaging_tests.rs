@@ -233,3 +233,66 @@ fn fallback_uninstall_restores_both_values_and_refuses_a_damaged_backup() {
 fn hex(b: &[u8]) -> String {
     b.iter().map(|c| format!("{c:02x}")).collect()
 }
+
+/// Any backup, valid or damaged in the ways a file can be (a value that isn't one line of
+/// text, a record cut short, a name twice, another app's activation file with any bytes in it,
+/// NULs too): `uninstall.sh` accepts exactly what Arbor's Restore accepts, and then puts back
+/// exactly what it records, byte for byte.
+#[test]
+fn the_scripts_backup_reader_agrees_with_arbor() {
+    let root = tmp("backup-agree");
+    let pkg = root.join("pkg");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/linux/uninstall.sh"), pkg.join("uninstall.sh")).unwrap();
+    let (mime_key, svc_key) = ("mimeapps.list inode/directory", "dbus-1/services/org.freedesktop.FileManager1.service");
+    crate::prop::check("uninstall_backup", 40, |r| {
+        let home = root.join("home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let (service, mimeapps, backup) = made_default(&home);
+        let mime: Option<Vec<u8>> = match r.below(4) {
+            0 => None,
+            1 => Some(
+                [&b"x.desktop"[..], r.pick(&[&b"\n[Evil]\nk=v"[..], b"\r", b"\t", b"\0", b"\xc3", b"\xe9", b"\xc2\x85", b"\x7f"])].concat(),
+            ),
+            _ => Some(r.from(&["org.", "gnome", ".Nautilus", ".desktop", ";", "-", "é", "中", " "], 6).into_bytes()),
+        };
+        let svc: Option<Vec<u8>> = if r.one_in(3) { None } else { Some(r.bytes(80)) };
+        let mut b = Backup::default();
+        b.put(mime_key, mime.as_deref());
+        b.put(svc_key, svc.as_deref());
+        let mut text = std::fs::read_to_string({
+            b.write(&backup).unwrap();
+            &backup
+        })
+        .unwrap();
+        match r.below(8) {
+            0 => text.push_str(&format!("-\t{mime_key}\n")),
+            1 => text.push_str("6\tcut\n"),
+            2 => text.push_str("zz\tx\n"),
+            _ => {}
+        }
+        std::fs::write(&backup, &text).unwrap();
+        let arbor = Backup::decode_for_tests(&text)
+            .ok()
+            .filter(|b| b.get(mime_key).is_some() && b.get(svc_key).is_some())
+            .is_some_and(|b| crate::handler::linux::saved_default(&b, &backup).is_ok());
+        let (ok, out) = run(&pkg, "uninstall.sh", &home);
+        assert_eq!(ok, arbor, "{text:?}: {out}");
+        if !ok {
+            assert!(out.contains("damaged"), "{out}");
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), text, "the backup stays");
+            return;
+        }
+        match &svc {
+            Some(bytes) => assert_eq!(&std::fs::read(&service).unwrap(), bytes, "{text:?}: {out}"),
+            None => assert!(!service.exists(), "{out}"),
+        }
+        let now = std::fs::read_to_string(&mimeapps).unwrap();
+        // (A value is read back trimmed, as Make records it.)
+        let want = mime.map(|m| String::from_utf8(m).unwrap().trim().to_string());
+        assert_eq!(crate::handler::linux::default_app(&now, "inode/directory"), want, "{text:?}: {now:?}");
+        assert!(!backup.exists());
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}

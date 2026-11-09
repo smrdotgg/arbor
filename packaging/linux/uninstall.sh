@@ -44,14 +44,17 @@ else
 	mime_key='mimeapps.list inode/directory'
 	service_key='dbus-1/services/org.freedesktop.FileManager1.service'
 	# The value the backup records under a name, decoded from hex ("-" is "there was none":
-	# then it prints nothing and fails).
+	# then it prints nothing and fails). The bytes come out of printf's octal escapes, so a
+	# NUL is put back too (not every awk can print one).
 	saved() {
-		LC_ALL=C awk -F '\t' -v k="$1" '$2 == k && $1 != "-" {
-			d = "0123456789abcdef"; s = ""; h = tolower($1)
-			for (i = 1; i < length(h); i += 2)
-				s = s sprintf("%c", (index(d, substr(h, i, 1)) - 1) * 16 + index(d, substr(h, i + 1, 1)) - 1)
-			printf "%s", s; found = 1
-		} END { exit !found }' "$backup"
+		hex=$(LC_ALL=C awk -F '\t' -v k="$1" '$2 == k && $1 != "-" { print tolower($1); found = 1 } END { exit !found }' "$backup") || return 1
+		esc=$(printf '%s' "$hex" | LC_ALL=C awk '{
+			d = "0123456789abcdef"
+			for (i = 1; i < length($0); i += 2)
+				printf "\\%03o", (index(d, substr($0, i, 1)) - 1) * 16 + index(d, substr($0, i + 1, 1)) - 1
+		}')
+		# shellcheck disable=SC2059 # the escapes are the format, on purpose
+		printf "$esc"
 	}
 	has_backup=
 	if [ -e "$backup" ]; then
@@ -107,20 +110,21 @@ else
 		echo "Left $service alone: it isn't Arbor's (it changed since Arbor wrote it)."
 	fi
 	if [ -f "$mimeapps" ] && grep -q '^inode/directory=arbor\.desktop' "$mimeapps"; then
-		before=
-		if [ -n "$has_backup" ]; then
-			before=$(saved "$mime_key" || true)
+		# What was there before, if anything was (an empty value is a value, put back as it was).
+		before= had=
+		if [ -n "$has_backup" ] && before=$(saved "$mime_key"); then
+			had=1
 		fi
-		BEFORE=$before awk '
+		HAD=$had BEFORE=$before awk '
 			/^[ \t]*\[/ { inside = ($0 ~ /^[ \t]*\[Default Applications\][ \t]*$/) }
 			inside && /^inode\/directory=arbor\.desktop/ {
-				if (ENVIRON["BEFORE"] != "") print "inode/directory=" ENVIRON["BEFORE"]
+				if (ENVIRON["HAD"] != "") print "inode/directory=" ENVIRON["BEFORE"]
 				next
 			}
 			{ print }
 		' "$mimeapps" >"$mimeapps.arbor-uninstall"
 		mv -f "$mimeapps.arbor-uninstall" "$mimeapps"
-		if [ -n "$before" ]; then
+		if [ -n "$had" ]; then
 			echo "Folders open in $before again (put back in $mimeapps)."
 		else
 			echo "Removed Arbor as the folder default from $mimeapps; the desktop's own file manager opens folders again."

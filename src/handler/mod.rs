@@ -134,6 +134,11 @@ impl Backup {
         Ok(b)
     }
 
+    #[cfg(test)]
+    pub(crate) fn decode_for_tests(s: &str) -> Result<Backup, String> {
+        Backup::decode(s)
+    }
+
     /// The saved backup, or `None` when there's none.
     pub(crate) fn read(path: &Path) -> Result<Option<Backup>, String> {
         match std::fs::read_to_string(path) {
