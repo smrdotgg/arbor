@@ -662,9 +662,7 @@ pub(crate) mod windows {
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
-    fn wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s).encode_wide().chain([0]).collect()
-    }
+    use crate::ffi::wide;
 
     /// The pipe for this user's login session (a fast user switch or a remote session gets its
     /// own Arbor).

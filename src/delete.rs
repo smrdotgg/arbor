@@ -135,8 +135,7 @@ pub mod volume {
     pub fn of_path(p: &std::path::Path) -> Option<Vec<u8>> {
         #[cfg(target_os = "macos")]
         {
-            use std::os::unix::ffi::OsStrExt;
-            let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+            let c = crate::ffi::cstr(p).ok()?;
             // SAFETY: a NUL-terminated path and a zeroed out-buffer.
             let mut s: libc::statfs = unsafe { std::mem::zeroed() };
             (unsafe { libc::statfs(c.as_ptr(), &mut s) } == 0).then(|| name(&s))
@@ -269,9 +268,7 @@ mod imp {
 
     use super::{Halt, Mounts, volume};
 
-    fn cstr(s: &OsStr) -> io::Result<CString> {
-        CString::new(s.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
-    }
+    use crate::ffi::cstr;
 
     fn fail(at: &Path, err: io::Error) -> Halt {
         Halt::Failed { at: at.to_path_buf(), err }

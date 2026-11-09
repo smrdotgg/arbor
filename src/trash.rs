@@ -96,8 +96,7 @@ pub fn classify_mac(domain: &str, code: i64, folder_writable: bool, message: Str
 /// Whether this process may add and remove entries in folder `dir` (a read-only disk isn't).
 #[cfg(unix)]
 fn writable(dir: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else { return false };
+    let Ok(c) = crate::ffi::cstr(dir) else { return false };
     // SAFETY: `c` is a valid NUL-terminated path.
     unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
 }
@@ -517,7 +516,6 @@ mod win {
     //! against the `windows` crate's `IFileOperation_Vtbl` and `IFileOperationProgressSink_Vtbl`.
 
     use std::ffi::c_void;
-    use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering::SeqCst};
 
@@ -540,9 +538,7 @@ mod win {
     const E_NOINTERFACE: HRESULT = 0x80004002_u32 as i32;
     const E_ABORT: HRESULT = 0x80004004_u32 as i32;
 
-    fn wide(p: &std::ffi::OsStr) -> Vec<u16> {
-        p.encode_wide().chain([0]).collect()
-    }
+    use crate::ffi::wide;
 
     /// The volume `abs` is on: its root (`C:\`, `\\server\share\`) and drive type.
     pub fn volume(abs: &Path) -> (String, u32) {

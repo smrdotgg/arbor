@@ -17,6 +17,7 @@ mod complete;
 mod config;
 mod confirm;
 mod delete;
+mod ffi;
 mod folder;
 #[cfg(test)]
 mod frame_bench;

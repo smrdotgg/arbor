@@ -327,16 +327,9 @@ fn handle_id(path: &Path, follow: bool) -> Option<FileId> {
 }
 
 #[cfg(unix)]
-fn cstr(p: &Path) -> io::Result<std::ffi::CString> {
-    use std::os::unix::ffi::OsStrExt;
-    std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| io::Error::new(ErrorKind::InvalidInput, "name contains a NUL byte"))
-}
-
+use crate::ffi::cstr;
 #[cfg(windows)]
-fn wide(p: &Path) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
-}
+use crate::ffi::wide;
 
 #[cfg(test)]
 mod tests {

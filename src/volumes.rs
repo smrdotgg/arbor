@@ -223,9 +223,7 @@ pub(crate) mod win {
     use super::{DRIVE_REMOTE, Volume, from_drives};
     use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
 
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
+    use crate::ffi::wide;
 
     pub fn list() -> Vec<Volume> {
         // A card reader or disc drive with nothing in it answers "not ready" rather than asking
@@ -242,7 +240,7 @@ pub(crate) mod win {
         from_drives(
             mask,
             // SAFETY: a NUL-terminated root path.
-            |l| unsafe { GetDriveTypeW(wide(&format!("{l}:\\")).as_ptr()) },
+            |l| unsafe { GetDriveTypeW(wide(format!("{l}:\\")).as_ptr()) },
             |l, kind| {
                 if kind == DRIVE_REMOTE {
                     return None;
@@ -251,7 +249,7 @@ pub(crate) mod win {
                 // SAFETY: a NUL-terminated root, a buffer of the length given, the rest null.
                 let ok = unsafe {
                     GetVolumeInformationW(
-                        wide(&format!("{l}:\\")).as_ptr(),
+                        wide(format!("{l}:\\")).as_ptr(),
                         name.as_mut_ptr(),
                         name.len() as u32,
                         std::ptr::null_mut(),
