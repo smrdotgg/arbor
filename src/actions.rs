@@ -186,7 +186,7 @@ impl State {
         // itself is one call here too).
         let found = self.cur().searching().then(|| self.cur().entries.iter().find(|e| e.os == r.os).and_then(|e| e.id)).flatten();
         if let Some(id) = found
-            && from.symlink_metadata().ok().and_then(|m| crate::fs::ident(&m)) != Some(id)
+            && crate::fs::ident_at(&from) != Some(id)
         {
             self.note = Some(format!(
                 "“{}” isn't the item the search found (it was moved, deleted or replaced since), so it wasn't renamed",
@@ -426,12 +426,8 @@ impl State {
     pub fn drag_item(&self, id: u64, i: usize) -> Option<DragItem> {
         let f = &self.pane(id)?.f;
         let mut paths = f.drag_paths(i);
-        let stale: Vec<PathBuf> = f
-            .drag_checks(i)
-            .into_iter()
-            .filter(|(p, id)| p.symlink_metadata().ok().and_then(|m| crate::fs::ident(&m)) != Some(*id))
-            .map(|(p, _)| p)
-            .collect();
+        let stale: Vec<PathBuf> =
+            f.drag_checks(i).into_iter().filter(|(p, id)| crate::fs::ident_at(p) != Some(*id)).map(|(p, _)| p).collect();
         paths.retain(|p| !stale.contains(p));
         if paths.is_empty() {
             return None;

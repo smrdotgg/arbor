@@ -49,6 +49,12 @@ pub fn ident(m: &std::fs::Metadata) -> Option<Ident> {
     }
 }
 
+/// The identity of what's at `path` now (not following a link), `None` when nothing is or it
+/// can't be read: compare it with the one captured earlier, right before acting on the path.
+pub fn ident_at(path: &Path) -> Option<Ident> {
+    ident(&path.symlink_metadata().ok()?)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortKey {
     Name,

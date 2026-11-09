@@ -793,7 +793,7 @@ impl<'a> Worker<'a> {
         if let Op::Copy { sources, .. } | Op::Move { sources, .. } | Op::Trash { sources } = &op {
             for src in sources {
                 if !self.seen.contains_key(src)
-                    && let Some(id) = src.symlink_metadata().ok().as_ref().and_then(crate::fs::ident)
+                    && let Some(id) = crate::fs::ident_at(src)
                 {
                     self.seen.insert(src.clone(), id);
                 }
