@@ -9,6 +9,31 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-09 · Milestone 15: what malformed input gets.** Each refusal below is "damage, not
+  a guess"; each has a regression test with the input a property test found.
+  - Go-to tries the typed path exactly first, then without trailing spaces (a name can end in
+    one; Tab completion writes it whole). Undo: `app::typed_targets`.
+  - `~\` is the home folder only on Windows. Elsewhere a backslash is part of a name. Undo:
+    `fs::expand`.
+  - Tab completion leaves out names that aren't UTF-8 (they can't be typed). Undo:
+    `complete::candidates`.
+  - Globs over 4096 characters are refused. Undo: `pattern::MAX_LEN`.
+  - Batch rename's regexes are capped at 64 KB compiled, and a regex rule is always planned on
+    the worker. Undo: `rename::REGEX_SIZE`, `c.is_regex()` in `batch_replan_within`.
+  - A `history.log` line over 128 KB is skipped. Undo: `jump::MAX_LINE`.
+  - These are refused rather than read:
+    - a `.trashinfo` with two `Path=` lines, `%00` or `%2F`;
+    - a `file://` URI with `%00`, `%2F` or a fragment;
+    - a desktop id with a separator, `..` or a leading dot;
+    - a `mimeapps.list` that isn't UTF-8;
+    - a backed-up folder default that isn't one line of UTF-8 text, a macOS viewer that isn't
+      a bundle id, or a Windows value shorter than its type.
+  - A mount whose device name isn't UTF-8 gets no device, so Eject falls back to `gio` with
+    the exact mount point.
+  - Property tests have a fixed seed per property, so CI is deterministic.
+    `ARBOR_PROP_SEED` and `ARBOR_PROP_CASES` hunt locally. There's no crate (`src/prop.rs`).
+    Undo: per item.
+
 - **2026-11-09 · Identity now includes type, size, ctime and birth time, so an item changed
   since it was chosen is left alone too (Review: a visible behaviour change).** Device and inode
   alone let a replacement that got the freed inode back through (ext4 here: 200 of 200), so

@@ -47,7 +47,7 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | UI | `view/` | Every element: root and status bar (`mod.rs`), `sidebar`, `pane` (path bar, tabs), `list`, `panels`, `overlays`, `batch` |
 | Shared | `bounded.rs`, `persist.rs`, `mounts.rs`, `dirfd.rs`, `ffi.rs`, `fs.rs` | See [Patterns](#patterns-to-reuse); folder reads, sorting, formatting |
 | Tooling | `timing.rs` | Opt-in speed logs (`ARBOR_TIMING`, the bench) |
-| Tests only | `a11y_tests.rs`, `frame_bench.rs`, `packaging_tests.rs` | Accessibility tree, per-key cost, install scripts |
+| Tests only | `a11y_tests.rs`, `frame_bench.rs`, `packaging_tests.rs`, `prop.rs` | Accessibility tree, per-key cost, install scripts, seeded property tests (a PRNG and a runner) |
 
 ## Threads
 
