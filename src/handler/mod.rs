@@ -134,7 +134,8 @@ impl Backup {
         Ok(b)
     }
 
-    #[cfg(test)]
+    /// For `packaging_tests` (Linux).
+    #[cfg(all(test, unix, not(target_os = "macos")))]
     pub(crate) fn decode_for_tests(s: &str) -> Result<Backup, String> {
         Backup::decode(s)
     }

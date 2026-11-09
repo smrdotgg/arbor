@@ -13,6 +13,7 @@ fn file_uris_become_paths() {
 
 /// Percent-encodes a path's bytes as a file manager's caller would (unreserved and `/` as they
 /// are).
+#[cfg(unix)]
 fn encode(b: &[u8]) -> String {
     b.iter()
         .map(|&c| if c.is_ascii_alphanumeric() || b"/-._~".contains(&c) { (c as char).to_string() } else { format!("%{c:02X}") })
