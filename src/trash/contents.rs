@@ -701,7 +701,7 @@ pub fn can_put_back_in(dir: &Path) -> bool {
 
 /// Where an item came from, from its `.trashinfo` text: the `Path=` key of its `[Trash Info]`
 /// group, URL-decoded; a relative one is from `top` (a trash on another disk). A path with `..`
-/// in it, or none, is refused rather than guessed.
+/// in it, or none, or two `Path=` lines, is refused rather than guessed.
 pub fn parse_info(text: &str, top: Option<&Path>) -> Result<PathBuf, String> {
     let mut in_group = false;
     let mut found = None;
@@ -712,8 +712,11 @@ pub fn parse_info(text: &str, top: Option<&Path>) -> Result<PathBuf, String> {
             continue;
         }
         if in_group && let Some(v) = line.strip_prefix("Path=") {
+            // Two places: the spec allows one, and other tools may read the other.
+            if found.is_some() {
+                return Err("its record in the Trash names two places".into());
+            }
             found = Some(v);
-            break;
         }
     }
     let raw = found.ok_or("its record in the Trash doesn't say where it came from")?;
@@ -995,6 +998,15 @@ mod tests {
             assert!(parse_info(&format!("[Trash Info]\nPath={root}{v}\n"), None).is_err(), "{v:?}");
         }
         assert!(parse_info(&format!("[Trash Info]\nPath={root}a%2Cb\n"), None).is_ok());
+    }
+
+    /// Two `Path=` lines in the group: Arbor took the first, where another tool may take the
+    /// last and put the item back somewhere else. It's damage, refused.
+    #[test]
+    fn a_record_naming_two_places_is_refused() {
+        let root = if cfg!(windows) { "C:/" } else { "/" };
+        assert!(parse_info(&format!("[Trash Info]\nPath={root}a\nPath={root}b\n"), None).is_err());
+        assert!(parse_info(&format!("[Trash Info]\nPath={root}a\n[Other]\nPath={root}b\n"), None).is_ok(), "another group's doesn't count");
     }
 
     /// A giant record is read at most 64 KB (`read_info_at`) and parsed at once.
