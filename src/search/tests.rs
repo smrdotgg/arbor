@@ -1004,8 +1004,25 @@ fn delete_permanently_leaves_a_replaced_result_alone() {
 /// renames or removes it refuses, saying why, and leaves the newcomer alone.
 #[test]
 fn every_action_on_a_replaced_result_refuses() {
-    let d = tree("replaced", &["a/report.txt", "b/other.txt"]);
-    let into = tree("replaced-into", &[]);
+    every_action_refuses("replaced", replace);
+}
+
+/// The review's blocker, for search results: a result replaced by an item that got its inode
+/// back (here, the same inode rewritten: what ext4 hands a new file at once) passed the
+/// device-and-inode check, and every action went ahead on the newcomer.
+#[cfg(unix)]
+#[test]
+fn every_action_on_a_result_whose_inode_was_reused_refuses() {
+    every_action_refuses("reused", |p| {
+        let before = crate::fs::ident_at(p).unwrap();
+        std::fs::write(p, "SOMEONE ELSE'S FILE").unwrap();
+        assert_eq!(crate::fs::ident_at(p).unwrap().node(), before.node());
+    });
+}
+
+fn every_action_refuses(name: &str, replace: fn(&Path)) {
+    let d = tree(name, &["a/report.txt", "b/other.txt"]);
+    let into = tree(&format!("{name}-into"), &[]);
     let mut s = state_in(&d);
     search(&mut s, "report");
     finish_walk(&mut s);

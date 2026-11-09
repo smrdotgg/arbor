@@ -94,14 +94,19 @@ Nothing runs in the background unless the user did something, and nothing polls.
   counter); an answer lands only if it carries the number its folder is still waiting for.
   Navigations that need follow-up (a Jump, a sidebar click) remember the number. Preview,
   Get Info and Open With keep their own counters the same way.
-- **Identity, re-checked right before acting.** A source's identity (`fs::Ident`: device and
-  inode on Unix; on Windows its creation time and whether it's a folder, from the metadata the
-  listing already has, since the file index needs the file opened, so a replacement within
-  Windows' 15 s creation-time tunnelling isn't seen there) is captured when an operation is asked for
-  (from the listing, or the search walk) and checked on the worker immediately before each
-  item is touched (`fs::ident_at`; `Op::Checked`, `ops::Doomed`, `ops::Seen` for batch
-  rename). Undo keeps a fuller fingerprint (`ops/print.rs`: identity, type, size, mtime, and a
-  tree for folders) and refuses if anything differs.
+- **Identity, re-checked right before acting.** A source's identity (`fs::Ident`, from the
+  metadata the listing already has: device and inode on Unix, or Windows' creation time, plus
+  its type, a file's size, its ctime to the nanosecond (Windows: last write) and its birth time
+  where the file system keeps one) is captured when an operation is asked for (from the
+  listing, or the search walk) and checked on the worker immediately before each item is
+  touched (`fs::ident_at`; `Op::Checked`, `ops::Doomed`, `ops::Seen` for batch rename). Device
+  and inode alone aren't enough: ext4 hands a new file the inode just freed. An item replaced
+  or changed since is left alone, and one with no identity is never deleted. Walks that only
+  check a folder wasn't swapped (Get Info, search rechecks) compare `Ident::node`. Windows
+  can't see a replacement within its 15 s creation-time tunnelling that has the same size and
+  write time (its file index needs the file opened). Undo keeps a fuller fingerprint
+  (`ops/print.rs`: identity, type, size, mtime, and a tree for folders) and refuses if
+  anything differs.
 - **Mount boundaries** (`mounts.rs`). `Mounts` (Linux's mount table, read once per operation)
   and `volume` (macOS's volume per folder) decide what's "another disk"; `Fence` bundles them
   for a walk. Used by permanent delete, cleanup of cancelled copies, cross-disk

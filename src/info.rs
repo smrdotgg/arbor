@@ -188,7 +188,7 @@ fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) ->
     use crate::dirfd::{Names, fstat, is_dir, open_dir, same, stat_at};
     use std::os::unix::ffi::OsStrExt;
     let (path, follow, want) = match root {
-        Root::Picked(p, id) => (p, false, *id),
+        Root::Picked(p, id) => (p, false, id.map(|i| i.node())),
         Root::Here(p, id) => (p, true, *id),
     };
     let opened = crate::ffi::cstr(path).and_then(|r| open_dir(libc::AT_FDCWD, &r, follow)).and_then(|fd| Ok((fstat(&fd)?, fd)));
@@ -274,9 +274,9 @@ fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) ->
 #[cfg(not(unix))]
 fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) -> bool {
     let still = match root {
-        Root::Picked(p, id) => {
-            p.symlink_metadata().is_ok_and(|m| m.is_dir() && !m.is_symlink() && id.is_none_or(|id| fs::ident(&m) == Some(id)))
-        }
+        Root::Picked(p, id) => p
+            .symlink_metadata()
+            .is_ok_and(|m| m.is_dir() && !m.is_symlink() && id.is_none_or(|id| fs::ident(&m).map(|i| i.node()) == Some(id.node()))),
         Root::Here(p, id) => id.is_none_or(|id| crate::noclobber::dir_id(p) == Some(id)),
     };
     if !still {
@@ -290,7 +290,13 @@ fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) ->
         }
         #[cfg(test)]
         hook::at(&dir);
-        if want.is_some() && !dir.symlink_metadata().is_ok_and(|m| m.is_dir() && !m.is_symlink() && fs::ident(&m) == want) {
+        // The same folder (device and inode, or Windows' creation time): its own times change as
+        // things in it do.
+        if want.is_some()
+            && !dir
+                .symlink_metadata()
+                .is_ok_and(|m| m.is_dir() && !m.is_symlink() && fs::ident(&m).map(|i| i.node()) == want.map(|w| w.node()))
+        {
             c.t.unreadable += 1;
             continue;
         }

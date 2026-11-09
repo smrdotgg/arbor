@@ -1651,6 +1651,65 @@ fn an_item_without_an_identity_is_never_deleted() {
     let _ = fs::remove_dir_all(&d);
 }
 
+/// Another item at `p` with `p`'s device and inode, as a file system reusing a freed inode at
+/// once gives it (ext4 does, every time): `p` rewritten in place, another size. Returns the
+/// identity `p` had before, which device and inode alone can't tell from the new one.
+#[cfg(unix)]
+fn inode_reused(p: &Path) -> crate::fs::Ident {
+    let before = crate::fs::ident_at(p).unwrap();
+    fs::write(p, "another item, of another size").unwrap();
+    assert_eq!(crate::fs::ident_at(p).unwrap().node(), before.node(), "same device and inode");
+    before
+}
+
+/// The review's blocker: identity was device and inode, so an item replaced by one that got its
+/// inode back passed every check and was acted on. Now each destructive path leaves it alone:
+/// delete, trash, move, rename, Put Back (search results' identities, `Op::Checked`) and Empty
+/// Trash. And a real remove-and-recreate at the same name never inherits the identity.
+#[cfg(unix)]
+#[test]
+fn an_item_with_a_reused_inode_is_never_acted_on() {
+    use crate::trash::contents;
+    let d = tmp("inode-reuse");
+    let target = d.join("t");
+    fs::create_dir(d.join("into")).unwrap();
+    let checked = |op: Op, id: crate::fs::Ident| Op::Checked { expect: vec![(target.clone(), id)], op: Box::new(op) };
+    let ops: Vec<(&str, Box<dyn Fn(crate::fs::Ident) -> Op>)> = vec![
+        ("delete", Box::new(|id| Op::Delete { items: vec![Doomed { path: target.clone(), id: Some(id), dir: false }] })),
+        ("trash", Box::new(|id| checked(Op::Trash { sources: vec![target.clone()] }, id))),
+        ("move", Box::new(|id| checked(Op::Move { sources: vec![target.clone()], dest: d.join("into") }, id))),
+        ("rename", Box::new(|id| checked(Op::RenameOne { from: target.clone(), to: d.join("renamed") }, id))),
+    ];
+    for (what, op) in &ops {
+        fs::write(&target, "the item chosen").unwrap();
+        let id = inode_reused(&target);
+        let o = run_now(op(id));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "another item, of another size", "{what}: left alone");
+        assert!(o.removed.is_empty() && o.moved.is_empty() && o.results.is_empty(), "{what}");
+        assert!(o.refused.is_some() || !o.errors.is_empty(), "{what}: and said");
+    }
+    // Empty Trash and Put Back.
+    let root = fixture_trash(&d, &[("a", "a")]);
+    let (items, _) = contents::list(&[trash_bin(&root)], &|| false).unwrap();
+    inode_reused(&root.join("files/a"));
+    let o = run_now(Op::EmptyTrash { items: Some(items) });
+    assert!(o.removed.is_empty() && root.join("files/a").exists() && root.join("info/a.trashinfo").exists(), "empty trash");
+    let item = root.join("files/a");
+    let id = inode_reused(&item);
+    let o = run_now(Op::Checked { expect: vec![(item.clone(), id)], op: Box::new(Op::PutBack { items: vec![item.clone()] }) });
+    assert!(o.refused.is_some() && item.exists() && !d.join("a").exists(), "put back");
+    // The real thing: removed and made again at once, the same size, twenty times.
+    for _ in 0..20 {
+        fs::write(&target, "old").unwrap();
+        let id = crate::fs::ident_at(&target).unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::write(&target, "new").unwrap();
+        let o = run_now(Op::Delete { items: vec![Doomed { path: target.clone(), id: Some(id), dir: false }] });
+        assert!(o.removed.is_empty() && fs::read_to_string(&target).unwrap() == "new", "a replacement is never deleted");
+    }
+    let _ = fs::remove_dir_all(&d);
+}
+
 /// Esc stops it between entries: what's gone stays gone, the rest stays in the Trash.
 #[test]
 fn empty_trash_stops_when_cancelled() {

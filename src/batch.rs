@@ -479,7 +479,7 @@ fn read_folders(
         gone.push(match &m {
             None => Some("It isn't there any more (moved or deleted)"),
             Some(m) if want.is_some() && crate::fs::ident(m) != want => {
-                Some("It isn't the item the search found (something else is at its path now)")
+                Some("It isn't the item the search found (something else is at its path now, or it changed since)")
             }
             Some(_) => None,
         });

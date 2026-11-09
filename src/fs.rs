@@ -28,24 +28,85 @@ pub struct Entry {
     pub id: Option<Ident>,
 }
 
-/// An item's identity as its own metadata gives it, at no extra cost (see [`ident`]).
-pub type Ident = (u64, u64);
+/// What tells an item from another put at its path later, and from itself changed since: the
+/// one definition every destructive check compares (delete, Empty Trash, trash, move, rename,
+/// batch rename), from the metadata already read for it (no extra call; see [`ident`]).
+///
+/// Device and inode alone aren't enough: a file system reuses a freed inode at once (ext4 gave
+/// a new file at the same name the old one's inode in 100 of 100 tries), so the type, a file's
+/// size, the time its inode last changed (ctime, to the nanosecond) and, where the file system
+/// keeps it, its birth time come too. A replacement has a new birth time and ctime; the same
+/// item edited since has a new ctime, and is left alone just the same ("changed since").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Ident {
+    /// Unix: device and inode. Windows: creation time (ns) and whether it's a folder.
+    node: (u64, u64),
+    /// 0 a file, 1 a folder, 2 a link, 3 anything else.
+    kind: u8,
+    /// A file's size (0 for anything else: a folder's changes as entries come and go).
+    size: u64,
+    /// Unix: when its inode last changed (ctime). Windows: when it was last written. In ns.
+    changed: i128,
+    /// When it was made, where the file system says (Linux's statx btime, macOS's birth time,
+    /// Windows' creation time), in ns.
+    born: Option<i128>,
+}
 
-/// What tells an item from another put at its path later, from the metadata already read for
-/// it (no extra call): device and inode on Unix; on Windows its creation time and whether
-/// it's a folder (the file index needs the file opened, one call per item). Windows gives a
-/// file created under a name within 15 s of deleting one there the old one's creation time
-/// ("tunnelling"), so a replacement that quick reads as the same item there.
+impl Ident {
+    /// The same object on the disk, changed or not (Unix: device and inode). For checking that
+    /// a folder being walked wasn't swapped for another, never for deciding to act on an item.
+    pub fn node(&self) -> (u64, u64) {
+        self.node
+    }
+
+    /// From its parts, for metadata read without `std` (`dirfd::ident_at`).
+    #[cfg(unix)]
+    pub(crate) fn of_parts(dev: u64, ino: u64, mode: u32, size: u64, changed: i128, born: Option<i128>) -> Ident {
+        let kind = match mode & libc::S_IFMT as u32 {
+            m if m == libc::S_IFREG as u32 => 0,
+            m if m == libc::S_IFDIR as u32 => 1,
+            m if m == libc::S_IFLNK as u32 => 2,
+            _ => 3,
+        };
+        Ident { node: (dev, ino), kind, size: if kind == 0 { size } else { 0 }, changed, born }
+    }
+}
+
+/// A time as ns since the Unix epoch (negative before it).
+fn ns(t: std::time::SystemTime) -> i128 {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_nanos() as i128,
+        Err(e) => -(e.duration().as_nanos() as i128),
+    }
+}
+
+/// An item's [`Ident`] from its metadata (not following a link). Windows gives a file created
+/// under a name within 15 s of deleting one there the old one's creation time ("tunnelling"),
+/// and its file index needs the file opened (one call per item), so there a replacement that
+/// quick, of the same size and written in the same clock tick, reads as the same item.
 pub fn ident(m: &std::fs::Metadata) -> Option<Ident> {
+    let ft = m.file_type();
+    let kind = if ft.is_symlink() {
+        2
+    } else if ft.is_dir() {
+        1
+    } else if ft.is_file() {
+        0
+    } else {
+        3
+    };
+    let size = if kind == 0 { m.len() } else { 0 };
+    let born = m.created().ok().map(ns);
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        Some((m.dev(), m.ino()))
+        let changed = m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128;
+        Some(Ident { node: (m.dev(), m.ino()), kind, size, changed, born })
     }
     #[cfg(not(unix))]
     {
-        let t = m.created().ok()?.duration_since(UNIX_EPOCH).ok()?;
-        Some((t.as_nanos() as u64, u64::from(m.is_dir())))
+        let changed = m.modified().ok().map_or(0, ns);
+        Some(Ident { node: (born.map_or(0, |b| b as u64), u64::from(m.is_dir())), kind, size, changed, born })
     }
 }
 

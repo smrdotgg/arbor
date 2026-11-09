@@ -279,7 +279,8 @@ struct Recheck {
     /// Which recheck this answers.
     asked: u64,
     gone: HashSet<String>,
-    changed: Vec<(String, bool, u64, i64)>,
+    /// Each with its identity now (what actions on it check from here on).
+    changed: Vec<(String, bool, u64, i64, Option<fs::Ident>)>,
     added: Vec<Entry>,
     /// Results found under the path a change moved them to: their new path below the root.
     moved: Vec<(String, OsString)>,
@@ -424,7 +425,8 @@ impl Folder {
                 }
             }
         }
-        let changed: HashMap<&str, (bool, u64, i64)> = r.changed.iter().map(|(k, d, s, m)| (k.as_str(), (*d, *s, *m))).collect();
+        let changed: HashMap<&str, (bool, u64, i64, Option<fs::Ident>)> =
+            r.changed.iter().map(|(k, d, s, m, id)| (k.as_str(), (*d, *s, *m, *id))).collect();
         let before = self.entries.len();
         let mut touched = !r.added.is_empty();
         let upto = self.search.as_ref().map_or(0, |s| s.upto);
@@ -435,11 +437,12 @@ impl Folder {
                 return false;
             }
             kept_shown += usize::from(i <= upto);
-            if let Some(&(is_dir, size, mtime)) = changed.get(e.key.as_str())
-                && (e.is_dir, e.size, e.mtime_ms) != (is_dir, size, mtime)
-            {
-                (e.is_dir, e.size, e.mtime_ms) = (is_dir, size, mtime);
-                touched = true;
+            if let Some(&(is_dir, size, mtime, id)) = changed.get(e.key.as_str()) {
+                if (e.is_dir, e.size, e.mtime_ms) != (is_dir, size, mtime) {
+                    (e.is_dir, e.size, e.mtime_ms) = (is_dir, size, mtime);
+                    touched = true;
+                }
+                e.id = id;
             }
             true
         });
@@ -523,13 +526,16 @@ impl Folder {
         s.recheck.request_opt((look, new), move |(look, new)| {
             let mut out = Recheck { generation, asked, gone: HashSet::new(), changed: Vec::new(), added: Vec::new(), moved: Vec::new() };
             let mut seen: HashMap<PathBuf, bool> = HashMap::new();
-            // What's at `path`, if it's the item `id` (any item, when not known).
-            let found = |path: &Path, id: Option<fs::Ident>| path.symlink_metadata().ok().filter(|m| id.is_none() || fs::ident(m) == id);
+            // What's at `path`, if it's the item `id` (any item, when not known): the same object
+            // on the disk, edited or not (an edit shows as a change to its row).
+            let found = |path: &Path, id: Option<fs::Ident>| {
+                path.symlink_metadata().ok().filter(|m| id.is_none() || fs::ident(m).map(|i| i.node()) == id.map(|i| i.node()))
+            };
             let info = |key: String, path: &Path, m: &std::fs::Metadata| {
                 let target = if m.file_type().is_symlink() { std::fs::metadata(path).ok() } else { None };
                 let t = target.as_ref().unwrap_or(m);
                 let is_dir = t.is_dir();
-                (key, is_dir, if is_dir { 0 } else { t.len() }, fs::mtime(t))
+                (key, is_dir, if is_dir { 0 } else { t.len() }, fs::mtime(t), fs::ident(m))
             };
             for l in look {
                 if stop.load(Relaxed) {
