@@ -200,7 +200,7 @@ impl State {
         }
         // It must still be the item its listing (or the search walk) found there, edited or not
         // (checked on the worker).
-        let found = self.cur().entries.iter().find(|e| e.os == r.os).and_then(|e| e.id);
+        let found = self.cur().entries.iter().find(|e| e.os == r.os).map(|e| e.id);
         let chosen = self.cur().chosen();
         // Beside it, in its own folder: never "the folder on screen + the new name".
         let Some(dir) = from.parent().map(Path::to_path_buf) else { return };

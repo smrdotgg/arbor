@@ -374,18 +374,23 @@ impl<'a> Worker<'a> {
     pub(super) fn run_checked(&mut self, expect: &Checks, op: Op) -> Outcome {
         let mut why = Vec::new();
         let mut left_out = std::collections::HashSet::new();
+        // A copy leaves its sources where they are: one that couldn't be identified is copied
+        // as it is now. Anything that moves or removes it can't tell it from a replacement.
+        let copies = matches!(op, Op::Copy { .. });
         for (path, id) in &expect.items {
-            let problem = match path.symlink_metadata() {
-                Ok(m) if crate::fs::ident_of(path, &m) == Some(*id) => continue,
-                Ok(_) => not_chosen(path, expect.from, true),
-                Err(_) => not_chosen(path, expect.from, false),
+            let problem = match (path.symlink_metadata(), id) {
+                (_, None) if copies => continue,
+                (_, None) => unverified(path, expect.from),
+                (Ok(m), Some(id)) if crate::fs::ident_of(path, &m) == Some(*id) => continue,
+                (Ok(_), Some(_)) => not_chosen(path, expect.from, true),
+                (Err(_), Some(_)) => not_chosen(path, expect.from, false),
             };
             why.push(problem);
             left_out.insert(path.as_path());
         }
         let (op, any) = op.without(&left_out);
         // Each item is checked again right before it's acted on (`Worker::changed`).
-        self.seen.extend(expect.items.iter().cloned());
+        self.seen.extend(expect.items.iter().filter_map(|(p, id)| Some((p.clone(), (*id)?))));
         self.chosen = Some(expect.from);
         if !any {
             let more = if why.len() > 1 { format!(" (and {} more)", why.len() - 1) } else { String::new() };
@@ -792,6 +797,18 @@ fn not_chosen(path: &Path, from: Chosen, there: bool) -> String {
         }
         (Chosen::Listing, false) => {
             format!("“{name}” was moved or deleted since the folder was read, so it was left alone; press {RELOAD} to read it again")
+        }
+    }
+}
+
+/// Why `path`, chosen from `from` without an identity (it couldn't be read then), was left
+/// alone.
+fn unverified(path: &Path, from: Chosen) -> String {
+    let name = name_of(path);
+    match from {
+        Chosen::Search => format!("Couldn't verify “{name}” when the search found it, so it was left alone; search again to retry"),
+        Chosen::Listing => {
+            format!("Couldn't verify “{name}” when the folder was read, so it was left alone; press {RELOAD} to read it again")
         }
     }
 }

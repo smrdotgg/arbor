@@ -152,8 +152,10 @@ impl State {
         // one folder mostly come together, so the last folder is checked first).
         let mut paths = Vec::with_capacity(targets.len());
         let mut items = Vec::with_capacity(targets.len());
-        // Search results: the identity the walk saw, which each must still have.
+        // The identity the listing or the walk read for each item, which it must still have
+        // (`None`: it couldn't be read, so it isn't renamed).
         let mut expect: Vec<Option<crate::fs::Ident>> = Vec::new();
+        let from = f.chosen();
         let mut dir_paths: Vec<PathBuf> = Vec::new();
         let mut dir_ix: HashMap<PathBuf, u32> = HashMap::new();
         let keep =
@@ -163,6 +165,7 @@ impl State {
             dir_paths.push(f.cwd.clone());
             for e in &targets {
                 items.push(Item { name: e.name.clone(), is_dir: e.is_dir, dir: 0, keep: keep(&e.os), gone: None, inside: Vec::new() });
+                expect.push(e.id);
                 paths.push(f.cwd.join(&e.os));
             }
         }
@@ -241,7 +244,8 @@ impl State {
         // the read can't be, so the dialog doesn't wait for it.
         let wait = if items.len() <= SYNC_ITEMS { self.show_wait } else { std::time::Duration::ZERO };
         let names: Vec<String> = b.dirs.iter().map(|d| d.name.clone()).collect();
-        let read = crate::bounded::read_waiting(&b.reader, wait, move || read_folders(&dir_paths, &names, &items, &paths, &expect, &stop));
+        let read =
+            crate::bounded::read_waiting(&b.reader, wait, move || read_folders(&dir_paths, &names, &items, &paths, &expect, from, &stop));
         if let Some(r) = read {
             land_read(&mut b, r);
         }
@@ -454,6 +458,7 @@ fn read_folders(
     items: &[Item],
     paths: &[PathBuf],
     expect: &[Option<crate::fs::Ident>],
+    from: crate::ops::Chosen,
     stop: &AtomicBool,
 ) -> Option<Read> {
     let mut batch: Vec<HashSet<&str>> = vec![HashSet::new(); dir_paths.len()];
@@ -486,13 +491,23 @@ fn read_folders(
             return None;
         }
         let m = p.symlink_metadata().ok();
-        let want = expect.get(i).copied().flatten();
-        gone.push(match &m {
-            None => Some("It isn't there any more (moved or deleted)"),
-            Some(m) if want.is_some() && crate::fs::ident(m) != want => {
-                Some("It isn't the item the search found (something else is at its path now)")
-            }
-            Some(_) => None,
+        let search = from == crate::ops::Chosen::Search;
+        gone.push(match (&m, expect.get(i).copied()) {
+            (None, _) => Some("It isn't there any more (moved or deleted)"),
+            (Some(_), Some(None)) if search => Some("It couldn't be verified when the search found it (search again to retry)"),
+            (Some(_), Some(None)) => Some(if cfg!(target_os = "macos") {
+                "It couldn't be verified when the folder was read (press ⌘R to read it again)"
+            } else {
+                "It couldn't be verified when the folder was read (press Ctrl+R to read it again)"
+            }),
+            (Some(m), Some(Some(want))) if crate::fs::ident_of(p, m) != Some(want) => Some(if search {
+                "It isn't the item the search found (something else is at its path now)"
+            } else if cfg!(target_os = "macos") {
+                "It was replaced since the folder was read (press ⌘R to read it again)"
+            } else {
+                "It was replaced since the folder was read (press Ctrl+R to read it again)"
+            }),
+            _ => None,
         });
         seen.push(m.map(|m| Seen::with(p, &m)));
     }

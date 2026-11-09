@@ -662,3 +662,79 @@ fn starting_a_drag_reads_nothing_from_the_disk() {
     assert_eq!(crate::fs::reads::so_far(), before, "no identity read");
     assert_eq!(item.paths().len(), 3, "every listed path, unread");
 }
+
+/// The review's case: a row whose identity couldn't be read when its folder was listed (here,
+/// a folder readable but not searchable then) had no check at all, so trash, rename, a move and
+/// a drop went ahead on whatever was at its path later. Now they refuse until the folder is
+/// read again; a copy, which leaves it where it is, goes ahead.
+#[cfg(unix)]
+#[test]
+fn a_row_listed_without_an_identity_is_never_moved_or_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = folder("unverified", 0);
+    let into = folder("unverified-into", 0);
+    let names = ["a-trash", "b-rename", "c-cut", "d-drop", "e-batch", "f-copy"];
+    for n in names {
+        std::fs::write(d.join(n), "as listed").unwrap();
+    }
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o400)).unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if s.cur().entries.iter().any(|e| e.id.is_some()) {
+        eprintln!("a_row_listed_without_an_identity_is_never_moved_or_removed: skipped (permissions don't stop lstat here: root?)");
+        return;
+    }
+    s.run(Cmd::Split, &mut Tx::default());
+    settle_all(&mut s);
+    s.panes[1].f.cwd = into.clone();
+    s.activate(0, &mut Tx::default());
+    for n in names {
+        crate::search::tests::replace(&d.join(n));
+    }
+    let at = |s: &State, n: &str| s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == n).unwrap();
+    let pick = |s: &mut State, n: &str| {
+        let i = at(s, n);
+        s.cur_mut().select(i);
+        s.note = None;
+    };
+    let untouched = |s: &State, n: &str| {
+        assert_eq!(std::fs::read_to_string(d.join(n)).unwrap(), "SOMEONE ELSE'S FILE", "{n}: the newcomer stays");
+        assert!(s.note.as_deref().is_some_and(|t| t.contains("Couldn't verify")), "{n}: {:?}", s.note);
+    };
+    pick(&mut s, "a-trash");
+    s.run(Cmd::Trash, &mut Tx::default());
+    finish_job(&mut s);
+    untouched(&s, "a-trash");
+    pick(&mut s, "b-rename");
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "b-renamed".into();
+    s.commit_rename(&mut Tx::default());
+    finish_job(&mut s);
+    untouched(&s, "b-rename");
+    pick(&mut s, "c-cut");
+    s.run(Cmd::Cut, &mut Tx::default());
+    let content = rune::ClipboardContent::new("").with_files(s.clip.as_ref().unwrap().paths.clone());
+    s.paste_reqs.push(PasteReq { id: 0, dest: into.clone(), dest_id: None, mv: false });
+    s.paste_reply(0, &content);
+    finish_job(&mut s);
+    untouched(&s, "c-cut");
+    pick(&mut s, "d-drop");
+    let (i, id, version, to) = (s.cur().sel, s.cur().id, s.cur().version, s.panes[1].id());
+    s.drop_on_pane(id, i, version, to, &mut Tx::default());
+    finish_job(&mut s);
+    untouched(&s, "d-drop");
+    assert!(std::fs::read_dir(&into).unwrap().next().is_none(), "nothing went into the other folder");
+    pick(&mut s, "e-batch");
+    s.run(Cmd::BatchRename, &mut Tx::default());
+    crate::batch::tests::settle_batch(&mut s);
+    let b = s.batch.as_ref().unwrap();
+    assert!(matches!(&b.plan.status[0], crate::rename::Status::Problem(w) if w.contains("couldn't be verified")), "{:?}", b.plan.status);
+    s.close_batch(&mut Tx::default());
+    pick(&mut s, "f-copy");
+    s.run(Cmd::CopyToOther, &mut Tx::default());
+    finish_job(&mut s);
+    assert_eq!(std::fs::read_to_string(into.join("f-copy")).unwrap(), "SOMEONE ELSE'S FILE", "a copy goes ahead: {:?}", s.note);
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&into);
+}

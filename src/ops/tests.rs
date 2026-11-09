@@ -1757,7 +1757,7 @@ fn windows_a_tunnelled_replacement_is_refused() {
     // (The newcomer has the old creation time when tunnelling is on, as it is by default.)
     eprintln!("tunnelled: {}", fs::symlink_metadata(d.join("a")).unwrap().created().unwrap() == born);
     let o = run_now(Op::Checked {
-        expect: Checks::new(Chosen::Listing, vec![(d.join("a"), id)]),
+        expect: Checks::new(Chosen::Listing, vec![(d.join("a"), Some(id))]),
         op: Box::new(Op::Trash { sources: vec![d.join("a")] }),
     });
     assert_eq!(fs::read_to_string(d.join("a")).unwrap(), "another item", "left alone");

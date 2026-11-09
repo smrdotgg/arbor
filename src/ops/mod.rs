@@ -104,22 +104,23 @@ pub enum Chosen {
 }
 
 /// The items an operation was asked for, each with the identity it had when its listing or
-/// search walk read it ([`Op::Checked`]).
+/// search walk read it ([`Op::Checked`]); `None` when it couldn't be read then, and so can't be
+/// told from a replacement: such an item is never moved or removed (copying it is harmless).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Checks {
     pub from: Chosen,
-    pub items: Vec<(PathBuf, crate::fs::Ident)>,
+    pub items: Vec<(PathBuf, Option<crate::fs::Ident>)>,
 }
 
 impl Checks {
-    pub fn new(from: Chosen, items: Vec<(PathBuf, crate::fs::Ident)>) -> Checks {
+    pub fn new(from: Chosen, items: Vec<(PathBuf, Option<crate::fs::Ident>)>) -> Checks {
         Checks { from, items }
     }
 
-    /// From search results (tests).
+    /// From search results, every identity known (tests).
     #[cfg(test)]
     pub fn search(items: Vec<(PathBuf, crate::fs::Ident)>) -> Checks {
-        Checks { from: Chosen::Search, items }
+        Checks { from: Chosen::Search, items: items.into_iter().map(|(p, id)| (p, Some(id))).collect() }
     }
 }
 
