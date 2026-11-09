@@ -604,6 +604,10 @@ pub(crate) mod windows {
                     // connects (or one connected before this call: ERROR_PIPE_CONNECTED).
                     let connected =
                         unsafe { ConnectNamedPipe(h, std::ptr::null_mut()) } != 0 || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
+                    // The next instance first, so there's always one waiting: a client between
+                    // this one closing and a new one opening would find no pipe and open a
+                    // window of its own.
+                    let next = make(&wname, false);
                     if connected {
                         let paths = decode(&read_all(h));
                         if !paths.is_empty() {
@@ -615,10 +619,10 @@ pub(crate) mod windows {
                         DisconnectNamedPipe(h);
                         CloseHandle(h);
                     }
-                    h = make(&wname, false);
-                    if h == INVALID_HANDLE_VALUE {
+                    if next == INVALID_HANDLE_VALUE {
                         return;
                     }
+                    h = next;
                 }
             })
             .ok();
@@ -682,9 +686,16 @@ pub(crate) mod windows {
             assert!(hand_off(&name, std::slice::from_ref(&a)));
             let got = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
             assert_eq!(got, vec![super::super::Show::Folder(a)]);
-            assert!(hand_off(&name, std::slice::from_ref(&b)), "still serving");
+            assert!(hand_off(&name, std::slice::from_ref(&b)), "still serving, right after the first");
             let got = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
-            assert_eq!(got, vec![super::super::Show::Folder(b)]);
+            assert_eq!(got, vec![super::super::Show::Folder(b.clone())]);
+            // Several at once, back to back: none finds the pipe missing.
+            for _ in 0..5 {
+                assert!(hand_off(&name, std::slice::from_ref(&b)));
+            }
+            for _ in 0..5 {
+                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            }
             // A second server for the same name doesn't start; nobody serving: no hand-off.
             serve(name.clone(), std::sync::Arc::new(|_, _| panic!("a second server")));
             assert!(!hand_off(&format!("{name}.nobody"), &[PathBuf::from(r"C:\")]));
