@@ -413,6 +413,8 @@ impl State {
             if self.preview_worker.is_none() {
                 self.preview_worker = Some(Worker::spawn(self.waker.clone()));
             }
+            // It takes Get Info's place.
+            self.info = None;
             self.preview = Some(Preview::new());
             self.sync_preview();
         }
@@ -434,7 +436,9 @@ impl State {
     /// earlier wake's poll already asked for, so a key handled in that frame would go
     /// unfollowed. Closed, it's one `None` check. True when the panel changed.
     pub(crate) fn sync_preview(&mut self) -> bool {
-        let Some(p) = &mut self.preview else { return false };
+        // Get Info's panel follows the selection the same way.
+        let info = self.sync_info();
+        let Some(p) = &mut self.preview else { return info };
         let f = &self.panes[self.active].f;
         let target = match (f.selected(), &p.target) {
             (Some(e), Some(t)) if t.is(f.id, &f.cwd, e) => return false,

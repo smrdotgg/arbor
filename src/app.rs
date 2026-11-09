@@ -178,6 +178,27 @@ pub struct State {
     handler_job: Latest<Result<String, String>>,
     /// Requests from other apps shown so far (`incoming.rs`).
     pub(crate) external_shows: u64,
+    /// The sidebar's favorites' state beyond `places` (`sidebar.rs`).
+    pub side: crate::sidebar::Side,
+    /// The sidebar's Locations (`volumes.rs`), read on a worker after the first frame.
+    pub volumes: Vec<crate::volumes::Volume>,
+    pub(crate) volume_loader: Latest<Vec<crate::volumes::Volume>>,
+    /// Whether the first read of the volumes was asked for.
+    volumes_asked: bool,
+    pub(crate) eject_job: Latest<(String, Result<(), crate::volumes::EjectError>)>,
+    /// The volume being ejected.
+    pub ejecting: Option<String>,
+    /// Open With's box, while it's open, and the worker reading its apps (`openwith.rs`).
+    pub open_with: Option<crate::openwith::OpenWithBox>,
+    pub(crate) apps_loader: crate::openwith::AppsLoader,
+    pub(crate) next_open_with: u64,
+    pub(crate) launch_job: Latest<Result<(), String>>,
+    /// The files and apps a native context menu's Open With submenu was built with.
+    pub(crate) menu_apps: Option<(Vec<PathBuf>, Vec<crate::openwith::Handler>)>,
+    /// Get Info's panel, while it's open (`info.rs`).
+    pub info: Option<crate::info::Info>,
+    pub(crate) meta_loader: crate::info::MetaLoader,
+    pub(crate) next_info: u64,
 }
 
 /// What's at a typed path.
@@ -230,10 +251,13 @@ impl State {
         }
         // Without the settings yet: the defaults, in the folder Arbor was started in, until
         // they land (`land_start`).
-        let (config, cwd, places, note) = match start {
-            Some(s) => (s.config, s.start, s.places, s.note),
-            None => (Config::default(), std::env::current_dir().unwrap_or_else(|_| fs::home()), Vec::new(), None),
+        let (config, cwd, places, note, custom) = match start {
+            Some(s) => (s.config, s.start, s.places, s.note, s.custom),
+            None => (Config::default(), std::env::current_dir().unwrap_or_else(|_| fs::home()), Vec::new(), None, false),
         };
+        let mut side = crate::sidebar::Side::new(if cfg!(test) { None } else { crate::sidebar::file_path() });
+        side.custom = custom;
+        side.look_due = true;
         let first = Folder::new(0, cwd, config.settings.sort, config.settings.show_hidden, None);
         // Where the history lives (environment only, no disk): tests keep theirs in memory.
         let mut history = History::new(if cfg!(test) { None } else { crate::jump::log_path() });
@@ -293,6 +317,22 @@ impl State {
             completer: Latest::default(),
             handler_job: Latest::default(),
             external_shows: 0,
+            side,
+            volumes: Vec::new(),
+            volume_loader: Latest::default(),
+            // Tests read the volumes when they ask (the first poll's read would make polls
+            // report changes at random).
+            volumes_asked: cfg!(test),
+            eject_job: Latest::default(),
+            ejecting: None,
+            open_with: None,
+            apps_loader: Latest::default(),
+            next_open_with: 0,
+            launch_job: Latest::default(),
+            menu_apps: None,
+            info: None,
+            meta_loader: Latest::default(),
+            next_info: 0,
         };
         let f = &mut s.panes[0].f;
         match listing {
@@ -332,6 +372,12 @@ impl State {
         self.path_check.set_waker(waker.clone());
         self.completer.set_waker(waker.clone());
         self.handler_job.set_waker(waker.clone());
+        self.volume_loader.set_waker(waker.clone());
+        self.eject_job.set_waker(waker.clone());
+        self.apps_loader.set_waker(waker.clone());
+        self.launch_job.set_waker(waker.clone());
+        self.meta_loader.set_waker(waker.clone());
+        self.side.dropped.set_waker(waker.clone());
         if let Some(b) = &self.boot
             && let Ok(mut w) = b.waker.lock()
         {
@@ -506,6 +552,20 @@ impl State {
             crate::incoming::linux::recheck();
             changed = true;
         }
+        // The sidebar's volumes, and one look at each favorite, from the first frame on: never
+        // before it, and never on this thread.
+        if !self.volumes_asked {
+            self.volumes_asked = true;
+            self.refresh_volumes();
+        }
+        if self.side.look_due && self.boot.is_none() {
+            self.side.look_due = false;
+            self.look_at_favorites();
+        }
+        changed |= self.poll_sidebar();
+        changed |= self.poll_volumes();
+        changed |= self.poll_open_with();
+        changed |= self.poll_info();
         changed |= self.poll_completion();
         changed |= self.poll_history();
         changed |= self.poll_search();
@@ -552,7 +612,7 @@ impl State {
     /// it since the window opened on the defaults (even back to the default: a flag says so,
     /// not a comparison).
     fn land_start(&mut self, start: Start) {
-        let Start { config, start, places, note } = start;
+        let Start { config, start, places, note, custom } = start;
         if let Some(req) = self.boot_req
             && let Some(f) = self.panes.iter_mut().map(|p| &mut p.f).find(|f| f.pending.as_ref().is_some_and(|p| p.req == req))
             && f.entries.is_empty()
@@ -577,6 +637,8 @@ impl State {
             }
         }
         self.places = places;
+        self.side.custom = custom;
+        self.side.look_due = true;
         self.apply_history_settings(&config.settings);
         self.note = config.summary().or(note).or(self.note.take());
         self.keymap = config.keymap;
@@ -597,8 +659,10 @@ impl State {
             p.rename = false;
         }
         let jumped = self.jump_req.take_if(|&mut r| r == p.req).is_some();
+        let placed = self.side.going.take_if(|(r, _)| *r == p.req).is_some();
         match a.listing.result {
             Err(_) if jumped && a.listing.missing => self.jump_missed(&p.path),
+            Err(_) if placed && a.listing.missing => self.place_missed(&p.path),
             Err(e) => {
                 self.note = Some(format!("{}: {e}", fs::pretty(&p.path)));
                 self.alert = self.note.clone();
@@ -778,6 +842,9 @@ impl State {
         if self.batch.is_some() {
             return self.batch_key(ev, tx);
         }
+        if self.open_with.is_some() {
+            return self.open_with_key(ev, tx);
+        }
         // In a search with the results focused, ⌫ edits the query (as typing does, below).
         let m = ev.mods;
         if self.cur().searching() && ev.key == Key::Backspace && !m.cmd && !m.ctrl && !m.alt {
@@ -792,6 +859,10 @@ impl State {
             // had it first, above).
             if cmd == Cmd::Clear && self.preview.is_some() {
                 cmd = Cmd::ClosePreview;
+            }
+            // And Get Info's panel, which takes its place.
+            if cmd == Cmd::Clear && self.info.is_some() {
+                cmd = Cmd::Info;
             }
             // Then a running file operation; then in a search, it stops the walk or leaves.
             if cmd == Cmd::Clear && self.job.is_none() && self.cur().searching() {
@@ -920,13 +991,17 @@ impl State {
             TogglePreview => when(self.preview.is_none() && nothing, "Select an item first"),
             ClosePreview => when(self.preview.is_none(), "The preview isn't open"),
             Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
-                when(cmd.place().is_some_and(|i| i >= self.places.len()), "No sidebar place there")
+                when(cmd.place().is_some_and(|i| i >= self.place_count()), "No sidebar place there")
             }
+            OpenWith => when(!f.targets().iter().any(|e| !e.is_dir), "Select a file first"),
+            SidebarRemove => when(self.favorite_here().is_none(), "This folder isn't in the sidebar"),
+            Eject => when(self.ejecting.is_some(), "Already ejecting a volume")
+                .or(when(self.volume_here().is_none(), "This folder isn't on a volume that can be ejected")),
             // Always available.
             NewFolder => when(searching, "Leave the search (Esc) to make a folder here"),
             MakeDefault | RestoreDefault => when(self.handler_job.is_pending(), "Already changing the default for folders"),
             GoTo | Reload | Reveal | Palette | OpenSettings | ReloadSettings | CopyPath | Hidden | SortReverse | NewTab | Split
-            | ClearJump | Search => None,
+            | ClearJump | Search | Info | SidebarAdd => None,
         }
     }
 
@@ -940,7 +1015,12 @@ impl State {
             Cmd::TogglePreview if self.preview.is_some() => "Close Preview".into(),
             Cmd::TogglePreview => "Quick Preview".into(),
             Cmd::Rename if self.cur().marked.len() > 1 => Cmd::BatchRename.title().into(),
-            _ => match cmd.place().and_then(|i| self.places.get(i)) {
+            Cmd::Info if self.info.is_some() => "Close Get Info".into(),
+            Cmd::Eject => match self.volume_here().and_then(|v| self.volumes.get(v)) {
+                Some(v) => format!("Eject “{}”", v.name).into(),
+                None => cmd.title().into(),
+            },
+            _ => match cmd.place().and_then(|i| self.place_at(i)) {
                 Some((name, _)) => format!("Go to {name}").into(),
                 None => cmd.title().into(),
             },
@@ -989,9 +1069,29 @@ impl State {
                 f.filter = p;
                 f.refilter(None);
             }
-            Reload if self.cur().searching() => self.restart_search(self.active, tx),
-            Reload => self.reload(),
+            Reload if self.cur().searching() => {
+                self.refresh_volumes();
+                self.restart_search(self.active, tx);
+            }
+            Reload => {
+                // ⌘R also reads the sidebar's volumes again (one of the explicit refreshes).
+                self.refresh_volumes();
+                self.reload();
+            }
             Reveal => self.reveal_selected(),
+            OpenWith => self.open_with(tx),
+            Info => self.toggle_info(),
+            SidebarAdd => self.add_to_sidebar(),
+            SidebarRemove => {
+                if let Some(i) = self.favorite_here() {
+                    self.remove_favorite(i);
+                }
+            }
+            Eject => {
+                if let Some(v) = self.volume_here() {
+                    self.eject(v);
+                }
+            }
             Palette => {
                 self.close_overlays(tx);
                 self.open_palette();
@@ -1098,8 +1198,8 @@ impl State {
             TogglePreview => self.toggle_preview(),
             ClosePreview => self.close_preview(),
             Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
-                if let Some((_, p)) = cmd.place().and_then(|i| self.places.get(i)).cloned() {
-                    self.go_to(p);
+                if let Some(i) = cmd.place() {
+                    self.go_place(i);
                 }
             }
         }
@@ -1164,8 +1264,10 @@ impl State {
                 p.f.set_hidden(new.show_hidden);
             }
         }
-        if new.places != old.places {
+        // The settings' places are the default list: the user's own (sidebar.toml) stays.
+        if new.places != old.places && !self.side.custom {
             self.places = places_for(new);
+            self.side.look_due = true;
         }
         let new = c.settings.clone();
         self.apply_history_settings(&new);
@@ -1192,6 +1294,7 @@ impl State {
             }
         }
         self.close_batch(&mut Tx::default());
+        self.info = None;
     }
 
     /// Closes the palette, Jump, Select by Pattern and Batch Rename (at most one is open).
@@ -1202,6 +1305,7 @@ impl State {
         self.close_jump(tx);
         self.close_pick(tx);
         self.close_batch(tx);
+        self.close_open_with();
     }
 }
 
@@ -1242,8 +1346,10 @@ struct Start {
     config: Config,
     start: PathBuf,
     places: Vec<(String, PathBuf)>,
-    /// A problem with the start folder.
+    /// A problem with the start folder (or the sidebar's file).
     note: Option<String>,
+    /// `places` are the user's own list, from `sidebar.toml`.
+    custom: bool,
 }
 
 /// What the startup read sends, in this order.
@@ -1266,8 +1372,15 @@ impl Booting {
         Booting::spawn(slow, || {
             let config = Config::load();
             let (start, note) = start_dir(&config.settings);
-            let places = places_for(&config.settings);
-            Start { config, start, places, note }
+            // The user's favorites (sidebar.toml), or the defaults.
+            let fav = crate::sidebar::load(crate::sidebar::file_path().as_deref());
+            let custom = fav.list.is_some();
+            let places = fav.list.map_or_else(|| places_for(&config.settings), crate::sidebar::named);
+            let note = match (note, fav.error) {
+                (Some(a), Some(b)) => Some(format!("{a} · {b}")),
+                (a, b) => a.or(b),
+            };
+            Start { config, start, places, note, custom }
         })
     }
 
@@ -1306,17 +1419,7 @@ pub static SLOW_FIRST_READ_MS: std::sync::atomic::AtomicU64 = std::sync::atomic:
 /// The sidebar: the settings file's places, or the ones found on this machine.
 fn places_for(s: &Settings) -> Vec<(String, PathBuf)> {
     let Some(list) = &s.places else { return fs::places() };
-    let home = fs::home();
-    list.iter()
-        .map(|p| {
-            let name = if *p == home {
-                "Home".to_string()
-            } else {
-                p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
-            };
-            (name, p.clone())
-        })
-        .collect()
+    crate::sidebar::named(list.clone())
 }
 
 /// The startup read, started by `main` before Rune's event loop so it overlaps the platform's
@@ -1376,7 +1479,7 @@ pub(crate) mod tests {
     }
 
     fn settings_for(dir: PathBuf, settings: Settings) -> Start {
-        Start { config: Config { settings, ..Config::default() }, start: dir, places: Vec::new(), note: None }
+        Start { config: Config { settings, ..Config::default() }, start: dir, places: Vec::new(), note: None, custom: false }
     }
 
     /// Polls as frames would until nothing is loading (or 10 s pass).

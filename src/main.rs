@@ -23,9 +23,11 @@ mod frame_bench;
 mod fs;
 mod handler;
 mod incoming;
+mod info;
 mod jump;
 mod menu;
 mod noclobber;
+mod openwith;
 mod ops;
 #[cfg(all(test, unix, not(target_os = "macos")))]
 mod packaging_tests;
@@ -36,10 +38,12 @@ mod preview;
 mod rename;
 mod search;
 mod select;
+mod sidebar;
 mod thumb;
 mod timing;
 mod trash;
 mod view;
+mod volumes;
 
 use rune::{App, AppSpec, Chrome};
 
@@ -92,12 +96,15 @@ fn main() {
     let mut app = App::new(spec).chrome(chrome).on_close(|s, _| {
         s.stop_background();
         jump::drain_at_exit();
+        sidebar::drain_at_exit();
     });
     if timing::benching() {
         app = app.open_inactive(); // the bench never takes focus from what the user is doing
     } else if rune::tooling::headless_run().is_none() {
         // Folders other apps ask for while Arbor runs (or that launched it).
         incoming::listen(app.handle());
+        // Volumes coming and going, where the OS says so without polling.
+        volumes::watch(app.handle());
     }
     if timed {
         app.on_frame_encoded(timing::frame).run()
@@ -105,4 +112,5 @@ fn main() {
         app.run()
     }
     jump::drain_at_exit();
+    sidebar::drain_at_exit();
 }

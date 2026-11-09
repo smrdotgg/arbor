@@ -275,7 +275,9 @@ pub fn home() -> PathBuf {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// Sidebar places that exist on this machine.
+/// The sidebar's default favorites that exist on this machine: home and its usual folders,
+/// Applications on macOS, the root elsewhere but Windows. Volumes and drives are the sidebar's
+/// Locations (`volumes.rs`).
 pub fn places() -> Vec<(String, PathBuf)> {
     let h = home();
     let mut v = vec![("Home".to_string(), h.clone())];
@@ -286,37 +288,9 @@ pub fn places() -> Vec<(String, PathBuf)> {
         }
     }
     #[cfg(target_os = "macos")]
-    {
-        v.push(("Applications".into(), PathBuf::from("/Applications")));
-        if let Ok(rd) = std::fs::read_dir("/Volumes") {
-            for de in rd.flatten() {
-                v.push((de.file_name().to_string_lossy().into_owned(), de.path()));
-            }
-        }
-    }
-    // One bitmask call: stat'ing each drive root can stall startup on a disconnected network drive.
-    #[cfg(windows)]
-    {
-        // SAFETY: takes no arguments and only returns a bitmask.
-        let drives = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
-        for (i, letter) in ('A'..='Z').enumerate() {
-            if drives & (1 << i) != 0 {
-                v.push((format!("{letter}:"), PathBuf::from(format!("{letter}:\\"))));
-            }
-        }
-    }
+    v.push(("Applications".into(), PathBuf::from("/Applications")));
     #[cfg(not(windows))]
     v.push(("Root".into(), PathBuf::from("/")));
-    #[cfg(target_os = "linux")]
-    for base in ["/mnt", "/media"] {
-        if let Ok(rd) = std::fs::read_dir(base) {
-            for de in rd.flatten() {
-                if de.path().is_dir() {
-                    v.push((de.file_name().to_string_lossy().into_owned(), de.path()));
-                }
-            }
-        }
-    }
     v
 }
 

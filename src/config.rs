@@ -152,7 +152,7 @@ pub const MAX_BYTES: u64 = 1 << 20;
 /// up to [`MAX_BYTES`] is read: a FIFO or device there could block forever and a huge file would
 /// take long, so both are refused with a message. The open doesn't block either (`O_NONBLOCK`,
 /// in case the file is swapped for a FIFO after the check), and what it opened is checked again.
-fn read_text(path: &Path) -> Result<Option<String>, String> {
+pub(crate) fn read_text(path: &Path) -> Result<Option<String>, String> {
     use std::io::Read;
     let name = fs::pretty(path);
     let not_a_file = || format!("{name} isn't a regular file, so it was ignored");

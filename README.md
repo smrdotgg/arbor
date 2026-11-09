@@ -56,7 +56,7 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 27,000 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
+About 30,000 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
 `ops.rs` (copy, move, trash, permanent delete, batch rename and undo on a worker), `noclobber.rs` (moves, copies and file ids
 that never replace anything), `trash.rs` (each platform's trash, and telling a disk with none),
 `delete.rs` (deleting permanently without following links), `confirm.rs` (Arbor's one dialog), `app.rs`
@@ -64,7 +64,9 @@ that never replace anything), `trash.rs` (each platform's trash, and telling a d
 listing, selection, filter, sort and history, and what a hidden tab keeps), `panes.rs` (tabs and
 split view), `commands.rs` (the command table and keymap), `palette.rs` (the command palette),
 `config.rs` (the settings file), `actions.rs` (clipboard, rename, drag and drop, context menu),
-`menu.rs` (the context menu in the window, on Linux), `handler.rs` (making Arbor the default for
+`menu.rs` (the context menu in the window, on Linux), `sidebar.rs` (the sidebar's favorites and
+their file), `volumes.rs` (the sidebar's Locations, and Eject), `openwith.rs` (Open With), `info.rs`
+(Get Info), `handler.rs` (making Arbor the default for
 folders, and putting the old default back), `incoming.rs` (folders other apps ask Arbor to show,
 and one Arbor on Windows), `complete.rs` (Tab completion in go-to mode),
 `preview.rs` (quick preview: reading, sniffing and decoding on a worker), `thumb.rs` (the OS's
@@ -271,6 +273,50 @@ selection comes back by name and the list scrolls to where it was. ⌘T and ⌘\
 already on screen, so they need no read. Closed tabs (up to 20, lightweight state only) are kept
 in memory for ⇧⌘T, never on disk.
 
+### The sidebar: favorites and Locations
+
+The sidebar lists **Favorites**, in your order, then **Locations**, the volumes mounted now.
+⌘1–9 go to the first nine (favorites first), and so do "Go to …" in the palette.
+
+- **Favorites** start as the usual folders (Home, Desktop, Documents, Downloads, Pictures,
+  Music, Movies or Videos, Applications on macOS, and the root outside Windows), or the
+  settings file's `places`. **"Add to Sidebar"** (palette, or a right-click on a folder or on
+  empty space) adds the selected folders, or the folder on screen; dropping folders on the
+  sidebar from another app, or dragging rows there from the list, adds them too (on macOS,
+  rows dragged from the list go out to other apps unless the window is split; see
+  `RUNE-GAPS.md`). Right-click a favorite for **Open**, **Open in New Tab**, **Remove from
+  Sidebar** (the folder itself stays), **Move Up** and **Move Down**; or drag it up or down
+  the list. "Remove from Sidebar" in the palette removes the folder on screen.
+- The list is yours (user data, not a cache), kept in `sidebar.toml` beside the settings file
+  (not in `config.toml`, which is for editing by hand). It's read at startup by the thread that
+  reads the first folder, never the window's, and written by a thread of its own after each
+  change (a temporary file renamed over the old one; several changes in a row are written
+  once; quitting gives it up to 100 ms). A failed write shows in the status bar. A file that
+  can't be read gives the default list and says so; the next change replaces it. Delete the
+  file to go back to the defaults; while it exists, the settings' `places` are left alone.
+- **A favorite that isn't there any more** is dimmed, and clicking it says so instead of going
+  there. Each favorite is looked at once per launch, after the window is up, on a worker of its
+  own (a dead network folder holds up only its own look), never again until the next launch,
+  and never watched. One that vanishes later is marked when a click finds it gone.
+- **Locations**: on macOS what's mounted in `/Volumes` (not the boot volume's alias, or a
+  folder left there with nothing mounted); on Linux the mounts under `/media/$USER`,
+  `/run/media/$USER`, `/media` and `/mnt` from `/proc/self/mounts` (not the kernel's own file
+  systems); on Windows the drive letters, with each drive's label (not asked of network drives,
+  which can take seconds when disconnected). They're read on a worker once the first frame is
+  up, and again only when asked: opening a sidebar item's menu, ⌘R, after an eject, and when
+  the OS says a volume came or went, where it can without polling (macOS's mount
+  notifications; Windows' `WM_DEVICECHANGE`, through a hidden window of Arbor's own). Linux
+  has no such notification short of watching, so there it's a right-click or ⌘R.
+- **Eject** (⏏ beside the volume, its menu, or ⌘E for the volume the active pane is on): a pane
+  showing the volume goes to the home folder first, then it runs on a worker and says how it
+  went: "Ejected “USB”", or "“USB” is in use by another app, so it wasn't ejected". macOS asks
+  NSWorkspace (`unmountAndEjectDeviceAtURL:`); Linux runs `udisksctl unmount`, then `power-off`
+  (or `gio mount -e` when udisks isn't there); Windows locks, dismounts and ejects the volume
+  (`DeviceIoControl`), which fails while another app has a file open on it. Offered for
+  removable drives and discs on Windows, everything in `/Volumes` on macOS (an internal disk's
+  other volumes refuse, and say so), and udisks' mounts under `/media` and `/run/media` on
+  Linux (a mount in `/mnt` needs root to unmount).
+
 ### Quick preview
 
 **Space** opens a panel showing the active pane's selected item; Space again or **Esc** closes
@@ -338,6 +384,51 @@ thread of its own, started by the first preview and kept across opens, one read 
 time: tapping Space quickly queues at most one more (each new request replaces the one
 waiting), so decodes never pile up, and a slow or hung disk slows previews, never the list or
 other folders.
+
+### Get Info
+
+**⌘I** (or "Get Info" in the context menu) opens a panel where the quick preview goes (Space
+switches to the preview, ⌘I or Esc closes it), following the selection as the preview does.
+For one item: its name, kind, full path (selectable, and "Copy Path"), size in bytes, when it
+was created, modified and last opened, its permissions as `ls -l` writes them and owner (macOS,
+Linux) or its attributes (Windows: Read-only, Hidden, System…), and where a link points.
+"Rename…" starts the list's own rename (undoable). With nothing selected it's the folder on
+screen; with several items, how many files and folders and their total.
+
+**A folder's size and item count** (or the total of several items) are counted on demand,
+following NORTHSTAR's rules for view-triggered work: the panel shows at once with what the
+listing knows, the item's own details land from a worker a moment later, and the count streams
+in ("7,041 items · 414 MB so far…") on a thread of its own that wakes the window at most every
+30 ms. Moving the selection or closing the panel stops it at the next entry. It never follows
+links, never enters another file system mounted inside (as Delete Permanently tells them apart:
+the device, and on macOS the volume) and says how many it left out, counts folders it couldn't
+read instead of guessing, and keeps nothing: come back and it counts again. Sizes are the files'
+own lengths (a hard-linked file counts each time, as Finder does).
+
+Changing attributes (hidden, read-only) isn't offered: it couldn't be undone.
+
+### Open With
+
+**"Open With…"** (palette, or the context menu on a file) lists the apps that can open the
+selected files, the default first; ↑↓ and Enter (or a click) opens them all with that app, Esc
+closes. The list is read on a worker when Open With opens and dropped when it closes; opening
+runs off the window's thread too.
+
+- **macOS:** Launch Services' list (`URLsForApplicationsToOpenURL:`, or
+  `LSCopyApplicationURLsForURL` before macOS 12), the default from
+  `URLForApplicationToOpenURL:`; the context menu has an **Open With** submenu when the list is
+  read within a frame of the right-click (a native menu can't change once open), and "Open
+  With…" otherwise. Opening runs `open -a`. There's no "Other…" to pick any app yet (see
+  `DECISIONS.md`).
+- **Linux:** the file's MIME type from `xdg-mime query filetype` when it's installed, otherwise
+  from its name through the shared MIME database's `globs2` (and a look at its first bytes for
+  text); then the freedesktop.org associations: every `mimeapps.list` in the spec's order (its
+  defaults, added and removed associations), each applications folder's `mimeinfo.cache` (or its
+  `.desktop` files where there's none), and each app's `.desktop` file for its name (translated
+  for `$LANG`) and `Exec` line, whose field codes are filled in (`%f` runs it once per file).
+  Any text file also lists the apps for plain text.
+- **Windows:** the system's own Open With dialog (`SHOpenWithDialog`), which lists the apps with
+  the default first and lets you choose any other.
 
 ### Jump to Folder
 
@@ -596,6 +687,8 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Clear Jump History… |  |  | `nav.clear_jump_history` |
 | Reload | ⌘R | Ctrl+R | `nav.reload` |
 | Show in Finder / Explorer / file manager | ⌘↩ | Ctrl+Enter | `nav.reveal` |
+| Open With… |  |  | `file.open_with` |
+| Get Info | ⌘I | Ctrl+I | `file.info` |
 | Command Palette | ⌘K, ⇧⌘P | Ctrl+K, Ctrl+Shift+P | `app.palette` |
 | Open Settings File | ⌘, | Ctrl+, | `app.settings` |
 | Reload Settings |  |  | `app.reload_settings` |
@@ -649,6 +742,9 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Reopen Closed Tab | ⇧⌘T | Ctrl+Shift+T | `tab.reopen` |
 | Split View (Toggle) | ⌘\ | Ctrl+\ | `pane.split` |
 | Switch to Other Pane | ⇥ | Tab | `pane.switch` |
+| Add to Sidebar |  |  | `sidebar.add` |
+| Remove from Sidebar |  |  | `sidebar.remove` |
+| Eject | ⌘E | Ctrl+E | `volume.eject` |
 | Go to sidebar place 1…9 | ⌘1 … ⌘9 | Ctrl+1 … Ctrl+9 | `place.1` … `place.9` |
 <!-- commands:end -->
 
@@ -659,7 +755,7 @@ Two panes on one folder by different paths (a symlink to it) are known to be the
 The palette names ⌘\ "Split View" or "Close Split View", and Space "Quick Preview" or "Close
 Preview", whichever it will do. Delete Permanently is ⌥⌘⌫ on macOS and Shift+Delete on Windows and
 Linux, each platform's own convention. Undo and redo refuse if any item changed since. Ctrl+Y
-(redo) is Windows' only; Linux has Ctrl+Shift+Z. Rename selects the name before the extension; Enter saves, Esc cancels. With two or more items selected, Rename opens Batch Rename. Esc also cancels
+(redo) is Windows' only; Linux has Ctrl+Shift+Z. ⌘R also reads the sidebar's Locations again. ⌘E ejects the volume the active pane is on; the palette names it ("Eject “USB”"). Add to Sidebar has no key: Finder's ⌃⌘T is ⌘T (New Tab) off macOS, so a settings file shared between machines would clash. Rename selects the name before the extension; Enter saves, Esc cancels. With two or more items selected, Rename opens Batch Rename. Esc also cancels
 a running copy or move.
 
 ## Accessibility
@@ -674,8 +770,8 @@ Arbor gives every part a role and a name (`src/view.rs`; `src/a11y_tests.rs` che
   is, with its place in the whole folder ("2 of 120", not of the rows built). The list's active
   descendant is the cursor's row, so a reader follows ↑↓, typing and every other key. In a
   split window both lists point at the active pane's cursor row.
-- **The sidebar** is a list box of places (the folder on screen selected, ⌘1–9 as each one's
-  shortcut); **the path bar** a toolbar of named buttons (Go Back, Go Forward, Go to Parent
+- **The sidebar** is a list box of places, favorites then volumes (the folder on screen
+  selected, ⌘1–9 as each one's shortcut, a volume's ⏏ a button named "Eject …"); **the path bar** a toolbar of named buttons (Go Back, Go Forward, Go to Parent
   Folder, dimmed when they can't) and the breadcrumbs as links; **the tab strip** a tab list
   with the shown tab selected; the column headers say which one sorts and which way.
 - **The status bar's note is a live region**: results ("Moved 3 items to the Trash", "Restored
@@ -691,13 +787,15 @@ Arbor gives every part a role and a name (`src/view.rs`; `src/a11y_tests.rs` che
   go-to's completion card. **The confirm dialog** is an alert dialog named by its title and
   described by what it says; the button with the focus (Cancel when it opens) is its active
   descendant.
+- **Get Info** is a complementary region named Get Info, the item's name a heading and its
+  running total a status; **Open With** a modal list box of apps.
 - **The preview** is a complementary region named Preview, the item's name a heading, an image
   named for its file, and a text file's contents a document that Tab reaches; while it has
   focus ↑↓ ←→ scroll three lines, Page Up/Down a page, Home and End to the ends.
 
 **Keyboard only.** Every command is in the palette (⌘K), including those with no key (Sort by
-Name, Kind, Size or Date, Batch Rename, Select All of This Kind…). Sidebar places are ⌘1–9 and
-"Go to …" in the palette; the breadcrumbs are ⌘↑ (parent) and ⌘L (type a path, Tab completes).
+Name, Kind, Size or Date, Batch Rename, Select All of This Kind, Open With, Add to Sidebar…).
+Sidebar places are ⌘1–9 and "Go to …" in the palette, ⌘I is Get Info and ⌘E ejects; the breadcrumbs are ⌘↑ (parent) and ⌘L (type a path, Tab completes).
 Tab moves focus to the list, the search field and the preview's contents (and switches panes
 when the window is split). Focus shows as the selection (the accent colour in the active pane,
 grey in the other, with an accent line along the active pane's top), the caret in a field, a
@@ -736,7 +834,7 @@ show_hidden = false        # show hidden files in new windows (⌘. toggles)
 sort = "name"              # "name", "kind", "size" or "modified"
 sort_descending = false    # default: size and modified sort largest and newest first
 start_folder = "~"         # when none is given on the command line
-places = ["~", "~/Projects", "/"]   # sidebar places, replacing the automatic list
+places = ["~", "~/Projects", "/"]   # the sidebar's default favorites (until you change them in Arbor)
 
 [jump]
 enabled = true                              # remember visited folders for Jump (⌘J)
@@ -760,7 +858,10 @@ two lines bind the same key the later one gets it (and the status bar says so). 
 `cmd+g` and `ctrl+g` are the same key. Only `[]` unbinds: a list whose keys are all typos keeps
 the defaults. Mistakes never stop Arbor: the status bar shows the first one ("Settings: line 12:
 unknown command 'file.trahs' (did you mean 'file.trash'?)"), everything valid still applies, and
-the rest keeps its default. A line that isn't valid TOML is skipped. The file is read at
+the rest keeps its default. A line that isn't valid TOML is skipped. `places` is the sidebar's default list: once you add,
+remove or move a favorite, the list lives in `sidebar.toml` beside this file (see
+[The sidebar](#the-sidebar-favorites-and-locations)), and `places` waits until that file is
+deleted. The file is read at
 startup on the thread that reads the first folder, and by Reload Settings on a worker, so it
 never holds up the window. Only a regular file up to 1 MB is read; anything else (a folder, a
 pipe, a huge file) is reported and ignored.
@@ -771,10 +872,10 @@ pipe, a huge file) is reported and ignored.
 All three build, pass tests and pass clippy in CI. How much has been run for real differs:
 
 - **macOS** (main target, used daily): content sits under a transparent titlebar, with the
-  traffic lights in the sidebar. Sidebar places include `/Volumes`.
+  traffic lights in the sidebar. The sidebar's Locations are what's mounted in `/Volumes`.
 - **Linux**: building needs `libxkbcommon-dev libwayland-dev`. Running under X11 also needs
   `libxkbcommon-x11-0` (desktops have it; minimal installs may not). Opens files with `xdg-open`.
-  Sidebar places include `/mnt` and `/media`. Checked at runtime only under Xvfb with Mesa's
+  The sidebar's Locations are the mounts under `/media`, `/run/media` and `/mnt`. Checked at runtime only under Xvfb with Mesa's
   software Vulkan (Ubuntu 24.04): the window opens and lists a folder, and synthetic X key
   presses (XTest) filter, move the selection and drive the command palette and settings reload.
   Under Xvfb too: the in-window context menu, Delete Permanently, and a trash on a disk with no
@@ -782,7 +883,12 @@ All three build, pass tests and pass clippy in CI. How much has been run for rea
   disk) asking before it deletes. Also under Xvfb, from the tarball installed into a fresh home:
   the desktop file's `Exec` opens the folder, "Make Arbor the Default for Folders…" through the
   palette and its dialog, a ShowItems call starting Arbor through D-Bus activation with the item
-  selected, a second call opening a tab in it, and `--restore-folder-default`. Not yet checked: Wayland, a real GPU, a real keyboard and
+  selected, a second call opening a tab in it, and `--restore-folder-default`. Milestone 12 under
+  Xvfb: the sidebar with a custom favorite, a missing one dimmed and a Locations entry
+  (`/mnt/local`), its context menus, dragging a favorite to reorder (and the file rewritten),
+  Open With's list for a text file (Mousepad, Vim), and Get Info for a file and for `/usr`,
+  whose total streamed in and matched `find /usr -xdev | wc -l` and `du -sb` exactly. Not
+  ejected (nothing removable there). Not yet checked: Wayland, a real GPU, a real keyboard and
   input methods, drag and drop, clipboard, undoing a trash, `xdg-open`.
 - **Windows**: drive letters, hidden attribute, Recycle Bin, `explorer /select,`. Compiles and
   passes tests in CI but **has never been run**: everything at runtime is unchecked.
@@ -797,6 +903,25 @@ Trash uses NSFileManager on macOS, the freedesktop.org spec on Linux, and the Re
 Windows (see [Trash and Delete Permanently](#trash-and-delete-permanently)). Undoing a trash puts
 the item back on macOS and Linux (on Linux its `.trashinfo` is removed too). Windows doesn't
 report where the item went, so restore it from the Recycle Bin there.
+
+### Test by hand on the Mac
+
+Built, tested and linted on the M4 Pro, but not run there yet (its GUI session was unavailable).
+On the Mac, check:
+
+- [ ] Plug in a USB stick: it appears under Locations by itself (the mount notification), and
+      the boot volume's "Macintosh HD" alias doesn't.
+- [ ] Eject it with ⏏: "Ejected “USB”", and it leaves the list. With a file on it open in
+      another app (Preview), Eject says it's in use and nothing is ejected. A disk image
+      (`.dmg`) and a network share eject too.
+- [ ] With a pane inside the stick, ⌘E ejects it and the pane goes to Home first.
+- [ ] Right-click a `.txt` file: the Open With submenu lists TextEdit (default) first and the
+      other editors; picking one opens the file in it. "Open With…" from the palette lists the
+      same apps.
+- [ ] Get Info (⌘I) on `~/Library`: the total streams in, and moving the selection stops it.
+      Created and accessed dates show; permissions and owner look like `ls -l`.
+- [ ] Add a folder to the sidebar, quit, reopen: it's still there. Drag a favorite up and down.
+      Rename the folder in Finder, relaunch: it's dimmed, and a click says it isn't there.
 
 ### Test by hand on Windows
 
@@ -819,13 +944,20 @@ one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine
       the front, and no second window opens.
 - [ ] `arbor.exe` shows its icon in Explorer and the taskbar, and Properties → Details shows
       Arbor and its version; no console window opens with it.
+- [ ] Plug in a USB stick: its drive appears under Locations by itself (`WM_DEVICECHANGE`), with
+      its label. Eject it (⏏): "Ejected “…”"; with a file on it open in Notepad, it says it's in
+      use. A card reader with no card adds no "insert a disk" dialog.
+- [ ] Right-click a file → Open With…: Windows' own dialog, with the default app first.
+- [ ] Get Info (Ctrl+I) shows attributes (Read-only, Hidden…) and a folder's total.
 - [ ] "Make Arbor the Default for Folders…": double-clicking a folder in Explorer, a drive in
       This PC and Win+E open Arbor; "Restore the System Default for Folders…" brings Explorer
       back for all three, and `reg query HKCU\Software\Classes\Directory\shell` is as before.
 
 ## Not yet
 
-Emptying the Trash, file watching (use ⌘R), rich previews (PDF, video, documents) on Linux and
+Emptying the Trash, file watching (use ⌘R), Open With's "Other…" on macOS and Linux, the
+sidebar's Locations refreshing by themselves on Linux (right-click or ⌘R), changing attributes
+in Get Info, rich previews (PDF, video, documents) on Linux and
 new (uncached) thumbnails on Windows (see Quick preview), syntax highlighting in the text
 preview, regular expressions in Select by Pattern, more than one operation
 at a time, reordering tabs or dragging them between panes, a universal (Intel and Apple silicon) Mac build,

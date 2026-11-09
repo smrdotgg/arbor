@@ -127,7 +127,9 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
     // Reads laid-out positions and sizes only; scrolling never re-runs the view.
     // With the preview open in a split window, it takes the other pane's place (as a
     // two-panel commander's quick view does).
-    let hidden = |ix: usize| s.preview.is_some() && ix != s.active;
+    // Get Info's panel goes where the preview does (only one is open).
+    let panel_open = s.preview.is_some() || s.info.is_some();
+    let hidden = |ix: usize| panel_open && ix != s.active;
     let split = match s.panes.as_slice() {
         [a, b] => {
             // Before the first layout, an empty rect: no pane to drop on yet.
@@ -141,22 +143,22 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         if ix > 0 {
             panes = panes.child(el().w(1.0).h_full().fill(l.t.separator));
         }
-        if let Some(pv) = s.preview.as_ref().filter(|_| split.is_some() && hidden(ix)) {
-            panes = panes.child(preview_panel(s, pv, l, cx, None));
+        if split.is_some() && hidden(ix) {
+            panes = panes.child(side_panel(s, l, cx, None));
             continue;
         }
         let w = cx.layout_size(&format!("pane-{}", p.id())).map_or(f32::MAX, |[w, _]| w);
         // With the other pane covered by the preview, this one draws as if alone (its rows
         // drag out to other apps; there's no pane to drop on).
-        let split = split.filter(|_| s.preview.is_none());
+        let split = split.filter(|_| !panel_open);
         let c = Ctx { id: p.id(), l, cols: Cols::for_width(w), focused: ix == s.active || split.is_none(), split, w };
         panes = panes.child(pane(s, p, c));
     }
     // One pane: the preview docks on its right, and the list stays usable beside it.
-    if let Some(pv) = s.preview.as_ref().filter(|_| split.is_none()) {
+    if panel_open && split.is_none() {
         let main = cx.layout_size("panes").map_or(980.0 - SIDEBAR_W, |[w, _]| w);
         let w = (main * 0.42).clamp(PREVIEW_MIN_W, PREVIEW_MAX_W).min(main - PREVIEW_MIN_W).round();
-        panes = panes.child(el().w(1.0).h_full().fill(l.t.separator)).child(preview_panel(s, pv, l, cx, Some(w)));
+        panes = panes.child(el().w(1.0).h_full().fill(l.t.separator)).child(side_panel(s, l, cx, Some(w)));
     }
     let window = row()
         .w_full()
@@ -183,6 +185,8 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         window.child(pick_view(s, l))
     } else if let Some(b) = &s.batch {
         window.child(batch_view(s, b, l))
+    } else if let Some(o) = &s.open_with {
+        window.child(open_with_view(o, l))
     } else {
         window
     }
@@ -193,40 +197,120 @@ fn hr(l: Look) -> El {
 }
 
 fn sidebar(s: &State, l: Look, under_titlebar: bool) -> El {
-    // A source list: each place is an option, the folder on screen the selected one.
-    let mut c = col().key("sidebar").role("listbox").label("Places").w(SIDEBAR_W).h_full().fill(l.sidebar).pb(10.0).px(8.0).gap(1.0);
-    c = c.child(el().key("sidebar-drag").w_full().h(if under_titlebar { BAR_H } else { 10.0 }).window_drag());
-    c = c.child(text("Places").font(SMALL).color(l.t.text_secondary).px(8.0).pb(4.0).a11y_hidden());
-    let cwd = &s.cur().cwd;
-    for (i, (name, path)) in s.places.iter().enumerate() {
-        let here = path == cwd;
-        let p = path.clone();
-        let mut item = row()
-            .key(format!("place-{i}"))
-            .role("option")
-            .focus_selected(here)
-            .h(26.0)
-            .px(8.0)
-            .center_y()
-            .radius(5.0)
-            .cursor(Cursor::Pointer)
-            .on_press_tx(move |s: &mut State, tx| {
-                tx.instant();
-                s.go_to(p.clone());
-            })
-            .child(text(name.clone()).font(BODY).color(l.t.text).truncate().grow(1.0).min_w(0.0));
-        let hint = Cmd::ALL.get(Cmd::ALL.iter().position(|&c| c == Cmd::Place1).unwrap_or(0) + i).filter(|c| c.place() == Some(i));
-        if let Some(&cmd) = hint {
-            let label = s.keymap.label(cmd);
-            if !label.is_empty() {
-                // Read as the place's shortcut, not as part of its name.
-                item = item.child(text(label.clone()).font(SMALL).color(l.t.text_secondary.alpha(0.6)).a11y_hidden()).shortcut_hint(label);
-            }
-        }
-        item = if here { item.fill(l.t.control_off) } else { item.hover(l.t.hover) };
-        c = c.child(item);
+    // A source list: each place is an option, the folder on screen the selected one. Favorites
+    // first (the user's, in their order), then Locations (mounted volumes). It scrolls when
+    // they don't all fit; folders dropped on it become favorites.
+    let mut outer = col()
+        .key("sidebar-pane")
+        .w(SIDEBAR_W)
+        .h_full()
+        .fill(l.sidebar)
+        .on_drop_files(|s: &mut State, files, tx| {
+            tx.instant();
+            s.side.drop_hover = false;
+            s.drop_on_sidebar(files);
+        })
+        .on_drop_hover(|s: &mut State, over, tx| {
+            tx.instant();
+            s.side.drop_hover = over;
+        });
+    if s.side.drop_hover {
+        outer = outer.border(2.0, l.accent);
     }
-    c
+    outer = outer.child(el().key("sidebar-drag").w_full().h(if under_titlebar { BAR_H } else { 10.0 }).window_drag());
+    let section = |name: &'static str| text(name).font(SMALL).color(l.t.text_secondary).px(8.0).pt(6.0).pb(4.0).a11y_hidden();
+    let mut c = col()
+        .key("sidebar")
+        .role("listbox")
+        .label("Places")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .pb(10.0)
+        .px(8.0)
+        .gap(1.0)
+        .scroll(ScrollSpec { stick_bottom: false });
+    c = c.child(section("Favorites"));
+    for i in 0..s.places.len() {
+        c = c.child(place_row(s, i, l));
+    }
+    if !s.volumes.is_empty() {
+        c = c.child(section("Locations"));
+        for i in s.places.len()..s.place_count() {
+            c = c.child(place_row(s, i, l));
+        }
+    }
+    outer.child(c)
+}
+
+/// Sidebar item `i` (favorites first, then volumes): a click goes there, a right-click opens
+/// its menu, a favorite drags up or down to reorder, a volume that can be ejected has ⏏.
+fn place_row(s: &State, i: usize, l: Look) -> El {
+    let Some((name, path)) = s.place_at(i) else { return el() };
+    let fav = i < s.places.len();
+    let here = path == s.cur().cwd;
+    let missing = fav && s.side.is_missing(&path);
+    let color = if missing { l.t.text_secondary.alpha(0.5) } else { l.t.text };
+    let mut item = row()
+        .key(format!("place-{i}"))
+        .role("option")
+        .focus_selected(here)
+        .h(26.0)
+        .px(8.0)
+        .gap(6.0)
+        .center_y()
+        .radius(5.0)
+        .cursor(Cursor::Pointer)
+        .on_press_tx(move |s: &mut State, tx| {
+            tx.instant();
+            s.go_place(i);
+        })
+        .on_secondary_press(move |s: &mut State, press, tx| {
+            tx.instant();
+            s.sidebar_menu(i, press, tx);
+        })
+        .child(text(name).font(BODY).color(color).truncate().grow(1.0).min_w(0.0));
+    if missing {
+        item = item.help(format!("{} isn't there any more", fs::pretty(&path)));
+    }
+    if fav {
+        item = item.on_drag(move |s: &mut State, d: &mut Drag, tx| s.drag_favorite(i, d, tx));
+    }
+    let hint = Cmd::ALL.get(Cmd::ALL.iter().position(|&c| c == Cmd::Place1).unwrap_or(0) + i).filter(|c| c.place() == Some(i));
+    if let Some(&cmd) = hint {
+        let label = s.keymap.label(cmd);
+        if !label.is_empty() {
+            // Read as the place's shortcut, not as part of its name.
+            item = item.child(text(label.clone()).font(SMALL).color(l.t.text_secondary.alpha(0.6)).a11y_hidden()).shortcut_hint(label);
+        }
+    }
+    if let Some(v) = i.checked_sub(s.places.len()).filter(|&v| s.volumes.get(v).is_some_and(|v| v.eject)) {
+        let name = s.volumes[v].name.clone();
+        item = item.child(
+            text("⏏")
+                .key(format!("eject-{v}"))
+                .role("button")
+                .label(format!("Eject {name}"))
+                .font(BODY)
+                .color(l.t.text_secondary)
+                .w(18.0)
+                .align(Align::Center)
+                .radius(4.0)
+                .hover(l.t.hover)
+                .help(format!("Eject “{name}”"))
+                .on_press_tx(move |s: &mut State, tx| {
+                    tx.instant();
+                    s.eject(v);
+                }),
+        );
+    }
+    match s.side.drag {
+        // Where the dragged favorite would land, and the favorite itself, dimmed.
+        Some((from, _)) if fav && from == i => item.fill(l.t.control_off).opacity(0.6),
+        Some((_, to)) if fav && to == i => item.fill(l.accent.alpha(0.22)),
+        _ if here => item.fill(l.t.control_off),
+        _ => item.hover(l.t.hover),
+    }
 }
 
 /// One pane. A click anywhere in it makes it the active one; every handler inside does that
@@ -885,36 +969,48 @@ fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
                 .child(name_el),
         );
     if renaming.is_none() {
-        match c.split {
-            // Out to other apps (macOS: Rune starts no system drag elsewhere).
-            None => {
-                r = r.drag_out(move |s: &State| if s.pane(id)?.f.version == version { s.drag_item(id, i) } else { None }).on_drag_end(
-                    |s: &mut State, outcome, tx| {
-                        tx.instant();
-                        s.drag_out_ended(outcome);
-                    },
-                );
+        // Arbor's own drag inside the window: onto the other pane (split) or onto the sidebar
+        // (which adds the folders). On macOS, unsplit, the row drags out to other apps instead
+        // and this never runs (a system drag can't land in its own window: RUNE-GAPS.md).
+        let split = c.split;
+        let inside = move |s: &mut State, d: &mut Drag, tx: &mut rune::Tx| {
+            tx.instant();
+            let far = d.dx.hypot(d.dy) > DRAG_START;
+            let at = d.window_point();
+            let side = far && at[0] < SIDEBAR_W;
+            let over = split.and_then(|p| p.at(at)).filter(|&p| p != id && far);
+            if d.phase == Phase::Up {
+                s.pane_drop = None;
+                s.side.drop_hover = false;
+                if d.cancelled() {
+                    return;
+                }
+                if side {
+                    s.drop_rows_on_sidebar(id, i, version);
+                } else if let Some(to) = over {
+                    s.drop_on_pane(id, i, version, to, tx);
+                }
+            } else if s.pane_drop != over || s.side.drop_hover != side {
+                s.pane_drop = over;
+                s.side.drop_hover = side;
+            } else {
+                tx.live_only();
             }
+        };
+        r = match c.split {
+            // Out to other apps (macOS: Rune starts no system drag elsewhere, so there the
+            // drag stays in the window).
+            None => r
+                .drag_out(move |s: &State| if s.pane(id)?.f.version == version { s.drag_item(id, i) } else { None })
+                .on_drag_end(|s: &mut State, outcome, tx| {
+                    tx.instant();
+                    s.drag_out_ended(outcome);
+                })
+                .on_drag(inside),
             // Split: within the window, onto the other pane. A system drag can't land in the
             // window it came from (RUNE-GAPS.md), so this one is Arbor's own.
-            Some(panes) => {
-                r = r.on_drag(move |s: &mut State, d: &mut Drag, tx| {
-                    tx.instant();
-                    let far = d.dx.hypot(d.dy) > DRAG_START;
-                    let over = panes.at(d.window_point()).filter(|&p| p != id && far);
-                    if d.phase == Phase::Up {
-                        match over {
-                            Some(to) if !d.cancelled() => s.drop_on_pane(id, i, version, to, tx),
-                            _ => s.pane_drop = None,
-                        }
-                    } else if s.pane_drop != over {
-                        s.pane_drop = over;
-                    } else {
-                        tx.live_only();
-                    }
-                });
-            }
-        }
+            Some(_) => r.on_drag(inside),
+        };
     }
     if e.is_dir {
         let target = f.cwd.join(&e.os);
@@ -1080,6 +1176,172 @@ const LINE_PAD: f32 = 12.0;
 /// The quick preview panel: the item's name and what the listing knows about it at once, then
 /// its contents when the worker has them (see `preview.rs`). `width`: docked beside one pane;
 /// `None` takes the other pane's place.
+/// The panel beside the list: the quick preview, or Get Info.
+fn side_panel(s: &State, l: Look, cx: &mut Cx<State>, width: Option<f32>) -> El {
+    match (&s.preview, &s.info) {
+        (Some(p), _) => preview_panel(s, p, l, cx, width),
+        (None, Some(i)) => info_panel(s, i, l, width),
+        (None, None) => el(),
+    }
+}
+
+/// Get Info (`info.rs`): the item's name, then what the disk says about it, a row each, and
+/// for a folder or several items the total as it streams in. Esc or ⌘I closes it.
+fn info_panel(s: &State, i: &crate::info::Info, l: Look, width: Option<f32>) -> El {
+    use crate::info::fmt_date;
+    let mut panel = col().key("info").role("complementary").label("Get Info").h_full().min_w(0.0).fill(l.t.bg);
+    panel = match width {
+        Some(w) => panel.w(w),
+        None => panel.grow(1.0),
+    };
+    let single = i.paths.len() == 1;
+    let meta = i.meta.as_ref().and_then(|m| m.as_ref().ok());
+    let kind = match meta {
+        Some(m) => m.kind.clone(),
+        None if single => "…".into(),
+        None => {
+            let part = |n: usize, one: &str, many: &str| (n > 0).then(|| format!("{n} {}", if n == 1 { one } else { many }));
+            [part(i.files, "file", "files"), part(i.dirs, "folder", "folders")].into_iter().flatten().collect::<Vec<_>>().join(", ")
+        }
+    };
+    let head = col()
+        .key("info-head")
+        .w_full()
+        .px(14.0)
+        .py(9.0)
+        .gap(3.0)
+        .child(text(i.name.clone()).role("heading").level(2).font(TextStyle::new(13.0, 600.0)).color(l.t.text).truncate_middle())
+        .child(text(kind.clone()).font(SMALL).color(l.t.text_secondary).truncate());
+    let label_w = 84.0;
+    let line = |label: &str, value: String| {
+        row()
+            .w_full()
+            .gap(10.0)
+            .child(text(label.to_string()).font(SMALL).color(l.t.text_secondary).w(label_w).align(Align::End).pt(1.0))
+            .child(text(value).font(BODY).color(l.t.text).wrap().grow(1.0).min_w(0.0).selectable(true))
+    };
+    let mut body =
+        col().key("info-body").w_full().grow(1.0).min_h(0.0).px(10.0).py(12.0).gap(7.0).scroll(ScrollSpec { stick_bottom: false });
+    if let Some(Err(e)) = &i.meta {
+        body = body.child(text(format!("Couldn't read it: {e}")).font(BODY).color(l.t.text_secondary).wrap());
+    }
+    body = body.child(line("Kind", kind));
+    let at = i.paths.first().and_then(|p| if single { Some(p.as_path()) } else { p.parent() });
+    if let Some(p) = at {
+        body = body.child(line(if single { "Where" } else { "In" }, p.display().to_string()));
+    }
+    let total = i.total.as_ref().and_then(|t| t.lock().ok().map(|t| t.clone()));
+    match (&total, meta) {
+        (Some(t), _) => {
+            body = body.child(line("Size", t.line()).key("info-total").role("status"));
+            if let Some(c) = t.caveats() {
+                body = body.child(line("", c));
+            }
+        }
+        (None, Some(m)) if !m.is_dir => {
+            body = body.child(line("Size", format!("{} ({} bytes)", fs::fmt_size(m.size), crate::info::group(m.size))));
+        }
+        _ if !single => body = body.child(line("Size", fs::fmt_size(i.size))),
+        _ => {}
+    }
+    if let Some(m) = meta {
+        body = body
+            .child(line("Created", fmt_date(m.created)))
+            .child(line("Modified", fmt_date(m.modified)))
+            .child(line("Accessed", fmt_date(m.accessed)));
+        if let Some(t) = &m.link {
+            body = body.child(line("Link to", t.clone()));
+        }
+        if let Some(mode) = &m.mode {
+            body = body.child(line("Permissions", mode.clone()));
+        }
+        if let Some(o) = &m.owner {
+            body = body.child(line("Owner", o.clone()));
+        }
+        if let Some(a) = &m.attrs {
+            body = body.child(line("Attributes", a.clone()));
+        }
+    }
+    let button = |label: &'static str, key: &'static str| {
+        text(label)
+            .key(key)
+            .role("button")
+            .font(BODY)
+            .color(l.t.text)
+            .px(10.0)
+            .py(3.0)
+            .radius(5.0)
+            .fill(l.t.control_off)
+            .hover(l.t.hover)
+            .cursor(Cursor::Pointer)
+    };
+    let mut buttons = row().key("info-actions").w_full().px(14.0).py(10.0).gap(8.0);
+    buttons = buttons.child(button("Copy Path", "info-copy").on_press_tx(|s: &mut State, tx| {
+        tx.instant();
+        s.info_copy_path(tx);
+    }));
+    // Rename is the list's own (undoable), for the one item selected.
+    if single && s.cur().selected().is_some() && s.cur().marked.len() <= 1 {
+        buttons = buttons.child(button("Rename…", "info-rename").on_press_tx(|s: &mut State, tx| {
+            tx.instant();
+            if s.unavailable(Cmd::Rename).is_none() {
+                s.run(Cmd::Rename, tx);
+            }
+        }));
+    }
+    panel.child(head).child(hr(l)).child(body).child(hr(l)).child(buttons)
+}
+
+/// Open With (`openwith.rs`): the apps for the selection, the default first; ↑↓ and Enter, or a
+/// click. Modal: Esc or a click outside closes it.
+fn open_with_view(o: &crate::openwith::OpenWithBox, l: Look) -> El {
+    let what = match o.files.as_slice() {
+        [one] => format!("Open “{}” with", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+        many => format!("Open {} files with", many.len()),
+    };
+    let msg = |m: String| text(m).role("status").font(BODY).color(l.t.text_secondary).px(16.0).py(10.0).wrap();
+    let mut list = col().key("open-with-list").role("listbox").label("Apps").w_full().px(6.0).py(4.0);
+    match &o.apps {
+        None => list = list.child(msg("Looking for apps…".into())),
+        Some(Err(e)) => list = list.child(msg(e.clone())),
+        Some(Ok(apps)) => {
+            list = list.active_descendant(format!("app-{}", o.sel));
+            for (i, h) in apps.iter().enumerate() {
+                let on = i == o.sel;
+                let (fg, dim) = if on { (l.sel_text, l.sel_text.alpha(0.8)) } else { (l.t.text, l.t.text_secondary) };
+                let mut r = row()
+                    .key(format!("app-{i}"))
+                    .role("option")
+                    .focus_selected(on)
+                    .w_full()
+                    .h(PALETTE_ROW_H)
+                    .px(10.0)
+                    .gap(10.0)
+                    .center_y()
+                    .radius(5.0)
+                    .cursor(Cursor::Pointer)
+                    .on_press_tx(move |s: &mut State, tx| {
+                        tx.instant();
+                        s.open_with_pick(i);
+                    })
+                    .child(text(h.name.clone()).font(BODY).color(fg).truncate().grow(1.0).min_w(0.0));
+                if h.default {
+                    r = r.child(text("Default").font(SMALL).color(dim));
+                }
+                list = list.child(if on { r.fill(l.accent) } else { r.hover(l.t.hover) });
+            }
+        }
+    }
+    let panel = overlay_card("open-with", "Open With", 420.0, l, |s: &mut State| s.close_open_with())
+        .focusable(true)
+        .no_focus_ring()
+        .on_key(|s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx| s.open_with_key(ev, tx))
+        .child(row().h(40.0).px(16.0).center_y().child(text(what).font(TextStyle::new(13.0, 600.0)).color(l.t.text).truncate()))
+        .child(hr(l))
+        .child(col().w_full().max_h(PALETTE_ROWS * PALETTE_ROW_H + 8.0).scroll(ScrollSpec { stick_bottom: false }).child(list));
+    overlay_layer("open-with-layer", panel)
+}
+
 fn preview_panel(s: &State, p: &Preview, l: Look, cx: &mut Cx<State>, width: Option<f32>) -> El {
     let mut panel = col().key("preview").role("complementary").label("Preview").h_full().min_w(0.0).fill(l.t.bg);
     panel = match width {
@@ -1545,7 +1807,7 @@ fn menu_view(m: &crate::menu::Menu, size: Option<[f32; 2]>, l: Look) -> El {
     for (i, it) in m.items.iter().enumerate() {
         card = card.child(match it {
             Item::Separator => el().w_full().h(MENU_SEP_H).py(4.0).a11y_hidden().child(el().w_full().h(1.0).fill(l.t.separator)),
-            Item::Cmd { title, on, keys, .. } => {
+            Item::Act { title, on, keys, .. } => {
                 let hi = m.sel == Some(i);
                 let (fg, dim) = match (hi, *on) {
                     (true, _) => (l.sel_text, l.sel_text.alpha(0.8)),

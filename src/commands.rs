@@ -97,6 +97,8 @@ commands! {
     ClearJump "nav.clear_jump_history" "Clear Jump History…", [];
     Reload "nav.reload" "Reload", ["cmd+r"];
     Reveal "nav.reveal" REVEAL, ["cmd+enter"];
+    OpenWith "file.open_with" "Open With…", [];
+    Info "file.info" "Get Info", ["cmd+i"];
     Palette "app.palette" "Command Palette", ["cmd+k", "cmd+shift+p"];
     OpenSettings "app.settings" "Open Settings File", ["cmd+comma"];
     ReloadSettings "app.reload_settings" "Reload Settings", [];
@@ -154,6 +156,10 @@ commands! {
     ReopenTab "tab.reopen" "Reopen Closed Tab", ["cmd+shift+t"];
     Split "pane.split" "Split View (Toggle)", ["cmd+backslash"];
     OtherPane "pane.switch" "Switch to Other Pane", ["tab"];
+
+    SidebarAdd "sidebar.add" "Add to Sidebar", [];
+    SidebarRemove "sidebar.remove" "Remove from Sidebar", [];
+    Eject "volume.eject" "Eject", ["cmd+e"];
 
     Place1 "place.1" "Go to Place 1", ["cmd+1"];
     Place2 "place.2" "Go to Place 2", ["cmd+2"];

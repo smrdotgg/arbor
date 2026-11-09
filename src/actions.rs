@@ -9,6 +9,7 @@ use rune::{ClipboardContent, DragItem, PointerPress, PopupItem, PopupMenu, TextE
 
 use crate::app::{Clip, Nav, PasteReq, Rename, State};
 use crate::commands::Cmd;
+use crate::menu::Act;
 use crate::ops::{self, Op, Undo};
 
 impl State {
@@ -468,7 +469,9 @@ impl State {
     /// Right-click on row `i` (or on empty space when `None`): a menu of commands, with their
     /// titles and keys from the command table and keymap. Native on macOS and Windows; Rune has
     /// none on Linux, so there it's Arbor's own, in the window (`menu.rs`, RUNE-GAPS.md), with
-    /// the same items.
+    /// the same items. On a file, macOS's menu gets an Open With submenu when the apps are
+    /// read within a frame (a native menu can't change once it's open); otherwise "Open With…"
+    /// opens Arbor's list.
     pub fn context_menu(&mut self, row: Option<usize>, press: PointerPress, tx: &mut Tx) {
         if let Some(i) = row
             && !self.cur().is_selected(i)
@@ -476,6 +479,48 @@ impl State {
             self.cur_mut().select(i);
         }
         let items = self.menu_items(row.is_some());
+        let apps = if row.is_some() && self.unavailable(Cmd::OpenWith).is_none() { self.apps_for_menu() } else { None };
+        self.show_menu(items, apps, press, tx);
+    }
+
+    /// Right-click on sidebar item `i` (favorites first, then volumes). Opening it reads the
+    /// volumes again (one of the explicit refreshes).
+    pub fn sidebar_menu(&mut self, i: usize, press: PointerPress, tx: &mut Tx) {
+        self.refresh_volumes();
+        let items = self.sidebar_menu_items(i);
+        self.show_menu(items, None, press, tx);
+    }
+
+    /// Sidebar item `i`'s menu: open it, and edit the favorites or eject the volume.
+    pub(crate) fn sidebar_menu_items(&self, i: usize) -> Vec<Option<(Act, String, bool)>> {
+        use crate::menu::PlaceAct;
+        let fav = i < self.places.len();
+        let n = self.places.len();
+        let item = |a: PlaceAct, title: &str, on: bool| Some((Act::Place(a, i), title.to_string(), on));
+        let mut v = vec![item(PlaceAct::Open, "Open", true), item(PlaceAct::NewTab, "Open in New Tab", true), None];
+        if fav {
+            v.extend([
+                item(PlaceAct::Remove, "Remove from Sidebar", true),
+                item(PlaceAct::Up, "Move Up", i > 0),
+                item(PlaceAct::Down, "Move Down", i + 1 < n),
+            ]);
+        } else {
+            let eject = self.volumes.get(i - n).is_some_and(|v| v.eject) && self.ejecting.is_none();
+            let listed = self.place_at(i).is_some_and(|(_, p)| self.places.iter().any(|(_, q)| *q == p));
+            v.extend([item(PlaceAct::Eject, "Eject", eject), item(PlaceAct::AddToSidebar, "Add to Favorites", !listed)]);
+        }
+        v
+    }
+
+    /// Opens `items` as the native menu, or Arbor's own where there's none. `apps`: the Open
+    /// With submenu's apps (native menus only).
+    fn show_menu(
+        &mut self,
+        items: Vec<Option<(Act, String, bool)>>,
+        apps: Option<Vec<crate::openwith::Handler>>,
+        press: PointerPress,
+        tx: &mut Tx,
+    ) {
         if !rune::popup_menu_supported() {
             self.open_menu(items, press, tx);
             return;
@@ -484,54 +529,122 @@ impl State {
         for it in items {
             menu = match it {
                 None => menu.separator(),
-                Some((cmd, title, on)) => {
-                    let it = PopupItem::new(cmd.id(), &title).enabled(on);
-                    menu.item(match self.keymap.shortcut(cmd) {
+                Some((Act::Cmd(Cmd::OpenWith), _, true)) if apps.is_some() => {
+                    let mut sub = PopupMenu::new();
+                    for (i, h) in apps.iter().flatten().enumerate() {
+                        let title = if h.default { format!("{} (default)", h.name) } else { h.name.clone() };
+                        sub = sub.item(PopupItem::new(Act::OpenWith(i).id(), title));
+                        if h.default && i == 0 && apps.as_ref().is_some_and(|a| a.len() > 1) {
+                            sub = sub.separator();
+                        }
+                    }
+                    menu.submenu("Open With", sub)
+                }
+                Some((act, title, on)) => {
+                    let it = PopupItem::new(act.id(), &title).enabled(on);
+                    menu.item(match act.cmd().and_then(|c| self.keymap.shortcut(c)) {
                         Some(k) => it.key_equivalent(k),
                         None => it,
                     })
                 }
             };
         }
+        let files: Vec<PathBuf> = {
+            let f = self.cur();
+            f.targets().iter().filter(|e| !e.is_dir).map(|e| f.cwd.join(&e.os)).collect()
+        };
+        self.menu_apps = apps.map(|a| (files, a));
         tx.popup_menu(menu, press, |s: &mut State, picked, tx| {
             tx.instant();
-            if let Some(cmd) = picked.and_then(Cmd::from_id)
-                && s.unavailable(cmd).is_none()
-            {
-                s.run(cmd, tx);
+            if let Some(act) = picked.and_then(Act::from_id) {
+                s.run_act(act, tx);
             }
+            s.menu_apps = None;
         });
+    }
+
+    /// Runs a menu row's action, if it can run now.
+    pub(crate) fn run_act(&mut self, act: Act, tx: &mut Tx) {
+        use crate::menu::PlaceAct;
+        match act {
+            Act::Cmd(cmd) => {
+                if self.unavailable(cmd).is_none() {
+                    self.run(cmd, tx);
+                }
+            }
+            Act::OpenWith(i) => {
+                if let Some((files, apps)) = self.menu_apps.take()
+                    && let Some(h) = apps.get(i).cloned()
+                {
+                    self.launch_with(h, files);
+                }
+            }
+            Act::Place(a, i) => match a {
+                PlaceAct::Open => self.go_place(i),
+                PlaceAct::NewTab => {
+                    self.new_tab(tx);
+                    self.go_place(i);
+                }
+                PlaceAct::Remove => self.remove_favorite(i),
+                PlaceAct::Up if i > 0 => self.move_favorite(i, i - 1),
+                PlaceAct::Down => self.move_favorite(i, i + 1),
+                PlaceAct::Up => {}
+                PlaceAct::Eject => {
+                    if let Some(v) = i.checked_sub(self.places.len()) {
+                        self.eject(v);
+                    }
+                }
+                PlaceAct::AddToSidebar => {
+                    if let Some((_, p)) = self.place_at(i) {
+                        self.add_favorites(vec![p], None);
+                    }
+                }
+            },
+        }
+        self.sync_preview();
     }
 
     /// The context menu's items, in order (`None` is a separator): each command, its title for
     /// what's selected, and whether it can run. `on_row`: the click was on a row.
-    pub(crate) fn menu_items(&self, on_row: bool) -> Vec<Option<(Cmd, String, bool)>> {
+    pub(crate) fn menu_items(&self, on_row: bool) -> Vec<Option<(Act, String, bool)>> {
         let has = on_row && !self.cur().visible.is_empty();
-        let n = if has { self.cur().targets().len() } else { 0 };
+        let targets = if has { self.cur().targets() } else { Vec::new() };
+        let n = targets.len();
+        let folders = targets.iter().any(|e| e.is_dir);
         let item = |cmd: Cmd| {
             // Commands on the selection need a row under the pointer; with several, Rename is
             // Batch Rename.
             let on_selection = matches!(
                 cmd,
-                Cmd::Open | Cmd::Rename | Cmd::Duplicate | Cmd::Trash | Cmd::Copy | Cmd::Cut | Cmd::CopyToOther | Cmd::MoveToOther
+                Cmd::Open
+                    | Cmd::OpenWith
+                    | Cmd::Rename
+                    | Cmd::Duplicate
+                    | Cmd::Trash
+                    | Cmd::Copy
+                    | Cmd::Cut
+                    | Cmd::CopyToOther
+                    | Cmd::MoveToOther
             );
-            let on = self.unavailable(cmd).is_none() && (!on_selection || has);
+            // On a row, Add to Sidebar is for the folders selected; on empty space, the folder here.
+            let on = self.unavailable(cmd).is_none() && (!on_selection || has) && (cmd != Cmd::SidebarAdd || !on_row || folders);
             let title = match cmd {
                 Cmd::Rename if n > 1 => format!("{} ({n} items)", Cmd::BatchRename.title()),
                 Cmd::Duplicate | Cmd::Trash | Cmd::Copy | Cmd::Cut | Cmd::CopyToOther | Cmd::MoveToOther if n > 1 => {
                     format!("{} ({n} items)", cmd.title())
                 }
-                _ => cmd.title().to_string(),
+                _ => self.title(cmd).into_owned(),
             };
-            Some((cmd, title, on))
+            Some((Act::Cmd(cmd), title, on))
         };
-        let mut v = vec![item(Cmd::Open), item(Cmd::Reveal), None, item(Cmd::Rename), item(Cmd::Duplicate), item(Cmd::Trash), None];
+        let mut v = vec![item(Cmd::Open), item(Cmd::OpenWith), item(Cmd::Reveal), None];
+        v.extend([item(Cmd::Info), item(Cmd::Rename), item(Cmd::Duplicate), item(Cmd::Trash), None]);
         v.extend([item(Cmd::Copy), item(Cmd::Cut), item(Cmd::Paste), item(Cmd::CopyPath), None]);
         // The commander commands only when there's another pane to send to.
         if self.split() {
             v.extend([item(Cmd::CopyToOther), item(Cmd::MoveToOther), None]);
         }
-        v.extend([item(Cmd::NewFolder), item(Cmd::Undo)]);
+        v.extend([item(Cmd::SidebarAdd), item(Cmd::NewFolder), item(Cmd::Undo)]);
         v
     }
 }

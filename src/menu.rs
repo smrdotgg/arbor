@@ -12,11 +12,74 @@ use rune::{Key, KeyEvent, PointerPress, Tx};
 use crate::app::State;
 use crate::commands::Cmd;
 
-/// One row: a command (its title for what's selected, whether it can run, its keys as this
+/// What a menu row does: a command, something to do with a sidebar item, or opening the
+/// selection with one of the apps Open With listed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Act {
+    Cmd(Cmd),
+    /// Sidebar item `usize` (favorites first, then volumes).
+    Place(PlaceAct, usize),
+    /// App `usize` of the list the menu was built with.
+    OpenWith(usize),
+}
+
+/// What a sidebar item's menu can do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceAct {
+    Open,
+    NewTab,
+    Remove,
+    Up,
+    Down,
+    Eject,
+    AddToSidebar,
+}
+
+const PLACE_ACTS: [(PlaceAct, &str); 7] = [
+    (PlaceAct::Open, "open"),
+    (PlaceAct::NewTab, "tab"),
+    (PlaceAct::Remove, "remove"),
+    (PlaceAct::Up, "up"),
+    (PlaceAct::Down, "down"),
+    (PlaceAct::Eject, "eject"),
+    (PlaceAct::AddToSidebar, "add"),
+];
+
+impl Act {
+    /// The id a native menu item carries: a command's own id, `side.remove:3`, `openwith:2`.
+    pub fn id(self) -> String {
+        match self {
+            Act::Cmd(c) => c.id().to_string(),
+            Act::Place(a, i) => format!("side.{}:{i}", PLACE_ACTS.iter().find(|(p, _)| *p == a).map_or("open", |(_, n)| n)),
+            Act::OpenWith(i) => format!("openwith:{i}"),
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Act> {
+        if let Some(i) = id.strip_prefix("openwith:") {
+            return i.parse().ok().map(Act::OpenWith);
+        }
+        if let Some((name, i)) = id.strip_prefix("side.").and_then(|r| r.split_once(':')) {
+            let a = PLACE_ACTS.iter().find(|(_, n)| *n == name)?.0;
+            return i.parse().ok().map(|i| Act::Place(a, i));
+        }
+        Cmd::from_id(id).map(Act::Cmd)
+    }
+
+    /// The command it runs, if it's one.
+    pub fn cmd(self) -> Option<Cmd> {
+        match self {
+            Act::Cmd(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+
+/// One row: what it does (its title for what's selected, whether it can run, its keys as this
 /// platform draws them), or a separator.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
-    Cmd { cmd: Cmd, title: String, on: bool, keys: String },
+    Act { act: Act, title: String, on: bool, keys: String },
     Separator,
 }
 
@@ -32,7 +95,7 @@ pub struct Menu {
 impl Menu {
     /// The rows that can run, in order.
     fn live(&self) -> impl Iterator<Item = usize> + '_ {
-        self.items.iter().enumerate().filter(|(_, it)| matches!(it, Item::Cmd { on: true, .. })).map(|(i, _)| i)
+        self.items.iter().enumerate().filter(|(_, it)| matches!(it, Item::Act { on: true, .. })).map(|(i, _)| i)
     }
 
     /// Highlights the next (`down`) or previous row that can run, wrapping; from nothing, the
@@ -52,7 +115,7 @@ impl Menu {
     /// highlighted one, wrapping.
     fn jump(&mut self, c: char) {
         let c = c.to_lowercase().next().unwrap_or(c);
-        let starts = |i: usize| matches!(&self.items[i], Item::Cmd { title, .. } if title.to_lowercase().starts_with(c));
+        let starts = |i: usize| matches!(&self.items[i], Item::Act { title, .. } if title.to_lowercase().starts_with(c));
         let live: Vec<usize> = self.live().filter(|&i| starts(i)).collect();
         let after = self.sel.and_then(|s| live.iter().copied().find(|&i| i > s));
         if let Some(i) = after.or(live.first().copied()) {
@@ -63,12 +126,12 @@ impl Menu {
 
 impl State {
     /// Opens the in-window menu at `press` with `items` (from `State::menu_items`).
-    pub(crate) fn open_menu(&mut self, items: Vec<Option<(Cmd, String, bool)>>, press: PointerPress, tx: &mut Tx) {
+    pub(crate) fn open_menu(&mut self, items: Vec<Option<(Act, String, bool)>>, press: PointerPress, tx: &mut Tx) {
         self.close_overlays(tx);
         let items = items
             .into_iter()
             .map(|it| match it {
-                Some((cmd, title, on)) => Item::Cmd { cmd, title, on, keys: self.keymap.label(cmd) },
+                Some((act, title, on)) => Item::Act { act, title, on, keys: act.cmd().map(|c| self.keymap.label(c)).unwrap_or_default() },
                 None => Item::Separator,
             })
             .collect();
@@ -83,10 +146,8 @@ impl State {
     pub fn menu_pick(&mut self, i: usize, tx: &mut Tx) {
         tx.instant();
         let Some(m) = self.menu.take() else { return };
-        if let Some(Item::Cmd { cmd, on: true, .. }) = m.items.get(i)
-            && self.unavailable(*cmd).is_none()
-        {
-            self.run(*cmd, tx);
+        if let Some(Item::Act { act, on: true, .. }) = m.items.get(i) {
+            self.run_act(*act, tx);
         }
     }
 
@@ -141,7 +202,7 @@ mod tests {
         m.items
             .iter()
             .map(|it| match it {
-                Item::Cmd { title, on, .. } => format!("{title}{}", if *on { "" } else { " (off)" }),
+                Item::Act { title, on, .. } => format!("{title}{}", if *on { "" } else { " (off)" }),
                 Item::Separator => "—".into(),
             })
             .collect()
@@ -175,8 +236,10 @@ mod tests {
             titles(m),
             [
                 "Open",
+                "Open With…",
                 crate::commands::REVEAL,
                 "—",
+                "Get Info",
                 "Rename…",
                 "Duplicate",
                 "Move to Trash",
@@ -186,14 +249,19 @@ mod tests {
                 "Paste",
                 "Copy Path",
                 "—",
+                "Add to Sidebar (off)",
                 "New Folder",
                 "Undo (off)"
             ]
         );
-        assert!(m.items.iter().any(|it| matches!(it, Item::Cmd { cmd: Cmd::Copy, keys, .. } if *keys == s.keymap.label(Cmd::Copy))));
+        assert!(
+            m.items.iter().any(|it| matches!(it, Item::Act { act: Act::Cmd(Cmd::Copy), keys, .. } if *keys == s.keymap.label(Cmd::Copy)))
+        );
         // On empty space, what needs a row under the pointer is off.
         s.open_menu(s.menu_items(false), press(), &mut tx);
-        assert!(titles(s.menu.as_ref().unwrap()).contains(&"Move to Trash (off)".to_string()));
+        let t = titles(s.menu.as_ref().unwrap());
+        assert!(t.contains(&"Move to Trash (off)".to_string()) && t.contains(&"Open With… (off)".to_string()));
+        assert!(t.contains(&"Add to Sidebar".to_string()), "the folder here: {t:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -209,20 +277,21 @@ mod tests {
         assert!(s.on_key(&key(Key::Down), &mut tx));
         assert_eq!(sel(&s), Some(0), "Open");
         assert!(s.on_key(&key(Key::Up), &mut tx));
-        assert_eq!(sel(&s), Some(12), "wrapped to New Folder, past the disabled Undo");
+        assert_eq!(sel(&s), Some(15), "wrapped to New Folder, past the disabled Undo");
         assert!(s.on_key(&key(Key::Down), &mut tx));
         assert_eq!(sel(&s), Some(0));
-        assert!(s.on_key(&key(Key::Down), &mut tx));
-        assert!(s.on_key(&key(Key::Down), &mut tx));
-        assert_eq!(sel(&s), Some(3), "past the separator to Rename");
+        for _ in 0..3 {
+            assert!(s.on_key(&key(Key::Down), &mut tx));
+        }
+        assert_eq!(sel(&s), Some(4), "past the separator to Get Info");
         assert!(s.on_key(&key(Key::Text("c".into())), &mut tx));
-        assert_eq!(sel(&s), Some(7), "Copy");
+        assert_eq!(sel(&s), Some(9), "Copy");
         assert!(s.on_key(&key(Key::Text("c".into())), &mut tx));
-        assert_eq!(sel(&s), Some(8), "then Cut");
+        assert_eq!(sel(&s), Some(10), "then Cut");
         assert!(s.on_key(&key(Key::Text("C".into())), &mut tx));
-        assert_eq!(sel(&s), Some(10), "then Copy Path, case aside");
+        assert_eq!(sel(&s), Some(12), "then Copy Path, case aside");
         assert!(s.on_key(&key(Key::End), &mut tx));
-        assert_eq!(sel(&s), Some(12));
+        assert_eq!(sel(&s), Some(15));
         let picked = s.cur().sel;
         assert!(s.on_key(&key(Key::PageDown), &mut tx), "other keys stay in the menu");
         assert_eq!(s.cur().sel, picked);
@@ -230,7 +299,7 @@ mod tests {
         assert!(s.menu.is_none());
         // Enter runs the highlight: Duplicate.
         s.open_menu(s.menu_items(true), press(), &mut tx);
-        s.menu.as_mut().unwrap().sel = Some(4);
+        s.menu.as_mut().unwrap().sel = Some(6);
         assert!(s.on_key(&key(Key::Enter), &mut tx));
         assert!(s.menu.is_none() && s.job.is_some(), "Duplicate started");
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -248,8 +317,34 @@ mod tests {
         let (d, mut s) = folder("off");
         let mut tx = Tx::default();
         s.open_menu(s.menu_items(true), press(), &mut tx);
-        s.menu_pick(13, &mut tx);
+        s.menu_pick(16, &mut tx);
         assert!(s.menu.is_none() && s.job.is_none() && s.note.is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn act_ids_round_trip() {
+        for a in [Act::Cmd(Cmd::Copy), Act::Place(PlaceAct::Remove, 3), Act::Place(PlaceAct::Eject, 12), Act::OpenWith(2)] {
+            assert_eq!(Act::from_id(&a.id()), Some(a), "{}", a.id());
+        }
+        assert_eq!(Act::from_id("side.nope:1"), None);
+        assert_eq!(Act::from_id("openwith:x"), None);
+    }
+
+    /// A favorite's menu: open, open in a new tab, remove and move (the ends can't move past
+    /// themselves); picking runs it.
+    #[test]
+    fn a_favorites_menu_edits_the_sidebar() {
+        let (d, mut s) = folder("side");
+        let mut tx = Tx::default();
+        s.places = crate::sidebar::named(vec![d.join("x"), d.clone(), d.join("y")]);
+        s.open_menu(s.sidebar_menu_items(0), press(), &mut tx);
+        assert_eq!(titles(s.menu.as_ref().unwrap()), ["Open", "Open in New Tab", "—", "Remove from Sidebar", "Move Up (off)", "Move Down"]);
+        s.menu_pick(5, &mut tx);
+        assert_eq!(s.places[1].1, d.join("x"), "moved down");
+        s.open_menu(s.sidebar_menu_items(1), press(), &mut tx);
+        s.menu_pick(3, &mut tx);
+        assert_eq!(s.places.iter().map(|p| p.1.clone()).collect::<Vec<_>>(), [d.clone(), d.join("y")]);
         let _ = std::fs::remove_dir_all(&d);
     }
 
