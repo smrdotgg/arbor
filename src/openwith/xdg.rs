@@ -173,7 +173,21 @@ pub fn exec_argv(exec: &str, files: &[PathBuf]) -> Vec<Vec<String>> {
         args.push(cur);
     }
     let paths: Vec<String> = files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-    let single = args.iter().any(|a| a.contains("%f") || a.contains("%u"));
+    // The field codes an argument holds, `%%` (a percent sign) skipped: "%%f" is the text "%f".
+    let codes = |a: &str| {
+        let mut out = Vec::new();
+        let mut it = a.chars();
+        while let Some(c) = it.next() {
+            if c == '%'
+                && let Some(code) = it.next()
+                && code != '%'
+            {
+                out.push(code);
+            }
+        }
+        out
+    };
+    let single = args.iter().any(|a| codes(a).iter().any(|c| matches!(c, 'f' | 'u')));
     let multi = args.iter().any(|a| a == "%F" || a == "%U");
     let expand = |one: Option<&str>| -> Vec<String> {
         let mut out = Vec::new();
@@ -190,10 +204,10 @@ pub fn exec_argv(exec: &str, files: &[PathBuf]) -> Vec<Vec<String>> {
                     s.push(c);
                     continue;
                 }
-                match ch.next() {
-                    Some('%') => s.push('%'),
-                    Some('f' | 'u') => s.push_str(one.unwrap_or("")),
-                    Some(_) | None => dropped = true,
+                match (ch.next(), one) {
+                    (Some('%'), _) => s.push('%'),
+                    (Some('f' | 'u'), Some(one)) => s.push_str(one),
+                    _ => dropped = true,
                 }
             }
             if !(s.is_empty() && dropped) {

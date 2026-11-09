@@ -94,3 +94,102 @@ fn exec_lines_expand_their_field_codes() {
     assert_eq!(s(exec_argv("plain", &f(&["/a"]))), ["plain|/a"], "no field code: files at the end");
     assert_eq!(unescape_value("a\\sb\\\\c"), "a b\\c");
 }
+
+// ---- robustness of desktop files and Exec lines ----
+
+/// A file name with anything in it: spaces, quotes, newlines, `%`, a leading `-`.
+fn any_file(r: &mut crate::prop::Rng) -> String {
+    let mut s = String::from("/");
+    s.push_str(&r.from(&["a", " ", "\"", "'", "\n", "%", "%f", "%F", "%%", "-", "--x", "\\", "$", "`", "é", ";", "\t", "*"], 8));
+    s
+}
+
+/// Whatever the file names, each lands as one argument, exactly as it is, as many times as its
+/// field code says: `%F`/`%U` all of them in one run, `%f`/`%u` one per run, none at the end.
+#[test]
+fn every_file_is_one_argument_whatever_its_name() {
+    crate::prop::check("exec_argv_files", 2000, |r| {
+        let files: Vec<PathBuf> = (0..1 + r.below(4)).map(|_| PathBuf::from(any_file(r))).collect();
+        let names: Vec<String> = files.iter().map(|f| f.to_string_lossy().into_owned()).collect();
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let cases: Vec<(&str, Vec<Vec<String>>)> = vec![
+            ("app %F", vec![[s(&["app"]), names.clone()].concat()]),
+            ("app %U", vec![[s(&["app"]), names.clone()].concat()]),
+            ("app", vec![[s(&["app"]), names.clone()].concat()]),
+            ("\"/opt/My App/run\" -n %F", vec![[s(&["/opt/My App/run", "-n"]), names.clone()].concat()]),
+            ("app %f", names.iter().map(|n| s(&["app", n])).collect()),
+            ("app --file=%u %i", names.iter().map(|n| s(&["app", &format!("--file={n}")])).collect()),
+            ("app 100%% %F", vec![[s(&["app", "100%"]), names.clone()].concat()]),
+            ("app %%f %F", vec![[s(&["app", "%f"]), names.clone()].concat()]),
+            ("app --literal=%%f", vec![[s(&["app", "--literal=%f"]), names.clone()].concat()]),
+        ];
+        for (exec, want) in cases {
+            assert_eq!(exec_argv(exec, &files), want, "{exec} with {names:?}");
+        }
+    });
+}
+
+/// Any Exec line: never a panic, never an empty command, and every file passed appears as an
+/// argument of its own (or inside one, for `--x=%f`), never split.
+#[test]
+fn any_exec_line_runs_something_sane() {
+    const BITS: &[&str] =
+        &["app", " ", "\"", "\\\"", "\\\\", "\\", "%f", "%F", "%u", "%U", "%%", "%", "%i", "%c", "%k", "--x=", "'", "\t", "é"];
+    crate::prop::check("exec_argv_any", 3000, |r| {
+        let exec = r.from(BITS, 12);
+        let files: Vec<PathBuf> = (0..r.below(3)).map(|_| PathBuf::from(any_file(r))).collect();
+        for run in exec_argv(&exec, &files) {
+            assert!(!run.is_empty() && run.iter().all(|a| !a.contains('\0')), "{exec:?}: {run:?}");
+        }
+    });
+}
+
+/// Found by `every_file_is_one_argument_whatever_its_name`: a literal "%%f" (the text "%f")
+/// was taken for the field code, so the app ran once per file and was given none of them.
+#[test]
+fn a_literal_percent_f_isnt_a_field_code() {
+    let f = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+    assert_eq!(exec_argv("app --x=%%f", &f), [["app", "--x=%f", "/a", "/b"]]);
+    assert_eq!(exec_argv("app %f %F", &f), [["app", "/a", "/b"]], "a stray %f with %F is dropped, not an empty argument");
+}
+
+/// Any key file: parsing never panics (desktop files, mimeapps.list, mimeinfo.cache).
+#[test]
+fn any_key_file_parses_without_panicking() {
+    const BITS: &[&str] = &[
+        "[Desktop Entry]",
+        "[Default Applications]",
+        "[Added Associations]",
+        "[Removed Associations]",
+        "[MIME Cache]",
+        "[",
+        "]",
+        "\n",
+        "\r\n",
+        "=",
+        ";",
+        "Name",
+        "Name[de]",
+        "Exec",
+        "Type=Application",
+        "MimeType",
+        "Hidden=true",
+        "text/plain",
+        "a.desktop",
+        " ",
+        "#",
+        "\\s",
+        "\\",
+        "é",
+    ];
+    crate::prop::check("key_files_any", 2000, |r| {
+        let text = if r.one_in(4) { r.string(100) } else { r.from(BITS, 40) };
+        let _ = parse_desktop(&text, "de_DE.UTF-8");
+        let m = parse_mimeapps(&text);
+        for (t, ids) in m.defaults.iter().chain(&m.added).chain(&m.removed) {
+            assert!(!t.contains('\n') && ids.iter().all(|i| !i.is_empty() && !i.contains(';')), "{text:?}");
+        }
+        let _ = parse_mimeinfo_cache(&text);
+        let _ = unescape_value(&text);
+    });
+}
