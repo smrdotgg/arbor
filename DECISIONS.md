@@ -195,6 +195,37 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-09 · Actions on listed items check the listing's identity (the PM's call), and
+  Windows lists with file ids** (review of milestone 15's fixes). Trash, move, copy, rename,
+  F5/F6, paste, drag and Duplicate on a folder's rows now carry each row's `fs::Ident` from
+  the listing (`ops::Checks`), as search results did; a replaced item is left alone with "“x”
+  was replaced since the folder was read, so it was left alone; press ⌘R to read it again"
+  (Ctrl+R off macOS; the default key, not a rebinding). Edits still pass. Windows' listing
+  enumerates with `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)` (no 8.3 short names,
+  which `FileIdBothDirectoryInfo` made NTFS look up: 23.8 ms against std's 13.9 ms on CI), so
+  each row's identity has the volume and NTFS file id, and checks read the file id through a
+  handle: a replacement within NTFS's 15 s tunnelling is refused (CI: tunnelled, refused). FAT
+  and file systems that can't answer it are read `std`'s way, by creation time as before; a
+  ReFS id that needs 128 bits isn't used; search results stay creation time (the walk can't open
+  every file). Listing 10k entries, read and sort, medians: Linux 14.9–19.5 ms before, 15.2–18.1
+  ms after (tabot-dev, load 3–4); macOS 11.4–12.0 before, 12.0–12.3 after (MacBook); Windows
+  16.5 ms with file ids against 15.2 ms for std's read, taking turns (CI runner). Undo:
+  `Folder::target_checks` (searching only), `fs::read` (`read_std` everywhere).
+- **2026-11-09 · Without a birth time, identity adds the Linux file handle, else the ctime**
+  (review: with statx returning `ENOSYS`, Delete removed 50 of 50 replacements that got the
+  freed inode). Where `statx` gives no btime, a listing reads each entry's handle
+  (`name_to_handle_at`: inode and generation on ext4), as do the checks; two handles are
+  compared instead of the ctime, so edits still pass. Without a handle (or where only one side
+  has it: search results' identities carry none) the ctime is compared, so on those systems an
+  item edited since it was chosen is refused too. Cost, only there: 10k entries 25.5–26.0 ms
+  against 16 ms with birth times (tabot-dev). Undo: `fs::Ident`'s `changed` and `handle`.
+- **2026-11-09 · Get Info compares a selected folder's whole identity** when it opens it
+  (`dirfd::ident_of_fd`), not device and inode. Undo: `info::walk_tree`.
+- **2026-11-09 · A newer batch rule stops the older plan before it's compiled**, so a rule that
+  doesn't compile stops it too. Undo: `batch_replan_within`.
+- **2026-11-09 · uninstall.sh's UTF-8 check is Unicode's**: overlong forms, surrogates and code
+  points past U+10FFFF are damage, as Restore says; each range's edges are tested against
+  Arbor's reader. Undo: `not_text` in `packaging/linux/uninstall.sh`.
 - **2026-11-09 · Object identity and content fingerprint are two notions** (the PM's call;
   replaces the entry that made identity type, size, ctime and birth time, under which a file
   edited after its folder was listed was refused by Delete and by every action on a search
@@ -212,6 +243,8 @@ Format: date · decision · why · how to undo.
   there is, so a reused inode reads as the same item; Windows' identity no longer includes a
   file's size and write time, so a replacement within NTFS's 15 s tunnelling isn't seen at all
   (the file index needs every file opened). Undo: `fs::Ident` (add the size and ctime back).
+  (Amended the same day, above: the no-birth-time fallback, and Windows' file ids from the
+  listing.)
 
 - **2026-11-09 · The inline rename and New Folder are worker operations** (review of milestone
   13: they touched the disk on the window's thread). The list shows the new name at once and

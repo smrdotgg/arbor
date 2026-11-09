@@ -97,19 +97,22 @@ Nothing runs in the background unless the user did something, and nothing polls.
 - **Identity, re-checked right before acting.** Two questions, two types. *Is it still the
   item chosen?* is `fs::Ident`, the object's identity: device and inode on Unix (Windows: its
   creation time), its type, and its birth time where the file system keeps one (statx btime,
-  macOS's birth time). It comes from the metadata the listing or search walk already has, is
-  captured when an operation is asked for, and is checked on the worker immediately before each
-  item is touched (`fs::ident_at`; `Op::Checked`, `ops::Doomed`, Empty Trash's items, which on
-  Linux add the file handle). Size and times of change aren't in it, so a file edited after its
-  folder was listed is still the item (Arbor watches nothing). Device and inode alone aren't
-  enough: ext4 hands a new file the inode just freed, and the birth time tells them apart. Where
-  there's no birth time (ext2/3, some FUSE and network file systems), or a replacement made in
-  the same clock tick as the original, a reused inode reads as the same item; Windows can't see
-  a replacement within its 15 s creation-time tunnelling (its file index needs the file opened).
-  An item replaced since is left alone, and one with no identity is never deleted. *Is it
-  unchanged?* is `ops::Print` (`ops/print.rs`: identity, type, size, mtime, and a tree for
-  folders): undo, redo, batch rename (from its preview, and its rollback) and a cancelled copy's
-  cleanup refuse if anything differs.
+  macOS's birth time). Every listing reads it for each entry from the metadata it reads anyway
+  (Windows: `fs::win_dir` enumerates with `FileIdBothDirectoryInfo`, which adds the volume and
+  NTFS file id at no cost per entry); so does the search walk. Every action on chosen items
+  carries it (`ops::Checks`, `Op::Checked`, `ops::Doomed`, a drag's paths, Empty Trash's
+  items, which on Linux add the file handle) and the worker compares it immediately before each
+  item is touched (`fs::ident_of`, which on Windows reads the file id through a handle). An item
+  replaced since is left alone ("…was replaced since the folder was read; press ⌘R"), and one
+  with no identity is never deleted. Size and times of change aren't in it, so a file edited
+  after its folder was listed is still the item (Arbor watches nothing). Device and inode alone
+  aren't enough: ext4 hands a new file the inode just freed; the birth time tells them apart, and
+  where there's none, Linux's file handle (inode and generation) or else the ctime does (on such
+  systems an edit then refuses too). Left: a replacement made in the original's clock tick (ext4),
+  and on Windows one within NTFS's 15 s tunnelling where the identity came without a file id (the
+  search walk, `std` metadata). *Is it unchanged?* is `ops::Print` (`ops/print.rs`: identity,
+  type, size, mtime, and a tree for folders): undo, redo, batch rename (from its preview, and its
+  rollback) and a cancelled copy's cleanup refuse if anything differs.
 - **Mount boundaries** (`mounts.rs`). `Mounts` (Linux's mount table, read once per operation)
   and `volume` (macOS's volume per folder) decide what's "another disk"; `Fence` bundles them
   for a walk. Used by permanent delete, cleanup of cancelled copies, cross-disk
