@@ -781,7 +781,10 @@ fn batch_rename_refuses_a_folder_and_something_inside_it() {
     let mut s = state_in(&d);
     search(&mut s, "hit");
     finish_walk(&mut s);
-    assert_eq!(results(&s), ["hit-z", "hit-z/hit-a"]);
+    // In the order the walk's threads found them, which varies.
+    let mut found = results(&s);
+    found.sort();
+    assert_eq!(found, ["hit-z", "hit-z/hit-a"]);
     s.run(Cmd::SelectAll, &mut tx());
     s.run(Cmd::Rename, &mut tx());
     let b = s.batch.as_mut().expect("Batch Rename on the results");
