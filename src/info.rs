@@ -169,7 +169,7 @@ impl Counting<'_> {
 /// stopped.
 #[cfg(unix)]
 fn walk_tree(root: &Path, fence: &Fence, c: &mut Counting, stop: &AtomicBool) -> bool {
-    use crate::dirfd::{fstat, is_dir, names, open_dir, same, stat_at};
+    use crate::dirfd::{Names, fstat, is_dir, open_dir, same, stat_at};
     use std::os::unix::ffi::OsStrExt;
     let opened = crate::ffi::cstr(root).and_then(|r| open_dir(libc::AT_FDCWD, &r, true)).and_then(|fd| Ok((fstat(&fd)?, fd)));
     let Ok((st, fd)) = opened else {
@@ -194,15 +194,25 @@ fn walk_tree(root: &Path, fence: &Fence, c: &mut Counting, stop: &AtomicBool) ->
                 continue;
             }
         };
-        let Ok(entries) = names(&fd) else {
+        // One name at a time: a stop between two reads reads nothing more, and a read error
+        // counts the folder as unreadable rather than ending it quietly.
+        let Ok(mut entries) = Names::open(&fd) else {
             c.t.unreadable += 1;
             continue;
         };
         let mut denied = false;
-        for n in entries {
+        loop {
             if stop.load(Relaxed) {
                 return false;
             }
+            let n = match entries.next() {
+                None => break,
+                Some(Ok(n)) => n,
+                Some(Err(_)) => {
+                    denied = true;
+                    break;
+                }
+            };
             match stat_at(&fd, &n) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(_) => denied = true,
@@ -745,6 +755,53 @@ mod tests {
             assert_eq!(t.bytes, 0, "at_root={at_root}: counted what's outside through the link: {t:?}");
             let _ = std::fs::remove_dir_all(&d);
         }
+    }
+
+    /// The review's case: a stop while a big folder waits to be read used to read all of it
+    /// first (the names were collected before the stop was looked at: 131 reads after a
+    /// cancel). Now nothing more is read.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_reads_nothing_more_of_a_folder() {
+        let d = temp("stop-reads");
+        let big = d.join("big");
+        std::fs::create_dir_all(&big).unwrap();
+        for i in 0..300 {
+            std::fs::write(big.join(format!("f{i}")), "x").unwrap();
+        }
+        let ino = crate::dirfd::hook::watch(&big, None);
+        let (reached_tx, reached) = std::sync::mpsc::channel();
+        let (go, go_rx) = std::sync::mpsc::channel();
+        hook::GATES.lock().unwrap().push((big.clone(), reached_tx, go_rx));
+        let (out, stop): (Shared, Arc<AtomicBool>) = (Arc::default(), Arc::default());
+        let (o, st, r) = (out.clone(), stop.clone(), d.clone());
+        let walker = std::thread::spawn(move || walk(&[r], Total::default(), &o, &st, &|| {}));
+        reached.recv_timeout(Duration::from_secs(5)).unwrap();
+        stop.store(true, Relaxed);
+        go.send(()).unwrap();
+        walker.join().unwrap();
+        assert_eq!(crate::dirfd::hook::reads(ino), 0, "read after the stop");
+        assert!(!out.lock().unwrap().done);
+        crate::dirfd::hook::WATCH.lock().unwrap().retain(|w| w.0 != ino);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The review's case: a read error partway through a folder (an injected `EIO`) used to
+    /// end it quietly, a finished total with nothing unreadable. Now the folder counts as one
+    /// that couldn't be read.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_error_is_unreadable_not_the_end() {
+        let d = temp("eio");
+        for i in 0..10 {
+            std::fs::write(d.join(format!("f{i}")), "x").unwrap();
+        }
+        let ino = crate::dirfd::hook::watch(&d, Some(4));
+        let t = total_of(std::slice::from_ref(&d));
+        crate::dirfd::hook::WATCH.lock().unwrap().retain(|w| w.0 != ino);
+        assert!(t.done && t.unreadable == 1 && t.files < 10, "{t:?}");
+        assert_eq!(t.caveats().as_deref(), Some("1 folder couldn't be read"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// A slow disk never holds up the key that opens Get Info: the panel shows at once, and the
