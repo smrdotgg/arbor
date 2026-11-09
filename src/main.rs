@@ -12,6 +12,7 @@ mod a11y_tests;
 mod actions;
 mod app;
 mod batch;
+mod bounded;
 mod commands;
 mod complete;
 mod config;

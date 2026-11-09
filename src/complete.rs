@@ -141,7 +141,7 @@ impl State {
             let (dir, prefix, at, old) = (c.dir.clone(), c.prefix.clone(), c.at, c.cands.clone());
             let current = at.and_then(|i| old.get(i).cloned());
             let (folder, sep, hidden) = (crate::fs::expand(&dir), sep_for(&dir), self.show_hidden);
-            let fresh = crate::folder::read_waiting(&self.completer, self.show_wait, move || {
+            let fresh = crate::bounded::read_waiting(&self.completer, self.show_wait, move || {
                 Some((String::new(), candidates(&folder, &prefix, hidden, CASE_SENSITIVE, sep)))
             });
             let cands = fresh.map_or(old, |(_, c)| c);
@@ -176,7 +176,7 @@ impl State {
         let (folder, prefix, sep) = (crate::fs::expand(dir), prefix.to_string(), sep_for(dir));
         let hidden = self.show_hidden;
         let asked = typed.clone();
-        let answer = crate::folder::read_waiting(&self.completer, self.show_wait, move || {
+        let answer = crate::bounded::read_waiting(&self.completer, self.show_wait, move || {
             Some((asked, candidates(&folder, &prefix, hidden, CASE_SENSITIVE, sep)))
         });
         match answer {

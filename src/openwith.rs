@@ -633,7 +633,7 @@ impl State {
     /// Asks a worker for the apps for `file`, waiting at most a frame.
     #[cfg_attr(windows, allow(dead_code))]
     fn read_apps(&mut self, req: u64, file: PathBuf) -> Option<(u64, Result<Vec<Handler>, String>)> {
-        crate::folder::read_waiting(&self.apps_loader, self.show_wait, move || Some((req, list(&file))))
+        crate::bounded::read_waiting(&self.apps_loader, self.show_wait, move || Some((req, list(&file))))
     }
 
     /// The apps for a context menu on a file (`Some` only if they're read within a frame,

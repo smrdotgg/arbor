@@ -265,7 +265,7 @@ impl Folder {
     pub(crate) fn request_now(&mut self, wait: std::time::Duration) -> Option<Answer> {
         let req = self.pending.as_ref()?.req;
         let (path, sort, stop) = (self.cwd.clone(), self.sort, self.stop_read());
-        read_waiting(&self.loader, wait, move || Some(Answer { req, sort, listing: fs::list_until(path, sort, &stop)? }))
+        crate::bounded::read_waiting(&self.loader, wait, move || Some(Answer { req, sort, listing: fs::list_until(path, sort, &stop)? }))
     }
 
     /// This tab's lightweight state, to keep while it's hidden.
@@ -639,50 +639,4 @@ pub fn tab_label(p: &Path) -> String {
 pub(crate) fn now() -> rune::LocalTime {
     let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
     rune::LocalTime::at(ms)
-}
-
-/// Runs `work` on `loader`'s worker and waits here up to `wait` for it. If it's done in time,
-/// the answer comes back from this call and never lands through the loader; otherwise `None`,
-/// and it lands through `loader.take()` in `poll` like any request. The hand-off is decided
-/// under one lock, so an answer is never lost or delivered twice. Work that stops early
-/// (`None`) hands nothing back.
-pub(crate) fn read_waiting<T: Send + 'static>(
-    loader: &Latest<T>,
-    wait: std::time::Duration,
-    work: impl FnOnce() -> Option<T> + Send + 'static,
-) -> Option<T> {
-    use std::sync::{Arc, Condvar, Mutex};
-    struct Hand<T> {
-        waiting: bool,
-        got: Option<T>,
-    }
-    let hand = Arc::new((Mutex::new(Hand { waiting: !wait.is_zero(), got: None }), Condvar::new()));
-    let worker = hand.clone();
-    loader.request_opt((), move |()| {
-        let listing = work()?;
-        let (lock, cv) = &*worker;
-        let mut h = lock.lock().unwrap_or_else(|e| e.into_inner());
-        if h.waiting {
-            h.got = Some(listing);
-            cv.notify_one();
-            None
-        } else {
-            Some(listing)
-        }
-    });
-    if wait.is_zero() {
-        return None;
-    }
-    let deadline = std::time::Instant::now() + wait;
-    let (lock, cv) = &*hand;
-    let mut h = lock.lock().unwrap_or_else(|e| e.into_inner());
-    while h.got.is_none() {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        h = cv.wait_timeout(h, left).unwrap_or_else(|e| e.into_inner()).0;
-    }
-    h.waiting = false;
-    h.got.take()
 }

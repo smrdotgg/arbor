@@ -426,7 +426,7 @@ impl State {
         let req = self.next_info;
         let meta = if paths.len() == 1 {
             let p = paths[0].clone();
-            crate::folder::read_waiting(&self.meta_loader, self.show_wait, move || Some((req, meta(&p)))).map(|(_, m)| m)
+            crate::bounded::read_waiting(&self.meta_loader, self.show_wait, move || Some((req, meta(&p)))).map(|(_, m)| m)
         } else {
             self.meta_loader.cancel();
             None

@@ -237,7 +237,7 @@ impl State {
         // the read can't be, so the dialog doesn't wait for it.
         let wait = if items.len() <= SYNC_ITEMS { self.show_wait } else { std::time::Duration::ZERO };
         let names: Vec<String> = b.dirs.iter().map(|d| d.name.clone()).collect();
-        let read = crate::folder::read_waiting(&b.reader, wait, move || read_folders(&dir_paths, &names, &items, &paths, &expect, &stop));
+        let read = crate::bounded::read_waiting(&b.reader, wait, move || read_folders(&dir_paths, &names, &items, &paths, &expect, &stop));
         if let Some(r) = read {
             land_read(&mut b, r);
         }
@@ -295,7 +295,7 @@ impl State {
                 } else {
                     let (items, dirs, round) = (b.items.clone(), b.dirs.clone(), b.round);
                     let work = move || Some((round, rename::plan(&c, &items, &dirs, PLATFORM)));
-                    crate::folder::read_waiting(&b.planner, wait, work).map(|(_, plan)| plan)
+                    crate::bounded::read_waiting(&b.planner, wait, work).map(|(_, plan)| plan)
                 };
                 match plan {
                     Some(plan) => {

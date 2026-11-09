@@ -769,7 +769,7 @@ impl State {
         let (id, path) = (crate::folder::next_request(), path.to_path_buf());
         self.going_to = Some(id);
         let wait = self.show_wait;
-        let answer = crate::folder::read_waiting(&self.path_check, wait, move || {
+        let answer = crate::bounded::read_waiting(&self.path_check, wait, move || {
             #[cfg(test)]
             path_hook::check(&path);
             let kind = if path.is_dir() {
@@ -1893,27 +1893,5 @@ pub(crate) mod tests {
         assert!(s.land(0, a, &mut Tx::default()));
         let names: Vec<&str> = s.cur().entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["c", "b", "a"]);
-    }
-
-    /// Showing a tab hands its listing over within the wait, or later through `poll`; never both,
-    /// never neither.
-    #[test]
-    fn read_waiting_hands_over_exactly_once() {
-        for wait in [Duration::ZERO, Duration::from_millis(1), Duration::from_secs(5)] {
-            let loader: Latest<u32> = Latest::default();
-            let now = crate::folder::read_waiting(&loader, wait, || {
-                std::thread::sleep(Duration::from_millis(3));
-                Some(7)
-            });
-            let until = Instant::now() + Duration::from_secs(5);
-            let mut later = None;
-            while now.is_none() && later.is_none() && Instant::now() < until {
-                std::thread::sleep(Duration::from_millis(1));
-                later = loader.take();
-            }
-            std::thread::sleep(Duration::from_millis(10));
-            assert_eq!(now.or(later), Some(7), "{wait:?}");
-            assert_eq!(loader.take(), None, "{wait:?}: delivered once");
-        }
     }
 }
