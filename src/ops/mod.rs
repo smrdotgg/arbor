@@ -7,7 +7,7 @@
 //! the same folder, "name 2" elsewhere), and undo leaves that item where it is. Folders can't go
 //! into themselves. Undo refuses rather than guesses: every result is fingerprinted when the
 //! operation finishes, undo checks all of them before touching anything, and checks each again
-//! right before its own step (see [`Print`]).
+//! right before its own step (see `print.rs`).
 
 use std::fs::Metadata;
 use std::hash::{Hash, Hasher};
