@@ -717,7 +717,8 @@ pub fn parse_info(text: &str, top: Option<&Path>) -> Result<PathBuf, String> {
         }
     }
     let raw = found.ok_or("its record in the Trash doesn't say where it came from")?;
-    let path = PathBuf::from(os_from_bytes(url_decode(raw)));
+    let bytes = url_decode(raw).ok_or("its record in the Trash names a path Arbor won't trust")?;
+    let path = PathBuf::from(os_from_bytes(bytes));
     if path.as_os_str().is_empty() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
         return Err("its record in the Trash names a path Arbor won't trust".into());
     }
@@ -869,8 +870,9 @@ fn read_info(info: &Path) -> Result<String, String> {
     Ok(s)
 }
 
-/// `%XX` escapes back to their bytes.
-fn url_decode(s: &str) -> Vec<u8> {
+/// `%XX` escapes back to their bytes; `None` for an escaped NUL (no path holds one) or `/` (a
+/// separator inside a name, which no name holds either), as GLib refuses them.
+fn url_decode(s: &str) -> Option<Vec<u8>> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -879,14 +881,19 @@ fn url_decode(s: &str) -> Vec<u8> {
         if b[i] == b'%'
             && let (Some(h), Some(l)) = (b.get(i + 1).and_then(|&c| hex(c)), b.get(i + 2).and_then(|&c| hex(c)))
         {
-            out.push((h * 16 + l) as u8);
+            let c = (h * 16 + l) as u8;
+            if c == 0 || c == b'/' {
+                return None;
+            }
+            out.push(c);
             i += 3;
         } else {
             out.push(b[i]);
             i += 1;
         }
     }
-    out
+    // A NUL written as it is (not escaped) is no better.
+    (!out.contains(&0)).then_some(out)
 }
 
 fn os_from_bytes(b: Vec<u8>) -> std::ffi::OsString {
@@ -906,6 +913,96 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// Any record text: never a panic, and any place it gives is a full path with no `..` and no
+    /// NUL in it, inside the disk's top folder when the record is relative.
+    #[test]
+    fn any_record_gives_a_safe_place_or_an_error() {
+        const BITS: &[&str] = &[
+            "[Trash Info]",
+            "[Other]",
+            "\n",
+            "\r\n",
+            "Path=",
+            "Path =",
+            "DeletionDate=x",
+            "/",
+            "..",
+            ".",
+            "%2E",
+            "%2F",
+            "%00",
+            "%",
+            "%4",
+            "%zz",
+            "%41",
+            "a",
+            "é",
+            " ",
+            "\0",
+            "~",
+            "\\",
+        ];
+        let top = Path::new(if cfg!(windows) { r"D:\mnt" } else { "/mnt/usb" });
+        crate::prop::check("trashinfo_any", 3000, |r| {
+            let text = if r.one_in(4) { r.string(80) } else { r.from(BITS, 30) };
+            for t in [None, Some(top)] {
+                if let Ok(p) = parse_info(&text, t) {
+                    assert!(p.is_absolute(), "{text:?} → {p:?}");
+                    assert!(!p.components().any(|c| matches!(c, std::path::Component::ParentDir)), "{text:?} → {p:?}");
+                    assert!(!p.as_os_str().as_encoded_bytes().contains(&0), "{text:?} → {p:?}");
+                    let relative = text
+                        .lines()
+                        .find_map(|l| l.trim_end_matches('\r').strip_prefix("Path="))
+                        .is_some_and(|v| !v.starts_with(['/', '%']));
+                    if relative && let Some(t) = t {
+                        assert!(p.starts_with(t), "{text:?} → {p:?}");
+                    }
+                }
+            }
+        });
+    }
+
+    /// What Arbor's own trash writes reads back as the same place, for any name (Linux).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn any_path_round_trips_through_a_record() {
+        use std::os::unix::ffi::OsStringExt;
+        crate::prop::check("trashinfo_round_trip", 2000, |r| {
+            let mut b = vec![b'/'];
+            for _ in 0..1 + r.below(4) {
+                let mut name: Vec<u8> = r.bytes(12).into_iter().filter(|&c| c != 0 && c != b'/').collect();
+                if name.is_empty() || name == b".." || name == b"." {
+                    name = b"n".to_vec();
+                }
+                b.extend(name);
+                b.push(b'/');
+            }
+            b.pop();
+            let p = PathBuf::from(std::ffi::OsString::from_vec(b));
+            let text = format!("[Trash Info]\nPath={}\nDeletionDate=2026-11-09T10:00:00\n", crate::trash::url_escape(&p));
+            assert_eq!(parse_info(&text, None).as_ref(), Ok(&p), "{text:?}");
+        });
+    }
+
+    /// Found by `any_record_gives_a_safe_place_or_an_error`: `%00` (or a raw NUL) put a NUL in
+    /// the place to put an item back, and `%2F` hid a separator; both are refused now.
+    #[test]
+    fn a_record_with_a_nul_or_an_escaped_slash_is_refused() {
+        let root = if cfg!(windows) { "C:/" } else { "/" };
+        for v in ["a%00b", "a\0b", "a%2F..%2Fb", "a%2fb"] {
+            assert!(parse_info(&format!("[Trash Info]\nPath={root}{v}\n"), None).is_err(), "{v:?}");
+        }
+        assert!(parse_info(&format!("[Trash Info]\nPath={root}a%2Cb\n"), None).is_ok());
+    }
+
+    /// A giant record is read at most 64 KB (`read_info_at`) and parsed at once.
+    #[test]
+    fn a_giant_record_is_parsed_quickly() {
+        let text = format!("[Trash Info]\nPath=/{}\n", "%41".repeat(1 << 20));
+        let p = crate::prop::within(std::time::Duration::from_secs(2), "a 3 MB record", move || parse_info(&text, None));
+        assert!(p.is_ok());
     }
 
     /// The home trash, then each disk's `.Trash/$uid` (only under a sticky `.Trash` that isn't

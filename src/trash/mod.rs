@@ -299,7 +299,7 @@ pub fn forget(trashed: &Path) {
 pub fn forget(_trashed: &Path) {}
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn url_escape(p: &Path) -> String {
+pub(crate) fn url_escape(p: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     let mut s = String::new();
     for &b in p.as_os_str().as_bytes() {
