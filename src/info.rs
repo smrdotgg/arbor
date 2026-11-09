@@ -28,8 +28,8 @@ use std::time::{Duration, Instant};
 use rune::Latest;
 
 use crate::app::State;
-use crate::delete::{Fence, Mounts};
 use crate::fs;
+use crate::mounts::{Fence, Mounts};
 
 /// How often a walk wakes the window at most while it counts.
 const WAKE_EVERY: Duration = Duration::from_millis(30);

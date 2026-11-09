@@ -9,9 +9,9 @@
 //!   folder's), and Arbor doesn't change any: what can't be removed is reported.
 //! - **Mounts:** a folder on another device than the item (a disk, a FUSE or network mount), or
 //!   a mount point on the same one (a bind mount: Linux reads `/proc/self/mountinfo` once per
-//!   operation, [`Mounts`]), is never entered or removed: the delete stops there and says another
+//!   operation, [`Mounts`](crate::mounts::Mounts)), is never entered or removed: the delete stops there and says another
 //!   disk is mounted there. So does an item that is itself a mount point. On macOS each folder's
-//!   volume is compared too ([`volume`]): the APFS volumes of one group share a device number
+//!   volume is compared too (`mounts::volume`): the APFS volumes of one group share a device number
 //!   (`/` and `/System/Volumes/Data`), and firmlinks (`/Users`, `/Applications`) lead from one
 //!   to the other.
 //! - **Identity:** each folder's opened handle must be the folder that was checked, and before
@@ -23,6 +23,8 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+
+use crate::mounts::{Fence, Mounts};
 
 /// Why a delete stopped.
 #[derive(Debug)]
@@ -48,157 +50,6 @@ impl Halt {
             Halt::Mounted { at } => Some((at, "another disk is mounted there".into())),
             Halt::Changed { at } => Some((at, "it was moved or replaced while it was being deleted".into())),
         }
-    }
-}
-
-/// Where other file systems are mounted: read once per operation, on its worker. Only Linux
-/// lists them (for bind mounts, which share their device); elsewhere every mount has a device
-/// of its own, which the walk compares.
-#[derive(Clone, Debug, Default)]
-pub struct Mounts(Vec<PathBuf>);
-
-impl Mounts {
-    pub fn read() -> Mounts {
-        #[cfg(target_os = "linux")]
-        if let Ok(s) = std::fs::read_to_string("/proc/self/mountinfo") {
-            return Mounts::parse(&s);
-        }
-        Mounts::default()
-    }
-
-    /// `/proc/self/mountinfo`'s mount points (the fifth field, with its octal escapes).
-    #[cfg(any(target_os = "linux", test))]
-    pub fn parse(s: &str) -> Mounts {
-        Mounts(s.lines().filter_map(|l| l.split(' ').nth(4)).map(unescape).collect())
-    }
-
-    /// Exactly these mount points (tests).
-    #[cfg(test)]
-    pub fn of(points: &[&Path]) -> Mounts {
-        Mounts(points.iter().map(|p| p.to_path_buf()).collect())
-    }
-
-    /// The mount points at or below `root` (a canonical path).
-    fn under(&self, root: &Path) -> Vec<PathBuf> {
-        self.0.iter().filter(|m| m.starts_with(root)).cloned().collect()
-    }
-}
-
-/// `\040` and the like back to their bytes.
-#[cfg(any(target_os = "linux", test))]
-fn unescape(s: &str) -> PathBuf {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'\\' && i + 3 < b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
-            out.push((b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0'));
-            i += 4;
-        } else {
-            out.push(b[i]);
-            i += 1;
-        }
-    }
-    #[cfg(unix)]
-    return PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(out));
-    #[cfg(not(unix))]
-    PathBuf::from(String::from_utf8_lossy(&out).into_owned())
-}
-
-/// macOS: which volume a folder is on, as the mount point `statfs` names (`f_mntonname`). The
-/// APFS volumes of one group share a device number, and a firmlink (`/Users`, `/Applications`)
-/// leads from the system volume to the Data volume, so a device number alone doesn't tell
-/// them apart. Elsewhere `None`: the device number does.
-pub mod volume {
-    #[cfg(target_os = "macos")]
-    fn name(s: &libc::statfs) -> Vec<u8> {
-        s.f_mntonname.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect()
-    }
-
-    /// The volume of the open folder `fd`.
-    #[cfg(unix)]
-    pub fn of_fd(fd: std::os::fd::RawFd) -> Option<Vec<u8>> {
-        #[cfg(target_os = "macos")]
-        {
-            // SAFETY: a zeroed statfs is a valid out-buffer for an open descriptor.
-            let mut s: libc::statfs = unsafe { std::mem::zeroed() };
-            (unsafe { libc::fstatfs(fd, &mut s) } == 0).then(|| name(&s))
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = fd;
-            None
-        }
-    }
-
-    /// The volume of the folder at `p` (following links: call it for folders).
-    pub fn of_path(p: &std::path::Path) -> Option<Vec<u8>> {
-        #[cfg(target_os = "macos")]
-        {
-            let c = crate::ffi::cstr(p).ok()?;
-            // SAFETY: a NUL-terminated path and a zeroed out-buffer.
-            let mut s: libc::statfs = unsafe { std::mem::zeroed() };
-            (unsafe { libc::statfs(c.as_ptr(), &mut s) } == 0).then(|| name(&s))
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = p;
-            None
-        }
-    }
-}
-
-/// The mount boundaries of one tree: its device (and on macOS its volume), and the mount points
-/// inside it (by canonical path). For the other recursive removals (a cancelled copy's leftovers,
-/// a cross-disk move's originals) and the count of what's left, which go by path.
-pub struct Fence {
-    root: PathBuf,
-    canon: PathBuf,
-    #[cfg(unix)]
-    dev: Option<u64>,
-    vol: Option<Vec<u8>>,
-    inside: Vec<PathBuf>,
-}
-
-impl Fence {
-    pub fn new(root: &Path, mounts: &Mounts) -> Fence {
-        let canon = canonical(root);
-        let meta = root.symlink_metadata().ok();
-        #[cfg(unix)]
-        let dev = meta.as_ref().map(std::os::unix::fs::MetadataExt::dev);
-        Fence {
-            root: root.to_path_buf(),
-            inside: mounts.under(&canon),
-            canon,
-            #[cfg(unix)]
-            dev,
-            vol: meta.filter(|m| m.is_dir()).and_then(|_| volume::of_path(root)),
-        }
-    }
-
-    /// Whether `p` (in the tree, with its own `lstat`) is a mount point or on another disk.
-    pub fn crosses(&self, p: &Path, m: &std::fs::Metadata) -> bool {
-        #[cfg(unix)]
-        if self.dev.is_some_and(|d| d != std::os::unix::fs::MetadataExt::dev(m)) {
-            return true;
-        }
-        if m.is_dir() && self.vol.is_some() && volume::of_path(p) != self.vol {
-            return true;
-        }
-        #[cfg(not(unix))]
-        let _ = m;
-        let rel = p.strip_prefix(&self.root).unwrap_or(p);
-        !self.inside.is_empty() && self.inside.iter().any(|i| self.canon.join(rel).starts_with(i))
-    }
-}
-
-/// `p` with its parent's links resolved (its own name kept as it is, since it may be a link).
-fn canonical(p: &Path) -> PathBuf {
-    match (p.parent(), p.file_name()) {
-        (Some(d), Some(n)) => {
-            std::fs::canonicalize(if d.as_os_str().is_empty() { Path::new(".") } else { d }).map_or_else(|_| p.into(), |d| d.join(n))
-        }
-        _ => p.to_path_buf(),
     }
 }
 
@@ -266,7 +117,8 @@ mod imp {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
 
-    use super::{Halt, Mounts, volume};
+    use super::Halt;
+    use crate::mounts::{Mounts, volume};
 
     use crate::ffi::cstr;
 
@@ -301,7 +153,7 @@ mod imp {
         let st = stat_at(&dir, &name).map_err(|e| fail(path, e))?;
         // An item on another device than its folder is itself a mount point.
         let parent_dev = fstat(&dir).map_err(|e| fail(parent, e))?.st_dev;
-        let canon = super::canonical(path);
+        let canon = crate::mounts::canonical(path);
         let inside = mounts.under(&canon);
         if is_dir(&st) && st.st_dev != parent_dev {
             return Err(Halt::Mounted { at: path.to_path_buf() });
@@ -440,7 +292,8 @@ mod imp {
     use std::os::windows::fs::FileTypeExt;
     use std::path::{Path, PathBuf};
 
-    use super::{Halt, Mounts};
+    use super::Halt;
+    use crate::mounts::Mounts;
 
     fn fail(at: &Path, err: io::Error) -> Halt {
         Halt::Failed { at: at.to_path_buf(), err }
@@ -467,7 +320,7 @@ mod imp {
     pub fn remove_tree(path: &Path, mounts: &Mounts, go: &mut dyn FnMut(&Path) -> bool, removed: &mut u64, _dry: bool) -> Result<(), Halt> {
         // Windows lists no mounts (a volume mounted in a folder is a reparse point, checked
         // below); a list given in tests is honoured all the same.
-        let canon = super::canonical(path);
+        let canon = crate::mounts::canonical(path);
         let inside = mounts.under(&canon);
         rm(path, &canon, &inside, go, removed)
     }
@@ -654,18 +507,6 @@ mod tests {
         assert!(matches!(&r, Err(Halt::Mounted { at }) if at == &d.join("a/b")), "{r:?}");
         assert!(d.join("a/b/f").exists());
         let _ = fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn reads_the_mount_table() {
-        let m = Mounts::parse(
-            "22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/root rw\n\
-             36 22 0:31 / /media/my\\040disk rw,nosuid - fuse.sshfs host: rw\n\
-             37 22 0:32 /sub /srv/bind rw - ext4 /dev/root rw\n",
-        );
-        assert_eq!(m.0, [PathBuf::from("/"), PathBuf::from("/media/my disk"), PathBuf::from("/srv/bind")]);
-        assert_eq!(m.under(Path::new("/media")), [PathBuf::from("/media/my disk")]);
-        assert!(m.under(Path::new("/srv/bin")).is_empty(), "a path prefix isn't a parent");
     }
 
     /// Deletes `ARBOR_DELETE_PROBE` for real, with the system's mount table (or none, with

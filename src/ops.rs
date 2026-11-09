@@ -590,7 +590,7 @@ struct Hooks {
     /// replaces it as if another app did so while a stalled copy was still writing.
     copied: Option<PathHook>,
     /// The mount table, instead of the system's (a folder a test says is a mount point).
-    mounts: Option<crate::delete::Mounts>,
+    mounts: Option<crate::mounts::Mounts>,
 }
 
 struct Worker<'a> {
@@ -607,7 +607,7 @@ struct Worker<'a> {
     seen_by_search: bool,
     /// Where other disks are mounted, read once per operation when a recursive removal first
     /// needs it, so none crosses into one.
-    mounts: std::cell::OnceCell<crate::delete::Mounts>,
+    mounts: std::cell::OnceCell<crate::mounts::Mounts>,
     #[cfg(test)]
     hooks: Hooks,
 }
@@ -658,13 +658,13 @@ impl<'a> Worker<'a> {
     }
 
     /// The mount table (read on first use, then kept for this operation).
-    fn mounts(&self) -> &crate::delete::Mounts {
+    fn mounts(&self) -> &crate::mounts::Mounts {
         self.mounts.get_or_init(|| {
             #[cfg(test)]
             if let Some(m) = &self.hooks.mounts {
                 return m.clone();
             }
-            crate::delete::Mounts::read()
+            crate::mounts::Mounts::read()
         })
     }
 
@@ -1446,7 +1446,7 @@ impl<'a> Worker<'a> {
         let (mut kept, mut first) = (0, None);
         // The first item made is the moved item itself: nothing on another disk mounted inside
         // it is removed (it was copied; the original stays where it's mounted).
-        let fence = made.first().map(|m| crate::delete::Fence::new(&m.src, self.mounts()));
+        let fence = made.first().map(|m| crate::mounts::Fence::new(&m.src, self.mounts()));
         for m in made.iter().rev() {
             if let (Some(f), Ok(meta)) = (&fence, m.src.symlink_metadata())
                 && f.crosses(&m.src, &meta)
@@ -1490,7 +1490,7 @@ impl<'a> Worker<'a> {
     /// just before), deepest first, folders only once empty.
     fn remove_rest(&mut self, at: &Path, copy: &Print) -> Result<(), MoveError> {
         let mut kept = None;
-        let fence = crate::delete::Fence::new(at, self.mounts());
+        let fence = crate::mounts::Fence::new(at, self.mounts());
         self.remove_tree_checked(at, &fence, &mut kept);
         match kept {
             None => Ok(()),
@@ -1501,7 +1501,7 @@ impl<'a> Worker<'a> {
     /// Only an item that's really gone counts as removed: one that can't be read (its folder
     /// lost its permissions, say) is kept, and the step's record with it. Never enters or
     /// removes a mount point (`fence`).
-    fn remove_tree_checked(&self, p: &Path, fence: &crate::delete::Fence, kept: &mut Option<String>) {
+    fn remove_tree_checked(&self, p: &Path, fence: &crate::mounts::Fence, kept: &mut Option<String>) {
         let keep = |kept: &mut Option<String>, e: io::Error| {
             kept.get_or_insert_with(|| format!("“{}”: {e}", p.display()));
         };
@@ -3237,7 +3237,7 @@ mod tests {
         fs::create_dir_all(d.join("doomed/mnt")).unwrap();
         fs::write(d.join("doomed/mnt/precious"), "keep").unwrap();
         let canon = fs::canonicalize(&d).unwrap();
-        let mounts = crate::delete::Mounts::of(&[&canon.join("doomed").join("mnt")]);
+        let mounts = crate::mounts::Mounts::of(&[&canon.join("doomed").join("mnt")]);
         let o =
             run_hooked(Op::Delete { items: doomed(&[d.join("doomed")]) }, fake_trash, Hooks { mounts: Some(mounts), ..Hooks::default() });
         assert!(o.removed.is_empty());
@@ -3255,7 +3255,7 @@ mod tests {
         fs::write(d.join("src/plain"), "x").unwrap();
         fs::create_dir(d.join("into")).unwrap();
         let canon = fs::canonicalize(&d).unwrap();
-        let mounts = crate::delete::Mounts::of(&[&canon.join("src").join("mnt")]);
+        let mounts = crate::mounts::Mounts::of(&[&canon.join("src").join("mnt")]);
         let o = run_hooked(
             Op::Move { sources: vec![d.join("src")], dest: d.join("into") },
             fake_trash,

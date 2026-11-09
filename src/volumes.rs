@@ -89,27 +89,10 @@ const PSEUDO: &[&str] = &[
     "tracefs",
 ];
 
-/// `/proc/self/mounts`' escapes: a space is `\040`, a tab `\011`, a newline `\012`, a
-/// backslash `\134`.
+/// A field of `/proc/self/mounts`, its escapes undone ([`crate::mounts::unescape_bytes`]).
 #[cfg_attr(not(any(test, all(unix, not(target_os = "macos")))), allow(dead_code))]
 pub fn unescape_mount(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'\\'
-            && i + 3 < b.len()
-            && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
-            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 4], 8)
-        {
-            out.push(v);
-            i += 4;
-            continue;
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8_lossy(&crate::mounts::unescape_bytes(s)).into_owned()
 }
 
 /// The user-visible volumes in a `/proc/self/mounts` text, in mount order: one level under

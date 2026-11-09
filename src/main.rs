@@ -27,6 +27,7 @@ mod incoming;
 mod info;
 mod jump;
 mod menu;
+mod mounts;
 mod noclobber;
 mod openwith;
 mod ops;
