@@ -161,8 +161,9 @@ universal `Arbor.app`: this Mac's slice as usual and the other with `--target` (
 `rustup target add x86_64-apple-darwin` on Apple silicon), joined with `lipo`, both built for
 macOS 11 (`MACOSX_DEPLOYMENT_TARGET`, matching the Info.plist's `LSMinimumSystemVersion`);
 `ARCH=native` builds this Mac's slice alone. `arbor --version` prints the version without a
-window. CI checks both slices and their minimum version, and runs the Intel slice's
-`--version` under Rosetta. The icon is drawn by
+window. CI checks both slices and their minimum version, and, best effort when its runner has
+(or can install) Rosetta, runs the Intel slice's `--version` under it; without Rosetta it
+warns and the slice is only checked, not run. The icon is drawn by
 `scripts/icon.py` (an original tree glyph; pure Python) into `assets/icon/`, and
 `scripts/package.sh --icns` turns it into `Arbor.icns` on a Mac. On Windows, `build.rs` writes
 the icon and version information into a resource file the linker takes (no resource compiler,
@@ -967,7 +968,8 @@ All three build, pass tests and pass clippy in CI. How much has been run for rea
 - **Milestone 14, not run for real:** emptying a real Trash on any platform (tests use fixture
   trashes, never the user's), the Full Disk Access message on a Mac without it, Windows'
   `SHEmptyRecycleBinW`, and dragging tabs with a real pointer. The universal package's Intel
-  slice is run only on CI's macOS runner (under Rosetta); the M4 Pro here has no Rosetta.
+  slice is run only on CI's macOS runner, and only when that runner has Rosetta (otherwise CI
+  warns and goes on); the M4 Pro here has no Rosetta.
 - **macOS packaging**, checked on the M4 Pro: `Arbor.app` passes `plutil -lint` and `codesign
   --verify`, its icon has every size, it launches with `open` and quits, a folder passed at
   launch (`open -a Arbor.app dir`) opens in its first tab, and one sent to the running app opens
