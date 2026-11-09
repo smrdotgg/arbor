@@ -648,11 +648,12 @@ pub(crate) mod windows {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::path::PathBuf;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, OPEN_EXISTING, PIPE_ACCESS_INBOUND, ReadFile, WriteFile,
+        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
     };
+    use windows_sys::Win32::System::IO::CancelSynchronousIo;
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE,
         PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
@@ -676,9 +677,29 @@ pub(crate) mod windows {
         format!(r"\\.\pipe\gg.smr.arbor.{session}.{user}")
     }
 
-    /// The paths as the pipe carries them: UTF-16 code units, each path ended by a NUL.
+    /// How long a second Arbor waits, once connected, for the running one to take its paths
+    /// and say so; then it opens its own window instead.
+    pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// What the running Arbor answers once it has read a request.
+    const ACK: u8 = 1;
+
+    /// The paths as the pipe carries them: UTF-16 code units, each path ended by a NUL, and one
+    /// more NUL to end the request (so the running Arbor knows it's all there and can answer
+    /// on the same pipe). An older client just closes its end.
     pub fn encode(paths: &[PathBuf]) -> Vec<u8> {
-        paths.iter().flat_map(|p| p.as_os_str().encode_wide().chain([0])).flat_map(u16::to_le_bytes).collect()
+        paths
+            .iter()
+            .filter(|p| !p.as_os_str().is_empty())
+            .flat_map(|p| p.as_os_str().encode_wide().chain([0]))
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    }
+
+    /// Whether `bytes` holds a whole request (it ends with the extra NUL).
+    fn complete(bytes: &[u8]) -> bool {
+        bytes.len() >= 4 && bytes.len().is_multiple_of(2) && bytes[bytes.len() - 4..] == [0, 0, 0, 0]
     }
 
     pub fn decode(bytes: &[u8]) -> Vec<PathBuf> {
@@ -707,8 +728,9 @@ pub(crate) mod windows {
         let name = wide(name);
         for _ in 0..3 {
             // SAFETY: `name` is NUL-terminated; no security attributes or template.
-            let h: HANDLE =
-                unsafe { CreateFileW(name.as_ptr(), GENERIC_WRITE, 0, std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut()) };
+            let h: HANDLE = unsafe {
+                CreateFileW(name.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0, std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut())
+            };
             if h == INVALID_HANDLE_VALUE {
                 // SAFETY: plain calls; `name` is NUL-terminated.
                 if unsafe { GetLastError() } == ERROR_PIPE_BUSY && unsafe { WaitNamedPipeW(name.as_ptr(), 2000) } != 0 {
@@ -721,7 +743,20 @@ pub(crate) mod windows {
             if unsafe { GetNamedPipeServerProcessId(h, &mut pid) } != 0 {
                 unsafe { AllowSetForegroundWindow(pid) };
             }
-            let bytes = encode(paths);
+            return exchange(h, encode(paths), DEADLINE);
+        }
+        false
+    }
+
+    /// Writes the request on the connected pipe `h` and waits for the running Arbor's answer,
+    /// on a thread of its own, for at most `deadline`: a running Arbor that's hung (or stuck on
+    /// an earlier request) never holds this launch up. On time out the thread's blocked call is
+    /// cancelled and false comes back (this one opens its own window). Closes `h`.
+    fn exchange(h: HANDLE, bytes: Vec<u8>, deadline: std::time::Duration) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let pipe = h as usize;
+        let worker = std::thread::spawn(move || {
+            let h = pipe as HANDLE;
             let mut sent = 0usize;
             let mut ok = true;
             while sent < bytes.len() {
@@ -734,14 +769,28 @@ pub(crate) mod windows {
                 }
                 sent += n as usize;
             }
-            // SAFETY: `h` is ours to flush and close.
-            unsafe {
-                FlushFileBuffers(h);
-                CloseHandle(h);
+            let mut ack = [0u8];
+            let mut n = 0u32;
+            // SAFETY: `h` is the open pipe; `ack` is valid for one byte.
+            ok = ok
+                && unsafe { FlushFileBuffers(h) } != 0
+                && unsafe { ReadFile(h, ack.as_mut_ptr(), 1, &mut n, std::ptr::null_mut()) } != 0
+                && n == 1
+                && ack[0] == ACK;
+            // SAFETY: `h` is ours to close.
+            unsafe { CloseHandle(h) };
+            let _ = tx.send(ok);
+        });
+        match rx.recv_timeout(deadline) {
+            Ok(ok) => ok,
+            Err(_) => {
+                use std::os::windows::io::AsRawHandle;
+                // SAFETY: the worker's own thread handle, alive while `worker` is; it then
+                // closes the pipe and ends.
+                unsafe { CancelSynchronousIo(worker.as_raw_handle() as HANDLE) };
+                false
             }
-            return ok;
         }
-        false
     }
 
     /// Serves `name` on a thread of its own, sending what each client writes to `sink`. Does
@@ -769,8 +818,16 @@ pub(crate) mod windows {
                     let next = make(&wname, false);
                     if connected {
                         let paths = decode(&read_all(h));
+                        // Taken: the client can go (it waits for this, a second at most).
+                        let mut n = 0u32;
+                        // SAFETY: `h` is the connected pipe; one byte from a valid buffer.
+                        unsafe { WriteFile(h, [ACK].as_ptr(), 1, &mut n, std::ptr::null_mut()) };
+                        unsafe { FlushFileBuffers(h) };
+                        // Which are folders is a disk question, which can be slow: not on this
+                        // thread, which goes straight back to serving the next client.
                         if !paths.is_empty() {
-                            sink(classify(paths, false), None);
+                            let sink = sink.clone();
+                            std::thread::spawn(move || sink(classify(paths, false), None));
                         }
                     }
                     // SAFETY: done with this client and this instance.
@@ -789,16 +846,16 @@ pub(crate) mod windows {
 
     /// One instance of the pipe `name` (NUL-terminated); `first` fails if any exists already.
     fn make(name: &[u16], first: bool) -> HANDLE {
-        let mode = PIPE_ACCESS_INBOUND | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 };
+        let mode = PIPE_ACCESS_DUPLEX | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 };
         // SAFETY: `name` is NUL-terminated; default security (this user and administrators may
-        // write, others only read, which an inbound pipe gives them nothing to do).
+        // write, others only read, which gives them at most the one-byte answer).
         unsafe {
             CreateNamedPipeW(
                 name.as_ptr(),
                 mode,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_UNLIMITED_INSTANCES,
-                0,
+                64,
                 64 * 1024,
                 0,
                 std::ptr::null(),
@@ -806,11 +863,12 @@ pub(crate) mod windows {
         }
     }
 
-    /// Everything the client writes, until it closes its end (at most 1 MB).
+    /// Everything the client writes, until its request ends (or it closes its end; at most
+    /// 1 MB).
     fn read_all(h: HANDLE) -> Vec<u8> {
         let mut out = Vec::new();
         let mut buf = [0u8; 4096];
-        while out.len() < 1 << 20 {
+        while out.len() < 1 << 20 && !complete(&out) {
             let mut n = 0u32;
             // SAFETY: `buf` is valid for its length.
             if unsafe { ReadFile(h, buf.as_mut_ptr(), buf.len() as u32, &mut n, std::ptr::null_mut()) } == 0 || n == 0 {
@@ -828,8 +886,36 @@ pub(crate) mod windows {
         #[test]
         fn paths_survive_the_pipe_encoding() {
             let paths = vec![PathBuf::from(r"C:\Users\me\Documents"), PathBuf::from(r"D:\été\naïve 2")];
-            assert_eq!(decode(&encode(&paths)), paths);
+            let bytes = encode(&paths);
+            assert!(complete(&bytes) && !complete(&bytes[..bytes.len() - 2]), "the extra NUL ends it");
+            assert_eq!(decode(&bytes), paths);
             assert!(decode(&[]).is_empty());
+            assert_eq!(
+                decode(&encode(&[PathBuf::new(), PathBuf::from(r"C:\")])),
+                [PathBuf::from(r"C:\")],
+                "an empty path can't end it early"
+            );
+        }
+
+        /// The review's case: a running Arbor that accepts the connection but never reads (hung,
+        /// or stuck on an earlier request) used to hold a later launch forever. Now it gives
+        /// up after the deadline and opens its own window.
+        #[test]
+        fn a_stalled_first_arbor_doesnt_hold_a_launch() {
+            let name = format!(r"\\.\pipe\gg.smr.arbor.stalled.{}", std::process::id());
+            let wname = wide(&name);
+            let h = make(&wname, true) as usize;
+            let (connected, hold) = std::sync::mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                // SAFETY: the instance made above; it's never read from.
+                unsafe { ConnectNamedPipe(h as HANDLE, std::ptr::null_mut()) };
+                let _ = connected.send(());
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            });
+            let t = std::time::Instant::now();
+            assert!(!hand_off(&name, &[PathBuf::from(r"C:\")]), "not taken");
+            assert!(t.elapsed() < DEADLINE * 3, "gave up in {:?}", t.elapsed());
+            drop(hold);
         }
 
         /// A second Arbor's hand-off reaches the first: each folder as a request, and the

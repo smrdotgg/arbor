@@ -125,7 +125,9 @@ Linux through D-Bus, and Windows through a named pipe: a second `arbor.exe <fold
 folder to the first and exits before opening a window): each in a new tab of the active pane,
 or, when Arbor was started for it and nobody has used the window yet, in its first tab. "Show
 item" requests open the item's folder with the item selected. On Windows, `arbor.exe` without a
-folder still opens a window of its own, and two started at the same instant may both open.
+folder still opens a window of its own, and two started at the same instant may both open. A
+running Arbor that doesn't answer within a second (hung, say) doesn't hold the new one up: it
+opens its own window.
 
 - **macOS:** LaunchServices' viewer for folders (`public.folder`) becomes `gg.smr.arbor`, which
   only works from `Arbor.app` (the bare program says so). Restore sets back the viewer you had
