@@ -16,6 +16,42 @@ Newest first.
 
 ---
 
+## Volumes: no mount or device notifications
+
+- **Feature:** the sidebar's Locations (milestone 12), which should show a USB stick when it's
+  plugged in and drop it when it's pulled, as Finder's and Explorer's do, without polling.
+- **What Rune is missing:** a way to hear that volumes changed: macOS's NSWorkspace
+  `didMount`/`didUnmount` notifications, Windows' `WM_DEVICECHANGE` (sent to top-level windows;
+  Rune's window procedure doesn't pass it on), and on Linux udisks' D-Bus signals.
+- **What we did instead:** on macOS Arbor registers its own observer with NSWorkspace's
+  notification center (`volumes::mac_watch`); on Windows it makes a hidden top-level window of
+  its own on a thread that sleeps in `GetMessage` (`volumes::win_watch`). Each refreshes the list
+  on a worker. Linux refreshes by hand (a sidebar right-click, ⌘R).
+- **What users lose:** on Linux, a stick plugged in shows only after a right-click or ⌘R. On
+  Windows, a thread and a hidden window for something the app's own window already receives.
+- **Suggested Rune change:** `App::on_volumes_changed(|s, tx|)`, from NSWorkspace on macOS,
+  `WM_DEVICECHANGE` on Windows, and udisks' `InterfacesAdded`/`InterfacesRemoved` (or
+  `/proc/self/mounts` becoming readable with `POLLPRI`) on Linux.
+
+## Native menus: a submenu can't be filled when it opens
+
+- **Feature:** Open With's submenu in the context menu (milestone 12): the apps that open the
+  file, which take Launch Services a few milliseconds to list (NORTHSTAR: pay only for what
+  you use).
+- **What Rune is missing:** a callback when a submenu is about to open (AppKit's
+  `menuNeedsUpdate:` / `menu:updateItem:…`, Windows' `WM_INITMENUPOPUP`), or a way to change an
+  open menu. `PopupMenu` is fixed when `Tx::popup_menu` is called.
+- **What we did instead:** the right-click on a file asks a worker for the apps and waits at
+  most a frame (`State::apps_for_menu` in `src/openwith.rs`); if they're in, the menu has an
+  Open With submenu, otherwise an "Open With…" item that opens Arbor's own list, which fills in
+  when the worker answers.
+- **What users lose:** every right-click on a file lists the apps whether or not the submenu is
+  opened (a few ms on a worker), and on a slow Launch Services the submenu becomes a separate
+  list.
+- **Suggested Rune change:** `PopupMenu::lazy_submenu(title, id)` with
+  `Tx::popup_menu`'s callback getting a "fill `id`" request (answered with a `PopupMenu`), or an
+  `App::on_menu_will_open`.
+
 ## Accessibility: no way to put keyboard focus on an element from a handler
 
 - **Feature:** screen-reader use of the file list (milestone 11; NORTHSTAR "zero learning to
@@ -298,6 +334,9 @@ Newest first.
   drop elsewhere. Starting every row drag as Arbor's own and handing it to the OS only when the
   pointer leaves the window isn't possible either: which of the two a press becomes is fixed per
   element when it starts (above).
+- **The sidebar, too (milestone 12):** rows dragged onto the sidebar add their folders through
+  the same in-window drag, which now runs unsplit as well; on macOS, unsplit, the row's drag is
+  the system's, so it can't land on the sidebar of its own window (folders from Finder can).
 - **What users lose:** on macOS, while split, a row can't be dragged out to Finder or another
   app; closing the split (⌘\\) brings that back. The in-window drag shows no drag image under the
   pointer, only the target pane's highlight, and can't drop on a folder row in the other pane

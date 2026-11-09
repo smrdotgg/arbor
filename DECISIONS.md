@@ -109,6 +109,61 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-09 · Scope: Milestone 12 (everyday parity: sidebar favorites, volumes and eject,
+  Open With, Get Info)** chosen by the agent after all NORTHSTAR Core features were built, to
+  serve milestone 1 (a month without Finder/Explorer). NORTHSTAR's 'Later' list (operation
+  queue, folder sizes column, archives, terminal, compare) was not started.
+- **2026-11-09 · Sidebar favorites live in `sidebar.toml`, beside `config.toml`.** The settings'
+  `[general] places` becomes the default list: it applies until the first change made in Arbor,
+  and again once `sidebar.toml` is deleted (a settings reload leaves the user's own list alone).
+  A file that can't be read gives the defaults and a note; the next change replaces it (no
+  backup of the bad file). Home is written as `~`. ⌘1–9 count favorites first, then Locations.
+  Undo: `sidebar::load` in `Booting::start`.
+- **2026-11-09 · Add to Sidebar has no default key.** Finder's ⌃⌘T becomes Ctrl+T (New Tab) off
+  macOS, so a settings file shared between a Mac and a PC would clash (the template test caught
+  it). It's in the palette, the context menu, drag and drop. Undo: give `SidebarAdd` a key in
+  `src/commands.rs`.
+- **2026-11-09 · A missing favorite is found by one `stat` per favorite per launch,** each on a
+  thread of its own, from the first `poll` after the first listing (not by the startup read: the
+  window never waits for it). The sidebar has no virtual rows, so "when shown" is "once the
+  window is up". A favorite that vanishes later is marked when a click's read finds it missing.
+  Undo: `State::look_at_favorites`.
+- **2026-11-09 · Locations: which volumes, and when they're read.** Linux: one level under
+  `/media/$USER`, `/run/media/$USER`, `/media` and `/mnt`, not kernel file systems; Eject only
+  for block devices under `/media` and `/run/media` (udisks' mounts; `/mnt` needs root). macOS:
+  `/Volumes` minus links to `/`, leftover folders (same device as `/Volumes`), dot names and
+  `com.apple.*`. Windows: drive letters with labels, except network drives (a disconnected one
+  can take seconds), on a thread with critical-error dialogs off. Read on a worker from the first
+  frame, then on: the sidebar's menu, ⌘R, after an eject, macOS mount notifications, Windows
+  `WM_DEVICECHANGE`. Linux refreshes by hand only, as the task said; udisks' D-Bus signals or
+  `poll(2)` on `/proc/self/mounts` would do it without polling, later. The volumes left the
+  favorites (they used to be appended to the places). Undo: `volumes::list`.
+- **2026-11-09 · Windows Eject locks, dismounts and ejects the volume with `DeviceIoControl`,
+  not the shell's Eject verb (Review: never run on Windows).** A lock that's refused is exactly
+  "in use by another app", which the verb doesn't report. Undo: `volumes::win_eject`.
+- **2026-11-09 · Open With: Windows shows its own dialog (`SHOpenWithDialog`); macOS gets a
+  native submenu only when the apps are read within a frame of the right-click,** "Open With…"
+  (Arbor's list) otherwise, since a native menu can't be filled after it opens (RUNE-GAPS.md);
+  Linux's in-window menu has no submenus, so "Open With…" opens the list. Computing the list at
+  right-click is the closest to "when the submenu opens". Undo: `State::apps_for_menu`.
+- **2026-11-09 · No "Other…" in Open With on macOS and Linux (Review).** Rune's native file
+  dialog (`Tx::open_file`, which would be an NSOpenPanel on `/Applications`) is behind its
+  `native-file-dialog` feature, which needs the `rfd` crate, not vendored (no new crates). Linux
+  has no standard app picker. To add: enable the feature (and vendor `rfd`), then an "Other…"
+  row opening `/Applications` filtered to `.app`. Windows' dialog has "Choose another app".
+- **2026-11-09 · Linux Open With: any `text/*` file also lists the plain-text apps; MIME
+  subclasses and aliases aren't followed otherwise; `Terminal=true` apps are started directly;
+  an `Exec` line without a file code gets the files at the end.** Undo: `openwith::linux::list`,
+  `xdg::exec_argv`.
+- **2026-11-09 · Get Info shares the preview's place** (one or the other), follows the selection
+  the same way, and counts apparent sizes (each hard link counts, as Finder's does). Changing
+  attributes (hidden, read-only) isn't offered: it couldn't go on the undo stack. Rename is the
+  list's own. Undo: `info.rs`, `side_panel` in `src/view.rs`.
+- **2026-11-09 · Rows dragged onto the sidebar add their folders in a split window and on Linux
+  and Windows; not on macOS unsplit,** where a row drag is a system drag that can't land in its
+  own window (RUNE-GAPS.md). Folders dropped from Finder or other apps work everywhere. Undo:
+  the `inside` drag in `file_row`.
+
 - **2026-11-09 · Review of milestone 10, fixed** (each with a test that fails on the old code):
   the backup is saved and flushed before any change on all three platforms, Windows writes
   commands before the default selectors and puts a half-made change back from the snapshot; a

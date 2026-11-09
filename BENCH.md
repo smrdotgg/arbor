@@ -27,6 +27,51 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-09, milestone 12 (sidebar favorites, Locations and Eject, Open With, Get Info)
+
+What could cost time: at startup, reading `sidebar.toml` (on the thread that reads the first
+folder, never the window's), then after the first frame one worker reading the volumes and one
+`stat` per favorite, each on its own thread; on every frame, the sidebar's section headers, its
+scroll container and the Locations rows; on every key, `sync_info` (a `None` check while Get
+Info is closed) and a drag handler on each row built. Open With and Get Info cost nothing until
+opened.
+
+### Arbor's own work per key, without the GPU (`frame_cost`, tabot-dev)
+
+Both test binaries kept and alternated (`test-base` from 820f79c, `test-new` this commit,
+`--ignored --nocapture frame_cost`), five passes each. The machine was busy (load average
+4.5–5.5, someone else's `rustc`), so each build swung between two levels:
+
+| Build | median (ms), in run order |
+| --- | --- |
+| 820f79c | 2.986, 1.874, 2.627, 3.004, 1.837 |
+| this | 1.844, 1.844, 3.059, 2.081, 1.918 |
+
+Best medians 1.837 ms and 1.844 ms: no difference beyond noise.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+`xvfb-run target/release/examples/bench 11 10 --bin …`, alternating, three passes each, load
+average 4.1–4.8 throughout:
+
+| Measure (median / p95) | 820f79c (3 passes) | this (3 passes) |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 140.4–213.9 / 216.7–259.7 ms | 162.6–221.4 / 219.6–241.8 ms |
+| Listing visible (10k, nav → frame) | 44.3–63.3 / 65.2–96.3 ms | 56.1–71.9 / 80.8–118.9 ms |
+| Key → frame (synthetic ↓) | 6.5–11.3 / 11.0–20.5 ms | 9.0–12.3 / 13.9–23.3 ms |
+
+The spread between passes of one build (cold start 140–214 ms for 820f79c) is larger than any
+difference between builds; this run can't show a change either way, and the headless numbers
+above are the measurement. Nothing new runs on the window's thread before the first frame: the
+sidebar file is read with the settings, and the volumes and favorites' looks start from the first
+`poll`, on workers.
+
+### Get Info's total
+
+Get Info on `/usr` (118,628 items, 3.0 GB, one file system) under Xvfb: the count streamed in
+("7,041 items · 414 MB so far…" 120 ms after ⌘I) and had finished by the second shot 8 s later on the busy machine,
+matching `find /usr -xdev | wc -l` and `du -sb --apparent-size /usr` exactly.
+
 ## 2026-11-09, milestone 11 (accessibility, go-to completion, redo, one Arbor on Windows)
 
 What could cost time on every key: the roles, states and names the view now gives assistive
