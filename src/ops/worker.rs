@@ -444,7 +444,10 @@ impl<'a> Worker<'a> {
             let problem = match d.path.symlink_metadata() {
                 _ if d.path.parent().is_none() => Some(format!("“{}” can't be deleted", d.path.display())),
                 Err(_) => Some(format!("“{name}” was already gone")),
-                Ok(m) if d.id.is_some() && crate::fs::ident(&m) != d.id => {
+                // Nothing to check it against: whatever is there now can't be told from the
+                // item chosen, so it's never deleted on a guess.
+                Ok(_) if d.id.is_none() => Some(format!("“{name}” couldn't be identified when it was chosen, so it was left alone")),
+                Ok(m) if crate::fs::ident(&m) != d.id => {
                     Some(format!("“{name}” isn't the item you chose (something else is at its path now), so it was left alone"))
                 }
                 Ok(_) => None,

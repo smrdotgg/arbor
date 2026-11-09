@@ -1566,6 +1566,11 @@ fn an_item_that_cant_be_recorded_for_undo_is_said() {
 
 /// A freedesktop.org trash on a "disk" at `top`: `files/` and `info/`, with an item at each
 /// name whose record says it came from `from` (relative to `top`, or absolute).
+/// The trash folder at `root` (a fixture's), as Empty Trash lists it.
+fn trash_bin(root: &Path) -> crate::trash::contents::Bin {
+    crate::trash::contents::Bin { items: root.join("files"), info: Some(root.join("info")) }
+}
+
 fn fixture_trash(top: &Path, items: &[(&str, &str)]) -> PathBuf {
     let root = top.join(".Trash-1000");
     fs::create_dir_all(root.join("files")).unwrap();
@@ -1623,6 +1628,26 @@ fn empty_trash_deletes_what_was_counted_and_their_records() {
     assert!(root.join("files/late").exists() && root.join("info/orphan.trashinfo").exists());
     assert!(o.undo.is_none(), "it can't be undone");
     assert!(o.folders.iter().any(|(p, _)| *p == root.join("files")), "panes on the trash read it again");
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// The review's case: an item whose identity couldn't be read when it was counted (its folder
+/// unreadable then) was deleted anyway, so a replacement put there since went. Now an item with
+/// nothing to check it against is never deleted, and that's said; deleting from a listing too.
+#[test]
+fn an_item_without_an_identity_is_never_deleted() {
+    use crate::trash::contents;
+    let d = tmp("no-ident");
+    let root = fixture_trash(&d, &[("a", "a")]);
+    let (mut items, _) = contents::list(&[trash_bin(&root)], &|| false).unwrap();
+    items[0].id = None;
+    let o = run_now(Op::EmptyTrash { items: Some(items) });
+    assert!(o.removed.is_empty(), "{:?}", o.removed);
+    assert!(root.join("files/a").exists() && root.join("info/a.trashinfo").exists());
+    assert!(o.errors[0].contains("“a” couldn't be identified"), "{:?}", o.errors);
+    fs::write(d.join("b"), "b").unwrap();
+    let o = run_now(Op::Delete { items: vec![Doomed { path: d.join("b"), id: None, dir: false }] });
+    assert!(o.removed.is_empty() && d.join("b").exists(), "{:?}", o.errors);
     let _ = fs::remove_dir_all(&d);
 }
 
