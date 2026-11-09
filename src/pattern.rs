@@ -15,6 +15,12 @@
 /// The most alternatives one pattern's braces may expand to.
 pub const MAX_ALTS: usize = 256;
 
+/// The longest pattern, in characters: more than any name or path (Linux's `PATH_MAX` is 4096
+/// bytes). Finding where braces and classes close takes time growing with the square of the
+/// length when they never do, so an absurd pattern (a damaged `jump.exclude`, which the startup
+/// read compiles) is refused rather than left to run for minutes.
+pub const MAX_LEN: usize = 4096;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Case {
     Sensitive,
@@ -161,6 +167,9 @@ impl Glob {
     }
 
     fn build(pattern: &str, case: Case, path: bool) -> Result<Glob, String> {
+        if pattern.chars().nth(MAX_LEN).is_some() {
+            return Err(format!("The pattern is longer than {MAX_LEN} characters"));
+        }
         let folded = match case {
             Case::Insensitive => pattern.to_lowercase(),
             Case::Sensitive => pattern.to_string(),
@@ -225,13 +234,14 @@ fn expand_braces(p: &str) -> Result<Vec<String>, String> {
 }
 
 fn expand_into(p: &[char], out: &mut Vec<String>) -> Result<(), String> {
+    let next = closes(p);
     // The first top-level `{` with its matching `}` (skipping `[...]` classes).
     let mut i = 0;
     while i < p.len() {
         match p[i] {
-            '[' => i = class_end(p, i).map_or(i + 1, |e| e + 1),
+            '[' => i = class_end(p, &next, i).map_or(i + 1, |e| e + 1),
             '{' => {
-                if let Some((end, commas)) = brace_end(p, i) {
+                if let Some((end, commas)) = brace_end(p, &next, i) {
                     let mut parts = Vec::new();
                     let mut from = i + 1;
                     for c in commas.into_iter().chain([end]) {
@@ -259,12 +269,12 @@ fn expand_into(p: &[char], out: &mut Vec<String>) -> Result<(), String> {
 }
 
 /// The `}` matching the `{` at `open`, and the top-level commas between them.
-fn brace_end(p: &[char], open: usize) -> Option<(usize, Vec<usize>)> {
+fn brace_end(p: &[char], next: &[usize], open: usize) -> Option<(usize, Vec<usize>)> {
     let (mut depth, mut commas, mut i) = (0, Vec::new(), open + 1);
     while i < p.len() {
         match p[i] {
             '[' => {
-                i = class_end(p, i).map_or(i + 1, |e| e + 1);
+                i = class_end(p, next, i).map_or(i + 1, |e| e + 1);
                 continue;
             }
             '{' => depth += 1,
@@ -278,8 +288,20 @@ fn brace_end(p: &[char], open: usize) -> Option<(usize, Vec<usize>)> {
     None
 }
 
-/// The `]` closing the class at `open`. A `]` right after `[` or `[!` is a member.
-fn class_end(p: &[char], open: usize) -> Option<usize> {
+/// For each position in `p`, the first `]` at or after it (`usize::MAX`: none), so finding
+/// where a class ends takes no scan: one that never closes would otherwise make every `[` and
+/// `{` after it look to the end of the pattern again.
+fn closes(p: &[char]) -> Vec<usize> {
+    let mut next = vec![usize::MAX; p.len() + 1];
+    for j in (0..p.len()).rev() {
+        next[j] = if p[j] == ']' { j } else { next[j + 1] };
+    }
+    next
+}
+
+/// The `]` closing the class at `open` (`next` from [`closes`]). A `]` right after `[` or `[!`
+/// is a member.
+fn class_end(p: &[char], next: &[usize], open: usize) -> Option<usize> {
     let mut i = open + 1;
     if matches!(p.get(i), Some('!' | '^')) {
         i += 1;
@@ -287,7 +309,7 @@ fn class_end(p: &[char], open: usize) -> Option<usize> {
     if p.get(i) == Some(&']') {
         i += 1;
     }
-    (i..p.len()).find(|&j| p[j] == ']')
+    Some(next[i.min(p.len())]).filter(|&j| j != usize::MAX)
 }
 
 fn is_sep(c: char) -> bool {
@@ -296,6 +318,7 @@ fn is_sep(c: char) -> bool {
 
 fn tokens(p: &str, path: bool) -> Vec<Tok> {
     let chars: Vec<char> = p.chars().collect();
+    let next = closes(&chars);
     let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
@@ -318,7 +341,7 @@ fn tokens(p: &str, path: bool) -> Vec<Tok> {
             }
             '?' => out.push(Tok::One),
             '[' => {
-                if let Some(end) = class_end(&chars, i) {
+                if let Some(end) = class_end(&chars, &next, i) {
                     let mut j = i + 1;
                     let neg = matches!(chars[j], '!' | '^');
                     if neg {
@@ -606,5 +629,91 @@ mod tests {
             println!("re:{pat}: {n} of 50k in {best:.2} ms (best of 20)");
             assert_eq!(n, want, "{pat}");
         }
+    }
+
+    /// The plainest possible matcher, for checking the fast ones: tries every split.
+    fn naive(toks: &[Tok], s: &[char], case: Case, path: bool) -> bool {
+        match toks.first() {
+            None => s.is_empty(),
+            Some(Tok::Deep) if path => (0..=s.len()).any(|k| naive(&toks[1..], &s[k..], case, path)),
+            Some(Tok::Star | Tok::Deep) => {
+                (0..=s.len()).take_while(|&k| k == 0 || !(path && is_sep(s[k - 1]))).any(|k| naive(&toks[1..], &s[k..], case, path))
+            }
+            Some(t) => !s.is_empty() && one(t, s[0], case, path) && naive(&toks[1..], &s[1..], case, path),
+        }
+    }
+
+    const PAT: &[&str] =
+        &["*", "**", "?", "a", "b", "A", ".", "/", "[ab]", "[!a]", "[a-c]", "[", "]", "{", "}", ",", "{a,b}", "é", "ß", "İ", "-"];
+    const SUBJ: &[&str] = &["a", "b", "A", "B", ".", "/", "c", "é", "É", "ß", "İ", "i\u{307}", "-", "[", "*"];
+
+    /// Any pattern against any name: the fast paths, the byte-wise matcher and the general one
+    /// all agree with the naive matcher, for both case rules, names and paths. Never a panic.
+    #[test]
+    fn any_glob_matches_as_the_naive_matcher_does() {
+        crate::prop::check("glob_agree", 4000, |r| {
+            let pat = r.from(PAT, 8);
+            let subj = r.from(SUBJ, 10);
+            for case in [Case::Sensitive, Case::Insensitive] {
+                for path in [false, true] {
+                    let Ok(g) = Glob::build(&pat, case, path) else { continue };
+                    let folded = if case == Case::Insensitive { subj.to_lowercase() } else { subj.clone() };
+                    let chars: Vec<char> = folded.chars().collect();
+                    let want = g.alts.iter().any(|a| naive(&a.toks, &chars, case, path));
+                    assert_eq!(g.matches(&subj), want, "{pat:?} {subj:?} {case:?} path {path}");
+                }
+            }
+        });
+    }
+
+    /// Patterns that make a backtracking matcher take exponential time, and brace bombs: each
+    /// answers within its bound, against names and paths far longer than real ones.
+    #[test]
+    fn pathological_globs_are_bounded() {
+        use std::time::Duration;
+        let long_a = "a".repeat(10_000);
+        let long_path = format!("/{}", vec!["aaaa"; 2_000].join("/"));
+        let t = std::time::Instant::now();
+        for pat in ["*a*a*a*a*a*b", "*a*a*a*a*a*a*a*a*a*a*a*a*b*", "?*?*?*?*?*?*?*b", "*[ab]*[ab]*[ab]*[ab]*c", "IMG_*a*a*a*a*b.jpg"] {
+            for case in [Case::Sensitive, Case::Insensitive] {
+                let g = Glob::name(pat, case).unwrap();
+                assert!(!g.matches(&long_a), "{pat}");
+                assert!(!g.matches(&format!("{long_a}é")), "{pat}: the general matcher too");
+            }
+        }
+        for pat in ["/**a**a**a**a**b", "/*/*/*/*/*/*/b/**", "**/a*a*a*a*b"] {
+            let g = Glob::path(pat, Case::Sensitive).unwrap();
+            assert!(!g.matches(&long_path), "{pat}");
+        }
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        // Brace bombs stop at the limit; deep or unclosed braces are quick.
+        let bomb = "{a,b}".repeat(30);
+        assert!(crate::prop::within(Duration::from_secs(2), "a brace bomb", move || Glob::name(&bomb, Case::Sensitive).is_err()));
+        let n = MAX_LEN;
+        for (what, pat) in [
+            ("deep braces", format!("{}x{}", "{".repeat(n / 2 - 1), "}".repeat(n / 2 - 1))),
+            ("unclosed braces", "{".repeat(n)),
+            ("unclosed classes", "[".repeat(n)),
+            ("classes and braces", "[{".repeat(n / 2)),
+        ] {
+            let t = std::time::Instant::now();
+            crate::prop::within(Duration::from_secs(2), what, move || {
+                let _ = Glob::name(&pat, Case::Sensitive).map(|g| g.matches("x"));
+            });
+            assert!(t.elapsed() < Duration::from_millis(500), "{what}: {:?}", t.elapsed());
+        }
+    }
+
+    /// Found by `pathological_globs_are_bounded`: an unclosed `{` or `[` made each one look for
+    /// its end to the end of the pattern, so 80,000 of them took 16 s, and `config.toml` (up to
+    /// 1 MB) could hold such a `jump.exclude` for the startup read to compile. A pattern over
+    /// `MAX_LEN` characters is refused now, at once.
+    #[test]
+    fn an_absurdly_long_pattern_is_refused_at_once() {
+        let pat = "{".repeat(1 << 20);
+        let r = crate::prop::within(std::time::Duration::from_secs(1), "a 1 MB pattern", move || Glob::path(&pat, Case::Sensitive).err());
+        assert!(r.is_some_and(|e| e.contains("longer than 4096")));
+        let c = crate::config::Config::parse(&format!("[jump]\nexclude = [\"{}\"]\n", "[".repeat(100_000)), rune::KeyPlatform::Linux);
+        assert!(c.errors.iter().any(|e| e.contains("longer than 4096")), "{:?}", c.errors);
     }
 }
