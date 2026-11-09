@@ -287,6 +287,10 @@ impl State {
             return;
         }
         b.round += 1;
+        // The plan the worker may still be on is for an older rule: it stops, whether or not
+        // the new rule compiles (a half-typed regex mustn't leave a heavy old plan running).
+        b.stop_plan.store(true, Relaxed);
+        b.stop_plan = Arc::new(AtomicBool::new(false));
         match want.0.compile() {
             Err(e) => {
                 b.error = Some(e);
@@ -295,9 +299,6 @@ impl State {
             }
             Ok(c) => {
                 b.error = None;
-                // The plan the worker may still be on is for an older rule: it stops.
-                b.stop_plan.store(true, Relaxed);
-                b.stop_plan = Arc::new(AtomicBool::new(false));
                 // A regex can take milliseconds a name (`rename::REGEX_SIZE`), so it's never
                 // worked out on the window's thread, however few the items.
                 let plan = if b.items.len() <= SYNC_ITEMS && !c.is_regex() {
@@ -545,6 +546,27 @@ pub(crate) mod tests {
             std::fs::write(d.join(f), format!("I was {f}")).unwrap();
         }
         d
+    }
+
+    /// The review's case: a newer rule that doesn't compile (a half-typed regex) left the plan
+    /// for the older rule running on the worker; only a rule that compiled stopped it.
+    #[test]
+    fn a_rule_that_doesnt_compile_stops_the_older_plan() {
+        let d = folder("invalid-stops", &["a", "b"]);
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        s.run(Cmd::SelectAll, &mut Tx::default());
+        s.run(Cmd::Rename, &mut Tx::default());
+        settle_batch(&mut s);
+        let older = s.batch.as_ref().unwrap().stop_plan.clone();
+        let b = s.batch.as_mut().unwrap();
+        b.regex = true;
+        b.find = rune::TextEdit::new("[");
+        s.batch_replan();
+        assert!(s.batch.as_ref().unwrap().error.is_some(), "it doesn't compile");
+        assert!(older.load(Relaxed), "the older plan was told to stop");
+        assert!(!s.batch.as_ref().unwrap().stop_plan.load(Relaxed), "the next one starts unstopped");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn names(d: &std::path::Path) -> Vec<String> {
