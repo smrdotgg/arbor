@@ -266,6 +266,8 @@ impl State {
         let mut side = crate::sidebar::Side::new(if cfg!(test) { None } else { crate::sidebar::file_path() });
         side.custom = custom;
         side.look_due = true;
+        // Headless runs have no `on_ready`: their first frame counts as shown from the start.
+        side.shown = rune::tooling::headless_run().is_some();
         let first = Folder::new(0, cwd, config.settings.sort, config.settings.show_hidden, None);
         // Where the history lives (environment only, no disk): tests keep theirs in memory.
         let mut history = History::new(if cfg!(test) { None } else { crate::jump::log_path() });
@@ -396,6 +398,11 @@ impl State {
     }
 
     /// The active pane's folder.
+    /// The startup read hasn't landed yet.
+    pub(crate) fn booting(&self) -> bool {
+        self.boot.is_some()
+    }
+
     pub fn cur(&self) -> &Folder {
         &self.panes[self.active].f
     }
@@ -567,7 +574,7 @@ impl State {
             self.volumes_asked = true;
             self.refresh_volumes();
         }
-        if self.side.look_due && self.boot.is_none() {
+        if self.side.look_due && self.side.shown && self.boot.is_none() {
             self.side.look_due = false;
             self.look_at_favorites();
         }

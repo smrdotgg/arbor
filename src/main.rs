@@ -103,6 +103,10 @@ fn main() {
         s.stop_background();
         persist::drain_at_exit();
     });
+    // Work the window doesn't need for its first frame waits until that frame is on screen
+    // (the sidebar's look at each favorite).
+    let shown = app.handle();
+    app = app.on_ready(move |_| shown.update(|s, _| s.first_frame_shown()));
     if timing::benching() {
         app = app.open_inactive(); // the bench never takes focus from what the user is doing
     } else if rune::tooling::headless_run().is_none() {

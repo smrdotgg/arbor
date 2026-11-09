@@ -23,9 +23,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use rune::{Drag, Phase, Tx};
 
@@ -203,6 +203,52 @@ impl Writer {
 /// A favorite's one look: its folder, and whether it's gone.
 type Look = (PathBuf, bool);
 
+/// The most threads looking at favorites at once: a dead network folder holds up one of them,
+/// never the window, and many favorites never mean many threads.
+pub const LOOKERS: usize = 2;
+
+/// The threads that look at favorites: at most [`LOOKERS`], sharing one queue, each ending
+/// when the queue is empty (nothing idles).
+#[derive(Default)]
+pub struct Lookers(Arc<Mutex<(std::collections::VecDeque<PathBuf>, usize)>>);
+
+impl Lookers {
+    fn push(&self, p: PathBuf, tx: &Sender<Look>, waker: Option<rune::Waker>) {
+        let mut q = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        q.0.push_back(p);
+        if q.1 >= LOOKERS {
+            return;
+        }
+        q.1 += 1;
+        let (queue, tx) = (self.0.clone(), tx.clone());
+        std::thread::spawn(move || {
+            loop {
+                let next = {
+                    let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+                    let p = q.0.pop_front();
+                    if p.is_none() {
+                        q.1 -= 1;
+                    }
+                    p
+                };
+                let Some(p) = next else { return };
+                let gone = !p.is_dir();
+                if tx.send((p, gone)).is_ok()
+                    && let Some(w) = &waker
+                {
+                    w();
+                }
+            }
+        });
+    }
+
+    /// Threads looking now, for tests.
+    #[cfg(test)]
+    pub fn running(&self) -> usize {
+        self.0.lock().unwrap().1
+    }
+}
+
 // ---- the UI side --------------------------------------------------------------------------
 
 /// The sidebar's state beyond the favorites themselves (`State::places`) and the volumes.
@@ -228,8 +274,12 @@ pub struct Side {
     pub(crate) dropped: rune::Latest<Vec<PathBuf>>,
     /// Looks started, for tests.
     pub looks: Arc<AtomicU64>,
-    /// The favorites changed (or just landed): look at the new ones at the next `poll`.
+    /// The favorites changed (or just landed): look at the new ones at the next `poll` once
+    /// the first frame is on screen.
     pub look_due: bool,
+    /// The window's first frame is on screen (`App::on_ready`; from the start without a window).
+    pub shown: bool,
+    lookers: Lookers,
     /// Something is being dragged over the sidebar (folders to add).
     pub drop_hover: bool,
 }
@@ -308,15 +358,16 @@ impl State {
         for p in todo {
             self.side.looked.insert(p.clone());
             self.side.looks.fetch_add(1, Relaxed);
-            let (tx, waker) = (tx.clone(), self.waker.clone());
-            std::thread::spawn(move || {
-                let gone = !p.is_dir();
-                if tx.send((p, gone)).is_ok()
-                    && let Some(w) = waker
-                {
-                    w();
-                }
-            });
+            self.side.lookers.push(p, &tx, self.waker.clone());
+        }
+    }
+
+    /// The window's first frame is on screen (`App::on_ready`): the favorites' looks may start.
+    pub fn first_frame_shown(&mut self) {
+        self.side.shown = true;
+        if self.side.look_due && !self.booting() {
+            self.side.look_due = false;
+            self.look_at_favorites();
         }
     }
 
@@ -631,20 +682,54 @@ mod tests {
     }
 
     /// Building the window looks at no favorite (the startup read only reads the file, off this
-    /// thread); the first `poll` after the first listing starts one look per favorite.
+    /// thread), nor does any `poll` before the first frame is on screen; then one look per
+    /// favorite starts, on at most [`LOOKERS`] threads.
     #[test]
-    fn startup_looks_at_nothing_until_the_window_is_up() {
+    fn startup_looks_at_nothing_until_the_first_frame_is_shown() {
         let d = temp("startup");
         let mut s = state_in(&d);
-        s.places = named(vec![d.clone(), d.join("x")]);
+        let many: Vec<PathBuf> = (0..12).map(|i| d.join(format!("f{i}"))).collect();
+        s.places = named(many);
         s.side.look_due = true;
         assert_eq!(s.side.looks.load(Relaxed), 0);
         assert!(s.side.writer_ref().is_none());
         s.poll(&mut Tx::default());
-        assert_eq!(s.side.looks.load(Relaxed), 2);
+        assert_eq!(s.side.looks.load(Relaxed), 0, "not before the first frame is on screen");
+        s.first_frame_shown();
+        assert_eq!(s.side.looks.load(Relaxed), 12);
+        assert!(s.side.lookers.running() <= LOOKERS, "never a thread per favorite");
         s.poll(&mut Tx::default());
-        assert_eq!(s.side.looks.load(Relaxed), 2, "once per launch");
+        assert_eq!(s.side.looks.load(Relaxed), 12, "once per launch");
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while s.side.missing.len() < 12 && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            s.poll_sidebar();
+        }
+        assert_eq!(s.side.missing.values().filter(|&&gone| gone).count(), 12, "every look answered");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The reviewer's check: the first frame of a real (headless) runtime looks at nothing.
+    #[test]
+    fn the_first_frame_looks_at_no_favorite() {
+        use std::sync::atomic::AtomicU64;
+        static SEEN: AtomicU64 = AtomicU64::new(u64::MAX);
+        fn init() -> State {
+            let d = temp("first-frame");
+            let mut s = state_in(&d);
+            s.places = named(vec![d]);
+            s.side = Side::new(None);
+            s.side.look_due = true;
+            s
+        }
+        fn view(s: &State, cx: &mut rune::Cx<State>) -> rune::El {
+            SEEN.store(s.side.looks.load(Relaxed), Relaxed);
+            crate::view::view(s, cx)
+        }
+        let spec = rune::AppSpec { poll: Some(|s: &mut State, _, tx| s.poll(tx)), ..rune::AppSpec::new("t", (980.0, 620.0), init, view) };
+        let mut rt = rune::App::new(spec).headless_runtime((980.0, 620.0), rune::Env::new(false, 1.0));
+        rt.frame(0.0);
+        assert_eq!(SEEN.load(Relaxed), 0, "looked while building the first frame");
     }
 
     /// A favorite that vanished before its look: the click's failed read marks it.
