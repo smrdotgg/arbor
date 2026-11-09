@@ -620,6 +620,34 @@ fn any_log_loads_only_paths_written_exactly() {
     });
 }
 
+/// What the log writes reads back as the same folders; compacting keeps them.
+#[test]
+fn written_events_read_back_and_survive_compaction() {
+    crate::prop::check("history_round_trip", 300, |r| {
+        let mut want = Frecency::default();
+        let mut log = String::new();
+        let paths: Vec<PathBuf> = (0..1 + r.below(8)).map(|_| PathBuf::from(log_path(r))).collect();
+        for _ in 0..r.len(40) {
+            let path = r.pick(&paths).clone();
+            let at = r.below(1 << 30) as u64;
+            let e = if r.one_in(6) { Event::Drop { path } } else { Event::Visit { path, at, rank: 1.0 } };
+            if let Some(line) = e.line(at) {
+                log.push_str(&line);
+                want.apply(&e);
+            }
+        }
+        let (got, _) = Frecency::from_log(&log);
+        let set = |f: &Frecency| {
+            let mut v: Vec<(PathBuf, u64)> = f.dirs.iter().map(|d| (d.path.to_path_buf(), (d.rank * 1000.0).round() as u64)).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(set(&got), set(&want), "{log:?}");
+        let (again, _) = Frecency::from_log(&got.compacted(1 << 31));
+        assert_eq!(set(&again), set(&want), "compacted");
+    });
+}
+
 /// Found by `any_log_loads_only_paths_written_exactly`: a damaged byte in a line was read as
 /// U+FFFD, so Jump offered a folder nobody visited ("/a\u{FFFD}b" for "/a\xFFb").
 #[test]
@@ -629,4 +657,12 @@ fn a_line_that_isnt_utf8_is_skipped_not_guessed() {
     let (f, lines) = Frecency::from_reader(&log[..]).unwrap();
     assert_eq!(lines, 2);
     assert_eq!(f.dirs.iter().map(|d| d.path.to_path_buf()).collect::<Vec<_>>(), [PathBuf::from(format!("{root}ok"))]);
+}
+
+/// Found by `written_events_read_back_and_survive_compaction`: a path with a NUL was written,
+/// and the reader (rightly) refused it, so the log and the session disagreed.
+#[test]
+fn a_path_with_a_nul_is_never_written() {
+    assert_eq!(Event::Visit { path: p("/a\0b"), at: 1, rank: 1.0 }.line(1), None);
+    assert!(Event::Visit { path: p("/ab"), at: 1, rank: 1.0 }.line(1).is_some());
 }

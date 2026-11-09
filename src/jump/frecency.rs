@@ -96,7 +96,8 @@ impl Event {
             Event::Visit { path, rank, .. } => (path, if *rank == 1.0 { "1".to_string() } else { format!("{rank:.3}") }),
             Event::Drop { path } => (path, "-".to_string()),
         };
-        let p = path.to_str().filter(|p| !p.is_empty() && !p.contains(['\n', '\r']))?;
+        // No NUL either: `parse` refuses a line with one (it marks a torn line).
+        let p = path.to_str().filter(|p| !p.is_empty() && !p.contains(['\n', '\r', '\0']))?;
         Some(format!("{at}\t{mid}\t{p}\n"))
     }
 
