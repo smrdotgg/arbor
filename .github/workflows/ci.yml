@@ -101,7 +101,7 @@ jobs:
           sips -g pixelWidth -g pixelHeight dist/Arbor.app/Contents/Resources/Arbor.icns
           bin=dist/Arbor.app/Contents/MacOS/arbor
           # Both slices, each built for the Info.plist's LSMinimumSystemVersion.
-          lipo -archs "$bin" && lipo -verify_arch arm64 x86_64 "$bin"
+          lipo -archs "$bin" && lipo "$bin" -verify_arch arm64 x86_64
           min=$(plutil -extract LSMinimumSystemVersion raw dist/Arbor.app/Contents/Info.plist)
           for a in arm64 x86_64; do
             vtool -arch "$a" -show-build "$bin" | tee /dev/stderr | grep -Eq "minos $min$"

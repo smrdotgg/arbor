@@ -357,7 +357,13 @@ pub fn markdown_table() -> String {
             Some(0) => ["Go to sidebar place 1…9".into(), "⌘1 … ⌘9".into(), "Ctrl+1 … Ctrl+9".into(), "`place.1` … `place.9`".into()],
             Some(_) => continue,
             None => {
-                let title = if cmd == Cmd::Reveal { "Show in Finder / Explorer / file manager" } else { cmd.title() };
+                // Titles that name each platform's own thing, written for all of them.
+                let title = match cmd {
+                    Cmd::Reveal => "Show in Finder / Explorer / file manager",
+                    Cmd::GoTrash => "Go to the Trash / Recycle Bin",
+                    Cmd::EmptyTrash => "Empty the Trash / Recycle Bin…",
+                    _ => cmd.title(),
+                };
                 [title.into(), keys(cmd, KeyPlatform::Mac), keys(cmd, KeyPlatform::Windows), format!("`{}`", cmd.id())]
             }
         };

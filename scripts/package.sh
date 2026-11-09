@@ -67,7 +67,7 @@ Darwin)
 	mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 	if [ -n "$other" ]; then
 		lipo -create "target/$profile/arbor" "target/$other/$profile/arbor" -output "$app/Contents/MacOS/arbor"
-		lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/arbor"
+		lipo "$app/Contents/MacOS/arbor" -verify_arch arm64 x86_64
 		arch=universal
 	else
 		cp "target/$profile/arbor" "$app/Contents/MacOS/arbor"

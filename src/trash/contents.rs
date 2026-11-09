@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn a_refusal_on_macos_means_full_disk_access() {
-        let eperm = io::Error::from_raw_os_error(1);
+        let eperm = io::Error::from(io::ErrorKind::PermissionDenied);
         assert_eq!(problem_of(Path::new("/x/.Trash"), &eperm, true), Problem::NeedsAccess);
         assert!(matches!(problem_of(Path::new("/x/.Trash"), &eperm, false), Problem::Unreadable(_)));
         let gone = io::Error::from(io::ErrorKind::Other);
@@ -683,15 +683,24 @@ mod tests {
     /// disk's top folder; what can't be trusted is refused, not guessed.
     #[test]
     fn a_record_says_where_an_item_came_from() {
-        let top = Path::new("/media/usb");
+        // An absolute path on this platform (the records are Linux's, but the code is portable).
+        let root = if cfg!(windows) { "C:/" } else { "/" };
+        let top = PathBuf::from(format!("{root}media/usb"));
+        let top = top.as_path();
         let info = |p: &str| format!("[Trash Info]\nPath={p}\nDeletionDate=2026-11-09T10:00:00\n");
-        assert_eq!(parse_info(&info("/home/u/My%20Docs/a.txt"), None).unwrap(), Path::new("/home/u/My Docs/a.txt"));
+        assert_eq!(
+            parse_info(&info(&format!("{root}home/u/My%20Docs/a.txt")), None).unwrap(),
+            PathBuf::from(format!("{root}home/u/My Docs/a.txt"))
+        );
         assert_eq!(parse_info(&info("docs/b%25.txt"), Some(top)).unwrap(), top.join("docs/b%.txt"));
         assert!(parse_info(&info("docs/b.txt"), None).is_err(), "relative, and no top folder to start from");
-        assert!(parse_info(&info("/home/u/../../etc/passwd"), None).is_err());
-        assert!(parse_info("[Other]\nPath=/a\n", None).is_err(), "only the Trash Info group counts");
+        assert!(parse_info(&info(&format!("{root}home/u/../../etc/passwd")), None).is_err());
+        assert!(parse_info(&format!("[Other]\nPath={root}a\n"), None).is_err(), "only the Trash Info group counts");
         assert!(parse_info("[Trash Info]\nDeletionDate=x\n", None).is_err());
-        assert_eq!(parse_info("[Other]\nPath=/x\n[Trash Info]\r\nPath=/y%2\r\n", None).unwrap(), Path::new("/y%2"));
+        assert_eq!(
+            parse_info(&format!("[Other]\nPath={root}x\n[Trash Info]\r\nPath={root}y%2\r\n"), None).unwrap(),
+            PathBuf::from(format!("{root}y%2"))
+        );
     }
 
     #[test]

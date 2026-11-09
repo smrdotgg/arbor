@@ -747,7 +747,7 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Clear Jump History… |  |  | `nav.clear_jump_history` |
 | Reload | ⌘R | Ctrl+R | `nav.reload` |
 | Show in Finder / Explorer / file manager | ⌘↩ | Ctrl+Enter | `nav.reveal` |
-| Go to the Trash |  |  | `nav.trash` |
+| Go to the Trash / Recycle Bin |  |  | `nav.trash` |
 | Open With… |  |  | `file.open_with` |
 | Get Info | ⌘I | Ctrl+I | `file.info` |
 | Command Palette | ⌘K, ⇧⌘P | Ctrl+K, Ctrl+Shift+P | `app.palette` |
@@ -770,7 +770,7 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Move to Trash | ⌘⌫, ⌦ | Ctrl+Backspace, Delete | `file.trash` |
 | Delete Permanently… | ⌥⌘⌫ | Shift+Delete | `file.delete` |
 | Put Back |  |  | `file.put_back` |
-| Empty the Trash… |  |  | `file.empty_trash` |
+| Empty the Trash / Recycle Bin… |  |  | `file.empty_trash` |
 | Undo | ⌘Z | Ctrl+Z | `file.undo` |
 | Redo | ⇧⌘Z | Ctrl+Shift+Z, Ctrl+Y | `file.redo` |
 | Cancel File Operation |  |  | `file.cancel` |
