@@ -10,8 +10,9 @@
 //!   with its case swapped), and every item's fingerprint, so applying refuses an item that
 //!   changed since. The window waits at most a frame for it; until it lands, Apply waits.
 //! - **Previews every keystroke.** A batch of up to [`SYNC_ITEMS`] is planned on the spot
-//!   (under a millisecond); a bigger one on a worker, showing the last plan until the new one
-//!   lands (10k names through a regex take about 20 ms, more than a frame). Only the rows in
+//!   (under a millisecond) unless Find is a regex; a bigger one, or any regex (a hostile one can
+//!   take milliseconds a name), on a worker, waiting at most `PLAN_WAIT` and showing the last
+//!   plan until the new one lands; a newer keystroke stops it between names. Only the rows in
 //!   view are built.
 //! - **Applies as one file operation** (`ops::Op::Rename`) on the operations worker, with
 //!   progress, cancellable, all or nothing, and one undo entry. Apply is disabled while
@@ -89,6 +90,8 @@ pub struct BatchBox {
     reader: Latest<Read>,
     stop_read: Arc<AtomicBool>,
     planner: Latest<(u64, Plan)>,
+    /// Set when the plan the worker is on stops mattering (a newer rule, the dialog closed).
+    stop_plan: Arc<AtomicBool>,
 }
 
 impl BatchBox {
@@ -232,6 +235,7 @@ impl State {
             reader,
             stop_read: stop.clone(),
             planner,
+            stop_plan: Arc::new(AtomicBool::new(false)),
         };
         // A few items' folders are read in time for this frame; for many (one lstat each),
         // the read can't be, so the dialog doesn't wait for it.
@@ -250,6 +254,7 @@ impl State {
     pub fn close_batch(&mut self, tx: &mut Tx) {
         if let Some(b) = self.batch.take() {
             b.stop_read.store(true, Relaxed);
+            b.stop_plan.store(true, Relaxed);
             self.batch_rule = b.rule();
             tx.blur();
         }
@@ -290,11 +295,16 @@ impl State {
             }
             Ok(c) => {
                 b.error = None;
-                let plan = if b.items.len() <= SYNC_ITEMS {
+                // The plan the worker may still be on is for an older rule: it stops.
+                b.stop_plan.store(true, Relaxed);
+                b.stop_plan = Arc::new(AtomicBool::new(false));
+                // A regex can take milliseconds a name (`rename::REGEX_SIZE`), so it's never
+                // worked out on the window's thread, however few the items.
+                let plan = if b.items.len() <= SYNC_ITEMS && !c.is_regex() {
                     Some(rename::plan(&c, &b.items, &b.dirs, PLATFORM))
                 } else {
-                    let (items, dirs, round) = (b.items.clone(), b.dirs.clone(), b.round);
-                    let work = move || Some((round, rename::plan(&c, &items, &dirs, PLATFORM)));
+                    let (items, dirs, round, stop) = (b.items.clone(), b.dirs.clone(), b.round, b.stop_plan.clone());
+                    let work = move || Some((round, rename::plan_until(&c, &items, &dirs, PLATFORM, &|| stop.load(Relaxed))?));
                     crate::bounded::read_waiting(&b.planner, wait, work).map(|(_, plan)| plan)
                 };
                 match plan {
@@ -767,6 +777,40 @@ pub(crate) mod tests {
         finish_job(&mut s);
         assert!(names(&d).iter().all(|n| n.starts_with('g')), "{:?}", &names(&d)[..3]);
         assert_eq!(s.cur().marked.len(), SYNC_ITEMS + 20);
+    }
+
+    /// The review's rule (NORTHSTAR: the UI never freezes) against a hostile regex: with
+    /// regex-lite's own size limit, one pattern took 208 ms a long name, and a batch of up to
+    /// 500 was planned on the window's thread (minutes, frozen). Now regexes are capped
+    /// (`rename::REGEX_SIZE`) and always planned on the worker, which a newer keystroke stops.
+    #[test]
+    fn a_hostile_regex_never_freezes_the_window() {
+        let files: Vec<String> = (0..40).map(|i| format!("{}{i:02}", "a".repeat(200))).collect();
+        let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+        let d = folder("hostile", &refs);
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        let mut tx = Tx::default();
+        s.run(Cmd::SelectAll, &mut tx);
+        s.run(Cmd::Rename, &mut tx);
+        settle_batch(&mut s);
+        let b = s.batch.as_mut().unwrap();
+        b.regex = true;
+        b.find = TextEdit::new("(?:a?){10000}a{10000}");
+        let t = Instant::now();
+        s.batch_replan();
+        assert!(s.batch.as_ref().unwrap().error.as_deref().is_some_and(|e| e.contains("too big")), "{:?}", s.batch.as_ref().unwrap().error);
+        // The worst pattern under the cap, on the worker: the key returns at once.
+        let b = s.batch.as_mut().unwrap();
+        b.find = TextEdit::new("(?:a?){300}a{300}");
+        s.batch_replan();
+        // And a newer rule stops it.
+        let b = s.batch.as_mut().unwrap();
+        b.find = TextEdit::new("(?:a?){299}a{299}");
+        s.batch_replan();
+        assert!(t.elapsed() < Duration::from_millis(100), "the window's thread waited {:?}", t.elapsed());
+        settle_batch(&mut s);
+        assert!(s.batch.as_ref().unwrap().error.is_none());
     }
 
     /// What opening the dialog on 10k items and typing in it cost on the UI thread:

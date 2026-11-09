@@ -141,6 +141,12 @@ pub struct Compiled {
 /// The longest padding `{n:…}` takes (more is surely a typo).
 const MAX_PAD: usize = 32;
 
+/// The largest compiled regex, in bytes of regex-lite's NFA. Matching takes time in proportion
+/// to it for each character of each name: at regex-lite's own limit (10 MB) one pattern took
+/// 208 ms per 255-character name and 3.5 ms to compile, where this keeps the worst under 7 ms
+/// and 60 µs. Patterns people write for renaming are a few hundred bytes.
+pub const REGEX_SIZE: usize = 64 * 1024;
+
 impl Rule {
     /// Checks the rule and gets it ready, or says what's wrong with it.
     pub fn compile(&self) -> Result<Compiled, String> {
@@ -156,7 +162,13 @@ impl Rule {
         let find = if self.find.is_empty() {
             Find::Nothing
         } else if self.regex {
-            Find::Regex(RegexBuilder::new(&self.find).case_insensitive(!self.case_sensitive).build().map_err(|e| regex_error(&e))?)
+            Find::Regex(
+                RegexBuilder::new(&self.find)
+                    .case_insensitive(!self.case_sensitive)
+                    .size_limit(REGEX_SIZE)
+                    .build()
+                    .map_err(|e| regex_error(&e))?,
+            )
         } else {
             Find::Text { needle: self.find.clone(), fold: !self.case_sensitive }
         };
@@ -168,6 +180,9 @@ impl Rule {
 /// regex-lite's message, first line only (the rest draws the pattern with a caret).
 fn regex_error(e: &regex_lite::Error) -> String {
     let s = e.to_string();
+    if s.contains("size limit") {
+        return "Regex: too big (it would take too long on each name)".into();
+    }
     let last = s.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("not a valid regular expression").trim().to_string();
     format!("Regex: {}", last.trim_start_matches("error: "))
 }
@@ -268,6 +283,11 @@ pub fn split_ext(name: &str, is_dir: bool) -> (&str, &str) {
 }
 
 impl Compiled {
+    /// Whether Find is a regular expression (which can take a while on many names).
+    pub fn is_regex(&self) -> bool {
+        matches!(self.find, Find::Regex(_))
+    }
+
     /// The new name for an item, `index` being how many items before it Find matched (the
     /// counter counts only those), and whether Find matched this one.
     pub fn apply(&self, name: &str, is_dir: bool, parent: &str, index: usize) -> (String, bool) {
@@ -473,11 +493,20 @@ impl Plan {
 /// Every item's new name and status under rule `r`, checking each new name against `p`'s
 /// rules, the other new names in its folder, and what else is in its folder.
 pub fn plan(r: &Compiled, items: &[Item], dirs: &[Dir], p: Platform) -> Plan {
+    plan_until(r, items, dirs, p, &|| false).unwrap_or_default()
+}
+
+/// [`plan`], stopping (`None`) between items once `stop` says so: a plan a newer keystroke
+/// replaced isn't worked out to the end.
+pub fn plan_until(r: &Compiled, items: &[Item], dirs: &[Dir], p: Platform, stop: &dyn Fn() -> bool) -> Option<Plan> {
     let mut new = Vec::with_capacity(items.len());
     let mut status = Vec::with_capacity(items.len());
     // The counter: how many items Find has matched so far.
     let mut counted = 0;
     for it in items {
+        if stop() {
+            return None;
+        }
         if let Some(why) = it.keep {
             new.push(it.name.clone());
             status.push(Status::Kept(why));
@@ -549,7 +578,7 @@ pub fn plan(r: &Compiled, items: &[Item], dirs: &[Dir], p: Platform) -> Plan {
     }
     let changes = status.iter().filter(|s| **s == Status::Change).count();
     let problems = status.iter().filter(|s| matches!(s, Status::Problem(_))).count();
-    Plan { new, status, changes, problems }
+    Some(Plan { new, status, changes, problems })
 }
 
 #[cfg(test)]
@@ -860,5 +889,50 @@ mod tests {
                 println!("10k items, {what}, ignores case {ignores_case}: median {:.2} ms, max {:.2} ms", t[7], t[14]);
             }
         }
+    }
+
+    /// Any rule on any names: never a panic, and every name the plan would give passes the
+    /// platform's rules (no separator, no NUL, not too long; Windows' own on Windows).
+    #[test]
+    fn any_rule_gives_only_valid_new_names() {
+        const FIND: &[&str] =
+            &["a", ".", "(", ")", "(a)", "(?P<x>.)", "$", "^", "\\d+", "[", "]", "*", "+", "?", "{2}", "|", "é", "\\", "/"];
+        const REPLACE: &[&str] =
+            &["{n}", "{n:3}", "{n:99}", "{name}", "{ext}", "{parent}", "{", "}", "$1", "${1}", "${x}", "$$", "/", "\\0", "é", "x", "."];
+        crate::prop::check("rename_any", 1500, |r| {
+            let rule = Rule {
+                find: r.from(FIND, 5),
+                regex: r.one_in(2),
+                case_sensitive: r.one_in(2),
+                replace: if r.one_in(5) { r.string(8) } else { r.from(REPLACE, 5) },
+                start: r.pick(&["1", "-5", "", "x", "999999999999999"]).to_string(),
+                step: r.pick(&["1", "-1", "0", "10"]).to_string(),
+                case: *r.pick(&CaseMode::ALL),
+                include_ext: r.one_in(2),
+            };
+            let Ok(c) = rule.compile() else { return };
+            let names: Vec<String> =
+                (0..1 + r.below(5)).map(|_| r.string(20).replace(['/', '\0'], "_")).filter(|n| !n.is_empty()).collect();
+            let items: Vec<Item> = names
+                .iter()
+                .map(|n| Item { name: n.clone(), is_dir: r.one_in(3), dir: 0, keep: None, gone: None, inside: Vec::new() })
+                .collect();
+            for p in [Platform::Linux, Platform::Mac, Platform::Windows] {
+                let plan = plan(&c, &items, &[Dir { name: r.string(6), ..Dir::default() }], p);
+                for (n, st) in plan.new.iter().zip(&plan.status) {
+                    if *st == Status::Change {
+                        assert_eq!(invalid(n, p), None, "{rule:?} gave {n:?} on {p:?}");
+                    }
+                }
+            }
+        });
+    }
+
+    /// A plan a newer keystroke replaced stops between names.
+    #[test]
+    fn a_stopped_plan_stops() {
+        let c = rule("a", "b").compile().unwrap();
+        let items = items(&["a1", "a2"]);
+        assert!(plan_until(&c, &items, &[dir(&[], false)], Platform::Linux, &|| true).is_none());
     }
 }
