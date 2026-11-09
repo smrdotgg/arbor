@@ -184,9 +184,10 @@ fn fallback_uninstall_restores_both_values_and_refuses_a_damaged_backup() {
     })
     .unwrap();
     let header = header.lines().next().unwrap().to_string();
-    for (i, damaged) in ["".to_string(), "\n".into(), format!("{header}\n"), format!("{header}\n{}\tmimeapps.list inode/directory\n", hex(b"old.desktop;"))]
-        .iter()
-        .enumerate()
+    for (i, damaged) in
+        ["".to_string(), "\n".into(), format!("{header}\n"), format!("{header}\n{}\tmimeapps.list inode/directory\n", hex(b"old.desktop;"))]
+            .iter()
+            .enumerate()
     {
         let (pkg, home) = bare(&root, &format!("damaged{i}"));
         let (service, mimeapps, backup) = made_default(&home);
