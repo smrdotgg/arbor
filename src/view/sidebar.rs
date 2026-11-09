@@ -91,7 +91,7 @@ pub(super) fn place_row(s: &State, i: usize, l: Look) -> El {
         }
     }
     if let Some(v) = i.checked_sub(s.places.len()).filter(|&v| s.volumes.get(v).is_some_and(|v| v.eject)) {
-        let name = s.volumes[v].name.clone();
+        let (name, path) = (s.volumes[v].name.clone(), s.volumes[v].path.clone());
         item = item.child(
             text("⏏")
                 .key(format!("eject-{v}"))
@@ -106,7 +106,7 @@ pub(super) fn place_row(s: &State, i: usize, l: Look) -> El {
                 .help(format!("Eject “{name}”"))
                 .on_press_tx(move |s: &mut State, tx| {
                     tx.instant();
-                    s.eject(v);
+                    s.eject_at(&path);
                 }),
         );
     }

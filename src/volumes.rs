@@ -35,23 +35,70 @@ pub struct Volume {
     pub eject: bool,
     /// Linux: the device it's mounted from (`/dev/sdb1`), for `udisksctl`.
     pub device: Option<String>,
+    /// What tells this volume from another mounted at the same place later ([`identity`]),
+    /// read with the list for those that can be ejected. Eject checks it again right before
+    /// acting, so a refresh or a swapped disk never redirects it to another volume.
+    pub id: Option<String>,
 }
 
 /// The volumes mounted now. Touches the disk: call on a worker.
 pub fn list() -> Vec<Volume> {
     #[cfg(target_os = "macos")]
-    {
-        mac_list()
-    }
+    let mut v = mac_list();
     #[cfg(all(unix, not(target_os = "macos")))]
-    {
+    let mut v = {
         let user = user_name();
         std::fs::read_to_string("/proc/self/mounts").map(|t| from_mounts(&t, &user)).unwrap_or_default()
+    };
+    #[cfg(windows)]
+    let mut v = win::list();
+    // Only those that can be ejected: a dead network mount's `stat` could hang.
+    for vol in v.iter_mut().filter(|v| v.eject) {
+        vol.id = identity(&vol.path);
+    }
+    v
+}
+
+/// What tells the volume mounted at `path` from another mounted there later: its device number
+/// and what it's mounted from (Linux: the mount table's source; macOS: `statfs`'s
+/// `f_mntfromname`), or on Windows the volume's GUID path. `None` when it can't be read.
+/// Touches the disk: call on a worker.
+pub fn identity(path: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let dev = std::fs::metadata(path).ok()?.dev();
+        #[cfg(target_os = "macos")]
+        let from = {
+            let c = crate::ffi::cstr(path).ok()?;
+            // SAFETY: a NUL-terminated path and a zeroed out-buffer.
+            let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+            if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
+                return None;
+            }
+            s.f_mntfromname.iter().take_while(|&&c| c != 0).map(|&c| c as u8 as char).collect::<String>()
+        };
+        #[cfg(not(target_os = "macos"))]
+        let from = std::fs::read_to_string("/proc/self/mounts").ok().and_then(|t| mount_source(&t, path)).unwrap_or_default();
+        Some(format!("{dev} {from}"))
     }
     #[cfg(windows)]
     {
-        win::list()
+        win::volume_guid(path)
     }
+}
+
+/// The source of the last mount at `at` in a `/proc/self/mounts` text (a later mount on the same
+/// point hides the earlier one).
+#[cfg_attr(not(any(test, all(unix, not(target_os = "macos")))), allow(dead_code))]
+pub fn mount_source(text: &str, at: &Path) -> Option<String> {
+    text.lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            Some((f.next()?, f.next()?))
+        })
+        .rfind(|(_, on)| Path::new(&unescape_mount(on)) == at)
+        .map(|(dev, _)| unescape_mount(dev))
 }
 
 // ---- Linux --------------------------------------------------------------------------------
@@ -118,7 +165,7 @@ pub fn from_mounts(text: &str, user: &str) -> Vec<Volume> {
         }
         let eject = dev.starts_with("/dev/") && (at.starts_with("/media/") || at.starts_with("/run/media/"));
         out.retain(|v| v.path != Path::new(&at));
-        out.push(Volume { name: name.to_string(), path: PathBuf::from(&at), eject, device: Some(dev) });
+        out.push(Volume { name: name.to_string(), path: PathBuf::from(&at), eject, device: Some(dev), id: None });
     }
     out
 }
@@ -148,7 +195,7 @@ pub fn from_volumes_dir(entries: Vec<VolumesEntry>, dir: &Path) -> Vec<Volume> {
     let mut v: Vec<Volume> = entries
         .into_iter()
         .filter(|e| !e.root_link && e.mounted && !e.name.starts_with('.') && !e.name.starts_with("com.apple."))
-        .map(|e| Volume { path: dir.join(&e.name), name: e.name, eject: true, device: None })
+        .map(|e| Volume { path: dir.join(&e.name), name: e.name, eject: true, device: None, id: None })
         .collect();
     v.sort_by_key(|v| v.name.to_lowercase());
     v
@@ -196,7 +243,13 @@ pub fn from_drives(mask: u32, kind: impl Fn(char) -> u32, label: impl Fn(char, u
                 Some(s) => format!("{} ({l}:)", s.trim()),
                 None => format!("{l}:"),
             };
-            Volume { name, path: PathBuf::from(format!("{l}:\\")), eject: matches!(k, DRIVE_REMOVABLE | DRIVE_CDROM), device: None }
+            Volume {
+                name,
+                path: PathBuf::from(format!("{l}:\\")),
+                eject: matches!(k, DRIVE_REMOVABLE | DRIVE_CDROM),
+                device: None,
+                id: None,
+            }
         })
         .collect()
 }
@@ -204,9 +257,27 @@ pub fn from_drives(mask: u32, kind: impl Fn(char) -> u32, label: impl Fn(char, u
 #[cfg(windows)]
 pub(crate) mod win {
     use super::{DRIVE_REMOTE, Volume, from_drives};
-    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
+    };
 
     use crate::ffi::wide;
+
+    /// The volume's GUID path (`\\?\Volume{…}\`) for a drive root or folder mount point.
+    pub fn volume_guid(root: &std::path::Path) -> Option<String> {
+        let mut at = root.as_os_str().to_owned();
+        if !root.to_string_lossy().ends_with('\\') {
+            at.push("\\");
+        }
+        let mut name = [0u16; 64];
+        // SAFETY: a NUL-terminated mount point and a buffer of the length given.
+        let ok = unsafe { GetVolumeNameForVolumeMountPointW(wide(&at).as_ptr(), name.as_mut_ptr(), name.len() as u32) };
+        if ok == 0 {
+            return None;
+        }
+        let n = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+        Some(String::from_utf16_lossy(&name[..n]))
+    }
 
     pub fn list() -> Vec<Volume> {
         // A card reader or disc drive with nothing in it answers "not ready" rather than asking
@@ -259,6 +330,13 @@ pub(crate) mod win {
 pub enum EjectError {
     /// Another app has something open on it.
     InUse,
+    /// It isn't the volume that was picked any more (another was mounted there since, or its
+    /// identity can't be read): nothing was done.
+    Changed,
+    /// Unmounted, but the drive couldn't be powered off (Linux): it's not safe to pull yet.
+    #[cfg_attr(any(test, not(all(unix, not(target_os = "macos")))), allow(dead_code))]
+    NotPoweredOff(String),
+    #[cfg_attr(test, allow(dead_code))]
     Failed(String),
 }
 
@@ -267,6 +345,8 @@ pub fn eject_note(name: &str, r: &Result<(), EjectError>) -> String {
     match r {
         Ok(()) => format!("Ejected “{name}”"),
         Err(EjectError::InUse) => format!("“{name}” is in use by another app, so it wasn't ejected"),
+        Err(EjectError::Changed) => format!("“{name}” changed since; refresh and try again"),
+        Err(EjectError::NotPoweredOff(e)) => format!("Unmounted “{name}”, but it couldn't be powered off: {e}"),
         Err(EjectError::Failed(e)) => format!("Couldn't eject “{name}”: {e}"),
     }
 }
@@ -278,29 +358,43 @@ pub fn says_busy(text: &str) -> bool {
     t.contains("busy") || t.contains("in use") || t.contains("dissented")
 }
 
-/// Ejects `v`. Blocks until the OS answers: call on a worker.
+/// Ejects `v`, if it's still the volume that was picked ([`Volume::id`], checked right before
+/// acting). Blocks until the OS answers: call on a worker.
 pub fn eject(v: &Volume) -> Result<(), EjectError> {
     if rune::tooling::headless_run().is_some() {
         return Ok(());
     }
-    #[cfg(target_os = "macos")]
-    {
-        mac_eject(&v.path)
+    if v.id.is_none() || identity(&v.path) != v.id {
+        return Err(EjectError::Changed);
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        linux_eject(v)
-    }
-    #[cfg(windows)]
-    {
-        win_eject(&v.path)
+    #[cfg(test)]
+    return hook::eject(v);
+    #[cfg(all(not(test), target_os = "macos"))]
+    return mac_eject(&v.path);
+    #[cfg(all(not(test), unix, not(target_os = "macos")))]
+    return linux_eject(v, std::env::var_os("PATH").as_deref());
+    #[cfg(all(not(test), windows))]
+    return win_eject(&v.path);
+}
+
+/// Test only: what was ejected, instead of ejecting it.
+#[cfg(test)]
+pub(crate) mod hook {
+    use std::sync::Mutex;
+
+    pub(crate) static EJECTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    pub(super) fn eject(v: &super::Volume) -> Result<(), super::EjectError> {
+        EJECTED.lock().unwrap().push(v.name.clone());
+        Ok(())
     }
 }
 
+/// udisks (unmount, then power off), else `gio mount -e`, found in `path` (`$PATH`).
 #[cfg(all(unix, not(target_os = "macos")))]
-fn linux_eject(v: &Volume) -> Result<(), EjectError> {
+#[cfg_attr(test, allow(dead_code))]
+fn linux_eject(v: &Volume, path: Option<&std::ffi::OsStr>) -> Result<(), EjectError> {
     use std::process::Command;
-    let path = std::env::var_os("PATH");
     let run = |c: &mut Command| -> Result<(), EjectError> {
         let out = c.output().map_err(|e| EjectError::Failed(e.to_string()))?;
         if out.status.success() {
@@ -314,20 +408,25 @@ fn linux_eject(v: &Volume) -> Result<(), EjectError> {
         }
     };
     let dev = v.device.as_deref().filter(|d| d.starts_with("/dev/"));
-    if let (Some(udisks), Some(dev)) = (find_program("udisksctl", path.as_deref()), dev) {
+    if let (Some(udisks), Some(dev)) = (find_program("udisksctl", path), dev) {
         run(Command::new(&udisks).args(["unmount", "--no-user-interaction", "-b", dev]))?;
         // Powering the drive off is what makes it safe to pull; a drive with another volume
-        // still mounted says no, and the unmount stands.
-        let _ = run(Command::new(&udisks).args(["power-off", "--no-user-interaction", "-b", dev]));
-        return Ok(());
+        // still mounted says no, and the unmount stands, said as such.
+        return match run(Command::new(&udisks).args(["power-off", "--no-user-interaction", "-b", dev])) {
+            Ok(()) => Ok(()),
+            Err(EjectError::InUse) => Err(EjectError::NotPoweredOff("another volume on the drive is in use".into())),
+            Err(EjectError::Failed(e) | EjectError::NotPoweredOff(e)) => Err(EjectError::NotPoweredOff(e)),
+            Err(EjectError::Changed) => Err(EjectError::Changed),
+        };
     }
-    if let Some(gio) = find_program("gio", path.as_deref()) {
+    if let Some(gio) = find_program("gio", path) {
         return run(Command::new(gio).args(["mount", "-e"]).arg(&v.path));
     }
     Err(EjectError::Failed("ejecting needs udisksctl (udisks2) or gio, and neither is installed".into()))
 }
 
 #[cfg(target_os = "macos")]
+#[cfg_attr(test, allow(dead_code))]
 fn mac_eject(path: &Path) -> Result<(), EjectError> {
     use objc2::rc::autoreleasepool;
     use objc2::runtime::AnyObject;
@@ -357,6 +456,7 @@ fn mac_eject(path: &Path) -> Result<(), EjectError> {
 }
 
 #[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
 fn win_eject(path: &Path) -> Result<(), EjectError> {
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE,
@@ -562,11 +662,31 @@ impl State {
     }
 
     /// Ejects volume `v` (index into `volumes`) on a worker. A pane showing it goes home first.
-    pub fn eject(&mut self, v: usize) {
-        let Some(vol) = self.volumes.get(v).cloned() else { return };
+    /// The volume mounted at `path` now (the ⏏ beside a row, which knows its path).
+    pub fn eject_at(&mut self, path: &Path) {
+        if let Some(vol) = self.volumes.iter().find(|v| v.path == path).cloned() {
+            self.eject(vol);
+        }
+    }
+
+    /// Ejects `vol` (as the list had it when it was picked) on a worker, which checks it's
+    /// still that volume first. Refused while a file operation reads or writes there. A pane
+    /// showing it goes home first, and searches that could walk into it stop.
+    pub fn eject(&mut self, vol: Volume) {
         if self.ejecting.is_some() {
             self.note = Some("Already ejecting a volume".into());
             return;
+        }
+        if self.job.as_ref().is_some_and(|j| j.touches(&vol.path)) {
+            self.note = Some(format!("A file operation is using “{}”: let it finish or cancel it (Esc), then eject", vol.name));
+            return;
+        }
+        for p in &mut self.panes {
+            if let Some(s) = p.f.search.as_mut()
+                && vol.path.starts_with(&p.f.cwd)
+            {
+                s.stop_all();
+            }
         }
         let home = crate::fs::home();
         for ix in 0..self.panes.len() {
@@ -635,6 +755,105 @@ systemd-1 /mnt/auto autofs rw 0 0
 /dev/loop3 /snap/core/1 squashfs ro 0 0
 /dev/sdg1 /media/cdrom iso9660 ro 0 0
 ";
+
+    #[test]
+    fn the_last_mount_at_a_point_is_its_source() {
+        assert_eq!(mount_source(MOUNTS, Path::new("/media/smr/Old")).as_deref(), Some("/dev/sdf1"));
+        assert_eq!(mount_source(MOUNTS, Path::new("/media/smr/USB Stick")).as_deref(), Some("/dev/sdb1"));
+        assert_eq!(mount_source(MOUNTS, Path::new("/media/smr")), None);
+    }
+
+    fn eject_state(name: &str, vols: &[&str]) -> (State, Vec<Volume>) {
+        let d = std::env::temp_dir().join(format!("arbor-eject-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let vols: Vec<Volume> = vols
+            .iter()
+            .map(|v| {
+                let path = d.join(v);
+                std::fs::create_dir_all(&path).unwrap();
+                Volume { name: format!("{name}-{v}"), id: identity(&path), path, eject: true, device: None }
+            })
+            .collect();
+        let mut s = crate::app::tests::state_in(&d);
+        crate::app::tests::settle_all(&mut s);
+        s.places.clear();
+        s.volumes = vols.clone();
+        (s, vols)
+    }
+
+    fn settle_eject(s: &mut State) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while s.ejecting.is_some() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            s.poll_volumes();
+        }
+        assert!(s.ejecting.is_none(), "the eject answered");
+    }
+
+    fn ejected(name: &str) -> bool {
+        hook::EJECTED.lock().unwrap().iter().any(|n| n == name)
+    }
+
+    /// The reviewer's case: USB's menu is open, a refresh drops USB from the list, and Eject is
+    /// chosen: Backup, now at USB's row, must not be ejected.
+    #[test]
+    fn a_refresh_while_the_menu_is_open_never_retargets_eject() {
+        let (mut s, vols) = eject_state("menu", &["USB", "Backup"]);
+        let mut tx = rune::Tx::default();
+        s.sidebar_menu(0, rune::PointerPress { x: 1.0, y: 1.0 }, &mut tx);
+        s.volumes.remove(0);
+        s.run_act(crate::menu::Act::Place(crate::menu::PlaceAct::Eject, 0), &mut tx);
+        settle_eject(&mut s);
+        assert!(!ejected(&vols[1].name), "clicked USB, ejected Backup");
+        assert!(ejected(&vols[0].name), "USB itself, still mounted, is ejected");
+    }
+
+    /// Another volume mounted at the picked one's place since: nothing is ejected, and it says so.
+    #[test]
+    fn a_volume_that_changed_since_it_was_picked_is_left_alone() {
+        let (mut s, mut vols) = eject_state("changed", &["USB"]);
+        vols[0].id = Some("another disk".into());
+        s.eject(vols[0].clone());
+        settle_eject(&mut s);
+        assert!(!ejected(&vols[0].name));
+        assert_eq!(s.note.as_deref(), Some(format!("“{}” changed since; refresh and try again", vols[0].name).as_str()));
+    }
+
+    /// A file operation reading from (or writing to) the volume holds Eject off.
+    #[test]
+    fn eject_waits_for_a_file_operation_on_the_volume() {
+        let (mut s, vols) = eject_state("busy", &["USB"]);
+        std::fs::write(vols[0].path.join("f"), "x").unwrap();
+        let elsewhere = std::env::temp_dir().join(format!("arbor-eject-busy-dest-{}", std::process::id()));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        s.job = Some(crate::ops::start(crate::ops::Op::Copy { sources: vec![vols[0].path.join("f")], dest: elsewhere }, None, None));
+        s.eject(vols[0].clone());
+        assert!(s.ejecting.is_none(), "not started");
+        assert!(s.note.as_deref().is_some_and(|n| n.starts_with("A file operation is using")), "{:?}", s.note);
+    }
+
+    /// udisks unmounts but can't power the drive off: said as such, not "Ejected".
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_drive_that_unmounts_but_wont_power_off_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = std::env::temp_dir().join(format!("arbor-eject-udisks-{}", std::process::id()));
+        std::fs::create_dir_all(&bin).unwrap();
+        let tool = bin.join("udisksctl");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\n[ \"$1\" = unmount ] && exit 0\necho 'Error powering off drive: not a removable device' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let v = Volume { name: "USB".into(), path: "/media/u/USB".into(), eject: true, device: Some("/dev/sdx1".into()), id: None };
+        let r = linux_eject(&v, Some(bin.as_os_str()));
+        assert_eq!(r, Err(EjectError::NotPoweredOff("Error powering off drive: not a removable device".into())));
+        assert_eq!(
+            eject_note("USB", &r),
+            "Unmounted “USB”, but it couldn't be powered off: Error powering off drive: not a removable device"
+        );
+    }
 
     #[test]
     fn linux_lists_the_users_mounts_only() {

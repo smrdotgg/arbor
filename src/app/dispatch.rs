@@ -288,7 +288,7 @@ impl State {
                 }
             }
             Eject => {
-                if let Some(v) = self.volume_here() {
+                if let Some(v) = self.volume_here().and_then(|v| self.volumes.get(v)).cloned() {
                     self.eject(v);
                 }
             }

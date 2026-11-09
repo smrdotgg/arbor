@@ -201,6 +201,8 @@ pub struct State {
     pub(crate) launch_job: Latest<Result<(), String>>,
     /// The files and apps a native context menu's Open With submenu was built with.
     pub(crate) menu_apps: Option<(Vec<PathBuf>, Vec<crate::openwith::Handler>)>,
+    /// The sidebar item a menu was opened on, when it's a volume: (its index then, the volume).
+    pub(crate) menu_volume: Option<(usize, crate::volumes::Volume)>,
     /// Get Info's panel, while it's open (`info.rs`).
     pub info: Option<crate::info::Info>,
     pub(crate) meta_loader: crate::info::MetaLoader,
@@ -336,6 +338,7 @@ impl State {
             next_open_with: 0,
             launch_job: Latest::default(),
             menu_apps: None,
+            menu_volume: None,
             info: None,
             meta_loader: Latest::default(),
             next_info: 0,

@@ -482,6 +482,9 @@ impl State {
     /// Right-click on sidebar item `i` (favorites first, then volumes). Opening it reads the
     /// volumes again (one of the explicit refreshes).
     pub fn sidebar_menu(&mut self, i: usize, press: PointerPress, tx: &mut Tx) {
+        // The volume as it is now: a refresh while the menu is open must not move its rows
+        // onto another volume.
+        self.menu_volume = i.checked_sub(self.places.len()).and_then(|v| self.volumes.get(v)).map(|v| (i, v.clone()));
         self.refresh_volumes();
         let items = self.sidebar_menu_items(i);
         self.show_menu(items, None, press, tx);
@@ -576,6 +579,26 @@ impl State {
                 }
             }
             Act::Place(a, i) => match a {
+                PlaceAct::Open | PlaceAct::NewTab | PlaceAct::Eject | PlaceAct::AddToSidebar if i >= self.places.len() => {
+                    // A volume's row: the volume the menu was opened on, wherever the list
+                    // has moved it since.
+                    let Some((_, vol)) = self.menu_volume.take().filter(|(at, _)| *at == i) else {
+                        self.note = Some("The volumes changed since the menu opened; try again".into());
+                        return;
+                    };
+                    match a {
+                        PlaceAct::Eject => self.eject(vol),
+                        PlaceAct::AddToSidebar => self.add_favorites(vec![vol.path], None),
+                        _ => {
+                            if a == PlaceAct::NewTab {
+                                self.new_tab(tx);
+                            }
+                            if vol.path != self.cur().cwd {
+                                self.go(vol.path, crate::folder::Nav::New, None);
+                            }
+                        }
+                    }
+                }
                 PlaceAct::Open => self.go_place(i),
                 PlaceAct::NewTab => {
                     self.new_tab(tx);
@@ -585,11 +608,7 @@ impl State {
                 PlaceAct::Up if i > 0 => self.move_favorite(i, i - 1),
                 PlaceAct::Down => self.move_favorite(i, i + 1),
                 PlaceAct::Up => {}
-                PlaceAct::Eject => {
-                    if let Some(v) = i.checked_sub(self.places.len()) {
-                        self.eject(v);
-                    }
-                }
+                PlaceAct::Eject => {}
                 PlaceAct::AddToSidebar => {
                     if let Some((_, p)) = self.place_at(i) {
                         self.add_favorites(vec![p], None);
