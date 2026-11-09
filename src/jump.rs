@@ -1245,13 +1245,16 @@ mod tests {
         d.join("history.log")
     }
 
-    /// Waits for the writer to have done `n` disk operations.
+    /// Waits for the writer to have done `n` disk operations. It counts one as it starts it,
+    /// so the flush then waits for the last one to finish (on a fast machine a test could
+    /// otherwise read the log before the append landed).
     fn settle_io(h: &History, n: u64) {
         let until = std::time::Instant::now() + Duration::from_secs(5);
         while h.io() < n && std::time::Instant::now() < until {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(h.io(), n);
+        assert!(h.drain(Duration::from_secs(5)), "the writer finishes what it started");
     }
 
     #[test]
