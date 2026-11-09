@@ -1160,10 +1160,12 @@ fn every_action_refuses(name: &str, replace: fn(&Path)) {
         b.plan.status
     );
     s.close_batch(&mut tx());
-    // Dragging it out carries nothing.
-    let i = s.cur().sel;
-    let id = s.cur().id;
-    assert!(s.drag_item(id, i).is_none());
+    // Dragged onto the other pane, the worker leaves it alone.
+    s.note = None;
+    let (i, id, version, to) = (s.cur().sel, s.cur().id, s.cur().version, s.panes[1].id());
+    s.drop_on_pane(id, i, version, to, &mut tx());
+    finish_job(&mut s);
+    untouched(&s, "drag onto the other pane");
     // An item that's still the one found goes ahead, beside one that isn't.
     s.note = None;
     search(&mut s, "t");

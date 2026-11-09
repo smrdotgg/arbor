@@ -624,9 +624,15 @@ fn a_listed_item_replaced_since_is_left_alone() {
     s.answer(true, &mut Tx::default());
     finish_job(&mut s);
     untouched(&s, "f-delete", "isn't the item you chose");
+    // A drag starts at once with the row as listed; dropped on the other pane, the worker
+    // leaves the newcomer alone.
     replaced(&mut s, "g-drag");
-    let (i, id) = (s.cur().sel, s.cur().id);
-    assert!(s.drag_item(id, i).is_none(), "a drag carries nothing");
+    let (i, id, version, to) = (s.cur().sel, s.cur().id, s.cur().version, s.panes[1].id());
+    assert!(s.drag_item(id, i).is_some(), "a drag starts");
+    s.drop_on_pane(id, i, version, to, &mut Tx::default());
+    finish_job(&mut s);
+    untouched(&s, "g-drag", since);
+    assert!(std::fs::read_dir(&into).unwrap().next().is_none(), "nothing went into the other folder");
     // Read again, the newcomer is what the row is: it goes.
     settle_all(&mut s);
     s.run(Cmd::Reload, &mut Tx::default());
@@ -638,4 +644,21 @@ fn a_listed_item_replaced_since_is_left_alone() {
     assert!(!d.join("a-trash").exists(), "{:?}", s.note);
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&into);
+}
+
+/// The review's case: starting a drag stat'ed (on Windows, opened) every selected item on the
+/// window's thread, so a slow disk froze the window. Now it carries the rows as listed and
+/// reads nothing: here the folder is gone and the drag still starts, with every path.
+#[test]
+fn starting_a_drag_reads_nothing_from_the_disk() {
+    let d = folder("drag-no-io", 3);
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.run(Cmd::SelectAll, &mut Tx::default());
+    std::fs::remove_dir_all(&d).unwrap();
+    let before = crate::fs::reads::so_far();
+    let (i, id) = (s.cur().sel, s.cur().id);
+    let item = s.drag_item(id, i).expect("the drag starts");
+    assert_eq!(crate::fs::reads::so_far(), before, "no identity read");
+    assert_eq!(item.paths().len(), 3, "every listed path, unread");
 }

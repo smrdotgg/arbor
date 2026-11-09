@@ -220,6 +220,8 @@ pub fn ident(m: &std::fs::Metadata) -> Option<Ident> {
 /// only there); on Windows its volume and file id (one open, without reading or locking it), to
 /// compare with what a listing read ([`win_dir`]). For checks right before acting, not walks.
 pub fn ident_of(path: &Path, m: &std::fs::Metadata) -> Option<Ident> {
+    #[cfg(test)]
+    reads::count();
     let id = ident(m)?;
     #[cfg(target_os = "linux")]
     if id.wants_handle() {
@@ -235,6 +237,20 @@ pub fn ident_of(path: &Path, m: &std::fs::Metadata) -> Option<Ident> {
     {
         let _ = path;
         Some(id)
+    }
+}
+
+/// Tests: how many identities this thread has read from the disk ([`ident_of`], [`ident_at`]).
+#[cfg(test)]
+pub(crate) mod reads {
+    thread_local! {
+        static N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    pub(crate) fn count() {
+        N.with(|n| n.set(n.get() + 1));
+    }
+    pub(crate) fn so_far() -> u64 {
+        N.with(|n| n.get())
     }
 }
 

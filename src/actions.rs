@@ -439,14 +439,12 @@ impl State {
     // ---- drag and drop ----------------------------------------------------------------------
 
     /// Files to drag out of row `i` of pane `id`: the whole selection if the row is in it,
-    /// else the row. Only the items still the ones the listing or the walk found (one lstat
-    /// each, here: the drop happens in another app, too late to check).
+    /// else the row, as listed. Nothing is read from the disk here, on the window's thread (a
+    /// slow disk would freeze it): a drop inside the window goes to the worker, which checks each
+    /// item against its listing's identity right before acting (`State::drop_on_pane`); what
+    /// another app does with a drop is that app's to check.
     pub fn drag_item(&self, id: u64, i: usize) -> Option<DragItem> {
-        let f = &self.pane(id)?.f;
-        let mut paths = f.drag_paths(i);
-        let stale: Vec<PathBuf> =
-            f.drag_checks(i).items.into_iter().filter(|(p, id)| crate::fs::ident_at(p) != Some(*id)).map(|(p, _)| p).collect();
-        paths.retain(|p| !stale.contains(p));
+        let paths = self.pane(id)?.f.drag_paths(i);
         if paths.is_empty() {
             return None;
         }
