@@ -547,7 +547,8 @@ mod tests {
         assert!(parse("favorites = [\"relative/path\"]").is_err());
         assert!(parse("favorites = [\n\"/a\",\n").unwrap_err().starts_with("line "));
         assert_eq!(parse("favorites = []").unwrap(), Vec::<PathBuf>::new());
-        assert_eq!(parse("favorites = [\"/a\", \"/a\"]").unwrap(), vec![PathBuf::from("/a")], "duplicates once");
+        let a = if cfg!(windows) { "C:/a" } else { "/a" };
+        assert_eq!(parse(&format!("favorites = [\"{a}\", \"{a}\"]")).unwrap(), vec![PathBuf::from(a)], "duplicates once");
     }
 
     /// A corrupt file gives the defaults (no list) and a message; a missing one gives the
