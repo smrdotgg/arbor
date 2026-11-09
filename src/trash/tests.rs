@@ -394,3 +394,46 @@ fn trashes_a_file() {
     assert!(r.is_ok());
     assert!(!p.exists());
 }
+
+/// Any names (bytes, not just UTF-8; names that collide; names that look like records): each
+/// trashed item lands in `files/` under a name of its own, never over another, with a record
+/// beside it that Put Back reads as exactly where it came from.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn any_name_is_trashed_with_a_record_that_reads_back() {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let d = tmp("names");
+    let home = d.join("home/Trash");
+    crate::prop::check("trash_names", 40, |r| {
+        let src = d.join("src");
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(&src).unwrap();
+        let mut made = Vec::new();
+        for _ in 0..1 + r.below(4) {
+            let name: Vec<u8> = match r.below(4) {
+                0 => b"same".to_vec(),
+                1 => b"x.trashinfo".to_vec(),
+                _ => r.bytes(20).into_iter().filter(|&c| c != 0 && c != b'/').collect(),
+            };
+            if name.is_empty() || name == b"." || name == b".." {
+                continue;
+            }
+            let p = src.join(std::ffi::OsString::from_vec(name));
+            if p.exists() {
+                continue;
+            }
+            std::fs::write(&p, p.as_os_str().as_bytes()).unwrap();
+            made.push(p);
+        }
+        for p in &made {
+            let at = super::trash_in(&home, p, p).ok().expect("trashed");
+            assert!(!p.exists() && at.parent() == Some(home.join("files").as_path()), "{p:?} → {at:?}");
+            assert_eq!(std::fs::read(&at).unwrap(), p.as_os_str().as_bytes(), "{at:?} is the item, not another");
+            let mut rec = at.file_name().unwrap().to_os_string();
+            rec.push(".trashinfo");
+            let text = std::fs::read_to_string(home.join("info").join(rec)).unwrap();
+            assert_eq!(crate::trash::contents::parse_info(&text, None).as_ref(), Ok(p), "{text:?}");
+        }
+    });
+    let _ = std::fs::remove_dir_all(&d);
+}
