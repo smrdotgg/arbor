@@ -20,4 +20,4 @@ to [`RUNE-GAPS.md`](RUNE-GAPS.md).
 When the owner is away, don't block on questions: pick the recommended option, carry on, and
 record it in [`DECISIONS.md`](DECISIONS.md) so it can be reviewed and undone.
 
-See `README.md` for build commands, keys and the source layout.
+See `README.md` for build commands and keys, and `ARCHITECTURE.md` for the source layout.

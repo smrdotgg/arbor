@@ -56,26 +56,8 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 30,000 lines in `src/` (over a third of it tests): `fs.rs` (reading folders, opening files),
-`ops.rs` (copy, move, trash, permanent delete, batch rename and undo on a worker), `noclobber.rs` (moves, copies and file ids
-that never replace anything), `trash.rs` (each platform's trash, and telling a disk with none),
-`delete.rs` (deleting permanently without following links), `confirm.rs` (Arbor's one dialog), `app.rs`
-(state, startup, key dispatch, what each command does), `folder.rs` (one folder on screen: its
-listing, selection, filter, sort and history, and what a hidden tab keeps), `panes.rs` (tabs and
-split view), `commands.rs` (the command table and keymap), `palette.rs` (the command palette),
-`config.rs` (the settings file), `actions.rs` (clipboard, rename, drag and drop, context menu),
-`menu.rs` (the context menu in the window, on Linux), `sidebar.rs` (the sidebar's favorites and
-their file), `volumes.rs` (the sidebar's Locations, and Eject), `openwith.rs` (Open With), `info.rs`
-(Get Info), `handler.rs` (making Arbor the default for
-folders, and putting the old default back), `incoming.rs` (folders other apps ask Arbor to show,
-and one Arbor on Windows), `complete.rs` (Tab completion in go-to mode),
-`preview.rs` (quick preview: reading, sniffing and decoding on a worker), `thumb.rs` (the OS's
-thumbnails for the preview: Quick Look, the Windows shell), `jump.rs` (Jump to
-Folder: the history's writer thread, frecency and ranking), `search.rs` (Search in This Folder:
-the walk, its threads and the results), `pattern.rs` (globs), `select.rs`
-(Select by Pattern and the other selection commands), `rename.rs` (Batch Rename's rules: tokens,
-case, and what's wrong with a name on each platform), `batch.rs` (the Batch Rename dialog), `view.rs` (UI) and `timing.rs` (opt-in
-speed measurement).
+About 33,500 lines of Rust in `src/`, over a third of it tests. [`ARCHITECTURE.md`](ARCHITECTURE.md)
+maps the modules, the threads, the patterns they share and where platform code lives.
 
 ## Install
 
@@ -766,7 +748,7 @@ a running copy or move.
 
 Rune exposes Arbor's window to each platform's accessibility API through AccessKit
 (VoiceOver and Voice Control on macOS, Narrator, NVDA and JAWS on Windows, Orca on Linux), and
-Arbor gives every part a role and a name (`src/view.rs`; `src/a11y_tests.rs` checks the tree):
+Arbor gives every part a role and a name (`src/view/`; `src/a11y_tests.rs` checks the tree):
 
 - **The file list** is a list box named for its folder ("Files in Downloads"). Each row is an
   option named from its cells in reading order (name, kind, size, modified: "notes.txt, txt,
