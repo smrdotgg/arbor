@@ -55,9 +55,10 @@ libc = "0.2"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # org.freedesktop.FileManager1 on the session bus, served only while Arbor is the default for
 # folders (src/incoming.rs). The same zbus and Tokio Rune's `dbus` feature already builds, so no
-# new crates: one current-thread runtime on the bus thread.
+# new crates: one current-thread runtime on the bus thread, told by a Tokio channel (`sync`, which
+# zbus builds already) when Make or Restore changes whether it should serve.
 zbus = { version = "6", default-features = false, features = ["tokio", "proxy", "service"] }
-tokio = { version = "1", default-features = false, features = ["rt"] }
+tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }

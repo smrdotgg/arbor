@@ -501,6 +501,9 @@ impl State {
         }
         if let Some(r) = self.handler_job.take() {
             self.note = Some(r.unwrap_or_else(|e| e));
+            // Linux: the running Arbor serves "Show in folder" requests from now on, or stops.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            crate::incoming::linux::recheck();
             changed = true;
         }
         changed |= self.poll_completion();

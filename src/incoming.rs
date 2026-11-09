@@ -316,22 +316,60 @@ pub(crate) mod linux {
         b.build().await
     }
 
-    /// On its own thread: does nothing more unless the activation file is Arbor's; then
-    /// serves the name until the process ends (waiting on the bus's socket, no polling).
+    /// Tells the bus thread to look at the activation file again.
+    static RECHECK: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>> = std::sync::OnceLock::new();
+
+    /// Whether the activation file is Arbor's, so Arbor should serve the name.
+    fn ours() -> bool {
+        data_home().map(|d| service_file(&d)).is_some_and(|f| std::fs::read_to_string(f).is_ok_and(|t| is_ours(&t)))
+    }
+
+    /// On its own thread: serves the name while the activation file is Arbor's (from startup,
+    /// or once Make writes it) and lets it go when Restore removes it, waiting on the bus's
+    /// socket and on [`recheck`] (no polling).
     pub(super) fn spawn(sink: Sink) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        if RECHECK.set(tx).is_err() {
+            return;
+        }
         let _ = std::thread::Builder::new().name("arbor-dbus".into()).spawn(move || {
-            let Some(file) = data_home().map(|d| service_file(&d)) else { return };
-            if !std::fs::read_to_string(file).is_ok_and(|t| is_ours(&t)) {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+            rt.block_on(follow(zbus::connection::Builder::session, sink, ours, rx));
+        });
+    }
+
+    /// "Make Arbor the Default for Folders" or its restore finished: serve the name, or let it
+    /// go, as the activation file now says. Does nothing before [`spawn`] (tests, headless).
+    pub fn recheck() {
+        if let Some(tx) = RECHECK.get() {
+            let _ = tx.send(());
+        }
+    }
+
+    /// Serves the name on a connection from `builder` whenever `ours()` says so, checked at
+    /// the start and on each message from `rx`; releases it when it stops saying so.
+    pub async fn follow(
+        builder: impl Fn() -> zbus::connection::Builder<'static>,
+        sink: Sink,
+        ours: impl Fn() -> bool,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    ) {
+        let mut conn: Option<zbus::Connection> = None;
+        loop {
+            match (ours(), conn.take()) {
+                // The name may be someone else's (a file manager that doesn't let go of it):
+                // then this waits for the next change.
+                (true, None) => conn = connect(builder(), sink.clone(), true).await.ok(),
+                (true, Some(c)) => conn = Some(c),
+                (false, Some(c)) => {
+                    let _ = c.release_name(BUS_NAME).await;
+                }
+                (false, None) => {}
+            }
+            if rx.recv().await.is_none() {
                 return;
             }
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
-            rt.block_on(async move {
-                // The name may be someone else's (a file manager that doesn't let go of it).
-                if let Ok(_conn) = connect(zbus::connection::Builder::session(), sink, true).await {
-                    std::future::pending::<()>().await;
-                }
-            });
-        });
+        }
     }
 }
 
@@ -449,6 +487,84 @@ mod tests {
         settle_all(&mut s);
         assert_eq!(s.panes[0].tabs.len(), 2);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The review's case: Make, in the running Arbor, starts serving the name at once (it used
+    /// to wait for the next launch, so the next request started a second Arbor), and Restore
+    /// lets it go (the second Arbor used to keep it, taking requests after Restore). On a
+    /// private bus; skipped where there's no `dbus-daemon`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_name_follows_make_and_restore_in_the_running_arbor() {
+        use std::io::BufRead;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Ok(mut daemon) = std::process::Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+        else {
+            eprintln!("no dbus-daemon: skipped");
+            return;
+        };
+        let mut addr = String::new();
+        std::io::BufReader::new(daemon.stdout.take().unwrap()).read_line(&mut addr).unwrap();
+        let addr: &'static str = Box::leak(addr.trim().to_string().into_boxed_str());
+        let (shows, got) = std::sync::mpsc::channel();
+        let shows = std::sync::Mutex::new(shows);
+        let sink: Sink = std::sync::Arc::new(move |s, _| shows.lock().unwrap().send(s).unwrap());
+        static OURS: AtomicBool = AtomicBool::new(false);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(linux::follow(move || zbus::connection::Builder::address(addr), sink, || OURS.load(Ordering::SeqCst), rx));
+            let client = zbus::connection::Builder::address(addr).build().await.unwrap();
+            let owned = || {
+                let client = client.clone();
+                async move {
+                    let r = client
+                        .call_method(
+                            Some("org.freedesktop.DBus"),
+                            "/org/freedesktop/DBus",
+                            Some("org.freedesktop.DBus"),
+                            "NameHasOwner",
+                            &(crate::handler::linux::BUS_NAME,),
+                        )
+                        .await
+                        .unwrap();
+                    r.body().deserialize::<bool>().unwrap()
+                }
+            };
+            // Each call is a round trip to the bus, which lets the serving task run.
+            let wait_for = |want: bool| async move {
+                for _ in 0..500 {
+                    if owned().await == want {
+                        return true;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                false
+            };
+            assert!(wait_for(false).await, "not Arbor's: not served");
+            OURS.store(true, Ordering::SeqCst); // Make wrote the activation file
+            tx.send(()).unwrap();
+            assert!(wait_for(true).await, "served at once after Make");
+            client
+                .call_method(
+                    Some(crate::handler::linux::BUS_NAME),
+                    linux::OBJECT_PATH,
+                    Some("org.freedesktop.FileManager1"),
+                    "ShowFolders",
+                    &(vec!["file:///tmp"], ""),
+                )
+                .await
+                .unwrap();
+            assert_eq!(got.try_recv().unwrap(), vec![Show::Folder(PathBuf::from("/tmp"))]);
+            OURS.store(false, Ordering::SeqCst); // Restore removed it
+            tx.send(()).unwrap();
+            assert!(wait_for(false).await, "let go after Restore");
+        });
+        let _ = daemon.kill();
+        let _ = daemon.wait();
     }
 
     /// The FileManager1 interface on a private session bus: ShowFolders and ShowItems reach
