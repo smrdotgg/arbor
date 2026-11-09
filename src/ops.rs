@@ -1092,13 +1092,12 @@ impl<'a> Worker<'a> {
 
     /// The step that reverses one that just went, read as the disk is now: an item that went
     /// back to `at` (`back: Some`), or one that should go to the Trash again (`back: None`,
-    /// fingerprinted with everything inside, as a copy's undo is). `None` when it can't be
-    /// read back (then it can't be reversed again, which loses nothing).
-    fn inverse_step(&self, at: PathBuf, back: Option<PathBuf>) -> Option<Step> {
-        let print = match back {
-            Some(_) => Print::of(&at, &at.symlink_metadata().ok()?),
-            None => self.print_all(&at).ok()?,
-        };
+    /// fingerprinted with everything inside, as a copy's undo is). `deep`: fingerprint
+    /// everything inside for a `back: Some` step too (an item that went to the Trash, which
+    /// redo takes back out: it may be edited there). `None` when it can't be read back (then it
+    /// can't be reversed again, which loses nothing).
+    fn inverse_step(&self, at: PathBuf, back: Option<PathBuf>, deep: bool) -> Option<Step> {
+        let print = if back.is_none() || deep { self.print_all(&at).ok()? } else { Print::of(&at, &at.symlink_metadata().ok()?) };
         Some(Step { at, print, back, split: None })
     }
 
@@ -1114,7 +1113,7 @@ impl<'a> Worker<'a> {
                 Ok(put) => {
                     // Where the Trash put it, when it says (the Recycle Bin doesn't): redo
                     // takes it back out from there.
-                    inverse.extend(put.and_then(|put| self.inverse_step(put, Some(step.at.clone()))));
+                    inverse.extend(put.and_then(|put| self.inverse_step(put, Some(step.at.clone()), true)));
                     out.removed.push(step.at.clone());
                     out.results.push(step.at);
                     None
@@ -1138,7 +1137,7 @@ impl<'a> Worker<'a> {
                 }
                 // Out of the Trash, reversing means trashing it again; otherwise moving it back.
                 let to = (!trashed).then(|| step.at.clone());
-                inverse.extend(self.inverse_step(back.clone(), to));
+                inverse.extend(self.inverse_step(back.clone(), to, false));
                 out.moved.push((step.at.clone(), back.clone()));
                 out.results.push(back);
                 None
@@ -1582,7 +1581,7 @@ impl Worker<'_> {
         if self.rename_all(&moves, &seen, out) {
             out.results = moves.iter().map(|(_, back)| back.clone()).collect();
             // Redo (or undo again) goes through the same plan, the other way.
-            let steps: Vec<Step> = moves.iter().filter_map(|(at, back)| self.inverse_step(back.clone(), Some(at.clone()))).collect();
+            let steps: Vec<Step> = moves.iter().filter_map(|(at, back)| self.inverse_step(back.clone(), Some(at.clone()), false)).collect();
             if !steps.is_empty() {
                 out.inverse = Some(Undo { what: What::BatchRename, redo: !undo.redo, steps });
             }
@@ -2100,6 +2099,24 @@ mod tests {
         fs::write(d.join("dst/src/new"), "mine").unwrap();
         let why = undo_refused(undo);
         assert!(why.starts_with("Can't undo the copy: items were added") && why.contains("“src”"), "{why}");
+    }
+
+    /// The review's case: undo a folder's copy, edit a file inside it where it sits in the
+    /// Trash, then redo. Redo used to take it back out (its record had only the folder's own
+    /// fingerprint); now it refuses, as undoing a copy does when anything inside changed.
+    #[test]
+    fn redo_of_a_copy_refuses_a_folder_edited_in_the_trash() {
+        let d = tmp("redo-copy-edited");
+        fs::create_dir_all(d.join("src/nested")).unwrap();
+        fs::write(d.join("src/nested/f"), "old").unwrap();
+        fs::create_dir(d.join("dst")).unwrap();
+        let u = take(run_now(Op::Copy { sources: vec![d.join("src")], dest: d.join("dst") }));
+        let redo = reverse(u);
+        let in_trash = redo.steps[0].at.clone();
+        fs::write(in_trash.join("nested/f"), "edited in the trash").unwrap();
+        let why = undo_refused(redo);
+        assert!(why.contains("“f”") || why.contains("changed") || why.contains("edited"), "{why}");
+        assert!(!d.join("dst/src").exists(), "it stays in the Trash");
     }
 
     /// Trash, undo (it comes back), redo (it goes to the Trash again), undo (back again).
