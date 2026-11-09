@@ -1,6 +1,6 @@
 //! The context menu where Rune has no native one (Linux, see RUNE-GAPS.md): a small card in the
 //! window at the pointer, with the same items as the native menus on macOS and Windows
-//! (`State::menu_items`), drawn by `menu_view` in `view.rs`.
+//! (`State::menu_items`), drawn by `menu_view` in `view/overlays.rs`.
 //!
 //! As a native menu does: nothing is highlighted when it opens; ↑ ↓ move (skipping separators
 //! and what can't run), Home and End go to the ends, a letter goes to the next item starting

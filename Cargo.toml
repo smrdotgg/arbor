@@ -18,7 +18,7 @@ rune = { path = "vendor/rune/crates/rune", default-features = false, features = 
 # build dependencies, and it reports each error's position, which the status bar shows as a line.
 toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
 
-# Quick preview's image decoders, run on a worker only while the preview is open (src/preview.rs).
+# Quick preview's image decoders, run on a worker only while the preview is open (src/preview/decode.rs).
 # png and image (with png and jpeg) are already in the lock file through Rune. png streams rows,
 # so a big PNG shrinks as it decodes. image adds only its built-in BMP codec, plus EXIF
 # orientation parsing. jpeg-decoder, unlike zune-jpeg, can decode at 1/2, 1/4 or 1/8 size in
@@ -54,7 +54,7 @@ libc = "0.2"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # org.freedesktop.FileManager1 on the session bus, served only while Arbor is the default for
-# folders (src/incoming.rs). The same zbus and Tokio Rune's `dbus` feature already builds, so no
+# folders (src/incoming/linux.rs). The same zbus and Tokio Rune's `dbus` feature already builds, so no
 # new crates: one current-thread runtime on the bus thread, told by a Tokio channel (`sync`, which
 # zbus builds already) when Make or Restore changes whether it should serve.
 zbus = { version = "6", default-features = false, features = ["tokio", "proxy", "service"] }
@@ -83,9 +83,9 @@ objc2-quick-look-thumbnailing = { version = "0.3", default-features = false, fea
 
 [target.'cfg(windows)'.dependencies]
 # Win32_Graphics_Gdi: reading the shell thumbnail's bitmap (src/thumb.rs). Win32_System_Registry:
-# the Recycle Bin's settings, checked before a trash (src/trash.rs). Pipes, IO, Security,
+# the Recycle Bin's settings, checked before a trash (src/trash/win.rs). Pipes, IO, Security,
 # RemoteDesktop (the session id) and WindowsAndMessaging (AllowSetForegroundWindow): one Arbor
-# per session, a second handing its folders to the first (src/incoming.rs). Ioctl,
+# per session, a second handing its folders to the first (src/incoming/windows.rs). Ioctl,
 # LibraryLoader and Diagnostics_Debug: ejecting a drive and hearing drives come and go
 # (src/volumes.rs).
 windows-sys = { version = "0.59", features = [

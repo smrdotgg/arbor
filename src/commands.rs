@@ -1,8 +1,8 @@
 //! Every user action, in one table: a stable id (`file.trash`), a title ("Move to Trash") and its
-//! default keys. Key dispatch (`app.rs`), the command palette (`palette.rs`), the context menu
+//! default keys. Key dispatch (`app/dispatch.rs`), the command palette (`palette.rs`), the context menu
 //! (`actions.rs`), the settings template (`config.rs`) and the README's key table all read it.
 //! What each command does, and when it's available, is in `State::run` and
-//! `State::unavailable` (`app.rs`), which match on [`Cmd`] exhaustively, so a new command can't
+//! `State::unavailable` (`app/dispatch.rs`), which match on [`Cmd`] exhaustively, so a new command can't
 //! be left without either.
 //!
 //! Keys are written as in the settings file: `cmd` is ⌘ on macOS and Ctrl elsewhere; `ctrl`,
