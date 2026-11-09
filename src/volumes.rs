@@ -142,8 +142,8 @@ pub fn mount_source(text: &str, at: &Path) -> Option<String> {
             let mut f = l.split_whitespace();
             Some((f.next()?, f.next()?))
         })
-        .rfind(|(_, on)| Path::new(&unescape_mount(on)) == at)
-        .map(|(dev, _)| unescape_mount(dev))
+        .rfind(|(_, on)| mount_path(on) == at)
+        .and_then(|(dev, _)| unescape_mount(dev))
 }
 
 // ---- Linux --------------------------------------------------------------------------------
@@ -181,10 +181,21 @@ const PSEUDO: &[&str] = &[
     "tracefs",
 ];
 
-/// A field of `/proc/self/mounts`, its escapes undone ([`crate::mounts::unescape_bytes`]).
+/// A field of `/proc/self/mounts`, its escapes undone ([`crate::mounts::unescape_bytes`]), as
+/// text: `None` when it isn't UTF-8 (a device named that way is never guessed at).
 #[cfg_attr(not(any(test, all(unix, not(target_os = "macos")))), allow(dead_code))]
-pub fn unescape_mount(s: &str) -> String {
-    String::from_utf8_lossy(&crate::mounts::unescape_bytes(s)).into_owned()
+pub fn unescape_mount(s: &str) -> Option<String> {
+    String::from_utf8(crate::mounts::unescape_bytes(s)).ok()
+}
+
+/// A mount point from `/proc/self/mounts`, byte for byte (a name that isn't UTF-8 too).
+#[cfg_attr(not(any(test, all(unix, not(target_os = "macos")))), allow(dead_code))]
+fn mount_path(s: &str) -> PathBuf {
+    let b = crate::mounts::unescape_bytes(s);
+    #[cfg(unix)]
+    return PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(b));
+    #[cfg(not(unix))]
+    PathBuf::from(String::from_utf8_lossy(&b).into_owned())
 }
 
 /// The user-visible volumes in a `/proc/self/mounts` text, in mount order: one level under
@@ -201,16 +212,21 @@ pub fn from_mounts(text: &str, user: &str) -> Vec<Volume> {
         if PSEUDO.contains(&kind) {
             continue;
         }
-        let (dev, at) = (unescape_mount(dev), unescape_mount(at));
+        let (dev, path) = (unescape_mount(dev), mount_path(at));
         // One level down from a base, and not the user's own folder under /media.
-        let under = bases.iter().find_map(|b| at.strip_prefix(b.as_str()).filter(|rest| !rest.is_empty() && !rest.contains('/')));
-        let Some(name) = under else { continue };
-        if at == format!("/media/{user}") {
+        let Some(name) = bases.iter().find_map(|b| {
+            let rest = path.strip_prefix(b).ok()?;
+            (rest.components().count() == 1).then(|| rest.to_string_lossy().into_owned())
+        }) else {
+            continue;
+        };
+        if path == Path::new(&format!("/media/{user}")) {
             continue;
         }
-        let eject = dev.starts_with("/dev/") && (at.starts_with("/media/") || at.starts_with("/run/media/"));
-        out.retain(|v| v.path != Path::new(&at));
-        out.push(Volume { name: name.to_string(), path: PathBuf::from(&at), eject, device: Some(dev), id: None });
+        let eject =
+            dev.as_deref().is_some_and(|d| d.starts_with("/dev/")) && (path.starts_with("/media/") || path.starts_with("/run/media/"));
+        out.retain(|v| v.path != path);
+        out.push(Volume { name, path, eject, device: dev, id: None });
     }
     out
 }
@@ -977,8 +993,48 @@ systemd-1 /mnt/auto autofs rw 0 0
 
     #[test]
     fn mount_escapes_are_undone() {
-        assert_eq!(unescape_mount("/media/a\\040b\\011c\\134d"), "/media/a b\tc\\d");
-        assert_eq!(unescape_mount("/x\\04"), "/x\\04", "a short escape stays as it is");
+        assert_eq!(unescape_mount("/media/a\\040b\\011c\\134d").as_deref(), Some("/media/a b\tc\\d"));
+        assert_eq!(unescape_mount("/x\\04").as_deref(), Some("/x\\04"), "a short escape stays as it is");
+    }
+
+    /// Any mount table: every volume's path is a mount point exactly as the table writes it
+    /// (escapes undone, byte for byte), and its device is one as written or none.
+    #[test]
+    fn any_mount_table_gives_volumes_at_their_exact_paths() {
+        crate::prop::check("volumes_from_mounts", 2000, |r| {
+            let mut text = String::new();
+            for _ in 0..r.len(6) {
+                let dev = r.pick(&["/dev/sdb1", "/dev/x\\377", "tmpfs", "server:/share"]);
+                let base = r.pick(&["/media/smr/", "/run/media/smr/", "/media/", "/mnt/", "/home/", "/media/smr"]);
+                let name = r.from(&["a", "\\040", "\\377", "\\303\\251", "\\134", "é", "\\777"], 4);
+                let kind = r.pick(&["ext4", "vfat", "proc", "nfs"]);
+                text.push_str(&format!("{dev} {base}{name} {kind} rw 0 0\n"));
+            }
+            let fields: Vec<(String, String)> = text
+                .lines()
+                .map(|l| l.split(' ').take(2).map(String::from).collect::<Vec<_>>())
+                .map(|f| (f[0].clone(), f[1].clone()))
+                .collect();
+            for v in from_mounts(&text, "smr") {
+                assert!(fields.iter().any(|(_, at)| mount_path(at) == v.path), "{:?} isn't a mount point in {text:?}", v.path);
+                if let Some(d) = &v.device {
+                    assert!(fields.iter().any(|(dev, _)| unescape_mount(dev).as_ref() == Some(d)), "{d:?}");
+                }
+            }
+        });
+    }
+
+    /// Found by `any_mount_table_gives_volumes_at_their_exact_paths`: a mount point whose name
+    /// isn't UTF-8 was listed with U+FFFD in it, a path where nothing is (and Eject's fallback
+    /// would name it to `gio`). Now it's the mount point, byte for byte.
+    #[cfg(unix)]
+    #[test]
+    fn a_mount_point_that_isnt_utf8_is_listed_exactly() {
+        use std::os::unix::ffi::OsStrExt;
+        let v = from_mounts("/dev/sdb1 /media/smr/caf\\351 vfat rw 0 0\n/dev/\\377 /media/smr/b ext4 rw 0 0\n", "smr");
+        assert_eq!(v[0].path.as_os_str().as_bytes(), b"/media/smr/caf\xe9");
+        assert_eq!(v[1].device, None, "a device named in bytes that aren't UTF-8 isn't guessed at");
+        assert!(!v[1].eject);
     }
 
     #[test]
