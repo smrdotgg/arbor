@@ -31,26 +31,34 @@ pub struct Entry {
     pub pending: Option<String>,
 }
 
-/// Object identity: whether what's at a path is still the item chosen from a listing (or a
-/// search), edited or not. Every action on chosen items compares it right before acting
-/// (delete, Empty Trash, trash, move, copy, rename, batch rename's search results, Put Back,
-/// drag), from the metadata already read for it (no extra call; see [`ident`]).
+/// Object identity: whether what's at a path is still the item chosen from a listing or a
+/// search, edited or not. Permanent delete, Empty Trash and every action on a search result
+/// compare it right before acting, from the metadata already read for the item (see [`ident`]
+/// and [`ident_of`]).
 ///
 /// It's the object, not its contents: device and inode (Windows: creation time and whether
 /// it's a folder), type and birth time. Size and times of change aren't part of it, so a file
 /// edited after its folder was listed (Arbor doesn't watch folders) is still the item the user
 /// chose. Whether an item is *unchanged* is another question, with its own type: undo, redo,
-/// batch rename's rollback and a cancelled copy's cleanup compare `ops::Print` (identity, type,
-/// size, mtime) and refuse on any edit.
+/// batch rename and a cancelled copy's cleanup compare `ops::Print` (identity, type, size,
+/// mtime) and refuse on any edit.
 ///
 /// Device and inode alone aren't enough: a file system reuses a freed inode at once (ext4 gave a
 /// new file at the same name the old one's inode in 100 of 100 tries). The birth time tells
-/// them apart, where the file system keeps one (Linux's statx btime: ext4, btrfs, xfs, tmpfs on
-/// recent kernels; macOS's birth time; Windows' creation time). Limits: where it keeps none
-/// (ext2/3, some network and FUSE file systems, kernels without statx) a replacement that got
-/// the inode back reads as the same item; and ext4 stamps from a clock that ticks every few ms,
-/// so a replacement made in the tick the original was made in does too.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// them apart, where the file system keeps one (Linux's statx btime; macOS's birth time;
+/// Windows' creation time). Where it keeps none (ext2/3, some network and FUSE file systems, a
+/// kernel or sandbox without statx), Linux reads the file system's handle for the item
+/// (`name_to_handle_at`: inode and generation on ext4, which a reused inode doesn't share) when
+/// a path is at hand ([`ident_of`]), and otherwise compares the inode's ctime too: on those
+/// systems alone an item edited since it was chosen reads as another, which refuses rather than
+/// guesses. Limits: ext4 stamps from a clock that ticks every few ms, so a replacement made in
+/// the tick the original was made in reads as it.
+///
+/// Comparing (`==`): device and inode, type and birth time must match; then the handles if both
+/// sides have one, else the ctimes (both `None` where there's a birth time). So it isn't
+/// transitive across identities with and without a handle: it's only ever used to compare one
+/// item captured earlier with what's at its path now.
+#[derive(Clone, Copy, Debug)]
 pub struct Ident {
     /// Unix: device and inode. Windows: creation time (ns) and whether it's a folder.
     node: (u64, u64),
@@ -59,6 +67,29 @@ pub struct Ident {
     /// When it was made, where the file system says (Linux's statx btime, macOS's birth time,
     /// Windows' creation time), in ns.
     born: Option<i128>,
+    /// Unix, only where there's no birth time: when its inode last changed (ctime), in ns.
+    changed: Option<i128>,
+    /// The file system's own name for the object, where it was read: Linux's file handle
+    /// (its type and a hash of its bytes), only where there's no birth time.
+    handle: Option<(u64, u64)>,
+}
+
+impl PartialEq for Ident {
+    fn eq(&self, o: &Ident) -> bool {
+        (self.node, self.kind, self.born) == (o.node, o.kind, o.born)
+            && match (self.handle, o.handle) {
+                (Some(a), Some(b)) => a == b,
+                _ => self.changed == o.changed,
+            }
+    }
+}
+
+impl Eq for Ident {}
+
+impl std::hash::Hash for Ident {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        (self.node, self.kind, self.born).hash(h);
+    }
 }
 
 impl Ident {
@@ -68,17 +99,74 @@ impl Ident {
         self.node
     }
 
-    /// From its parts, for metadata read without `std` (`dirfd::ident_at`).
+    /// From its parts, for metadata read without `std` (`dirfd`). `changed` (ctime) is kept
+    /// only without a birth time.
     #[cfg(unix)]
     #[allow(clippy::unnecessary_cast)] // mode_t is u16 on macOS
-    pub(crate) fn of_parts(dev: u64, ino: u64, mode: u32, born: Option<i128>) -> Ident {
+    pub(crate) fn of_parts(dev: u64, ino: u64, mode: u32, born: Option<i128>, changed: i128) -> Ident {
         let kind = match mode & libc::S_IFMT as u32 {
             m if m == libc::S_IFREG as u32 => 0,
             m if m == libc::S_IFDIR as u32 => 1,
             m if m == libc::S_IFLNK as u32 => 2,
             _ => 3,
         };
-        Ident { node: (dev, ino), kind, born }
+        let born = born.filter(|_| !pretend::no_birth_time());
+        Ident { node: (dev, ino), kind, born, changed: born.is_none().then_some(changed), handle: None }
+    }
+
+    /// Whether there's no birth time in it, so a handle would tell more (Linux).
+    pub(crate) fn wants_handle(&self) -> bool {
+        cfg!(target_os = "linux") && self.born.is_none()
+    }
+
+    /// With the file system's handle for it (`dirfd::handle_key`).
+    #[cfg(unix)]
+    pub(crate) fn with_handle(self, handle: Option<(u64, u64)>) -> Ident {
+        Ident { handle, ..self }
+    }
+}
+
+/// Tests: makes this thread's identities as a system without birth times (or file handles)
+/// would read them, so the fallbacks are tested on any machine. Off outside tests.
+pub(crate) mod pretend {
+    #[cfg(test)]
+    thread_local! {
+        static NO_BIRTH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static NO_HANDLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    pub(crate) fn no_birth_time() -> bool {
+        #[cfg(test)]
+        return NO_BIRTH.with(|c| c.get());
+        #[cfg(not(test))]
+        false
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn no_handle() -> bool {
+        #[cfg(test)]
+        return NO_HANDLE.with(|c| c.get());
+        #[cfg(not(test))]
+        false
+    }
+
+    /// Until it's dropped: no birth times, and with `no_handle` no file handles either.
+    #[cfg(all(test, unix))]
+    pub(crate) struct Pretend;
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn without_birth_times(no_handle: bool) -> Pretend {
+        NO_BIRTH.with(|c| c.set(true));
+        NO_HANDLE.with(|c| c.set(no_handle));
+        Pretend
+    }
+
+    #[cfg(all(test, unix))]
+    impl Drop for Pretend {
+        fn drop(&mut self) {
+            NO_BIRTH.with(|c| c.set(false));
+            NO_HANDLE.with(|c| c.set(false));
+        }
     }
 }
 
@@ -90,10 +178,10 @@ fn ns(t: std::time::SystemTime) -> i128 {
     }
 }
 
-/// An item's [`Ident`] from its metadata (not following a link). Windows gives a file created
-/// under a name within 15 s of deleting one there the old one's creation time ("tunnelling"),
-/// and its file index needs the file opened (one call per item), so there a replacement that
-/// quick reads as the same item.
+/// An item's [`Ident`] from its metadata alone (not following a link): no file handle, so
+/// where there's no birth time its ctime stands in ([`ident_of`] does better with a path).
+/// Windows gives a file created under a name within 15 s of deleting one there the old one's
+/// creation time ("tunnelling"), so there a replacement that quick reads as the same item.
 pub fn ident(m: &std::fs::Metadata) -> Option<Ident> {
     let ft = m.file_type();
     let kind = if ft.is_symlink() {
@@ -105,33 +193,46 @@ pub fn ident(m: &std::fs::Metadata) -> Option<Ident> {
     } else {
         3
     };
-    // Linux: statx's btime, `Err` where the file system keeps none (then device, inode and type).
-    let born = m.created().ok().map(ns);
+    // Linux: statx's btime, `Err` where the file system keeps none (or there's no statx).
+    let born = m.created().ok().map(ns).filter(|_| !pretend::no_birth_time());
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        Some(Ident { node: (m.dev(), m.ino()), kind, born })
+        let changed = born.is_none().then(|| m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128);
+        Some(Ident { node: (m.dev(), m.ino()), kind, born, changed, handle: None })
     }
     #[cfg(not(unix))]
     {
         // Without a creation time nothing tells it from any other item: no identity (and
         // nothing is deleted on a guess).
         let b = born?;
-        Some(Ident { node: (b as u64, u64::from(m.is_dir())), kind, born })
+        Some(Ident { node: (b as u64, u64::from(m.is_dir())), kind, born, changed: None, handle: None })
     }
+}
+
+/// [`ident`] for the item at `path`, whose metadata `m` is: on Linux, where there's no birth
+/// time, with the file system's handle for it too (one more call, only there).
+pub fn ident_of(path: &Path, m: &std::fs::Metadata) -> Option<Ident> {
+    let id = ident(m)?;
+    #[cfg(target_os = "linux")]
+    if id.wants_handle() {
+        let handle = crate::ffi::cstr(path).ok().and_then(|p| crate::dirfd::handle_key(libc::AT_FDCWD, &p, 0));
+        return Some(id.with_handle(handle));
+    }
+    let _ = path;
+    Some(id)
 }
 
 /// The identity of what's at `path` now (not following a link), `None` when nothing is or it
 /// can't be read: compare it with the one captured earlier, right before acting on the path.
 pub fn ident_at(path: &Path) -> Option<Ident> {
-    ident(&path.symlink_metadata().ok()?)
+    ident_of(path, &path.symlink_metadata().ok()?)
 }
 
 /// Tests: the file at `p` removed and another made there holding `content`, one that got `p`'s
-/// inode back (ext4 hands a new file the lowest inode free) and has its own birth time. Returns
-/// the identity of the item it replaced, which device, inode and type alone can't tell from the
-/// new one. `None` where it can't be shown (nothing is changed): a file system that keeps no
-/// birth time.
+/// inode back (ext4 hands a new file the lowest inode free), with its own birth time where the
+/// file system keeps one. Returns the identity of the item it replaced, which device, inode and
+/// type alone can't tell from the new one. `None` when `p` can't be read.
 ///
 /// Tests running alongside free and take inodes too, so it's tried a few times, each newcomer
 /// becoming the item to replace next. If the inode never comes back (a busy machine), `p` still
@@ -155,7 +256,6 @@ pub(crate) fn reuse_inode(p: &Path, content: &str) -> Option<Ident> {
 fn reuse_inode_once(p: &Path, content: &str) -> Option<(Ident, bool)> {
     use std::os::unix::fs::MetadataExt;
     let before = ident_at(p)?;
-    before.born?;
     let ino = p.symlink_metadata().ok()?.ino();
     // More than a tick of the clock the file system stamps from (ext4: a few ms) after the
     // original was made, so the newcomer's birth time is its own.
@@ -169,7 +269,9 @@ fn reuse_inode_once(p: &Path, content: &str) -> Option<(Ident, bool)> {
         std::fs::write(p, content).ok()?;
         let m = p.symlink_metadata().ok()?;
         if m.ino() == ino {
-            assert_ne!(ident(&m)?.born, before.born, "a newcomer has its own birth time");
+            if before.born.is_some() {
+                assert_ne!(ident(&m)?.born, before.born, "a newcomer has its own birth time");
+            }
             reused = true;
             break;
         }
@@ -186,8 +288,8 @@ fn reuse_inode_once(p: &Path, content: &str) -> Option<(Ident, bool)> {
     Some((before, reused))
 }
 
-/// Tests: whether the temp folder's file system keeps birth times, so a reused inode can be told
-/// from the item that had it (and whether it reuses one at once); says so when not.
+/// Tests: whether the temp folder's file system reuses a freed inode at once, so reuse can be
+/// shown; says so when not (APFS and tmpfs don't).
 #[cfg(all(test, unix))]
 pub(crate) fn inode_reuse_shows(test: &str) -> bool {
     let d = std::env::temp_dir().join(format!("arbor-reuse-probe-{test}-{}", std::process::id()));
@@ -196,7 +298,7 @@ pub(crate) fn inode_reuse_shows(test: &str) -> bool {
     let shows = std::fs::write(&p, "probe").is_ok() && (0..5).any(|_| reuse_inode_once(&p, "again").is_some_and(|(_, r)| r));
     let _ = std::fs::remove_dir_all(&d);
     if !shows {
-        eprintln!("{test}: skipped (the temp folder's file system keeps no birth time, or doesn't reuse an inode at once)");
+        eprintln!("{test}: skipped (the temp folder's file system doesn't reuse an inode at once)");
     }
     shows
 }
@@ -282,7 +384,12 @@ fn read(path: &Path, stop: &AtomicBool) -> Option<Result<Vec<Entry>, String>> {
         let hidden = is_hidden(&name, meta.as_ref());
         let lower = name.to_lowercase();
         let key = format!("f:{name}");
-        let id = meta.as_ref().and_then(ident);
+        // Where there's no birth time (Linux), with the file system's handle: a call more per
+        // entry, only on those systems.
+        let id = meta
+            .as_ref()
+            .and_then(ident)
+            .map(|id| if id.wants_handle() { ident_of(&de.path(), meta.as_ref().unwrap()).unwrap_or(id) } else { id });
         out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size: if is_dir { 0 } else { size }, mtime_ms, id, pending: None });
     }
     #[cfg(test)]

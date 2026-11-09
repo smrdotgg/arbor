@@ -206,7 +206,7 @@ impl Doomed {
     /// `path` as it is now (one lstat).
     pub fn now(path: &Path) -> Doomed {
         let m = path.symlink_metadata().ok();
-        Doomed { path: path.to_path_buf(), id: m.as_ref().and_then(crate::fs::ident), dir: m.is_some_and(|m| m.is_dir()) }
+        Doomed { path: path.to_path_buf(), id: m.as_ref().and_then(|m| crate::fs::ident_of(path, m)), dir: m.is_some_and(|m| m.is_dir()) }
     }
 }
 

@@ -52,20 +52,28 @@ pub fn node(st: &libc::stat) -> (u64, u64) {
 }
 
 /// The [`crate::fs::Ident`] of `name` in open folder `dir` (a link is described, not
-/// followed): the same as `fs::ident` gives from `std`'s metadata for it (Linux asks `statx`, as
-/// `std` does, for the birth time).
+/// followed): the same as `fs::ident_of` gives for it (Linux asks `statx`, as `std` does, for
+/// the birth time, and where there's none, the file system's handle).
 pub fn ident_at(dir: &OwnedFd, name: &CStr) -> io::Result<crate::fs::Ident> {
+    let id = ident_raw(dir.as_raw_fd(), name, libc::AT_SYMLINK_NOFOLLOW)?;
+    Ok(if id.wants_handle() { id.with_handle(handle_key(dir.as_raw_fd(), name, 0)) } else { id })
+}
+
+/// `statx` (Linux) or `fstatat`/`fstat` for `name` relative to `dir` with `flags`, as an
+/// identity without a handle. An empty `name` is `dir` itself.
+fn ident_raw(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<crate::fs::Ident> {
     #[cfg(target_os = "linux")]
     {
         // SAFETY: a zeroed statx is a valid out-buffer; `name` is NUL-terminated.
         let mut x: libc::statx = unsafe { std::mem::zeroed() };
         let mask = libc::STATX_BASIC_STATS | libc::STATX_BTIME;
-        let r = unsafe { libc::statx(dir.as_raw_fd(), name.as_ptr(), libc::AT_SYMLINK_NOFOLLOW, mask, &mut x) };
+        let r = unsafe { libc::statx(dir, name.as_ptr(), flags, mask, &mut x) };
         if r == 0 {
             let t = |s: i64, n: u32| s as i128 * 1_000_000_000 + n as i128;
             let born = (x.stx_mask & libc::STATX_BTIME != 0).then(|| t(x.stx_btime.tv_sec, x.stx_btime.tv_nsec));
             let dev = libc::makedev(x.stx_dev_major, x.stx_dev_minor);
-            return Ok(crate::fs::Ident::of_parts(dev, x.stx_ino, u32::from(x.stx_mode), born));
+            let changed = t(x.stx_ctime.tv_sec, x.stx_ctime.tv_nsec);
+            return Ok(crate::fs::Ident::of_parts(dev, x.stx_ino, u32::from(x.stx_mode), born, changed));
         }
         let e = io::Error::last_os_error();
         // No statx (an old kernel, a sandbox): what `std` falls back to, without a birth time.
@@ -73,20 +81,47 @@ pub fn ident_at(dir: &OwnedFd, name: &CStr) -> io::Result<crate::fs::Ident> {
             return Err(e);
         }
     }
-    let st = stat_at(dir, name)?;
+    // SAFETY: a zeroed stat is a valid out-buffer; `name` is NUL-terminated.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let r =
+        if name.is_empty() { unsafe { libc::fstat(dir, &mut st) } } else { unsafe { libc::fstatat(dir, name.as_ptr(), &mut st, flags) } };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
     let (dev, ino) = node(&st);
+    #[allow(clippy::unnecessary_cast)]
+    let changed = st.st_ctime as i128 * 1_000_000_000 + st.st_ctime_nsec as i128;
     #[cfg(target_os = "macos")]
     let born = Some(st.st_birthtime as i128 * 1_000_000_000 + st.st_birthtime_nsec as i128);
     #[cfg(not(target_os = "macos"))]
     let born = None;
     #[allow(clippy::unnecessary_cast)]
-    Ok(crate::fs::Ident::of_parts(dev, ino, st.st_mode as u32, born))
+    Ok(crate::fs::Ident::of_parts(dev, ino, st.st_mode as u32, born, changed))
 }
 
 /// Linux: the file system's handle for `name` in open folder `dir` (a link's own, not
 /// followed): its inode and the inode's generation, so an item that got a freed inode back is
 /// told from the one that had it. `None` where the file system gives none, and elsewhere.
 pub fn handle_at(dir: &OwnedFd, name: &CStr) -> Option<Vec<u8>> {
+    handle_raw(dir.as_raw_fd(), name, 0)
+}
+
+/// [`handle_at`] as an identity's part: the handle's type and a hash of its bytes (`flags`:
+/// `AT_EMPTY_PATH` for `dir` itself; a link is never followed). `None` where there's none.
+pub fn handle_key(dir: RawFd, name: &CStr, flags: libc::c_int) -> Option<(u64, u64)> {
+    use std::hash::{Hash, Hasher};
+    if crate::fs::pretend::no_handle() {
+        return None;
+    }
+    let v = handle_raw(dir, name, flags)?;
+    // `DefaultHasher::new` has fixed keys: the same handle hashes the same every time.
+    let mut h = std::hash::DefaultHasher::new();
+    v.hash(&mut h);
+    let kind = i32::from_ne_bytes(v.get(..4)?.try_into().ok()?);
+    Some((kind as u64, h.finish()))
+}
+
+fn handle_raw(dir: RawFd, name: &CStr, flags: libc::c_int) -> Option<Vec<u8>> {
     #[cfg(target_os = "linux")]
     {
         const MAX: usize = 128;
@@ -99,8 +134,8 @@ pub fn handle_at(dir: &OwnedFd, name: &CStr) -> Option<Vec<u8>> {
         let mut h = Handle { bytes: MAX as libc::c_uint, kind: 0, data: [0; MAX] };
         let mut mount: libc::c_int = 0;
         // SAFETY: `h` starts as a `file_handle` with room for MAX bytes, as `bytes` says;
-        // `name` is NUL-terminated. Flags 0: a link is described, not followed.
-        let r = unsafe { libc::name_to_handle_at(dir.as_raw_fd(), name.as_ptr(), (&raw mut h).cast(), &mut mount, 0) };
+        // `name` is NUL-terminated. Without AT_SYMLINK_FOLLOW a link is described, not followed.
+        let r = unsafe { libc::name_to_handle_at(dir, name.as_ptr(), (&raw mut h).cast(), &mut mount, flags) };
         if r != 0 {
             return None;
         }
@@ -110,7 +145,7 @@ pub fn handle_at(dir: &OwnedFd, name: &CStr) -> Option<Vec<u8>> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (dir, name);
+        let _ = (dir, name, flags);
         None
     }
 }

@@ -1696,6 +1696,43 @@ fn an_item_with_a_reused_inode_is_never_acted_on() {
     let _ = fs::remove_dir_all(&d);
 }
 
+/// The review's case: with no birth time (statx missing, or a file system that keeps none),
+/// identity was device, inode and type, so a replacement that got the freed inode back was
+/// deleted (50 of 50). Now Linux reads the file system's handle (inode and generation), which a
+/// reused inode doesn't share, and an edit still passes; without a handle either, the ctime
+/// stands in (so there an edit is refused too: it refuses rather than guesses).
+#[cfg(unix)]
+#[test]
+fn without_birth_times_a_reused_inode_is_still_refused() {
+    if !crate::fs::inode_reuse_shows("without_birth_times_a_reused_inode_is_still_refused") {
+        return;
+    }
+    let d = tmp("no-btime");
+    let target = d.join("t");
+    let delete = |id| run_now(Op::Delete { items: vec![Doomed { path: target.clone(), id: Some(id), dir: false }] });
+    let trash = |id| run_now(Op::Checked { expect: vec![(target.clone(), id)], op: Box::new(Op::Trash { sources: vec![target.clone()] }) });
+    // Handles only on Linux; elsewhere the ctime is all there is.
+    for no_handle in if cfg!(target_os = "linux") { vec![false, true] } else { vec![true] } {
+        let _p = crate::fs::pretend::without_birth_times(no_handle);
+        let what = if no_handle { "ctime" } else { "handle" };
+        for (op, act) in [("delete", &delete as &dyn Fn(crate::fs::Ident) -> Outcome), ("trash", &trash)] {
+            fs::write(&target, "the item chosen").unwrap();
+            let id = crate::fs::reuse_inode(&target, "another item").unwrap();
+            let o = act(id);
+            assert_eq!(fs::read_to_string(&target).unwrap(), "another item", "{what}, {op}: left alone");
+            assert!(o.removed.is_empty() && o.moved.is_empty() && (o.refused.is_some() || !o.errors.is_empty()), "{what}, {op}");
+            // Edited since it was chosen: by handle, still the item; by ctime, refused.
+            fs::write(&target, "the item chosen").unwrap();
+            let id = crate::fs::ident_at(&target).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            fs::write(&target, "edited since, and longer").unwrap();
+            let o = act(id);
+            assert_eq!(target.exists(), no_handle, "{what}, {op}: {:?} {:?}", o.refused, o.errors);
+        }
+    }
+    let _ = fs::remove_dir_all(&d);
+}
+
 /// A file edited after its folder was listed (Arbor doesn't watch folders) is still the item
 /// the user chose: delete, trash, move, rename and Put Back go ahead (identity is the object,
 /// not its contents), and so does Empty Trash. Undo still refuses once it's edited again: its
