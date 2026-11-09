@@ -1674,7 +1674,8 @@ fn an_item_with_a_reused_inode_is_never_acted_on() {
     let target = d.join("t");
     fs::create_dir(d.join("into")).unwrap();
     let checked = |op: Op, id: crate::fs::Ident| Op::Checked { expect: vec![(target.clone(), id)], op: Box::new(op) };
-    let ops: Vec<(&str, Box<dyn Fn(crate::fs::Ident) -> Op>)> = vec![
+    type MakeOp<'a> = Box<dyn Fn(crate::fs::Ident) -> Op + 'a>;
+    let ops: Vec<(&str, MakeOp)> = vec![
         ("delete", Box::new(|id| Op::Delete { items: vec![Doomed { path: target.clone(), id: Some(id), dir: false }] })),
         ("trash", Box::new(|id| checked(Op::Trash { sources: vec![target.clone()] }, id))),
         ("move", Box::new(|id| checked(Op::Move { sources: vec![target.clone()], dest: d.join("into") }, id))),

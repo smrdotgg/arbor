@@ -67,7 +67,7 @@ pub struct Reach {
 #[cfg_attr(not(unix), allow(dead_code))]
 pub enum Need {
     /// Any folder (macOS's `.Trashes`, which root owns).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(any(test, not(target_os = "macos")), allow(dead_code))]
     Folder,
     /// This user's.
     Owned,
@@ -78,6 +78,7 @@ pub enum Need {
 impl Bin {
     /// A freedesktop.org trash folder `root` of `uid`'s, with `files/` and `info/` inside: the
     /// home trash, or a disk's `.Trash-$uid` (`root`'s folder reached as the user reaches it).
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn freedesktop(root: &Path, uid: u32) -> Bin {
         let anchor = root.parent().map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
         let name = root.file_name().map(|n| n.to_os_string()).unwrap_or_default();
@@ -288,6 +289,7 @@ pub fn open(bin: &Bin) -> Result<Option<Opened>, Problem> {
         Err(e) => return Err(problem_of(&at, &e, mac)),
     };
     let mut folders = Vec::new();
+    #[allow(clippy::unnecessary_cast)] // mode_t is u16 on macOS
     let check = |fd: &std::os::fd::OwnedFd, need: Need, at: &Path| -> Result<(u64, u64), Problem> {
         let st = fstat(fd).map_err(|e| problem_of(at, &e, mac))?;
         let ok = match need {

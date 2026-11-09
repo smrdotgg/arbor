@@ -61,6 +61,7 @@ impl Ident {
 
     /// From its parts, for metadata read without `std` (`dirfd::ident_at`).
     #[cfg(unix)]
+    #[allow(clippy::unnecessary_cast)] // mode_t is u16 on macOS
     pub(crate) fn of_parts(dev: u64, ino: u64, mode: u32, size: u64, changed: i128, born: Option<i128>) -> Ident {
         let kind = match mode & libc::S_IFMT as u32 {
             m if m == libc::S_IFREG as u32 => 0,
