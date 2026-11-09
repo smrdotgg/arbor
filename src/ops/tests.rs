@@ -52,9 +52,13 @@ fn undo_refused(u: Undo) -> String {
 
 /// Changes the content (same length) and moves the mtime, as an editor saving would.
 fn edit(p: &Path) {
-    let len = fs::metadata(p).unwrap().len() as usize;
-    fs::write(p, "z".repeat(len)).unwrap();
-    bump(p);
+    let before = fs::metadata(p).unwrap();
+    fs::write(p, "z".repeat(before.len() as usize)).unwrap();
+    // Two hours past the mtime it had: the write itself can land in the same clock tick as an
+    // earlier write (Windows updates write times on a ~15 ms timer), and "now + 1 h" would then
+    // equal a mtime an earlier `bump` gave it, leaving size and mtime unchanged.
+    let t = before.modified().unwrap() + Duration::from_secs(7200);
+    fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
 }
 
 /// Moves the mtime an hour on, without sleeping or depending on the clock's granularity.
