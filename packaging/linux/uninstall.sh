@@ -61,11 +61,29 @@ else
 			awk -F '\t' -v k="$k" '$2 == k { found = 1 } END { exit !found }' "$backup" 2>/dev/null || damaged=1
 		done
 		# Every record whole, as Arbor writes them: "<hex or ->\t<name>", the hex of whole
-		# bytes (none for an empty value), and no name twice.
-		LC_ALL=C awk -F '\t' '
+		# bytes (none for an empty value), and no name twice. The folder default must be one
+		# line of text (UTF-8, no control characters), as Arbor's Restore requires: a line
+		# break in it would add lines of its own to mimeapps.list.
+		LC_ALL=C awk -F '\t' -v mime="$mime_key" '
+			function not_text(h,   d, i, b, need) {
+				d = "0123456789abcdef"; h = tolower(h); need = 0; c1 = 0
+				for (i = 1; i < length(h); i += 2) {
+					b = (index(d, substr(h, i, 1)) - 1) * 16 + index(d, substr(h, i + 1, 1)) - 1
+					if (need > 0) { if (b < 128 || b >= 192 || (c1 && b < 160)) return 1; need--; c1 = 0; continue }
+					if (b < 32 || b == 127) return 1
+					if (b < 128) continue
+					c1 = (b == 194)
+					if (b >= 194 && b < 224) need = 1
+					else if (b >= 224 && b < 240) need = 2
+					else if (b >= 240 && b < 245) need = 3
+					else return 1
+				}
+				return need > 0
+			}
 			/^#/ || /^[ \t]*$/ { next }
 			NF != 2 || $2 == "" { bad = 1 }
 			$1 != "-" && ($1 !~ /^[0-9a-fA-F]*$/ || length($1) % 2) { bad = 1 }
+			$2 == mime && $1 != "-" && not_text($1) { bad = 1 }
 			seen[$2]++ { bad = 1 }
 			END { exit bad }' "$backup" 2>/dev/null || damaged=1
 		if [ -n "$damaged" ]; then

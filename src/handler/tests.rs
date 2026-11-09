@@ -680,3 +680,27 @@ fn linux_never_rewrites_a_file_it_cant_read_exactly() {
     assert_eq!(std::fs::read(&service).unwrap(), theirs);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A backup whose folder default holds a line break (damaged, or crafted) would have written
+/// lines of its own into mimeapps.list on Restore. It's damage now: nothing changes.
+#[test]
+fn linux_restore_refuses_a_folder_default_with_a_line_break() {
+    let d = tmp("linux-inject");
+    let dirs = linux_dirs(&d, true);
+    let backup = d.join("arbor").join(BACKUP_FILE);
+    let mimeapps = dirs.config_home.join("mimeapps.list");
+    std::fs::create_dir_all(&dirs.config_home).unwrap();
+    std::fs::write(&mimeapps, "[Default Applications]\ninode/directory=old.desktop\n").unwrap();
+    linux::run(Change::Make, &dirs, &backup).unwrap();
+    let ours = std::fs::read_to_string(&mimeapps).unwrap();
+    for bad in [&b"x.desktop\n[Default Applications]\ntext/html=evil.desktop"[..], b"a\rb", b"a\0b", b"caf\xe9"] {
+        let mut b = Backup::read(&backup).unwrap().unwrap();
+        b.put("mimeapps.list inode/directory", Some(bad));
+        b.write(&backup).unwrap();
+        let e = linux::run(Change::Restore, &dirs, &backup).unwrap_err();
+        assert!(e.contains("damaged") && e.contains("nothing was changed"), "{e}");
+        assert_eq!(std::fs::read_to_string(&mimeapps).unwrap(), ours, "{bad:?}");
+        assert!(backup.exists());
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

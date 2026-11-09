@@ -197,6 +197,21 @@ fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
+/// The folder default a backup recorded, as a value for `mimeapps.list`: one line of text. A
+/// line break in it would add lines of its own to the file, so it's damage.
+pub(crate) fn saved_default(b: &Backup, backup: &Path) -> Result<Option<String>, String> {
+    match b.get(MIME_KEY).flatten() {
+        None => Ok(None),
+        Some(v) => match std::str::from_utf8(v) {
+            Ok(t) if !t.chars().any(char::is_control) => Ok(Some(t.to_string())),
+            _ => Err(format!(
+                "{} is damaged (the folder default it recorded isn't one line of text), so nothing was changed",
+                crate::fs::pretty(backup)
+            )),
+        },
+    }
+}
+
 /// Where `arbor.desktop` is installed, if it is.
 fn desktop_file(d: &Dirs) -> Option<PathBuf> {
     std::iter::once(&d.data_home).chain(&d.data_dirs).map(|p| p.join("applications").join(DESKTOP_ID)).find(|p| p.is_file())
@@ -282,7 +297,7 @@ fn restore(d: &Dirs, backup: &Path) -> Result<String, String> {
     let b = saved.clone().unwrap_or_default();
     let (mut kept, mut changed) = (Vec::new(), false);
     let mimeapps = d.config_home.join("mimeapps.list");
-    let before = b.get(MIME_KEY).flatten().map(|v| String::from_utf8_lossy(v).into_owned());
+    let before = saved_default(&b, backup)?;
     if let Some(text) = read(&mimeapps)? {
         match default_app(&text, MIME) {
             Some(v) if first(&v) == DESKTOP_ID => {

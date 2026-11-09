@@ -208,6 +208,9 @@ fn fallback_uninstall_restores_both_values_and_refuses_a_damaged_backup() {
         whole("zz", "-"),
         format!("{header}\n616263\n-\t{svc}\n-\t{mime}\n"),
         format!("{}-\t{mime}\n", whole("616263", "-")),
+        // A folder default that isn't one line of text (it would add lines to mimeapps.list).
+        whole(&hex(b"x.desktop\n[Default Applications]\ntext/html=evil.desktop"), "-"),
+        whole(&hex(b"caf\xe9"), "-"),
     ]
     .iter()
     .enumerate()
