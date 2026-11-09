@@ -711,15 +711,25 @@ pub(crate) mod windows {
         match change {
             Change::Make => {
                 // The whole snapshot is on the disk before the registry changes at all.
-                let fresh = saved.is_none();
+                let first = saved.clone();
+                // What this attempt replaces, to put back if a write fails: the registry just
+                // before it. When Arbor is the default already (Make again, from another
+                // arbor.exe), that's the first Make's values, not the durable backup's.
+                let attempt = snapshot(store, &plan, root, None);
                 let b = snapshot(store, &plan, root, saved);
                 b.write(backup)?;
                 if let Err(e) = apply(store, &plan) {
-                    // Halfway: what was written goes back, from the snapshot just saved.
-                    return Err(match restore(store, &plan, root, Some(&b)) {
+                    // Halfway: what this attempt wrote goes back, and so does the backup file
+                    // (none, or the first Make's, as it was).
+                    return Err(match restore(store, &plan, root, Some(&attempt)) {
                         Ok(_) => {
-                            if fresh {
-                                let _ = remove_backup(backup);
+                            match &first {
+                                None => {
+                                    let _ = remove_backup(backup);
+                                }
+                                Some(f) => {
+                                    let _ = f.write(backup);
+                                }
                             }
                             format!("Couldn't make Arbor the default for folders ({e}), so nothing was changed")
                         }
@@ -1378,6 +1388,33 @@ mod tests {
             "the first backup's record stays"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Make again (from another `arbor.exe`) failing halfway puts back the state just before
+    /// that attempt (the first Make's values, still working), not the state before Arbor; the
+    /// backup on disk is the first one again, and Restore still puts back what Arbor replaced.
+    #[test]
+    fn windows_a_failed_make_again_leaves_the_first_make_in_place() {
+        use windows::Store;
+        let root = windows::CLASSES;
+        for fail_at in 1..=windows::plan(root, EXE).len() {
+            let d = tmp(&format!("win-again-{fail_at}"));
+            let backup = d.join(BACKUP_FILE);
+            let mut reg = Reg::default();
+            reg.set(r"Software\Classes\Directory\shell", "", 2, &windows::utf16z("%SystemRoot%\\other")).unwrap();
+            let start = reg.clone();
+            windows::run(Change::Make, &mut reg, root, EXE, &backup).unwrap();
+            let (made, first) = (reg.clone(), std::fs::read_to_string(&backup).unwrap());
+            let mut failing = Failing { reg, writes: 0, fail_at };
+            let e = windows::run(Change::Make, &mut failing, root, r"D:\Arbor\arbor.exe", &backup).unwrap_err();
+            assert!(e.ends_with("so nothing was changed"), "write {fail_at}: {e}");
+            assert_eq!(failing.reg, made, "write {fail_at}: the first Make's values, as they were");
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), first, "write {fail_at}: the first backup, as it was");
+            let mut reg = failing.reg;
+            windows::run(Change::Restore, &mut reg, root, EXE, &backup).unwrap();
+            assert_eq!(reg, start, "write {fail_at}: Restore still puts back what Arbor replaced");
+            let _ = std::fs::remove_dir_all(&d);
+        }
     }
 
     /// An empty or cut-short backup is damaged, not a record of "nothing was there": Restore
