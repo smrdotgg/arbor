@@ -551,3 +551,82 @@ fn open_speed() {
         s.close_jump(&mut tx);
     }
 }
+
+// ---- robustness of history.log -------------------------------------------------------------
+
+/// Random path-ish text for the log: separators, tabs, CR, NUL and non-ASCII among names.
+fn log_path(r: &mut crate::prop::Rng) -> String {
+    let mut s = String::from(if cfg!(windows) { "C:\\" } else { "/" });
+    for _ in 0..r.len(6) {
+        s.push_str(&r.from(&["a", "Proj", "é", "😀", " ", "\t", "\r", "%", "\u{301}", "-", "."], 6));
+        s.push(if cfg!(windows) { '\\' } else { '/' });
+    }
+    s.push_str(&r.string(8));
+    s
+}
+
+/// The complete lines (ending in `\n`) of a log, as bytes without their line break.
+fn whole_lines(b: &[u8]) -> Vec<&[u8]> {
+    let mut v: Vec<&[u8]> = b.split_inclusive(|&c| c == b'\n').filter(|l| l.ends_with(b"\n")).collect();
+    for l in &mut v {
+        *l = &l[..l.len() - 1];
+        // The reader drops every CR before the line break (Arbor never writes one in a path).
+        while l.ends_with(b"\r") {
+            *l = &l[..l.len() - 1];
+        }
+    }
+    v
+}
+
+/// Any bytes (torn lines, NULs, CRLF, invalid UTF-8): loading never panics, and every folder
+/// it finds is a full path written exactly, byte for byte, as the last field of a whole line,
+/// never a guess (such as invalid bytes turned into U+FFFD).
+#[test]
+fn any_log_loads_only_paths_written_exactly() {
+    crate::prop::check("history_any_bytes", 600, |r| {
+        let mut log: Vec<u8> = Vec::new();
+        for _ in 0..r.len(12) {
+            match r.below(5) {
+                0 => log.extend(r.bytes(40)),
+                1 => {
+                    let mut l =
+                        format!("{}\t{}\t{}", r.below(1 << 20), r.pick(&["1", "-", "0.5", "nan", "inf", "-1", "1e308", ""]), log_path(r))
+                            .into_bytes();
+                    // A torn or damaged byte somewhere.
+                    if r.one_in(2) && !l.is_empty() {
+                        let i = r.below(l.len());
+                        l[i] = r.byte();
+                    }
+                    log.extend(l);
+                }
+                _ => log.extend(format!("{}\t1\t{}", r.below(1000), log_path(r)).into_bytes()),
+            }
+            log.extend(r.pick(&[&b"\n"[..], b"\r\n", b"\n", b"", b"\0\n"]).iter());
+        }
+        let (f, lines) = Frecency::from_reader(&log[..]).unwrap();
+        let whole = whole_lines(&log);
+        assert_eq!(lines, whole.len());
+        for d in &f.dirs {
+            assert!(d.path.is_absolute() || d.path.has_root(), "{:?}", d.path);
+            let p = d.path.to_str().expect("paths from the log are UTF-8");
+            assert!(!p.contains('\0'));
+            assert!(
+                whole.iter().any(|l| l.splitn(3, |&c| c == b'\t').nth(2) == Some(p.as_bytes())),
+                "{p:?} isn't written exactly in {:?}",
+                String::from_utf8_lossy(&log)
+            );
+            assert!(d.rank.is_finite() && d.rank > 0.0, "{d:?}");
+        }
+    });
+}
+
+/// Found by `any_log_loads_only_paths_written_exactly`: a damaged byte in a line was read as
+/// U+FFFD, so Jump offered a folder nobody visited ("/a\u{FFFD}b" for "/a\xFFb").
+#[test]
+fn a_line_that_isnt_utf8_is_skipped_not_guessed() {
+    let root = if cfg!(windows) { "C:\\" } else { "/" };
+    let log = [format!("1\t1\t{root}a").into_bytes(), b"\xff\n".to_vec(), format!("2\t1\t{root}ok\n").into_bytes()].concat();
+    let (f, lines) = Frecency::from_reader(&log[..]).unwrap();
+    assert_eq!(lines, 2);
+    assert_eq!(f.dirs.iter().map(|d| d.path.to_path_buf()).collect::<Vec<_>>(), [PathBuf::from(format!("{root}ok"))]);
+}

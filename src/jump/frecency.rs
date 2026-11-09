@@ -187,7 +187,8 @@ impl Frecency {
 
     /// The aggregate of a log's text, and how many lines it had. A last line without its
     /// newline was cut short (a crash mid-write), so it's left out; so is any line that
-    /// doesn't parse.
+    /// doesn't parse, or isn't UTF-8 (Arbor writes only UTF-8: anything else is damage, and
+    /// reading it as U+FFFD would make up a folder that was never visited).
     pub fn from_log(text: &str) -> (Frecency, usize) {
         Frecency::from_reader(text.as_bytes()).unwrap_or_default()
     }
@@ -203,7 +204,7 @@ impl Frecency {
                 return Ok((f, lines));
             }
             lines += 1;
-            let line = String::from_utf8_lossy(&buf);
+            let Ok(line) = std::str::from_utf8(&buf) else { continue };
             if let Some(e) = Event::parse(line.trim_end_matches(['\n', '\r'])) {
                 f.apply(&e);
             }
