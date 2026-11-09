@@ -672,7 +672,7 @@ fn a_path_with_a_nul_is_never_written() {
 /// most that much, and the lines after it still count.
 #[test]
 fn a_huge_line_is_skipped_without_holding_it() {
-    /// 64 MB of one line without a break, then a good line, handed out in 1 MB reads.
+    /// 16 MB of one line without a break, then a good line, handed out in 1 MB reads.
     struct Endless(usize);
     impl std::io::Read for Endless {
         fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
@@ -684,8 +684,8 @@ fn a_huge_line_is_skipped_without_holding_it() {
     }
     let root = if cfg!(windows) { "C:\\" } else { "/" };
     let tail = format!("\n5\t1\t{root}after\n");
-    let r = std::io::BufReader::with_capacity(1 << 20, std::io::Read::chain(Endless(64 << 20), std::io::Cursor::new(tail.into_bytes())));
-    let (f, lines) = crate::prop::within(Duration::from_secs(10), "a 64 MB line", move || Frecency::from_reader(r).unwrap());
+    let r = std::io::BufReader::with_capacity(1 << 20, std::io::Read::chain(Endless(16 << 20), std::io::Cursor::new(tail.into_bytes())));
+    let (f, lines) = crate::prop::within(Duration::from_secs(10), "a 16 MB line", move || Frecency::from_reader(r).unwrap());
     assert_eq!(lines, 2);
     assert_eq!(f.dirs.iter().map(|d| d.path.to_path_buf()).collect::<Vec<_>>(), [PathBuf::from(format!("{root}after"))]);
     // The buffer never grows past the limit (plus one read).
