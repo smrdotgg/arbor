@@ -174,7 +174,8 @@ fn fallback_uninstall_restores_both_values_and_refuses_a_damaged_backup() {
     assert_eq!(std::fs::read_to_string(&service).unwrap(), theirs, "their activation file is back: {out}");
     assert!(std::fs::read_to_string(&mimeapps).unwrap().contains("\n[Default Applications]\ninode/directory=old.desktop;\n"), "{out}");
     assert!(!backup.exists(), "everything went back, so the backup goes: {out}");
-    // Damaged backups: empty, no header, or an entry missing.
+    // Damaged backups: empty, no header, an entry missing, or a record that isn't whole (hex
+    // of half a byte, not hex, a field missing, a name twice).
     let header = std::fs::read_to_string({
         let mut b = Backup::default();
         b.put("x", None);
@@ -184,10 +185,20 @@ fn fallback_uninstall_restores_both_values_and_refuses_a_damaged_backup() {
     })
     .unwrap();
     let header = header.lines().next().unwrap().to_string();
-    for (i, damaged) in
-        ["".to_string(), "\n".into(), format!("{header}\n"), format!("{header}\n{}\tmimeapps.list inode/directory\n", hex(b"old.desktop;"))]
-            .iter()
-            .enumerate()
+    let (mime, svc) = ("mimeapps.list inode/directory", "dbus-1/services/org.freedesktop.FileManager1.service");
+    let whole = |m: &str, s: &str| format!("{header}\n{m}\t{mime}\n{s}\t{svc}\n");
+    for (i, damaged) in [
+        "".to_string(),
+        "\n".into(),
+        format!("{header}\n"),
+        format!("{header}\n{}\t{mime}\n", hex(b"old.desktop;")),
+        whole("616", "-"),
+        whole("zz", "-"),
+        format!("{header}\n616263\n-\t{svc}\n-\t{mime}\n"),
+        format!("{}-\t{mime}\n", whole("616263", "-")),
+    ]
+    .iter()
+    .enumerate()
     {
         let (pkg, home) = bare(&root, &format!("damaged{i}"));
         let (service, mimeapps, backup) = made_default(&home);

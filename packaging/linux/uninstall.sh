@@ -47,9 +47,9 @@ else
 	# then it prints nothing and fails).
 	saved() {
 		LC_ALL=C awk -F '\t' -v k="$1" '$2 == k && $1 != "-" {
-			d = "0123456789abcdef"; s = ""
-			for (i = 1; i < length($1); i += 2)
-				s = s sprintf("%c", (index(d, substr($1, i, 1)) - 1) * 16 + index(d, substr($1, i + 1, 1)) - 1)
+			d = "0123456789abcdef"; s = ""; h = tolower($1)
+			for (i = 1; i < length(h); i += 2)
+				s = s sprintf("%c", (index(d, substr(h, i, 1)) - 1) * 16 + index(d, substr(h, i + 1, 1)) - 1)
 			printf "%s", s; found = 1
 		} END { exit !found }' "$backup"
 	}
@@ -60,6 +60,14 @@ else
 		for k in "$mime_key" "$service_key"; do
 			awk -F '\t' -v k="$k" '$2 == k { found = 1 } END { exit !found }' "$backup" 2>/dev/null || damaged=1
 		done
+		# Every record whole, as Arbor writes them: "<hex or ->\t<name>", the hex of whole
+		# bytes, and no name twice.
+		LC_ALL=C awk -F '\t' '
+			/^#/ || /^[ \t]*$/ { next }
+			NF != 2 || $2 == "" { bad = 1 }
+			$1 != "-" && ($1 !~ /^[0-9a-fA-F]+$/ || length($1) % 2) { bad = 1 }
+			seen[$2]++ { bad = 1 }
+			END { exit bad }' "$backup" 2>/dev/null || damaged=1
 		if [ -n "$damaged" ]; then
 			echo "The backup of your folder default ($backup) is damaged, so nothing was changed. Put the folder default back by hand (or reinstall Arbor and run Restore the System Default for Folders), then run this again." >&2
 			exit 1

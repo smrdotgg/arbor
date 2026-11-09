@@ -26,6 +26,8 @@ fn the_backup_reads_back_what_it_wrote() {
     assert!(Backup::read(&d.join("none")).unwrap().is_none());
     std::fs::write(&p, "zz\tkey\n").unwrap();
     assert!(Backup::read(&p).is_err(), "a damaged backup is said, not guessed at");
+    std::fs::write(&p, format!("{BACKUP_HEADER}\n61\tkey\n-\tkey\n")).unwrap();
+    assert!(Backup::read(&p).is_err_and(|e| e.contains("records key again")), "a name twice is damage too");
     let _ = std::fs::remove_dir_all(&d);
 }
 

@@ -120,6 +120,9 @@ impl Backup {
                 let bytes: Result<Vec<u8>, _> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16)).collect();
                 Some(bytes.map_err(|_| bad())?)
             };
+            if b.get(key).is_some() {
+                return Err(format!("line {} records {key} again", n + 1));
+            }
             b.entries.push((key.to_string(), value));
         }
         Ok(b)
