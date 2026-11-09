@@ -552,6 +552,26 @@ fn mac_make_needs_the_bundle_and_restore_puts_back_the_old_viewer() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// A backup whose viewer isn't a bundle id (empty, not UTF-8, two words) was handed to
+/// LaunchServices as it read, with U+FFFD; it's damage now, and nothing changes.
+#[test]
+fn mac_restore_refuses_a_viewer_that_isnt_a_bundle_id() {
+    let d = tmp("mac-damaged");
+    let backup = d.join(BACKUP_FILE);
+    for bad in [&b""[..], b"com.caf\xe9", b"com.a com.b", b"com.a\n"] {
+        let mut ls = FakeLs(Some("com.cocoatech.PathFinder".into()), true);
+        mac::run(Change::Make, &mut ls, Some(mac::BUNDLE_ID), &backup).unwrap();
+        let mut b = Backup::read(&backup).unwrap().unwrap();
+        b.put("public.folder viewer", Some(bad));
+        b.write(&backup).unwrap();
+        let e = mac::run(Change::Restore, &mut ls, Some(mac::BUNDLE_ID), &backup).unwrap_err();
+        assert!(e.contains("damaged"), "{bad:?}: {e}");
+        assert_eq!(ls.0.as_deref(), Some(mac::BUNDLE_ID), "{bad:?}: nothing changed");
+        let _ = std::fs::remove_file(&backup);
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// Read-only: what LaunchServices says the folder viewer is (never changes it).
 #[cfg(target_os = "macos")]
 #[test]

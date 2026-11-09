@@ -35,7 +35,20 @@ pub fn run(change: Change, ls: &mut dyn Handlers, bundle: Option<&str>, backup: 
         }
         Change::Restore => {
             let b = Backup::require(Backup::read(backup)?, &[BEFORE.into()], backup)?.unwrap_or_default();
-            let to = b.get(BEFORE).flatten().map_or_else(|| FINDER.to_string(), |v| String::from_utf8_lossy(v).into_owned());
+            // A bundle id is one word of text: anything else is damage, never handed to
+            // LaunchServices as a guess.
+            let to = match b.get(BEFORE).flatten() {
+                None => FINDER.to_string(),
+                Some(v) => match std::str::from_utf8(v) {
+                    Ok(t) if !t.is_empty() && !t.chars().any(|c| c.is_control() || c.is_whitespace()) => t.to_string(),
+                    _ => {
+                        return Err(format!(
+                            "{} is damaged (the viewer it recorded isn't a bundle id), so nothing was changed",
+                            crate::fs::pretty(backup)
+                        ));
+                    }
+                },
+            };
             let now = ls.current();
             if now.as_deref().is_some_and(|c| !c.eq_ignore_ascii_case(BUNDLE_ID)) {
                 remove_backup(backup)?;
