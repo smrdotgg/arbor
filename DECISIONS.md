@@ -109,6 +109,28 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-09 · Review of milestone 12, fixed** (all ten findings; each with a test that
+  fails on the old code, except Windows-only paths, which CI compiles but can't exercise).
+  Calls made: (1) **Eject identity** is the device number plus the mount source (Linux: the
+  mount table's; macOS: `f_mntfromname`), or the volume GUID on Windows, read with the list
+  only for volumes that can be ejected (a dead network mount's `stat` could hang the list); a
+  volume whose identity can't be read isn't ejected ("changed since; refresh and try again"),
+  and a volume row's other menu items (Open, New Tab, Add to Favorites) also act on the volume
+  the menu opened on. (2) **Eject during an operation** is refused (not queued) when the
+  operation's sources, destination or undo steps are on the volume; searches whose root holds
+  the volume stop, as panes on it go home. (3) **Get Info waits 2 ms** for an item's details
+  (`info::META_WAIT`), not 0: a local `lstat` lands within it, so moving the selection with the
+  panel open doesn't flash a placeholder; a slow disk costs a quarter of the frame at most.
+  (4) **Get Info on Windows** checks each folder's type and identity right before reading it
+  (no descriptor-relative reads there), which narrows the swap race to that instant.
+  (5) **Favorite looks** start from Rune's `on_ready` (the first frame on screen) on at most two
+  threads; headless runs count as shown from the start. (6) **Sidebar merging** applies each
+  window's operations to the file under `sidebar.lock`; a window shows the merged list (the
+  other window's changes) after its own next change is written, not live (that would need
+  watching the file). (7) **A backup naming a setting twice is damaged** for Arbor's own
+  Restore too, not only `uninstall.sh`, so both restorers agree. Undo: the commits from
+  bb1284b to 97bad06.
+
 - **2026-11-09 · Milestone 13: consolidation, with no behaviour change.** Big files became
   folders whose `mod.rs` is the interface (`ops/`, `preview/`, `view/`, `app/`, `jump/`,
   `search/`, `handler/`, `incoming/`, `trash/`, `openwith/`), tests moved out of inline

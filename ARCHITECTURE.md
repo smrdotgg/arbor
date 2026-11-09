@@ -41,7 +41,7 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | Platform glue | `handler/` | Making Arbor the default for folders, and restoring (`linux.rs`, `windows.rs`, `mac.rs`) |
 | | `incoming/` | Folders other apps send (`mac.rs` Apple events, `linux.rs` D-Bus, `windows.rs` a pipe) |
 | UI | `view/` | Every element: root and status bar (`mod.rs`), `sidebar`, `pane` (path bar, tabs), `list`, `panels`, `overlays`, `batch` |
-| Shared | `bounded.rs`, `persist.rs`, `mounts.rs`, `ffi.rs`, `fs.rs` | See [Patterns](#patterns-to-reuse); folder reads, sorting, formatting |
+| Shared | `bounded.rs`, `persist.rs`, `mounts.rs`, `dirfd.rs`, `ffi.rs`, `fs.rs` | See [Patterns](#patterns-to-reuse); folder reads, sorting, formatting |
 | Tooling | `timing.rs` | Opt-in speed logs (`ARBOR_TIMING`, the bench) |
 | Tests only | `a11y_tests.rs`, `frame_bench.rs`, `packaging_tests.rs` | Accessibility tree, per-key cost, install scripts |
 
@@ -61,7 +61,8 @@ Nothing runs in the background unless the user did something, and nothing polls.
 - **Search pool** (`search::Pool`): up to four walker threads, started by the first search,
   below the window's priority, sharing one queue and a stop flag per walk.
 - **Writers**: `arbor-history` (`jump::history`: appends, load, compaction, clear, under a
-  lock file) and `arbor-sidebar` (`sidebar::Writer`: atomic rewrites). Each registers with
+  lock file) and `arbor-sidebar` (`sidebar::Writer`: edits merged into the file under its
+  lock, then an atomic rewrite). Each registers with
   `persist::at_exit` and gets up to 100 ms when Arbor quits (`persist::drain_at_exit`).
 - **Get Info's total** (`arbor-info`): one walk per request, waking the window at most every
   30 ms.
@@ -71,8 +72,9 @@ Nothing runs in the background unless the user did something, and nothing polls.
   blocks on its source; none polls.
 - **The operation worker** (`ops::start`): one thread per file operation; only one runs at a
   time (`State::job`).
-- Short-lived threads: one `stat` per favorite (`sidebar`), reaping launched processes
-  (`fs::reap`, `openwith`).
+- **Favorite looks** (`sidebar::Lookers`): at most two threads sharing a queue, started from
+  Rune's `on_ready` (the first frame on screen), ending when it's empty.
+- Short-lived threads: reaping launched processes (`fs::reap`, `openwith`).
 
 ## Patterns to reuse
 
@@ -96,8 +98,12 @@ Nothing runs in the background unless the user did something, and nothing polls.
   for a walk. Used by permanent delete, cleanup of cancelled copies, cross-disk
   moves and Get Info's total. Search uses device numbers alone (`search::devices_for`).
 - **User data on disk** (`persist.rs`). `replace` rewrites a file atomically (`Durable` also
-  flushes it first, for the handler backup); a writer thread reports a run of failures once
-  (`Failures`) and registers its flush for exit.
+  flushes it first, for the handler backup); `locked` holds a file's lock file around a
+  read-then-write so two Arbor processes don't interleave; a writer thread reports a run of
+  failures once (`Failures`) and registers its flush for exit.
+- **Walking without following links** (`dirfd.rs`, Unix): folders opened with `O_NOFOLLOW`,
+  checked against the identity they were listed with, entries `lstat`ed through the
+  descriptor. Permanent delete and Get Info's total.
 - **OS strings** (`ffi.rs`): `cstr` (Unix) and `wide` (Windows) for every path passed to the OS.
 - **Stop flags.** Every background read has an `Arc<AtomicBool>` set when its result stops
   mattering (navigated away, tab hidden, dropped); work checks it between entries.

@@ -283,9 +283,9 @@ The sidebar lists **Favorites**, in your order, then **Locations**, the volumes 
   can't be read gives the default list and says so; the next change replaces it. Delete the
   file to go back to the defaults; while it exists, the settings' `places` are left alone.
 - **A favorite that isn't there any more** is dimmed, and clicking it says so instead of going
-  there. Each favorite is looked at once per launch, after the window is up, on a worker of its
-  own (a dead network folder holds up only its own look), never again until the next launch,
-  and never watched. One that vanishes later is marked when a click finds it gone.
+  there. Each favorite is looked at once per launch, once the window's first frame is on
+  screen, by at most two threads that share the list (a dead network folder holds up one of
+  them, never the window), never again until the next launch, and never watched. One that vanishes later is marked when a click finds it gone.
 - **Locations**: on macOS what's mounted in `/Volumes` (not the boot volume's alias, or a
   folder left there with nothing mounted); on Linux the mounts under `/media/$USER`,
   `/run/media/$USER`, `/media` and `/mnt` from `/proc/self/mounts` (not the kernel's own file
@@ -296,8 +296,15 @@ The sidebar lists **Favorites**, in your order, then **Locations**, the volumes 
   notifications; Windows' `WM_DEVICECHANGE`, through a hidden window of Arbor's own). Linux
   has no such notification short of watching, so there it's a right-click or ⌘R.
 - **Eject** (⏏ beside the volume, its menu, or ⌘E for the volume the active pane is on): a pane
-  showing the volume goes to the home folder first, then it runs on a worker and says how it
-  went: "Ejected “USB”", or "“USB” is in use by another app, so it wasn't ejected". macOS asks
+  showing the volume goes to the home folder first, and searches that could walk into it stop;
+  then it runs on a worker and says how it went: "Ejected “USB”", or "“USB” is in use by
+  another app, so it wasn't ejected". It ejects the volume that was picked, never another: each
+  volume's identity (its device and what it's mounted from; the volume GUID on Windows) is
+  read with the list and checked again right before ejecting, so a menu left open while the
+  list refreshed, or another disk mounted at the same place since, says "“USB” changed since;
+  refresh and try again" and nothing happens. While a file operation reads or writes on the
+  volume, Eject waits for it (or a cancel). When udisks unmounts but can't power the drive off,
+  it says "Unmounted “USB”, but it couldn't be powered off: …", since it isn't safe to pull. macOS asks
   NSWorkspace (`unmountAndEjectDeviceAtURL:`); Linux runs `udisksctl unmount`, then `power-off`
   (or `gio mount -e` when udisks isn't there); Windows locks, dismounts and ejects the volume
   (`DeviceIoControl`), which fails while another app has a file open on it. Offered for
@@ -385,12 +392,16 @@ screen; with several items, how many files and folders and their total.
 
 **A folder's size and item count** (or the total of several items) are counted on demand,
 following NORTHSTAR's rules for view-triggered work: the panel shows at once with what the
-listing knows, the item's own details land from a worker a moment later, and the count streams
+listing knows (the key waits at most 2 ms for the item's own details, which a local disk
+answers within; a slow one's land from the worker a moment later), and the count streams
 in ("7,041 items · 414 MB so far…") on a thread of its own that wakes the window at most every
 30 ms. Moving the selection or closing the panel stops it at the next entry. It never follows
-links, never enters another file system mounted inside (as Delete Permanently tells them apart:
-the device, and on macOS the volume) and says how many it left out, counts folders it couldn't
-read instead of guessing, and keeps nothing: come back and it counts again. Sizes are the files'
+links (on macOS and Linux each folder is opened without following one, and only while it's
+still the folder that was listed, as Delete Permanently does), never enters another file system
+mounted inside (as Delete Permanently tells them apart: the device, and on macOS the volume;
+Get Info on a mount point itself, `/` or a volume's top folder, counts what's on it) and says
+how many it left out, counts folders it couldn't read (or whose entries it couldn't look at)
+instead of guessing, and keeps nothing: come back and it counts again. Sizes are the files'
 own lengths (a hard-linked file counts each time, as Finder does).
 
 Changing attributes (hidden, read-only) isn't offered: it couldn't be undone.
