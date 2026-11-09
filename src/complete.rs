@@ -350,6 +350,31 @@ mod tests {
         assert_eq!(sep_for(r"C:\Users\"), if cfg!(windows) { '\\' } else { std::path::MAIN_SEPARATOR });
     }
 
+    /// Found by `any_typed_path_expands_only_its_tilde`: off Windows, `~\x` went to `x` in the
+    /// home folder, but a backslash is part of a name there: `~\x` names no such folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_tilde_and_a_backslash_is_the_home_folder_only_on_windows() {
+        assert_eq!(crate::fs::expand("~\\x"), std::path::PathBuf::from("~\\x"));
+        assert_eq!(crate::fs::expand("~/x"), crate::fs::home().join("x"));
+    }
+
+    /// Any typed path off Windows: only `~` alone or `~/` at the start is the home folder;
+    /// everything else is the path as typed.
+    #[cfg(unix)]
+    #[test]
+    fn any_typed_path_expands_only_its_tilde() {
+        crate::prop::check("goto_expand", 3000, |r| {
+            let typed = if r.one_in(4) { r.string(20) } else { r.from(TYPED, 8) };
+            let got = crate::fs::expand(&typed);
+            match typed.strip_prefix("~/") {
+                _ if typed == "~" => assert_eq!(got, crate::fs::home()),
+                Some(rest) => assert_eq!(got, crate::fs::home().join(rest)),
+                None => assert_eq!(got, std::path::PathBuf::from(&typed), "{typed:?}"),
+            }
+        });
+    }
+
     /// Found reading the go-to code: the typed path was trimmed, so a folder whose name ends in
     /// a space (Tab completion writes it whole) went to the item without the space, and a file
     /// there was opened. Now the exact path comes first; a stray space still finds its folder.

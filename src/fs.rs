@@ -372,7 +372,8 @@ pub fn expand(input: &str) -> PathBuf {
     if input == "~" {
         return home();
     }
-    if let Some(rest) = input.strip_prefix("~/").or_else(|| input.strip_prefix("~\\")) {
+    // `~\` only on Windows: elsewhere a backslash is part of a name.
+    if let Some(rest) = input.strip_prefix("~/").or_else(|| input.strip_prefix("~\\").filter(|_| cfg!(windows))) {
         return home().join(rest);
     }
     PathBuf::from(input)
