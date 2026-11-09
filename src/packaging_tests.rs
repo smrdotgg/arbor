@@ -141,3 +141,68 @@ fn uninstall_never_strands_the_folder_default() {
     assert!(service.exists(), "not Arbor's: left alone");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A package without any `arbor`, installed into a fresh home whose binary is gone too: only
+/// the script can put things back.
+fn bare(root: &Path, name: &str) -> (PathBuf, PathBuf) {
+    let pkg = package(root, false);
+    let home = root.join(name);
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::copy(Path::new("/bin/true"), pkg.join("arbor")).unwrap();
+    assert!(run(&pkg, "install.sh", &home).0);
+    std::fs::remove_file(pkg.join("arbor")).unwrap();
+    std::fs::remove_file(home.join(".local/bin/arbor")).unwrap();
+    (pkg, home)
+}
+
+/// The review's case: with no Arbor to ask, a FileManager1 activation file another file
+/// manager had (which the backup saved) used to be deleted instead of put back, and the backup
+/// with it; an empty backup was taken for "nothing to restore" and discarded. Now both saved
+/// values go back, and a damaged backup stops the script before anything changes, and stays.
+#[test]
+fn fallback_uninstall_restores_both_values_and_refuses_a_damaged_backup() {
+    let root = tmp("uninstall-saved");
+    let (pkg, home) = bare(&root, "home1");
+    let (service, mimeapps, backup) = made_default(&home);
+    let theirs = "[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=/usr/bin/previous-manager\n";
+    let mut b = Backup::default();
+    b.put("mimeapps.list inode/directory", Some(b"old.desktop;"));
+    b.put("dbus-1/services/org.freedesktop.FileManager1.service", Some(theirs.as_bytes()));
+    b.write(&backup).unwrap();
+    let (ok, out) = run(&pkg, "uninstall.sh", &home);
+    assert!(ok, "{out}");
+    assert_eq!(std::fs::read_to_string(&service).unwrap(), theirs, "their activation file is back: {out}");
+    assert!(std::fs::read_to_string(&mimeapps).unwrap().contains("\n[Default Applications]\ninode/directory=old.desktop;\n"), "{out}");
+    assert!(!backup.exists(), "everything went back, so the backup goes: {out}");
+    // Damaged backups: empty, no header, or an entry missing.
+    let header = std::fs::read_to_string({
+        let mut b = Backup::default();
+        b.put("x", None);
+        let p = root.join("header.txt");
+        b.write(&p).unwrap();
+        p
+    })
+    .unwrap();
+    let header = header.lines().next().unwrap().to_string();
+    for (i, damaged) in ["".to_string(), "\n".into(), format!("{header}\n"), format!("{header}\n{}\tmimeapps.list inode/directory\n", hex(b"old.desktop;"))]
+        .iter()
+        .enumerate()
+    {
+        let (pkg, home) = bare(&root, &format!("damaged{i}"));
+        let (service, mimeapps, backup) = made_default(&home);
+        std::fs::write(&backup, damaged).unwrap();
+        let (svc, mime) = (std::fs::read_to_string(&service).unwrap(), std::fs::read_to_string(&mimeapps).unwrap());
+        let (ok, out) = run(&pkg, "uninstall.sh", &home);
+        assert!(!ok, "{damaged:?}: refused: {out}");
+        assert!(out.contains("damaged") && out.contains("nothing was changed"), "{damaged:?}: {out}");
+        assert_eq!(std::fs::read_to_string(&service).unwrap(), svc, "{damaged:?}: activation file as it was");
+        assert_eq!(std::fs::read_to_string(&mimeapps).unwrap(), mime, "{damaged:?}: folder default as it was");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), *damaged, "{damaged:?}: the backup stays");
+        assert!(home.join(".local/share/applications/arbor.desktop").exists(), "{damaged:?}: nothing removed");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|c| format!("{c:02x}")).collect()
+}

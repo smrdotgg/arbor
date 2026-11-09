@@ -96,9 +96,10 @@ all three on every push to `main`: they're the run's artifacts (`arbor-macOS`, `
   `~/.local/share/applications` (so menus list it) and its icons (the desktop file names the
   binary by its full path, quoted as the Desktop Entry spec says, so any home folder works).
   `./uninstall.sh` removes them, putting back the folder default first if Arbor has it: with
-  the installed Arbor, or the one beside the script if that's gone, or with neither, by taking
-  back Arbor's D-Bus activation file and folder default itself (from the backup) and saying
-  what it did. Running under X11 needs
+  the installed Arbor, or the one beside the script if that's gone, or with neither, by putting
+  back the D-Bus activation file and folder default the backup recorded itself (or removing
+  Arbor's when there was none) and saying what it did; a damaged backup stops it before
+  anything changes, and the backup stays until everything is back. Running under X11 needs
   `libxkbcommon-x11` (see [Platform notes](#platform-notes)).
 
 Installing never makes Arbor the default for anything. That's a command:

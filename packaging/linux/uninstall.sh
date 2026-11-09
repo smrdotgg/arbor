@@ -1,9 +1,10 @@
 #!/bin/sh
 # Removes what install.sh installed. If Arbor is the default for folders, it first puts the old
 # default back (what "Restore the System Default for Folders…" does), with the installed Arbor,
-# or the one beside this script when that's gone; with neither, it takes back Arbor's D-Bus
-# activation file and folder default itself, from the backup Arbor saved. Your settings and
-# Jump history (~/.config/arbor) stay.
+# or the one beside this script when that's gone; with neither, it puts back the D-Bus
+# activation file and folder default the backup Arbor saved recorded, itself (a damaged backup
+# stops it before anything changes, and stays). Your settings and Jump history
+# (~/.config/arbor) stay.
 #
 #   ./uninstall.sh
 #   PREFIX=/some/dir ./uninstall.sh
@@ -32,28 +33,57 @@ if [ -n "$restorer" ]; then
 		exit 1
 	}
 else
-	# No Arbor to ask. What Arbor's Restore does, by hand: its activation file goes (only if
-	# it's Arbor's), and the folder default it wrote goes back to what the backup recorded.
+	# No Arbor to ask. What Arbor's Restore does, by hand, from the backup Arbor saved: its
+	# activation file goes back to what was there (or goes, if nothing was), and the folder
+	# default it wrote goes back to what the backup recorded. A backup that's damaged stops it
+	# here, before anything changes; the backup goes only once everything is back.
 	service=$user_data/dbus-1/services/org.freedesktop.FileManager1.service
+	mimeapps=$config/mimeapps.list
+	backup=$config/arbor/folder-handler-backup.txt
+	header='# What "Make Arbor the Default for Folders" replaced. "Restore the System Default for Folders" puts it back. Keep this file.'
+	mime_key='mimeapps.list inode/directory'
+	service_key='dbus-1/services/org.freedesktop.FileManager1.service'
+	# The value the backup records under a name, decoded from hex ("-" is "there was none":
+	# then it prints nothing and fails).
+	saved() {
+		LC_ALL=C awk -F '\t' -v k="$1" '$2 == k && $1 != "-" {
+			d = "0123456789abcdef"; s = ""
+			for (i = 1; i < length($1); i += 2)
+				s = s sprintf("%c", (index(d, substr($1, i, 1)) - 1) * 16 + index(d, substr($1, i + 1, 1)) - 1)
+			printf "%s", s; found = 1
+		} END { exit !found }' "$backup"
+	}
+	has_backup=
+	if [ -e "$backup" ]; then
+		damaged=
+		[ -f "$backup" ] && head -n 1 "$backup" | grep -qxF "$header" || damaged=1
+		for k in "$mime_key" "$service_key"; do
+			awk -F '\t' -v k="$k" '$2 == k { found = 1 } END { exit !found }' "$backup" 2>/dev/null || damaged=1
+		done
+		if [ -n "$damaged" ]; then
+			echo "The backup of your folder default ($backup) is damaged, so nothing was changed. Put the folder default back by hand (or reinstall Arbor and run Restore the System Default for Folders), then run this again." >&2
+			exit 1
+		fi
+		has_backup=1
+	fi
 	if [ -f "$service" ] && head -n 1 "$service" | grep -q '^# Written by Arbor'; then
-		rm -f "$service"
-		echo "Removed Arbor's D-Bus activation file ($service)."
+		if [ -n "$has_backup" ] && saved "$service_key" >"$service.arbor-uninstall"; then
+			mv -f "$service.arbor-uninstall" "$service"
+			echo "Put back the D-Bus activation file that was there before Arbor ($service)."
+		else
+			rm -f "$service.arbor-uninstall" "$service"
+			echo "Removed Arbor's D-Bus activation file ($service)."
+		fi
 		if command -v dbus-send >/dev/null 2>&1; then
 			dbus-send --session --type=method_call --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ReloadConfig 2>/dev/null || true
 		fi
+	elif [ -f "$service" ]; then
+		echo "Left $service alone: it isn't Arbor's (it changed since Arbor wrote it)."
 	fi
-	mimeapps=$config/mimeapps.list
-	backup=$config/arbor/folder-handler-backup.txt
 	if [ -f "$mimeapps" ] && grep -q '^inode/directory=arbor\.desktop' "$mimeapps"; then
 		before=
-		if [ -f "$backup" ]; then
-			# The value as the backup records it: hex, a tab, the entry's name ("-" for none).
-			before=$(awk -F '\t' '$2 == "mimeapps.list inode/directory" && $1 != "-" {
-				d = "0123456789abcdef"; s = ""
-				for (i = 1; i < length($1); i += 2)
-					s = s sprintf("%c", (index(d, substr($1, i, 1)) - 1) * 16 + index(d, substr($1, i + 1, 1)) - 1)
-				print s
-			}' "$backup")
+		if [ -n "$has_backup" ]; then
+			before=$(saved "$mime_key" || true)
 		fi
 		BEFORE=$before awk '
 			/^[ \t]*\[/ { inside = ($0 ~ /^[ \t]*\[Default Applications\][ \t]*$/) }
@@ -70,6 +100,7 @@ else
 			echo "Removed Arbor as the folder default from $mimeapps; the desktop's own file manager opens folders again."
 		fi
 	fi
+	# Everything is back (a failure above stops the script with the backup kept).
 	rm -f "$backup"
 fi
 
