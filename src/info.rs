@@ -755,11 +755,14 @@ mod tests {
         std::fs::write(d.join("f"), "x").unwrap();
         let mut s = state_in(&d);
         settle_all(&mut s);
-        hook::SLOW.lock().unwrap().push((d.join("f"), Duration::from_millis(200)));
+        hook::SLOW.lock().unwrap().push((d.join("f"), Duration::from_millis(300)));
+        // Even where the window's other bounded waits are long, this one is META_WAIT (the old
+        // code waited out the window's own wait, here longer than the slow read).
+        s.show_wait = Duration::from_secs(2);
         let t = Instant::now();
         s.toggle_info();
         let took = t.elapsed();
-        assert!(took < Duration::from_millis(5), "the key waited {took:?}");
+        assert!(took < Duration::from_millis(150), "the key waited {took:?}");
         assert!(s.info.as_ref().is_some_and(|i| i.meta.is_none()), "shown before the details");
         let until = Instant::now() + Duration::from_secs(5);
         while s.info.as_ref().is_some_and(|i| i.meta.is_none()) && Instant::now() < until {

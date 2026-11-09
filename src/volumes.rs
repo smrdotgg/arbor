@@ -258,20 +258,22 @@ pub fn from_drives(mask: u32, kind: impl Fn(char) -> u32, label: impl Fn(char, u
 pub(crate) mod win {
     use super::{DRIVE_REMOTE, Volume, from_drives};
     use windows_sys::Win32::Storage::FileSystem::{
-        GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
+        GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
     };
 
     use crate::ffi::wide;
 
-    /// The volume's GUID path (`\\?\Volume{…}\`) for a drive root or folder mount point.
-    pub fn volume_guid(root: &std::path::Path) -> Option<String> {
-        let mut at = root.as_os_str().to_owned();
-        if !root.to_string_lossy().ends_with('\\') {
-            at.push("\\");
+    /// The GUID path (`\\?\Volume{…}\`) of the volume `path` is on: its mount point (a drive
+    /// root, or a folder a volume is mounted in), then that volume's name.
+    pub fn volume_guid(path: &std::path::Path) -> Option<String> {
+        let mut root = [0u16; 261];
+        // SAFETY: a NUL-terminated path and a buffer of the length given.
+        if unsafe { GetVolumePathNameW(wide(path).as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
+            return None;
         }
         let mut name = [0u16; 64];
-        // SAFETY: a NUL-terminated mount point and a buffer of the length given.
-        let ok = unsafe { GetVolumeNameForVolumeMountPointW(wide(&at).as_ptr(), name.as_mut_ptr(), name.len() as u32) };
+        // SAFETY: the NUL-terminated mount point just read, and a buffer of the length given.
+        let ok = unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), name.len() as u32) };
         if ok == 0 {
             return None;
         }
