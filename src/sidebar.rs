@@ -146,39 +146,108 @@ pub fn named(paths: Vec<PathBuf>) -> Vec<(String, PathBuf)> {
 
 // ---- the writer ---------------------------------------------------------------------------
 
+/// One change to the favorites, as an operation, so the writer can apply it to what's in the
+/// file now: another Arbor may have changed it since this one read it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Edit {
+    /// These folders, before `before` (at the end when it's `None` or gone); those already
+    /// there stay where they are.
+    Add {
+        dirs: Vec<PathBuf>,
+        before: Option<PathBuf>,
+    },
+    Remove(PathBuf),
+    /// This favorite, moved before `before` (to the end when it's `None` or gone).
+    Move {
+        path: PathBuf,
+        before: Option<PathBuf>,
+    },
+}
+
+impl Edit {
+    pub fn apply(&self, list: &mut Vec<PathBuf>) {
+        let at = |list: &[PathBuf], before: &Option<PathBuf>| {
+            before.as_ref().and_then(|b| list.iter().position(|p| p == b)).unwrap_or(list.len())
+        };
+        match self {
+            Edit::Add { dirs, before } => {
+                let new: Vec<PathBuf> = dirs.iter().filter(|d| !list.contains(d)).cloned().collect();
+                let i = at(list, before);
+                list.splice(i..i, new);
+            }
+            Edit::Remove(p) => list.retain(|q| q != p),
+            Edit::Move { path, before } => {
+                if let Some(from) = list.iter().position(|p| p == path) {
+                    let item = list.remove(from);
+                    let i = at(list, before);
+                    list.insert(i, item);
+                }
+            }
+        }
+    }
+}
+
 enum Msg {
-    Save(String),
+    /// An edit, numbered, and this window's whole list after it (written as it is when the
+    /// file is missing or can't be read).
+    Edit { seq: u64, edit: Edit, list: Vec<PathBuf> },
     /// Answered once everything sent before it is written.
     Flush(Sender<()>),
 }
 
-/// The one thread that writes `sidebar.toml`.
+/// The one thread that writes `sidebar.toml`. Each batch of edits holds the file's lock, reads
+/// it, applies the edits to what it holds, writes it (a temporary file renamed over it) and
+/// sends the result back, so two Arbor windows never lose each other's changes.
 pub struct Writer {
     tx: Sender<Msg>,
     errors: Receiver<String>,
+    /// The list as written, after the edit numbered so.
+    merged: Receiver<(u64, Vec<PathBuf>)>,
 }
 
 impl Writer {
     fn spawn(path: PathBuf, waker: Option<rune::Waker>) -> Writer {
         let (tx, rx) = std::sync::mpsc::channel::<Msg>();
-        let (mut failures, errors) = persist::Failures::new(waker);
+        let (merged_tx, merged) = std::sync::mpsc::channel();
+        let (mut failures, errors) = persist::Failures::new(waker.clone());
         persist::at_exit(&tx, Msg::Flush);
         std::thread::Builder::new()
             .name("arbor-sidebar".into())
             .spawn(move || {
                 while let Ok(first) = rx.recv() {
-                    // Everything queued: only the newest list is written; flushes answer after.
-                    let mut text = None;
+                    // Everything queued is written at once; flushes answer after.
+                    let mut edits = Vec::new();
                     let mut replies = Vec::new();
                     for m in std::iter::once(first).chain(std::iter::from_fn(|| rx.try_recv().ok())) {
                         match m {
-                            Msg::Save(t) => text = Some(t),
+                            Msg::Edit { seq, edit, list } => edits.push((seq, edit, list)),
                             Msg::Flush(r) => replies.push(r),
                         }
                     }
-                    if let Some(t) = text {
-                        let written = persist::replace(&path, t.as_bytes(), persist::Durability::Plain);
-                        failures.note(written, |e| format!("Couldn't save the sidebar ({}): {e}", fs::pretty(&path)));
+                    if let Some((seq, _, mine)) = edits.last() {
+                        let (seq, mine) = (*seq, mine.clone());
+                        let written = persist::locked(&path, || {
+                            let mut list = match crate::config::read_text(&path) {
+                                Ok(Some(text)) => parse(&text).ok(),
+                                _ => None,
+                            };
+                            match list.as_mut() {
+                                Some(l) => edits.iter().for_each(|(_, e, _)| e.apply(l)),
+                                None => list = Some(mine),
+                            }
+                            let list = list.unwrap_or_default();
+                            let text = serialize(&list).ok_or_else(|| std::io::Error::other("a folder's name isn't valid Unicode"))?;
+                            persist::replace(&path, text.as_bytes(), persist::Durability::Plain)?;
+                            Ok(list)
+                        });
+                        let list = written.as_ref().ok().cloned();
+                        failures.note(written.map(|_| ()), |e| format!("Couldn't save the sidebar ({}): {e}", fs::pretty(&path)));
+                        if let Some(list) = list
+                            && merged_tx.send((seq, list)).is_ok()
+                            && let Some(w) = &waker
+                        {
+                            w();
+                        }
                     }
                     for r in replies {
                         let _ = r.send(());
@@ -186,11 +255,11 @@ impl Writer {
                 }
             })
             .expect("can't start the sidebar's writer");
-        Writer { tx, errors }
+        Writer { tx, errors, merged }
     }
 
-    fn save(&self, text: String) {
-        let _ = self.tx.send(Msg::Save(text));
+    fn send(&self, seq: u64, edit: Edit, list: Vec<PathBuf>) {
+        let _ = self.tx.send(Msg::Edit { seq, edit, list });
     }
 
     /// Waits up to `wait` for what's queued to be written. True when it was.
@@ -270,6 +339,8 @@ pub struct Side {
     pub drag: Option<(usize, usize)>,
     /// The navigation a sidebar click asked for, so a folder that turns out gone is marked.
     pub(crate) going: Option<(u64, PathBuf)>,
+    /// Edits sent to the writer, numbered.
+    sent: u64,
     /// Folders dropped on the sidebar from another app, checked on a worker.
     pub(crate) dropped: rune::Latest<Vec<PathBuf>>,
     /// Looks started, for tests.
@@ -385,6 +456,18 @@ impl State {
             self.alert = self.note.clone();
             changed = true;
         }
+        // What the writer wrote, with any other Arbor's changes: shown once it has every edit
+        // made here (not mid-drag), and new favorites get their one look.
+        let merged = self.side.writer.as_ref().and_then(|w| w.merged.try_iter().last());
+        if let Some((seq, list)) = merged
+            && seq == self.side.sent
+            && self.side.drag.is_none()
+            && self.places.iter().map(|(_, p)| p).ne(list.iter())
+        {
+            self.places = named(list);
+            self.side.look_due = true;
+            changed = true;
+        }
         if let Some(dirs) = self.side.dropped.take() {
             if dirs.is_empty() {
                 self.note = Some("Only folders can go in the sidebar".into());
@@ -396,17 +479,19 @@ impl State {
         changed
     }
 
-    /// Saves the favorites, on the writer's thread.
-    fn save_favorites(&mut self) {
+    /// Saves `edit` (already made to the list on screen), on the writer's thread, which applies
+    /// it to what the file holds then.
+    fn save_favorites(&mut self, edit: Edit) {
         let paths: Vec<PathBuf> = self.places.iter().map(|(_, p)| p.clone()).collect();
-        let Some(text) = serialize(&paths) else {
+        if serialize(&paths).is_none() {
             self.note = Some("Couldn't save the sidebar: a folder's name isn't valid Unicode".into());
             return;
-        };
+        }
         self.side.custom = true;
-        let waker = self.waker.clone();
+        self.side.sent += 1;
+        let (seq, waker) = (self.side.sent, self.waker.clone());
         if let Some(w) = self.side.writer(waker) {
-            w.save(text);
+            w.send(seq, edit, paths);
         }
     }
 
@@ -430,9 +515,10 @@ impl State {
         }
         let n = new.len();
         let first = name_for(&new[0]);
+        let edit = Edit::Add { dirs: new.clone(), before: self.places.get(at).map(|(_, p)| p.clone()) };
         self.places.splice(at..at, named(new));
         self.note = Some(if n == 1 { format!("Added “{first}” to the sidebar") } else { format!("Added {n} folders to the sidebar") });
-        self.save_favorites();
+        self.save_favorites(edit);
     }
 
     /// "Add to Sidebar": the selected folders, or the folder on screen when no folder is
@@ -449,9 +535,9 @@ impl State {
         if i >= self.places.len() {
             return;
         }
-        let (name, _) = self.places.remove(i);
+        let (name, path) = self.places.remove(i);
         self.note = Some(format!("Removed “{name}” from the sidebar (the folder itself is untouched)"));
-        self.save_favorites();
+        self.save_favorites(Edit::Remove(path));
     }
 
     /// The favorite showing the folder on screen, for "Remove from Sidebar" from the palette.
@@ -466,8 +552,10 @@ impl State {
             return;
         }
         let item = self.places.remove(from);
+        let path = item.1.clone();
         self.places.insert(to, item);
-        self.save_favorites();
+        let before = self.places.get(to + 1).map(|(_, p)| p.clone());
+        self.save_favorites(Edit::Move { path, before });
     }
 
     /// A drag of favorite `i`: the place it would land shows while it moves (one place per
@@ -585,6 +673,46 @@ mod tests {
     fn saved(s: &State, file: &Path) -> Vec<PathBuf> {
         assert!(s.side.writer_ref().unwrap().flush(Duration::from_secs(5)));
         parse(&std::fs::read_to_string(file).unwrap()).unwrap()
+    }
+
+    /// Two Arbor windows that read the sidebar before either changed it: each one's edit lands
+    /// in the file, and each shows the other's once its own is written.
+    #[test]
+    fn two_windows_never_lose_each_others_favorites() {
+        let d = temp("two-windows");
+        let file = d.join(FILE);
+        let (a, b, c) = (d.join("a"), d.join("b"), d.join("c"));
+        for p in [&a, &b, &c] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let mut first = state_with(&d, &file, std::slice::from_ref(&c));
+        let mut second = state_with(&d, &file, std::slice::from_ref(&c));
+        first.add_favorites(vec![a.clone()], None);
+        assert_eq!(saved(&first, &file), [c.clone(), a.clone()]);
+        second.add_favorites(vec![b.clone()], Some(0));
+        assert_eq!(saved(&second, &file), [b.clone(), c.clone(), a.clone()], "the first window's add is kept");
+        second.poll_sidebar();
+        assert_eq!(second.places.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>(), [b.clone(), c.clone(), a.clone()]);
+        // A remove and a move from the first window apply to the file as it is now.
+        first.remove_favorite(0);
+        assert_eq!(saved(&first, &file), [b.clone(), a.clone()]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn edits_apply_to_whatever_list_is_there() {
+        let p = |s: &str| PathBuf::from(format!("/{s}"));
+        let mut l = vec![p("a"), p("b"), p("c")];
+        Edit::Add { dirs: vec![p("x"), p("b")], before: Some(p("b")) }.apply(&mut l);
+        assert_eq!(l, [p("a"), p("x"), p("b"), p("c")], "b was there already");
+        Edit::Add { dirs: vec![p("y")], before: Some(p("gone")) }.apply(&mut l);
+        assert_eq!(l.last(), Some(&p("y")), "before a missing one: at the end");
+        Edit::Move { path: p("c"), before: Some(p("a")) }.apply(&mut l);
+        assert_eq!(l, [p("c"), p("a"), p("x"), p("b"), p("y")]);
+        Edit::Move { path: p("a"), before: None }.apply(&mut l);
+        Edit::Remove(p("x")).apply(&mut l);
+        Edit::Remove(p("never")).apply(&mut l);
+        assert_eq!(l, [p("c"), p("b"), p("y"), p("a")]);
     }
 
     /// Add, remove and reorder each save the list on the writer's thread, in order.

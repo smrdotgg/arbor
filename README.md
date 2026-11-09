@@ -277,7 +277,9 @@ The sidebar lists **Favorites**, in your order, then **Locations**, the volumes 
   (not in `config.toml`, which is for editing by hand). It's read at startup by the thread that
   reads the first folder, never the window's, and written by a thread of its own after each
   change (a temporary file renamed over the old one; several changes in a row are written
-  once; quitting gives it up to 100 ms). A failed write shows in the status bar. A file that
+  once; quitting gives it up to 100 ms). Each change is applied to the file as it is then,
+  holding its lock file (`sidebar.lock`), so two Arbor windows keep each other's changes,
+  and each shows the other's after its own next change. A failed write shows in the status bar. A file that
   can't be read gives the default list and says so; the next change replaces it. Delete the
   file to go back to the defaults; while it exists, the settings' `places` are left alone.
 - **A favorite that isn't there any more** is dimmed, and clicking it says so instead of going

@@ -88,16 +88,9 @@ impl Store {
 }
 
 /// Runs `f` holding the history's lock file (`history.lock` beside it), so two Arbor processes
-/// never interleave a compaction (read, then rewrite) with an append or a clear: one waits for
-/// the other. The lock is the operating system's (`flock`, `LockFileEx`), released when the
-/// file closes, even if the process dies.
+/// never interleave a compaction (read, then rewrite) with an append or a clear.
 pub(super) fn locked<T>(p: &Path, f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
-    if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(p.with_extension("lock"))?;
-    lock.lock()?;
-    f()
+    persist::locked(p, f)
 }
 
 /// Appends `line`. A last line cut short (a crash mid-write) is first ended with a NUL, so it
