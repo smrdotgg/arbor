@@ -149,6 +149,9 @@ impl State {
         let pane = &self.panes[self.active];
         let when = |cond: bool, why: &'static str| cond.then_some(why);
         let searching = f.searching();
+        // An item an inline rename is still renaming: nothing acts on it until that lands.
+        let renaming = busy && f.targets().iter().any(|e| e.pending.is_some());
+        let renaming = when(renaming, "Wait for the rename to finish");
         match cmd {
             // Start a file operation.
             Trash | Delete => when(busy, BUSY).or(when(nothing, "Select an item first")),
@@ -176,8 +179,8 @@ impl State {
             Undo => when(busy, BUSY).or(when(self.undo.is_empty(), "Nothing to undo")),
             Redo => when(busy, BUSY).or(when(self.redo.is_empty(), "Nothing to redo")),
             Cancel => when(!busy, "No file operation is running"),
-            Open | Copy | Cut | Rename | BatchRename => when(nothing, "Select an item first"),
-            Into => when(!f.selected().is_some_and(|e| e.is_dir), "Select a folder first"),
+            Open | Copy | Cut | Rename | BatchRename => when(nothing, "Select an item first").or(renaming),
+            Into => when(!f.selected().is_some_and(|e| e.is_dir), "Select a folder first").or(renaming),
             Parent => when(searching, "Leave the search first (Esc)").or(when(f.cwd.parent().is_none(), "Already at the top")),
             // In a search, Back leaves it.
             Back => when(!searching && f.back.is_empty(), "Nothing to go back to"),
@@ -205,7 +208,7 @@ impl State {
             Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
                 when(cmd.place().is_some_and(|i| i >= self.place_count()), "No sidebar place there")
             }
-            OpenWith => when(!f.targets().iter().any(|e| !e.is_dir), "Select a file first"),
+            OpenWith => when(!f.targets().iter().any(|e| !e.is_dir), "Select a file first").or(renaming),
             SidebarRemove => when(self.favorite_here().is_none(), "This folder isn't in the sidebar"),
             Eject => when(self.ejecting.is_some(), "Already ejecting a volume")
                 .or(when(busy, "Wait for the file operation to finish, then eject"))
@@ -213,8 +216,8 @@ impl State {
             // Always available.
             NewFolder => when(busy, BUSY).or(when(searching, "Leave the search (Esc) to make a folder here")),
             MakeDefault | RestoreDefault => when(self.handler_job.is_pending(), "Already changing the default for folders"),
-            GoTo | Reload | Reveal | Palette | OpenSettings | ReloadSettings | CopyPath | Hidden | SortReverse | NewTab | Split
-            | ClearJump | Search | Info | SidebarAdd => None,
+            Reveal | CopyPath | Info | SidebarAdd => renaming,
+            GoTo | Reload | Palette | OpenSettings | ReloadSettings | Hidden | SortReverse | NewTab | Split | ClearJump | Search => None,
         }
     }
 

@@ -207,13 +207,13 @@ impl State {
         if !self.start(checked(Op::RenameOne { from, to }, expect)) {
             return;
         }
-        // At once, before the worker answers: the panes on this folder show the new name.
+        // At once, before the worker answers: the panes on this folder show the new name, as a
+        // label only; the row is still the item it was (and actions on it wait) until it lands.
         let f = self.cur();
         let id = if dir == f.cwd && !f.searching() { f.dir_id } else { None };
-        let new = OsString::from(new);
         for p in &mut self.panes {
             if !p.f.searching() && p.f.shows(&dir, id) {
-                p.f.renamed(&old, &new);
+                p.f.rename_pending(&old, &new);
             }
         }
     }
@@ -302,6 +302,10 @@ impl State {
                     p.f.renamed_paths(&renamed);
                 }
             }
+        }
+        // An inline rename's label goes: the row renamed, or back to its own name.
+        for p in &mut self.panes {
+            p.f.land_pending(&out.moved);
         }
         // A trash and a delete have no results to select: what they did is what's gone.
         let n = if matches!(verb, "Moving to Trash" | "Deleting" | ops::EMPTYING) { out.removed.len() } else { out.results.len() };

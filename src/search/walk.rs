@@ -439,6 +439,7 @@ pub(super) fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
             mtime_ms,
             // The item the walk saw: actions check it's still the one at this path.
             id: meta.as_ref().and_then(fs::ident),
+            pending: None,
             os: t.rel.join(&os).into_os_string(),
         });
         if found.len() >= room.min(CHUNK) {

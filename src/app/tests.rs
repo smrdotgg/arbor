@@ -439,6 +439,36 @@ fn a_listing_read_under_an_old_sort_is_sorted_again() {
     assert_eq!(names, ["c", "b", "a"]);
 }
 
+/// The review of milestone 14: renaming `a` to a name already taken pointed the row (and Open,
+/// Copy, everything acting on it) at the other item until the refusal landed. Now the new name
+/// is only a label until the worker says how it went: the row is still `a`, actions on it wait,
+/// and a refused rename shows `a` again.
+#[test]
+fn a_pending_rename_never_points_the_row_at_another_item() {
+    let d = folder("rename-pending", 0);
+    std::fs::write(d.join("a"), "original").unwrap();
+    std::fs::write(d.join("b"), "other").unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.cur_mut().select(0);
+    assert_eq!(s.cur().target_paths(), [d.join("a")]);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "b".into();
+    s.commit_rename(&mut Tx::default());
+    assert!(s.job.is_some());
+    assert_eq!(s.cur().target_paths(), [d.join("a")], "still the item being renamed");
+    assert_eq!(s.cur().selected().and_then(|e| e.pending.as_deref()), Some("b"), "its new name, as a label");
+    for cmd in [Cmd::Open, Cmd::Copy, Cmd::Cut, Cmd::Rename, Cmd::OpenWith, Cmd::CopyPath, Cmd::Trash, Cmd::Delete] {
+        assert!(s.unavailable(cmd).is_some(), "{cmd:?} waits for the rename");
+    }
+    finish_job(&mut s);
+    assert_eq!(s.note.as_deref(), Some("“b” already exists"));
+    assert_eq!(s.cur().target_paths(), [d.join("a")]);
+    assert!(s.cur().entries.iter().all(|e| e.pending.is_none()), "the label went");
+    assert_eq!(s.unavailable(Cmd::Open), None);
+    assert_eq!(std::fs::read_to_string(d.join("b")).unwrap(), "other");
+}
+
 /// The review's case: the inline rename and New Folder touched the disk on the window's
 /// thread (a slow disk froze it). Both are operations on the worker now: the list shows the
 /// new name at once, the disk changes when the worker gets to it, undo is as before, and
@@ -454,7 +484,7 @@ fn rename_and_new_folder_run_on_the_worker() {
     s.rename.as_mut().unwrap().edit.text = "b.txt".into();
     s.commit_rename(&mut tx);
     assert!(s.job.is_some(), "on the worker");
-    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("b.txt"), "shown at once");
+    assert_eq!(s.cur().selected().and_then(|e| e.pending.as_deref()), Some("b.txt"), "shown at once");
     finish_job(&mut s);
     assert!(d.join("b.txt").exists() && !d.join("a.txt").exists());
     assert_eq!((s.note.as_deref(), s.undo.len()), (None, 1), "nothing to say; undoable");

@@ -697,6 +697,7 @@ fn the_list_grows_only_so_far_while_the_walk_goes_on() {
         size: 1,
         mtime_ms: 1,
         id: None,
+        pending: None,
     };
     // As poll_search appends batches while the walk is still going.
     for batch in 0..3 {

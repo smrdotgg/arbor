@@ -176,7 +176,7 @@ pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
             .fill(l.t.bg)
             .border(1.0, l.accent),
         None => {
-            let mut name = e.name.clone();
+            let mut name = e.pending.clone().unwrap_or_else(|| e.name.clone());
             if e.is_link {
                 name.push_str("  ↗"); // In the bundled Inter, so it draws the same everywhere.
             }

@@ -547,10 +547,38 @@ impl Folder {
         }
     }
 
-    /// The item `old` was just renamed `new` on disk: shows it under its new name at once (a
-    /// fresh read follows), keeping it selected if it was, so nothing on screen names a file
-    /// that's gone or now another one.
-    pub fn renamed(&mut self, old: &OsStr, new: &OsStr) {
+    /// The item `old` is being renamed `new` on the worker: its row shows the new name at once,
+    /// but it's still `old` (what actions act on) until the outcome lands: a rename that fails
+    /// (the name was taken) never points the row at the other item.
+    pub fn rename_pending(&mut self, old: &OsStr, new: &str) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.os == old) {
+            e.pending = Some(new.to_string());
+        }
+    }
+
+    /// The inline rename landed: a row whose pending name it gave (one of `moved`, which has
+    /// the item's old and new paths) takes it, through whichever path this pane reached the
+    /// folder by; any other goes back to its own name.
+    pub fn land_pending(&mut self, moved: &[(PathBuf, PathBuf)]) {
+        let done: Vec<(OsString, OsString)> = self
+            .entries
+            .iter_mut()
+            .filter_map(|e| {
+                let new = e.pending.take()?;
+                moved
+                    .iter()
+                    .any(|(f, t)| f.file_name() == Some(e.os.as_os_str()) && t.file_name() == Some(OsStr::new(&new)))
+                    .then(|| (e.os.clone(), OsString::from(new)))
+            })
+            .collect();
+        for (old, new) in done {
+            self.renamed(&old, &new);
+        }
+    }
+
+    /// The item `old` was renamed `new` on disk: shows it under its new name at once (a fresh
+    /// read follows), keeping it selected if it was.
+    fn renamed(&mut self, old: &OsStr, new: &OsStr) {
         let Some(ix) = self.entries.iter().position(|e| e.os == old) else { return };
         let keep = self.visible.get(self.sel) == Some(&(ix as u32));
         let e = &mut self.entries[ix];
