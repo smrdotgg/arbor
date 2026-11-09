@@ -68,18 +68,26 @@ else
 		# line of text (UTF-8, no control characters), as Arbor's Restore requires: a line
 		# break in it would add lines of its own to mimeapps.list.
 		LC_ALL=C awk -F '\t' -v mime="$mime_key" '
-			function not_text(h,   d, i, b, need) {
-				d = "0123456789abcdef"; h = tolower(h); need = 0; c1 = 0
+			# Well-formed UTF-8 as Unicode defines it: no overlong forms (C0, C1, E0 80-9F,
+			# F0 80-8F), no surrogates (ED A0-BF), nothing past U+10FFFF (F4 90-BF, F5-FF), and
+			# no C1 controls (C2 80-9F). lo and hi bound the next continuation byte.
+			function not_text(h,   d, i, b, need, lo, hi) {
+				d = "0123456789abcdef"; h = tolower(h); need = 0
 				for (i = 1; i < length(h); i += 2) {
 					b = (index(d, substr(h, i, 1)) - 1) * 16 + index(d, substr(h, i + 1, 1)) - 1
-					if (need > 0) { if (b < 128 || b >= 192 || (c1 && b < 160)) return 1; need--; c1 = 0; continue }
+					if (need > 0) { if (b < lo || b > hi) return 1; need--; lo = 128; hi = 191; continue }
 					if (b < 32 || b == 127) return 1
 					if (b < 128) continue
-					c1 = (b == 194)
+					lo = 128; hi = 191
 					if (b >= 194 && b < 224) need = 1
 					else if (b >= 224 && b < 240) need = 2
 					else if (b >= 240 && b < 245) need = 3
 					else return 1
+					if (b == 194) lo = 160
+					else if (b == 224) lo = 160
+					else if (b == 237) hi = 159
+					else if (b == 240) lo = 144
+					else if (b == 244) hi = 143
 				}
 				return need > 0
 			}

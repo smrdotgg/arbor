@@ -234,6 +234,74 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|c| format!("{c:02x}")).collect()
 }
 
+/// The review's case: the script's UTF-8 check took overlong encodings (`E0 80 80`),
+/// surrogates (`ED A0 80`) and code points past U+10FFFF (`F4 BF BF BF`), wrote them into
+/// mimeapps.list and deleted the backup, where Arbor's Restore refuses them. Each edge of each
+/// lead byte's range, against Arbor's own reader.
+#[test]
+fn the_scripts_utf8_check_agrees_with_arbor_at_every_edge() {
+    let root = tmp("utf8-edges");
+    let pkg = root.join("pkg");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/linux/uninstall.sh"), pkg.join("uninstall.sh")).unwrap();
+    let (mime_key, svc_key) = ("mimeapps.list inode/directory", "dbus-1/services/org.freedesktop.FileManager1.service");
+    let cases: &[&[u8]] = &[
+        // Overlong.
+        b"\xc0\x80",
+        b"\xc1\xbf",
+        b"\xe0\x80\x80",
+        b"\xe0\x9f\xbf",
+        b"\xf0\x80\x80\x80",
+        b"\xf0\x8f\xbf\xbf",
+        // Surrogates.
+        b"\xed\xa0\x80",
+        b"\xed\xbf\xbf",
+        // Past U+10FFFF.
+        b"\xf4\x90\x80\x80",
+        b"\xf4\xbf\xbf\xbf",
+        b"\xf5\x80\x80\x80",
+        b"\xff",
+        // C1 controls.
+        b"\xc2\x80",
+        b"\xc2\x9f",
+        // Cut short, or a stray continuation.
+        b"\xe4\xb8",
+        b"\xf0\x9f\x98",
+        b"\x80",
+        b"\xc3\xa9\xa9",
+        // Valid: each range's edges.
+        b"\xc2\xa0",
+        b"\xdf\xbf",
+        b"\xe0\xa0\x80",
+        b"\xec\xbf\xbf",
+        b"\xed\x80\x80",
+        b"\xed\x9f\xbf",
+        b"\xee\x80\x80",
+        b"\xef\xbf\xbf",
+        b"\xf0\x90\x80\x80",
+        b"\xf3\xbf\xbf\xbf",
+        b"\xf4\x80\x80\x80",
+        b"\xf4\x8f\xbf\xbf",
+    ];
+    for seq in cases {
+        let home = root.join("home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let (_, _, backup) = made_default(&home);
+        let mime = [&b"x"[..], seq, b".desktop"].concat();
+        let mut b = Backup::default();
+        b.put(mime_key, Some(&mime));
+        b.put(svc_key, None);
+        b.write(&backup).unwrap();
+        let text = std::fs::read_to_string(&backup).unwrap();
+        let arbor = Backup::decode_for_tests(&text).is_ok_and(|b| crate::handler::linux::saved_default(&b, &backup).is_ok());
+        assert_eq!(arbor, std::str::from_utf8(seq).is_ok_and(|t| !t.chars().any(char::is_control)), "{seq:02x?}: Arbor's reader");
+        let (ok, out) = run(&pkg, "uninstall.sh", &home);
+        assert_eq!(ok, arbor, "{seq:02x?}: {out}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Any backup, valid or damaged in the ways a file can be (a value that isn't one line of
 /// text, a record cut short, a name twice, another app's activation file with any bytes in it,
 /// NULs too): `uninstall.sh` accepts exactly what Arbor's Restore accepts, and then puts back
