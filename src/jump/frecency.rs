@@ -195,19 +195,22 @@ impl Frecency {
     }
 
     /// [`from_log`](Self::from_log), reading a line at a time, so a log of any size is read
-    /// whole without holding it in memory.
+    /// whole without holding it in memory. A line longer than [`MAX_LINE`] can't be a record
+    /// (no path is that long), so it's skipped as it's read, never held.
     pub fn from_reader(mut r: impl std::io::BufRead) -> std::io::Result<(Frecency, usize)> {
         let mut f = Frecency::default();
         let (mut lines, mut buf) = (0, Vec::new());
         loop {
-            buf.clear();
-            if r.read_until(b'\n', &mut buf)? == 0 || buf.last() != Some(&b'\n') {
-                return Ok((f, lines));
-            }
-            lines += 1;
-            let Ok(line) = std::str::from_utf8(&buf) else { continue };
-            if let Some(e) = Event::parse(line.trim_end_matches(['\n', '\r'])) {
-                f.apply(&e);
+            match read_line(&mut r, &mut buf)? {
+                Line::End => return Ok((f, lines)),
+                Line::TooLong => lines += 1,
+                Line::Whole => {
+                    lines += 1;
+                    let Ok(line) = std::str::from_utf8(&buf) else { continue };
+                    if let Some(e) = Event::parse(line.trim_end_matches(['\n', '\r'])) {
+                        f.apply(&e);
+                    }
+                }
             }
         }
     }
@@ -341,6 +344,55 @@ pub(super) fn quality(words: &[Vec<char>], low: &[char], tail: usize, mut marks:
 pub(super) fn byte_ranges(s: &str, chars: &[(usize, usize)]) -> Vec<(usize, usize)> {
     let offs: Vec<usize> = s.char_indices().map(|(b, _)| b).chain([s.len()]).collect();
     chars.iter().filter(|(a, b)| a < b && *b < offs.len()).map(|&(a, b)| (offs[a], offs[b])).collect()
+}
+
+/// The longest line of `history.log` read as a record, with its line break: more than any path
+/// (Windows' 32,767 UTF-16 units are at most about 96 KB of UTF-8; Linux's `PATH_MAX` is 4 KB)
+/// plus its time and rank.
+pub const MAX_LINE: usize = 128 * 1024;
+
+/// What [`read_line`] found.
+#[derive(Debug, PartialEq)]
+pub(super) enum Line {
+    /// A whole line, its break included, in the buffer.
+    Whole,
+    /// A line over [`MAX_LINE`], read past and dropped; the buffer is empty.
+    TooLong,
+    /// The end: nothing more, or a last line without its break (cut short by a crash).
+    End,
+}
+
+/// Reads one line of `r` into `buf` (cleared first), holding at most [`MAX_LINE`] bytes of it.
+pub(super) fn read_line(r: &mut impl std::io::BufRead, buf: &mut Vec<u8>) -> std::io::Result<Line> {
+    buf.clear();
+    let mut over = false;
+    loop {
+        let avail = match r.fill_buf() {
+            Ok(a) => a,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if avail.is_empty() {
+            buf.clear();
+            return Ok(Line::End);
+        }
+        let (take, done) = match avail.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (avail.len(), false),
+        };
+        if !over && buf.len() + take > MAX_LINE {
+            over = true;
+            buf.clear();
+            buf.shrink_to(MAX_LINE);
+        }
+        if !over {
+            buf.extend_from_slice(&avail[..take]);
+        }
+        r.consume(take);
+        if done {
+            return Ok(if over { Line::TooLong } else { Line::Whole });
+        }
+    }
 }
 
 /// A row in the box. Its strings are its folder's own, shared.

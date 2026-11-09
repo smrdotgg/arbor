@@ -666,3 +666,39 @@ fn a_path_with_a_nul_is_never_written() {
     assert_eq!(Event::Visit { path: p("/a\0b"), at: 1, rank: 1.0 }.line(1), None);
     assert!(Event::Visit { path: p("/ab"), at: 1, rank: 1.0 }.line(1).is_some());
 }
+
+/// Found reading `from_reader`: a huge line (a damaged log, or something else's file) was held
+/// whole in memory however long it was. Now a line over `MAX_LINE` is read past, holding at
+/// most that much, and the lines after it still count.
+#[test]
+fn a_huge_line_is_skipped_without_holding_it() {
+    /// 64 MB of one line without a break, then a good line, handed out in 1 MB reads.
+    struct Endless(usize);
+    impl std::io::Read for Endless {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let n = out.len().min(self.0);
+            out[..n].fill(b'a');
+            self.0 -= n;
+            Ok(n)
+        }
+    }
+    let root = if cfg!(windows) { "C:\\" } else { "/" };
+    let tail = format!("\n5\t1\t{root}after\n");
+    let r = std::io::BufReader::with_capacity(1 << 20, std::io::Read::chain(Endless(64 << 20), std::io::Cursor::new(tail.into_bytes())));
+    let (f, lines) = crate::prop::within(Duration::from_secs(10), "a 64 MB line", move || Frecency::from_reader(r).unwrap());
+    assert_eq!(lines, 2);
+    assert_eq!(f.dirs.iter().map(|d| d.path.to_path_buf()).collect::<Vec<_>>(), [PathBuf::from(format!("{root}after"))]);
+    // The buffer never grows past the limit (plus one read).
+    let mut r = std::io::BufReader::with_capacity(1 << 16, std::io::Read::chain(Endless(4 * MAX_LINE), "\nx\n".as_bytes()));
+    let mut buf = Vec::new();
+    assert_eq!(read_line(&mut r, &mut buf).unwrap(), Line::TooLong);
+    assert!(buf.capacity() <= MAX_LINE + (1 << 16), "{}", buf.capacity());
+    assert_eq!(read_line(&mut r, &mut buf).unwrap(), Line::Whole);
+    assert_eq!(buf, b"x\n");
+    assert_eq!(read_line(&mut r, &mut buf).unwrap(), Line::End);
+    // A line of exactly the limit is still read.
+    let line = format!("1\t1\t{root}{}\n", "b".repeat(MAX_LINE - 5 - root.len()));
+    assert_eq!(line.len(), MAX_LINE);
+    let (f, _) = Frecency::from_log(&line);
+    assert_eq!(f.len(), 1);
+}
