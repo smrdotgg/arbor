@@ -99,7 +99,9 @@ pub fn candidates(dir: &std::path::Path, prefix: &str, hidden: bool, sensitive: 
     let hidden = hidden || prefix.starts_with('.');
     let mut out: Vec<(String, bool)> = Vec::new();
     for de in rd.flatten() {
-        let name = de.file_name().to_string_lossy().into_owned();
+        // A name that isn't UTF-8 can't be typed: shown with U+FFFD in the field, Enter would
+        // go to a path where nothing is (or another item).
+        let Ok(name) = de.file_name().into_string() else { continue };
         if !starts_with(&name, prefix, sensitive) {
             continue;
         }
@@ -370,6 +372,18 @@ mod tests {
         settle_all(&mut s);
         assert_eq!(s.cur().cwd, d.join("sub"));
         assert_eq!(crate::app::typed_targets(" /a b "), [std::path::PathBuf::from("/a b "), std::path::PathBuf::from("/a b")]);
+    }
+
+    /// Found by reading `candidates`: a name that isn't UTF-8 was offered with U+FFFD in it, so
+    /// taking it went to a path where nothing is. It's left out now (it can't be typed).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_that_isnt_utf8_isnt_offered() {
+        use std::os::unix::ffi::OsStringExt;
+        let d = tmp("not-utf8");
+        std::fs::write(d.join(std::ffi::OsString::from_vec(b"caf\xe9".to_vec())), "x").unwrap();
+        std::fs::write(d.join("cafe"), "x").unwrap();
+        assert_eq!(candidates(&d, "caf", false, true, '/'), ["cafe"]);
     }
 
     #[test]
