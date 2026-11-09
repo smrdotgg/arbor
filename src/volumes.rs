@@ -360,6 +360,9 @@ pub fn says_busy(text: &str) -> bool {
     t.contains("busy") || t.contains("in use") || t.contains("dissented")
 }
 
+/// What Eject says while a file operation runs (before the volume's name).
+pub const EJECT_BUSY: &str = "Wait for the file operation to finish (or cancel it with Esc), then eject";
+
 /// Ejects `v`, if it's still the volume that was picked ([`Volume::id`], checked right before
 /// acting). Blocks until the OS answers: call on a worker.
 pub fn eject(v: &Volume) -> Result<(), EjectError> {
@@ -672,15 +675,17 @@ impl State {
     }
 
     /// Ejects `vol` (as the list had it when it was picked) on a worker, which checks it's
-    /// still that volume first. Refused while a file operation reads or writes there. A pane
-    /// showing it goes home first, and searches that could walk into it stop.
+    /// still that volume first. Refused while any file operation runs: which disks an
+    /// operation reaches (through a link, a folder holding the volume, an undo's steps) can't
+    /// be told cheaply and surely from its paths. A pane showing it goes home first, and
+    /// searches that could walk into it stop.
     pub fn eject(&mut self, vol: Volume) {
         if self.ejecting.is_some() {
             self.note = Some("Already ejecting a volume".into());
             return;
         }
-        if self.job.as_ref().is_some_and(|j| j.touches(&vol.path)) {
-            self.note = Some(format!("A file operation is using “{}”: let it finish or cancel it (Esc), then eject", vol.name));
+        if self.job.is_some() {
+            self.note = Some(format!("{EJECT_BUSY} “{}”", vol.name));
             return;
         }
         for p in &mut self.panes {
@@ -821,17 +826,42 @@ systemd-1 /mnt/auto autofs rw 0 0
         assert_eq!(s.note.as_deref(), Some(format!("“{}” changed since; refresh and try again", vols[0].name).as_str()));
     }
 
-    /// A file operation reading from (or writing to) the volume holds Eject off.
+    /// Any file operation holds Eject off: one on the volume by its own path, and (the review's
+    /// cases, which the old path check let through) one reaching it through a link, or copying
+    /// a folder that holds it.
     #[test]
-    fn eject_waits_for_a_file_operation_on_the_volume() {
+    fn eject_waits_for_any_file_operation() {
         let (mut s, vols) = eject_state("busy", &["USB"]);
         std::fs::write(vols[0].path.join("f"), "x").unwrap();
         let elsewhere = std::env::temp_dir().join(format!("arbor-eject-busy-dest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&elsewhere);
         std::fs::create_dir_all(&elsewhere).unwrap();
-        s.job = Some(crate::ops::start(crate::ops::Op::Copy { sources: vec![vols[0].path.join("f")], dest: elsewhere }, None, None));
-        s.eject(vols[0].clone());
-        assert!(s.ejecting.is_none(), "not started");
-        assert!(s.note.as_deref().is_some_and(|n| n.starts_with("A file operation is using")), "{:?}", s.note);
+        let alias = elsewhere.join("alias");
+        let linked = {
+            #[cfg(unix)]
+            let r = std::os::unix::fs::symlink(&vols[0].path, &alias);
+            #[cfg(windows)]
+            let r = std::os::windows::fs::symlink_dir(&vols[0].path, &alias);
+            r.is_ok()
+        };
+        let holder = vols[0].path.parent().unwrap().to_path_buf();
+        let mut sources = vec![vec![vols[0].path.join("f")], vec![holder]];
+        if linked {
+            sources.push(vec![alias.join("f")]);
+        }
+        for src in sources {
+            let dest = elsewhere.join("out");
+            s.job = Some(crate::ops::start(crate::ops::Op::Copy { sources: src.clone(), dest }, None, None));
+            s.eject(vols[0].clone());
+            assert!(s.ejecting.is_none(), "{src:?}: not started");
+            assert!(s.note.as_deref().is_some_and(|n| n.starts_with(EJECT_BUSY)), "{src:?}: {:?}", s.note);
+            assert!(s.unavailable(crate::commands::Cmd::Eject).is_some(), "{src:?}: and dimmed");
+            while s.job.as_ref().is_some_and(|j| j.take().is_none()) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            s.job = None;
+        }
+        let _ = std::fs::remove_dir_all(&elsewhere);
     }
 
     /// udisks unmounts but can't power the drive off: said as such, not "Ejected".

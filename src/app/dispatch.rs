@@ -208,6 +208,7 @@ impl State {
             OpenWith => when(!f.targets().iter().any(|e| !e.is_dir), "Select a file first"),
             SidebarRemove => when(self.favorite_here().is_none(), "This folder isn't in the sidebar"),
             Eject => when(self.ejecting.is_some(), "Already ejecting a volume")
+                .or(when(busy, "Wait for the file operation to finish, then eject"))
                 .or(when(self.volume_here().is_none(), "This folder isn't on a volume that can be ejected")),
             // Always available.
             NewFolder => when(searching, "Leave the search (Esc) to make a folder here"),

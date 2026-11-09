@@ -94,19 +94,6 @@ impl Op {
     }
 
     /// The folders it changes: where items go and where they come from.
-    /// Every path it reads or writes.
-    fn paths(&self) -> Vec<PathBuf> {
-        match self {
-            Op::Copy { sources, dest } | Op::Move { sources, dest } => sources.iter().chain([dest]).cloned().collect(),
-            Op::Trash { sources } | Op::PutBack { items: sources } => sources.clone(),
-            Op::EmptyTrash { items } => items.iter().flatten().map(|i| i.path.clone()).collect(),
-            Op::Delete { items } => items.iter().map(|d| d.path.clone()).collect(),
-            Op::Rename { items } => items.iter().flat_map(|r| [r.from.clone(), r.to.clone()]).collect(),
-            Op::Checked { op, .. } => op.paths(),
-            Op::Undo(u) => u.steps.iter().flat_map(|s| [Some(&s.at), s.back.as_ref()]).flatten().cloned().collect(),
-        }
-    }
-
     fn folders(&self) -> Vec<PathBuf> {
         let parents = |ps: &[PathBuf]| ps.iter().filter_map(|p| p.parent().map(Path::to_path_buf)).collect::<Vec<_>>();
         let mut v = match self {
@@ -297,16 +284,9 @@ pub struct Running {
     pub cancellable: bool,
     pub progress: Arc<Progress>,
     done: Arc<Mutex<Option<Outcome>>>,
-    /// Every path the operation reads or writes (sources, destination, undo's steps).
-    paths: Vec<PathBuf>,
 }
 
 impl Running {
-    /// Whether it reads or writes anything at or under `root`.
-    pub fn touches(&self, root: &Path) -> bool {
-        self.paths.iter().any(|p| p.starts_with(root))
-    }
-
     pub fn take(&self) -> Option<Outcome> {
         self.done.lock().ok()?.take()
     }
@@ -336,7 +316,6 @@ pub fn start(op: Op, dest_id: Option<noclobber::FileId>, waker: Option<rune::Wak
     let progress = Arc::new(Progress::default());
     let done = Arc::new(Mutex::new(None));
     let verb = op.verb();
-    let paths = op.paths();
     let cancellable = op.cancellable();
     let (p, d) = (progress.clone(), done.clone());
     // Headless runs (scripts, snapshots) run on a virtual clock far faster than real time, so
@@ -344,7 +323,7 @@ pub fn start(op: Op, dest_id: Option<noclobber::FileId>, waker: Option<rune::Wak
     if rune::tooling::headless_run().is_some() {
         let outcome = Worker::new(&p, None, TRASH).run_into(op, dest_id);
         *done.lock().expect("fresh mutex") = Some(outcome);
-        return Running { verb, cancellable, progress, done, paths };
+        return Running { verb, cancellable, progress, done };
     }
     std::thread::spawn(move || {
         let outcome = Worker::new(&p, waker.as_ref(), TRASH).run_into(op, dest_id);
@@ -355,7 +334,7 @@ pub fn start(op: Op, dest_id: Option<noclobber::FileId>, waker: Option<rune::Wak
             wake();
         }
     });
-    Running { verb, cancellable, progress, done, paths }
+    Running { verb, cancellable, progress, done }
 }
 
 /// Renames `from` to `to` in place (the inline rename), never over another item. A case-only

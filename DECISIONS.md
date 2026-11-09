@@ -149,6 +149,13 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-09 · Eject waits for any running file operation** (review of milestone 13). The
+  old check compared paths, so an operation reaching the volume through a link, or copying a
+  folder that holds it, was missed. Telling it surely would mean resolving every source,
+  destination and undo step to its device when the operation is planned (on the window's
+  thread, or another worker round trip); one operation runs at a time and most are short, so
+  Eject now says "Wait for the file operation to finish (or cancel it with Esc), then eject" and
+  is dimmed meanwhile. Undo: `State::eject` in `src/volumes.rs`.
 - **2026-11-09 · Review of milestone 12, fixed** (all ten findings; each with a test that
   fails on the old code, except Windows-only paths, which CI compiles but can't exercise).
   Calls made: (1) **Eject identity** is the device number plus the mount source (Linux: the

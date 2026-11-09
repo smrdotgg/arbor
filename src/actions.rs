@@ -545,7 +545,7 @@ impl State {
                 item(PlaceAct::Down, "Move Down", i + 1 < n),
             ]);
         } else {
-            let eject = self.volumes.get(i - n).is_some_and(|v| v.eject) && self.ejecting.is_none();
+            let eject = self.volumes.get(i - n).is_some_and(|v| v.eject) && self.ejecting.is_none() && self.job.is_none();
             let listed = self.place_at(i).is_some_and(|(_, p)| self.places.iter().any(|(_, q)| *q == p));
             v.extend([item(PlaceAct::Eject, "Eject", eject), item(PlaceAct::AddToSidebar, "Add to Favorites", !listed)]);
         }
