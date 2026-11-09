@@ -142,7 +142,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -l dist
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Arbor ${GITHUB_REF_NAME#v}" --generate-notes
+          # A tag with a suffix (v0.1.0-alpha.1) is published as a pre-release.
+          pre=(); [[ "$GITHUB_REF_NAME" == *-* ]] && pre=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Arbor ${GITHUB_REF_NAME#v}" --generate-notes "${pre[@]}"
 
       # Numbers for the owner's decision on full Windows thumbnail generation, which can't be
       # cancelled (src/thumb.rs, UNCANCELLABLE_WINDOWS_THUMBNAILS): how long the shell takes for
