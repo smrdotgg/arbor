@@ -461,42 +461,58 @@ impl<'a> Worker<'a> {
                 self.p.items_done.fetch_add(1, Relaxed);
                 continue;
             }
-            let mut removed = 0;
             let mounts = self.mounts().clone();
-            let w = &mut *self;
-            let mut go = |at: &Path| {
-                w.cancel_hook(at);
-                w.tick(0);
-                !w.cancelled()
-            };
-            match crate::delete::remove_tree(&d.path, &mounts, &mut go, &mut removed) {
-                Ok(()) => out.removed.push(d.path.clone()),
-                Err(crate::delete::Halt::Cancelled) => {
-                    if removed > 0 {
-                        out.partly = Some(d.path.clone());
-                    }
-                }
-                Err(halt) => {
-                    let Some((at, why)) = halt.why() else { continue };
-                    let shown = d.path.parent().and_then(|p| at.strip_prefix(p).ok()).unwrap_or(at).display().to_string();
-                    let first = if matches!(halt, crate::delete::Halt::Failed { .. }) { "Couldn't delete" } else { "Skipped" };
-                    if removed == 0 {
-                        out.errors.push(format!("{first} “{shown}”: {why}"));
-                    } else {
-                        // Truthful counts: what went, and what's still there (counted on this
-                        // worker, not entering mounts; left out if a cancel stops the count, and
-                        // never a guess when part of it can't be read).
-                        let left = left_note(crate::delete::count_left(&d.path, &mounts, &mut || !self.cancelled()), &d.path);
-                        out.errors.push(format!(
-                            "Partly deleted “{}”: stopped at “{shown}” ({why}); {removed} item{} deleted{left}",
-                            name_of(&d.path),
-                            if removed == 1 { "" } else { "s" }
-                        ));
-                    }
-                }
-            }
+            self.remove_with(&d.path, &mounts, out, |path, mounts, go, removed| crate::delete::remove_tree(path, mounts, go, removed));
             self.p.items_done.fetch_add(1, Relaxed);
         }
+    }
+
+    /// Removes `path` whole with `remove` (given the mount table, the per-item callback that
+    /// ticks and cancels, and the count), and says how it went in `out`.
+    pub(super) fn remove_with(
+        &mut self,
+        path: &Path,
+        mounts: &crate::mounts::Mounts,
+        out: &mut Outcome,
+        remove: impl FnOnce(&Path, &crate::mounts::Mounts, &mut dyn FnMut(&Path) -> bool, &mut u64) -> Result<(), crate::delete::Halt>,
+    ) -> bool {
+        let mut removed = 0;
+        let w = &mut *self;
+        let mut go = |at: &Path| {
+            w.cancel_hook(at);
+            w.tick(0);
+            !w.cancelled()
+        };
+        match remove(path, mounts, &mut go, &mut removed) {
+            Ok(()) => {
+                out.removed.push(path.to_path_buf());
+                return true;
+            }
+            Err(crate::delete::Halt::Cancelled) => {
+                if removed > 0 {
+                    out.partly = Some(path.to_path_buf());
+                }
+            }
+            Err(halt) => {
+                let Some((at, why)) = halt.why() else { return false };
+                let shown = path.parent().and_then(|p| at.strip_prefix(p).ok()).unwrap_or(at).display().to_string();
+                let first = if matches!(halt, crate::delete::Halt::Failed { .. }) { "Couldn't delete" } else { "Skipped" };
+                if removed == 0 {
+                    out.errors.push(format!("{first} “{shown}”: {why}"));
+                } else {
+                    // Truthful counts: what went, and what's still there (counted on this
+                    // worker, not entering mounts; left out if a cancel stops the count, and
+                    // never a guess when part of it can't be read).
+                    let left = left_note(crate::delete::count_left(path, mounts, &mut || !self.cancelled()), path);
+                    out.errors.push(format!(
+                        "Partly deleted “{}”: stopped at “{shown}” ({why}); {removed} item{} deleted{left}",
+                        name_of(path),
+                        if removed == 1 { "" } else { "s" }
+                    ));
+                }
+            }
+        }
+        false
     }
 
     /// Copies `src` into `dest_dir` under a free name; returns where it went and its fingerprint.

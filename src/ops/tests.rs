@@ -1568,7 +1568,7 @@ fn an_item_that_cant_be_recorded_for_undo_is_said() {
 /// name whose record says it came from `from` (relative to `top`, or absolute).
 /// The trash folder at `root` (a fixture's), as Empty Trash lists it.
 fn trash_bin(root: &Path) -> crate::trash::contents::Bin {
-    crate::trash::contents::Bin { items: root.join("files"), info: Some(root.join("info")) }
+    crate::trash::contents::Bin::freedesktop(root, crate::trash::contents::me())
 }
 
 fn fixture_trash(top: &Path, items: &[(&str, &str)]) -> PathBuf {
@@ -1598,7 +1598,7 @@ fn fixture_trash(top: &Path, items: &[(&str, &str)]) -> PathBuf {
 /// in the Trash after the count stays; a record with no item of its own stays.
 #[test]
 fn empty_trash_deletes_what_was_counted_and_their_records() {
-    use crate::trash::contents::{self, Bin};
+    use crate::trash::contents;
     let d = tmp("empty");
     let root = fixture_trash(&d, &[("a.txt", "a.txt"), ("dir/", "dir"), ("swapped", "swapped")]);
     fs::create_dir_all(d.join("keep")).unwrap();
@@ -1606,7 +1606,7 @@ fn empty_trash_deletes_what_was_counted_and_their_records() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(d.join("keep"), root.join("files/dir/to-keep")).unwrap();
     fs::write(root.join("info/orphan.trashinfo"), "[Trash Info]\nPath=orphan\n").unwrap();
-    let bins = [Bin { items: root.join("files"), info: Some(root.join("info")) }];
+    let bins = [trash_bin(&root)];
     let (items, problem) = contents::list(&bins, &|| false).unwrap();
     assert_eq!((items.len(), problem), (3, None));
     // After the count: one replaced (by a folder, which no platform can take for the file:
@@ -1710,13 +1710,82 @@ fn an_item_with_a_reused_inode_is_never_acted_on() {
     let _ = fs::remove_dir_all(&d);
 }
 
+/// The review's blocker: Empty Trash reached its folders by path, so a trash whose `files/` or
+/// `info/` was a link, or a counted `files/` moved away and a link put in its place, had it
+/// delete things outside the Trash. Now each folder is opened without following a link and
+/// checked against the one counted, and items and records are removed relative to them.
+#[cfg(unix)]
+#[test]
+fn empty_trash_never_deletes_outside_the_trash() {
+    use crate::trash::contents;
+    use std::os::unix::fs::symlink;
+    let d = tmp("empty-outside");
+    let outside = d.join("outside");
+    let precious = |what: &str| {
+        for f in ["a", "a.trashinfo", "precious"] {
+            assert!(outside.join(f).exists(), "{what}: outside/{f} was deleted");
+        }
+    };
+    let reset = || {
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&outside).unwrap();
+        for f in ["a", "a.trashinfo", "precious"] {
+            fs::write(outside.join(f), "not trash").unwrap();
+        }
+    };
+    // The home trash's files/ is a link: it isn't read, and nothing is deleted.
+    reset();
+    let home = d.join("home/Trash");
+    fs::create_dir_all(&home).unwrap();
+    symlink(&outside, home.join("files")).unwrap();
+    let (items, problem) = contents::list(&[trash_bin(&home)], &|| false).unwrap();
+    assert!(items.is_empty() && problem.is_some_and(|p| p.say().contains("isn't a folder of yours")), "{items:?}");
+    // A disk's trash whose info/ is a link: its records aren't touched.
+    reset();
+    let root = d.join("disk/.Trash-x");
+    fs::create_dir_all(root.join("files")).unwrap();
+    fs::write(root.join("files/a"), "trashed").unwrap();
+    symlink(&outside, root.join("info")).unwrap();
+    let (items, problem) = contents::list(&[trash_bin(&root)], &|| false).unwrap();
+    assert!(items.is_empty() && problem.is_some(), "a trash with a linked info/ isn't emptied: {items:?}");
+    precious("info link");
+    // Counted, then files/ moved away and a link to it put in its place.
+    reset();
+    fs::remove_file(root.join("info")).unwrap();
+    fs::create_dir(root.join("info")).unwrap();
+    fs::write(root.join("info/a.trashinfo"), "[Trash Info]\nPath=a\n").unwrap();
+    let (items, _) = contents::list(&[trash_bin(&root)], &|| false).unwrap();
+    assert_eq!(items.len(), 1);
+    fs::rename(root.join("files"), d.join("moved")).unwrap();
+    fs::remove_file(outside.join("a")).unwrap();
+    fs::rename(d.join("moved/a"), outside.join("a")).unwrap();
+    symlink(&outside, root.join("files")).unwrap();
+    let o = run_now(Op::EmptyTrash { items: Some(items) });
+    assert!(o.removed.is_empty(), "{:?}", o.removed);
+    assert!(o.errors[0].starts_with("Nothing in “") && o.errors[0].contains("isn't a folder of yours"), "{:?}", o.errors);
+    precious("files moved and linked");
+    assert!(root.join("info/a.trashinfo").exists());
+    // And a real folder put in its place (no link) is refused the same way.
+    fs::remove_file(root.join("files")).unwrap();
+    fs::create_dir(root.join("files")).unwrap();
+    fs::write(root.join("files/a"), "trashed").unwrap();
+    let (items, _) = contents::list(&[trash_bin(&root)], &|| false).unwrap();
+    fs::rename(root.join("files"), d.join("moved2")).unwrap();
+    fs::create_dir(root.join("files")).unwrap();
+    fs::write(root.join("files/a"), "trashed").unwrap();
+    let o = run_now(Op::EmptyTrash { items: Some(items) });
+    assert!(o.removed.is_empty() && root.join("files/a").exists(), "{:?}", o.errors);
+    assert!(o.errors[0].contains("was moved or replaced since it was counted"), "{:?}", o.errors);
+    let _ = fs::remove_dir_all(&d);
+}
+
 /// Esc stops it between entries: what's gone stays gone, the rest stays in the Trash.
 #[test]
 fn empty_trash_stops_when_cancelled() {
-    use crate::trash::contents::{self, Bin};
+    use crate::trash::contents;
     let d = tmp("empty-cancel");
     let root = fixture_trash(&d, &[("a", "a"), ("b", "b"), ("c", "c")]);
-    let (mut items, _) = contents::list(&[Bin { items: root.join("files"), info: Some(root.join("info")) }], &|| false).unwrap();
+    let (mut items, _) = contents::list(&[trash_bin(&root)], &|| false).unwrap();
     items.sort_by(|a, b| a.path.cmp(&b.path));
     let stop = root.join("files/b");
     let o = run_hooked(

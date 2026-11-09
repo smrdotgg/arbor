@@ -11,10 +11,16 @@
 //! - **Counting** ([`Counting`]): when the dialog opens, a thread of its own lists the items
 //!   (each with its identity), then adds up their sizes; the dialog shows at once and says the
 //!   count when it lands. Closing the dialog stops it. Nothing is kept.
-//! - **Emptying** runs on the operation worker (`Op::EmptyTrash`): each item counted is
-//!   deleted only while it's still the item that was counted, with the same no-follow,
-//!   never-cross-a-mount delete as Delete Permanently (`delete.rs`), then its `.trashinfo`.
-//!   An item put in the Trash after the count stays there. Esc stops it between entries.
+//! - **Safe folders** ([`open`], Unix): each trash folder is opened from the one above it
+//!   without following a link, and must be this user's (a disk's shared `.Trash` must be
+//!   sticky); so must its `files/` and `info/`. A trash that isn't is never read or emptied.
+//!   The count pins each folder's identity ([`Pin`]).
+//! - **Emptying** runs on the operation worker (`Op::EmptyTrash`): each trash's folders are
+//!   opened again and must be the ones counted; then each item is deleted only while it's
+//!   still the item that was counted (its [`Ident`], and on Linux its file handle), relative to
+//!   the open `files/` with the same no-follow, never-cross-a-mount delete as Delete
+//!   Permanently (`delete.rs`), then its `.trashinfo` relative to the open `info/`. An item
+//!   with no identity, or put in the Trash after the count, stays. Esc stops it between entries.
 //! - **macOS privacy.** `~/.Trash` can't be read without Full Disk Access on recent macOS
 //!   (`EPERM`); the dialog and the result say how to grant it ([`NEEDS_ACCESS`]).
 //! - **Put Back** (Linux): an item's `.trashinfo` says where it came from ([`parse_info`]); it
@@ -32,20 +38,100 @@ use super::BIN;
 use crate::fs::Ident;
 
 /// One trash folder: `items` holds what's in it (freedesktop's `files/`, macOS's `.Trash`), and
-/// `info` the freedesktop.org `.trashinfo` records (none on macOS).
+/// `info` the freedesktop.org `.trashinfo` records (none on macOS). Both paths are for showing
+/// and for the mount table: on Unix nothing is ever reached through them. Each folder is opened
+/// as [`Reach`] says, never following a link, and checked ([`open`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bin {
     pub items: PathBuf,
     pub info: Option<PathBuf>,
+    pub reach: Reach,
+}
+
+/// How a trash's folders are reached: `anchor` as the user reaches it (links followed: the
+/// home folder, a disk's top folder), then each of `steps` opened relative to the one before
+/// without following a link, and checked; the last is the trash itself. A freedesktop.org
+/// trash (`split`) keeps its items in `files/` and their records in `info/` inside it, each
+/// opened the same way and this user's; a macOS one keeps its items in itself.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub struct Reach {
+    pub anchor: PathBuf,
+    pub steps: Vec<(std::ffi::OsString, Need)>,
+    pub split: bool,
+    pub uid: u32,
+}
+
+/// What a step of a trash's path must be (besides a real folder, not a link to one).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub enum Need {
+    /// Any folder (macOS's `.Trashes`, which root owns).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Folder,
+    /// This user's.
+    Owned,
+    /// Sticky (a disk's shared `.Trash`, as the freedesktop.org spec requires).
+    Sticky,
+}
+
+impl Bin {
+    /// A freedesktop.org trash folder `root` of `uid`'s, with `files/` and `info/` inside: the
+    /// home trash, or a disk's `.Trash-$uid` (`root`'s folder reached as the user reaches it).
+    pub fn freedesktop(root: &Path, uid: u32) -> Bin {
+        let anchor = root.parent().map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
+        let name = root.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        Bin {
+            items: root.join("files"),
+            info: Some(root.join("info")),
+            reach: Reach { anchor, steps: vec![(name, Need::Owned)], split: true, uid },
+        }
+    }
+
+    /// A disk's `$top/.Trash/$uid`, under a sticky shared `.Trash`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub fn shared(top: &Path, uid: u32) -> Bin {
+        let root = top.join(".Trash").join(uid.to_string());
+        Bin {
+            items: root.join("files"),
+            info: Some(root.join("info")),
+            reach: Reach {
+                anchor: top.to_path_buf(),
+                steps: vec![(".Trash".into(), Need::Sticky), (uid.to_string().into(), Need::Owned)],
+                split: true,
+                uid,
+            },
+        }
+    }
+
+    /// A macOS trash: `anchor` then `steps`, its items in the last one itself.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn mac(anchor: &Path, steps: Vec<(std::ffi::OsString, Need)>, uid: u32) -> Bin {
+        let items = steps.iter().fold(anchor.to_path_buf(), |p, (n, _)| p.join(n));
+        Bin { items, info: None, reach: Reach { anchor: anchor.to_path_buf(), steps, split: false, uid } }
+    }
+}
+
+/// A trash as it was counted: the identities (device and inode) of each folder on its way, its
+/// `files` and its `info`, which must be the same when it's emptied.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pin {
+    pub bin: Bin,
+    folders: Vec<(u64, u64)>,
+    info: Option<(u64, u64)>,
 }
 
 /// One thing in a Trash, as it was counted: its path, its identity (an item replaced since is
-/// never deleted for it), and its record when there is one.
+/// never deleted for it), its record when there is one, and its trash.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     pub path: PathBuf,
     pub id: Option<Ident>,
     pub info: Option<PathBuf>,
+    /// Linux: the file system's handle for it (inode and generation), when it gives one: a new
+    /// item that got its inode back has another.
+    pub handle: Option<Vec<u8>>,
+    pub pin: Arc<Pin>,
 }
 
 /// Why the Trash couldn't all be read.
@@ -92,6 +178,16 @@ pub fn bins() -> Vec<Bin> {
     platform_bins()
 }
 
+/// This user's id (tests: the owner trash folders must have).
+#[cfg(test)]
+pub fn me() -> u32 {
+    #[cfg(unix)]
+    // SAFETY: getuid can't fail.
+    return unsafe { libc::getuid() };
+    #[cfg(not(unix))]
+    0
+}
+
 /// Tests' trash folders (empty unless a test sets them).
 #[cfg(test)]
 pub static FIXTURE: std::sync::Mutex<Vec<Bin>> = std::sync::Mutex::new(Vec::new());
@@ -104,13 +200,13 @@ fn platform_bins() -> Vec<Bin> {
 
 #[cfg(all(target_os = "macos", not(test)))]
 fn platform_bins() -> Vec<Bin> {
-    let mut v = vec![Bin { items: crate::fs::home().join(".Trash"), info: None }];
     // SAFETY: getuid can't fail.
-    let uid = unsafe { libc::getuid() }.to_string();
+    let uid = unsafe { libc::getuid() };
+    let mut v = vec![Bin::mac(&crate::fs::home(), vec![(".Trash".into(), Need::Owned)], uid)];
     for top in crate::mounts::local_points().into_iter().filter(|t| t.starts_with("/Volumes")) {
-        let t = top.join(".Trashes").join(&uid);
-        if real_dir(&t, None) {
-            v.push(Bin { items: t, info: None });
+        let b = Bin::mac(&top, vec![(".Trashes".into(), Need::Folder), (uid.to_string().into(), Need::Owned)], uid);
+        if real_dir(&b.items, Some(uid)) {
+            v.push(b);
         }
     }
     v
@@ -131,33 +227,117 @@ fn real_dir(p: &Path, uid: Option<u32>) -> bool {
 /// The freedesktop.org trashes: `home` (the home trash) and, on each disk mounted at one of
 /// `tops`, `$top/.Trash/$uid` (only under a sticky `.Trash` that isn't a link) and
 /// `$top/.Trash-$uid`, each a real folder owned by `uid` with a real `files` folder. A trash
-/// reached twice (a bind mount) is listed once.
+/// reached twice (a bind mount) is listed once. (Each is checked again, without following
+/// links, whenever it's read or emptied: [`open`].)
 #[cfg(unix)]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn bins_in(home: &Path, tops: &[PathBuf], uid: u32) -> Vec<Bin> {
     use std::os::unix::fs::PermissionsExt;
-    let mut out = vec![Bin { items: home.join("files"), info: Some(home.join("info")) }];
-    let mut seen: Vec<Ident> = crate::fs::ident_at(&home.join("files")).into_iter().collect();
+    let mut out = vec![Bin::freedesktop(home, uid)];
+    let mut seen: Vec<(u64, u64)> = crate::fs::ident_at(&home.join("files")).map(|i| i.node()).into_iter().collect();
     for top in tops {
         let shared = top.join(".Trash");
         let admin = shared
             .symlink_metadata()
             .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink() && m.permissions().mode() & 0o1000 != 0)
-            .then(|| shared.join(uid.to_string()));
-        for root in admin.into_iter().chain([top.join(format!(".Trash-{uid}"))]) {
-            let files = root.join("files");
-            if !real_dir(&root, Some(uid)) || !real_dir(&files, None) {
+            .then(|| Bin::shared(top, uid));
+        for bin in admin.into_iter().chain([Bin::freedesktop(&top.join(format!(".Trash-{uid}")), uid)]) {
+            let root = bin.items.parent().unwrap_or(&bin.items).to_path_buf();
+            if !real_dir(&root, Some(uid)) || !real_dir(&bin.items, None) {
                 continue;
             }
-            let Some(id) = crate::fs::ident_at(&files) else { continue };
+            let Some(id) = crate::fs::ident_at(&bin.items).map(|i| i.node()) else { continue };
             if seen.contains(&id) {
                 continue;
             }
             seen.push(id);
-            out.push(Bin { items: files, info: Some(root.join("info")) });
+            out.push(bin);
         }
     }
     out
+}
+
+/// A trash's folders, opened ([`open`]).
+#[cfg(unix)]
+pub struct Opened {
+    pub files: std::os::fd::OwnedFd,
+    pub info: Option<std::os::fd::OwnedFd>,
+    pub pin: Pin,
+}
+
+/// Opens `bin`'s folders as its [`Reach`] says: each step without following a link and checked
+/// (this user's, or sticky), then `files/` and `info/`, each a real folder of this user's.
+/// `Ok(None)`: there's no such trash (nothing to empty). A step that's a link, someone else's,
+/// or not sticky when it must be is a problem, and nothing in that trash is read or deleted.
+#[cfg(unix)]
+pub fn open(bin: &Bin) -> Result<Option<Opened>, Problem> {
+    use crate::dirfd::{fstat, node, open_dir};
+    let r = &bin.reach;
+    let mac = cfg!(target_os = "macos");
+    let missing = |e: &io::Error| e.kind() == io::ErrorKind::NotFound;
+    let not_real = |at: &Path| {
+        Problem::Unreadable(format!(
+            "“{}” isn't a folder of yours (a link, or someone else's), so Arbor won't empty that Trash",
+            crate::fs::pretty(at)
+        ))
+    };
+    let mut at = r.anchor.clone();
+    let mut fd = match crate::ffi::cstr(&r.anchor).and_then(|a| open_dir(libc::AT_FDCWD, &a, true)) {
+        Ok(fd) => fd,
+        Err(e) if missing(&e) => return Ok(None),
+        Err(e) => return Err(problem_of(&at, &e, mac)),
+    };
+    let mut folders = Vec::new();
+    let check = |fd: &std::os::fd::OwnedFd, need: Need, at: &Path| -> Result<(u64, u64), Problem> {
+        let st = fstat(fd).map_err(|e| problem_of(at, &e, mac))?;
+        let ok = match need {
+            Need::Folder => true,
+            Need::Owned => st.st_uid == r.uid,
+            Need::Sticky => st.st_mode as u32 & libc::S_ISVTX as u32 != 0,
+        };
+        if ok { Ok(node(&st)) } else { Err(not_real(at)) }
+    };
+    // Each step: not a link (O_NOFOLLOW, O_DIRECTORY), and what it must be.
+    let step =
+        |dir: &std::os::fd::OwnedFd, name: &std::ffi::OsStr, need: Need, at: &Path| -> Result<Option<std::os::fd::OwnedFd>, Problem> {
+            let c = crate::ffi::cstr(name).map_err(|e| problem_of(at, &e, mac))?;
+            match open_dir(std::os::fd::AsRawFd::as_raw_fd(dir), &c, false) {
+                Ok(fd) => check(&fd, need, at).map(|_| Some(fd)),
+                Err(e) if missing(&e) => Ok(None),
+                Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => Err(not_real(at)),
+                Err(e) => Err(problem_of(at, &e, mac)),
+            }
+        };
+    for (name, need) in &r.steps {
+        at.push(name);
+        let Some(next) = step(&fd, name, *need, &at)? else { return Ok(None) };
+        folders.push(check(&next, *need, &at)?);
+        fd = next;
+    }
+    if !r.split {
+        let files = open_dir(std::os::fd::AsRawFd::as_raw_fd(&fd), c".", false).map_err(|e| problem_of(&at, &e, mac))?;
+        return Ok(Some(Opened { files, info: None, pin: Pin { bin: bin.clone(), folders, info: None } }));
+    }
+    let Some(files) = step(&fd, "files".as_ref(), Need::Owned, &at.join("files"))? else { return Ok(None) };
+    folders.push(check(&files, Need::Owned, &at.join("files"))?);
+    let info = step(&fd, "info".as_ref(), Need::Owned, &at.join("info"))?;
+    let info_id = match &info {
+        Some(i) => Some(check(i, Need::Owned, &at.join("info"))?),
+        None => None,
+    };
+    Ok(Some(Opened { files, info, pin: Pin { bin: bin.clone(), folders, info: info_id } }))
+}
+
+/// Opens the trash `pin` was counted in again, only if each of its folders is still the one
+/// counted (a folder moved away and another, or a link, put in its place is refused).
+#[cfg(unix)]
+pub fn reopen(pin: &Pin) -> Result<Opened, String> {
+    let gone = || "it was moved or replaced since it was counted".to_string();
+    match open(&pin.bin) {
+        Ok(Some(o)) if o.pin.folders == pin.folders && (pin.info.is_none() || o.pin.info == pin.info) => Ok(o),
+        Ok(_) => Err(gone()),
+        Err(p) => Err(p.say()),
+    }
 }
 
 /// Why folder `dir` couldn't be read: on macOS a refusal (`EPERM`, `EACCES`) means Arbor
@@ -172,15 +352,69 @@ pub fn problem_of(dir: &Path, e: &io::Error, mac: bool) -> Problem {
 
 /// What's in `bins`: each entry of each one's folder, with its identity and record (macOS's
 /// `.DS_Store`, Finder's own, isn't an item). A missing folder is an empty trash; the first
-/// folder that can't be read is the problem. `None` when `stop` says so.
+/// folder that can't be read (or isn't safe to: [`open`]) is the problem. `None` when `stop`
+/// says so. On Unix each trash is read through its opened folders, never by path.
+#[cfg(unix)]
+pub fn list(bins: &[Bin], stop: &dyn Fn() -> bool) -> Option<(Vec<Item>, Option<Problem>)> {
+    use std::os::unix::ffi::OsStrExt;
+    let (mut items, mut problem) = (Vec::new(), None);
+    for b in bins {
+        let o = match open(b) {
+            Ok(Some(o)) => o,
+            Ok(None) => continue,
+            Err(p) => {
+                problem.get_or_insert(p);
+                continue;
+            }
+        };
+        let pin = Arc::new(o.pin.clone());
+        let names = match crate::dirfd::Names::open(&o.files) {
+            Ok(n) => n,
+            Err(e) => {
+                problem.get_or_insert(problem_of(&b.items, &e, cfg!(target_os = "macos")));
+                continue;
+            }
+        };
+        for n in names {
+            if stop() {
+                return None;
+            }
+            let n = match n {
+                Ok(n) => n,
+                Err(e) => {
+                    problem.get_or_insert(problem_of(&b.items, &e, cfg!(target_os = "macos")));
+                    break;
+                }
+            };
+            let name = std::ffi::OsStr::from_bytes(n.as_bytes());
+            if !b.reach.split && name == ".DS_Store" {
+                continue;
+            }
+            let info = b.info.as_ref().map(|i| {
+                let mut r = name.to_os_string();
+                r.push(".trashinfo");
+                i.join(r)
+            });
+            let id = crate::dirfd::ident_at(&o.files, &n).ok();
+            let handle = crate::dirfd::handle_at(&o.files, &n);
+            items.push(Item { path: b.items.join(name), id, info, handle, pin: pin.clone() });
+        }
+    }
+    Some((items, problem))
+}
+
+/// [`list`] by path where there are no descriptor-relative calls (Windows, in tests only: its
+/// Recycle Bin is the shell's).
+#[cfg(not(unix))]
 pub fn list(bins: &[Bin], stop: &dyn Fn() -> bool) -> Option<(Vec<Item>, Option<Problem>)> {
     let (mut items, mut problem) = (Vec::new(), None);
     for b in bins {
+        let pin = Arc::new(Pin { bin: b.clone(), folders: Vec::new(), info: None });
         let rd = match std::fs::read_dir(&b.items) {
             Ok(rd) => rd,
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => {
-                problem.get_or_insert(problem_of(&b.items, &e, cfg!(target_os = "macos")));
+                problem.get_or_insert(problem_of(&b.items, &e, false));
                 continue;
             }
         };
@@ -191,21 +425,18 @@ pub fn list(bins: &[Bin], stop: &dyn Fn() -> bool) -> Option<(Vec<Item>, Option<
             let de = match de {
                 Ok(de) => de,
                 Err(e) => {
-                    problem.get_or_insert(problem_of(&b.items, &e, cfg!(target_os = "macos")));
+                    problem.get_or_insert(problem_of(&b.items, &e, false));
                     break;
                 }
             };
             let name = de.file_name();
-            if b.info.is_none() && name == ".DS_Store" {
-                continue;
-            }
             let path = de.path();
             let info = b.info.as_ref().map(|i| {
                 let mut n = name.clone();
                 n.push(".trashinfo");
                 i.join(n)
             });
-            items.push(Item { id: crate::fs::ident_at(&path), path, info });
+            items.push(Item { id: crate::fs::ident_at(&path), path, info, handle: None, pin: pin.clone() });
         }
     }
     Some((items, problem))
@@ -602,9 +833,9 @@ mod tests {
         fs::write(d.join("mac/.DS_Store"), "x").unwrap();
         fs::write(d.join("mac/b"), "b").unwrap();
         let bins = [
-            Bin { items: d.join("t/files"), info: Some(d.join("t/info")) },
-            Bin { items: d.join("mac"), info: None },
-            Bin { items: d.join("missing/files"), info: Some(d.join("missing/info")) },
+            Bin::freedesktop(&d.join("t"), me()),
+            Bin::mac(&d, vec![("mac".into(), Need::Owned)], me()),
+            Bin::freedesktop(&d.join("missing"), me()),
         ];
         let (mut items, problem) = list(&bins, &|| false).unwrap();
         items.sort_by(|a, b| a.path.cmp(&b.path));
@@ -628,7 +859,7 @@ mod tests {
         fs::write(d.join("big"), vec![0u8; 100_000]).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(d.join("big"), d.join("files/f/link")).unwrap();
-        let (items, _) = list(&[Bin { items: d.join("files"), info: None }], &|| false).unwrap();
+        let (items, _) = list(&[Bin::mac(&d, vec![("files".into(), Need::Owned)], me())], &|| false).unwrap();
         assert_eq!(bytes(&items, &|| false), Some((1024, true)));
         assert_eq!(bytes(&items, &|| true), None);
         let _ = fs::remove_dir_all(&d);

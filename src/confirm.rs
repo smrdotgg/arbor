@@ -449,7 +449,7 @@ mod tests {
             std::fs::write(root.join("info").join(format!("{n}.trashinfo")), "[Trash Info]\nPath=/x\n").unwrap();
         }
         std::fs::write(root.join("files/sub/c"), vec![b'x'; 1024]).unwrap();
-        *FIXTURE.lock().unwrap() = vec![Bin { items: root.join("files"), info: Some(root.join("info")) }];
+        *FIXTURE.lock().unwrap() = vec![Bin::freedesktop(&root, crate::trash::contents::me())];
         let mut tx = Tx::default();
         let undos = s.undo.len();
         let counted = |s: &mut State| {

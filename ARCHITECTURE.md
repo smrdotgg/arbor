@@ -118,7 +118,8 @@ Nothing runs in the background unless the user did something, and nothing polls.
   failures once (`Failures`) and registers its flush for exit.
 - **Walking without following links** (`dirfd.rs`, Unix): folders opened with `O_NOFOLLOW`,
   checked against the identity they were listed with, entries `lstat`ed through the
-  descriptor. Permanent delete and Get Info's total.
+  descriptor. Permanent delete, Get Info's total, and Empty Trash (each trash folder opened
+  that way and pinned at the count, items and records removed with `unlinkat` relative to it).
 - **OS strings** (`ffi.rs`): `cstr` (Unix) and `wide` (Windows) for every path passed to the OS.
 - **Stop flags.** Every background read has an `Arc<AtomicBool>` set when its result stops
   mattering (navigated away, tab hidden, dropped); work checks it between entries.

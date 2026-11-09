@@ -46,17 +46,95 @@ impl Worker<'_> {
             let id = noclobber::dir_id(&d);
             (d, id)
         }));
-        let doomed = items.iter().map(|i| Doomed { path: i.path.clone(), id: i.id, dir: false }).collect();
-        self.delete(doomed, out);
-        for it in &items {
-            if !out.removed.contains(&it.path) {
-                continue;
+        self.p.items_total.store(items.len(), Relaxed);
+        #[cfg(unix)]
+        self.empty_bins(items, out);
+        #[cfg(not(unix))]
+        {
+            let doomed = items.iter().map(|i| Doomed { path: i.path.clone(), id: i.id, dir: false }).collect();
+            self.delete(doomed, out);
+            for it in &items {
+                if !out.removed.contains(&it.path) {
+                    continue;
+                }
+                if let Some(info) = &it.info
+                    && let Err(e) = std::fs::remove_file(info)
+                    && e.kind() != ErrorKind::NotFound
+                {
+                    out.errors.push(format!("“{}” was deleted, but its record in the Trash couldn't be removed ({e})", name_of(&it.path)));
+                }
             }
-            if let Some(info) = &it.info
-                && let Err(e) = std::fs::remove_file(info)
-                && e.kind() != ErrorKind::NotFound
-            {
-                out.errors.push(format!("“{}” was deleted, but its record in the Trash couldn't be removed ({e})", name_of(&it.path)));
+        }
+    }
+
+    /// Empty Trash on Unix: each trash's folders opened again, without following links, and
+    /// only while each is still the folder counted ([`contents::reopen`]); then each item
+    /// checked through them right before it goes (its identity, and on Linux its handle), and
+    /// removed, with its record, relative to them: nothing is reached by a path a link could
+    /// redirect.
+    #[cfg(unix)]
+    fn empty_bins(&mut self, items: Vec<Item>, out: &mut Outcome) {
+        use std::os::unix::ffi::OsStrExt;
+        let mut groups: Vec<(Arc<contents::Pin>, Vec<Item>)> = Vec::new();
+        for it in items {
+            match groups.iter_mut().find(|(p, _)| Arc::ptr_eq(p, &it.pin) || **p == *it.pin) {
+                Some((_, v)) => v.push(it),
+                None => groups.push((it.pin.clone(), vec![it])),
+            }
+        }
+        let mounts = self.mounts().clone();
+        for (pin, items) in groups {
+            if self.cancelled() {
+                break;
+            }
+            let opened = match contents::reopen(&pin) {
+                Ok(o) => o,
+                Err(why) => {
+                    out.errors.push(format!("Nothing in “{}” was deleted: {why}", crate::fs::pretty(&pin.bin.items)));
+                    self.p.items_done.fetch_add(items.len(), Relaxed);
+                    continue;
+                }
+            };
+            for it in &items {
+                if self.cancelled() {
+                    break;
+                }
+                let name = name_of(&it.path);
+                self.before_act(&it.path);
+                let Some(c) = it.path.file_name().and_then(|n| std::ffi::CString::new(n.as_bytes()).ok()) else { continue };
+                let problem = match (it.id, crate::dirfd::ident_at(&opened.files, &c)) {
+                    (_, Err(e)) if e.kind() == ErrorKind::NotFound => Some(format!("“{name}” was already gone")),
+                    (None, _) => Some(format!("“{name}” couldn't be identified when it was chosen, so it was left alone")),
+                    (Some(want), Ok(now))
+                        if now == want && (it.handle.is_none() || crate::dirfd::handle_at(&opened.files, &c) == it.handle) =>
+                    {
+                        None
+                    }
+                    (Some(_), Ok(_)) => Some(format!(
+                        "“{name}” isn't the item you chose (something else is at its path now, or it changed since), so it was left alone"
+                    )),
+                    (Some(_), Err(e)) => Some(format!("Couldn't delete “{name}”: {e}")),
+                };
+                if let Some(why) = problem {
+                    out.errors.push(why);
+                    self.p.items_done.fetch_add(1, Relaxed);
+                    continue;
+                }
+                let files = &opened.files;
+                let gone = self.remove_with(&it.path, &mounts, out, |path, mounts, go, removed| {
+                    crate::delete::remove_in(files, &c, path, mounts, go, removed)
+                });
+                if gone && let Some(info) = &opened.info {
+                    let mut rec = c.as_bytes().to_vec();
+                    rec.extend_from_slice(b".trashinfo");
+                    if let Ok(rec) = std::ffi::CString::new(rec)
+                        && let Err(e) = crate::dirfd::unlink_at(info, &rec)
+                        && e.kind() != ErrorKind::NotFound
+                    {
+                        out.errors.push(format!("“{name}” was deleted, but its record in the Trash couldn't be removed ({e})"));
+                    }
+                }
+                self.p.items_done.fetch_add(1, Relaxed);
             }
         }
     }

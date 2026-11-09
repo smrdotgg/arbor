@@ -60,6 +60,21 @@ pub fn remove_tree(path: &Path, mounts: &Mounts, go: &mut dyn FnMut(&Path) -> bo
     imp::remove_tree(path, mounts, go, removed, false)
 }
 
+/// [`remove_tree`] for `name` in the open folder `dir`, which the caller has checked is the
+/// folder it means (Empty Trash's `files/`): nothing is reached by its path. `path` is where it
+/// is, for messages and the mount table.
+#[cfg(unix)]
+pub fn remove_in(
+    dir: &std::os::fd::OwnedFd,
+    name: &std::ffi::CStr,
+    path: &Path,
+    mounts: &Mounts,
+    go: &mut dyn FnMut(&Path) -> bool,
+    removed: &mut u64,
+) -> Result<(), Halt> {
+    imp::remove_in(dir, name, path, mounts, go, removed, false)
+}
+
 /// [`remove_tree`]'s walk with every check, removing nothing: where it would stop, and how many
 /// items it would remove (tests, and the Mac's check that it stops at a volume boundary).
 #[cfg(all(test, unix))]
@@ -151,9 +166,24 @@ mod imp {
         // is never followed.
         let dir = cstr(parent.as_os_str()).and_then(|p| open_dir(libc::AT_FDCWD, &p, true)).map_err(|e| fail(parent, e))?;
         let name = cstr(name).map_err(|e| fail(path, e))?;
-        let st = stat_at(&dir, &name).map_err(|e| fail(path, e))?;
+        remove_in(&dir, &name, path, mounts, go, removed, dry)
+    }
+
+    /// [`remove_tree`] for `name` in folder `dir`, already open (and checked by the caller):
+    /// `shown` is its path, for messages and the mount table.
+    pub fn remove_in(
+        dir: &OwnedFd,
+        name: &CStr,
+        path: &Path,
+        mounts: &Mounts,
+        go: &mut dyn FnMut(&Path) -> bool,
+        removed: &mut u64,
+        dry: bool,
+    ) -> Result<(), Halt> {
+        let parent = path.parent().unwrap_or(path);
+        let st = stat_at(dir, name).map_err(|e| fail(path, e))?;
         // An item on another device than its folder is itself a mount point.
-        let parent_dev = fstat(&dir).map_err(|e| fail(parent, e))?.st_dev;
+        let parent_dev = fstat(dir).map_err(|e| fail(parent, e))?.st_dev;
         let canon = crate::mounts::canonical(path);
         let inside = mounts.under(&canon);
         if is_dir(&st) && st.st_dev != parent_dev {
@@ -164,7 +194,7 @@ mod imp {
         let mut vol = None;
         if is_dir(&st)
             && let Some(parent_vol) = volume::of_fd(dir.as_raw_fd())
-            && let Ok(item) = open_dir(dir.as_raw_fd(), &name, false)
+            && let Ok(item) = open_dir(dir.as_raw_fd(), name, false)
         {
             vol = volume::of_fd(item.as_raw_fd());
             if vol.as_ref().is_some_and(|v| *v != parent_vol) {
@@ -172,7 +202,7 @@ mod imp {
             }
         }
         let mut w = Walk { dev: st.st_dev, vol, inside, go, removed, dry };
-        remove_at(&dir, &name, path, &canon, &mut w)
+        remove_at(dir, name, path, &canon, &mut w)
     }
 
     fn remove_at(dir: &OwnedFd, name: &CStr, shown: &Path, canon: &Path, w: &mut Walk) -> Result<(), Halt> {

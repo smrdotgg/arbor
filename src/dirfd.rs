@@ -45,6 +45,90 @@ pub fn same(a: &libc::stat, b: &libc::stat) -> bool {
     (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
 }
 
+/// Device and inode, as `MetadataExt` gives them (`dev_t` is i32 on macOS).
+#[allow(clippy::unnecessary_cast)]
+pub fn node(st: &libc::stat) -> (u64, u64) {
+    (st.st_dev as u64, st.st_ino as u64)
+}
+
+/// The [`crate::fs::Ident`] of `name` in open folder `dir` (a link is described, not
+/// followed): the same as `fs::ident` gives from `std`'s metadata for it (Linux asks `statx`, as
+/// `std` does, for the birth time).
+pub fn ident_at(dir: &OwnedFd, name: &CStr) -> io::Result<crate::fs::Ident> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: a zeroed statx is a valid out-buffer; `name` is NUL-terminated.
+        let mut x: libc::statx = unsafe { std::mem::zeroed() };
+        let mask = libc::STATX_BASIC_STATS | libc::STATX_BTIME;
+        let r = unsafe { libc::statx(dir.as_raw_fd(), name.as_ptr(), libc::AT_SYMLINK_NOFOLLOW, mask, &mut x) };
+        if r == 0 {
+            let t = |s: i64, n: u32| s as i128 * 1_000_000_000 + n as i128;
+            let born = (x.stx_mask & libc::STATX_BTIME != 0).then(|| t(x.stx_btime.tv_sec, x.stx_btime.tv_nsec));
+            let dev = libc::makedev(x.stx_dev_major, x.stx_dev_minor);
+            return Ok(crate::fs::Ident::of_parts(
+                dev,
+                x.stx_ino,
+                u32::from(x.stx_mode),
+                x.stx_size,
+                t(x.stx_ctime.tv_sec, x.stx_ctime.tv_nsec),
+                born,
+            ));
+        }
+        let e = io::Error::last_os_error();
+        // No statx (an old kernel, a sandbox): what `std` falls back to, without a birth time.
+        if !matches!(e.raw_os_error(), Some(libc::ENOSYS | libc::EPERM)) {
+            return Err(e);
+        }
+    }
+    let st = stat_at(dir, name)?;
+    let (dev, ino) = node(&st);
+    let changed = st.st_ctime as i128 * 1_000_000_000 + st.st_ctime_nsec as i128;
+    #[cfg(target_os = "macos")]
+    let born = Some(st.st_birthtime as i128 * 1_000_000_000 + st.st_birthtime_nsec as i128);
+    #[cfg(not(target_os = "macos"))]
+    let born = None;
+    #[allow(clippy::unnecessary_cast)]
+    Ok(crate::fs::Ident::of_parts(dev, ino, st.st_mode as u32, st.st_size as u64, changed, born))
+}
+
+/// Linux: the file system's handle for `name` in open folder `dir` (a link's own, not
+/// followed): its inode and the inode's generation, so an item that got a freed inode back is
+/// told from the one that had it. `None` where the file system gives none, and elsewhere.
+pub fn handle_at(dir: &OwnedFd, name: &CStr) -> Option<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    {
+        const MAX: usize = 128;
+        #[repr(C)]
+        struct Handle {
+            bytes: libc::c_uint,
+            kind: libc::c_int,
+            data: [u8; MAX],
+        }
+        let mut h = Handle { bytes: MAX as libc::c_uint, kind: 0, data: [0; MAX] };
+        let mut mount: libc::c_int = 0;
+        // SAFETY: `h` starts as a `file_handle` with room for MAX bytes, as `bytes` says;
+        // `name` is NUL-terminated. Flags 0: a link is described, not followed.
+        let r = unsafe { libc::name_to_handle_at(dir.as_raw_fd(), name.as_ptr(), (&raw mut h).cast(), &mut mount, 0) };
+        if r != 0 {
+            return None;
+        }
+        let mut v = h.kind.to_ne_bytes().to_vec();
+        v.extend_from_slice(&h.data[..(h.bytes as usize).min(MAX)]);
+        Some(v)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (dir, name);
+        None
+    }
+}
+
+/// Removes `name` from open folder `dir` (not a folder: `unlinkat` without `AT_REMOVEDIR`).
+pub fn unlink_at(dir: &OwnedFd, name: &CStr) -> io::Result<()> {
+    // SAFETY: `name` is NUL-terminated and `dir` an open folder.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+}
+
 /// The names in open folder `dir`, without `.` and `..`, all at once (a delete, which removes
 /// entries as it goes, reads the folder first). A read error is an error, never the end.
 pub fn names(dir: &OwnedFd) -> io::Result<Vec<CString>> {
