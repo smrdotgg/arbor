@@ -133,7 +133,6 @@ pub struct Recycled {
 }
 
 // Read by COM through pointers, not by name.
-#[allow(dead_code)]
 #[repr(C)]
 struct UnknownVtbl {
     query_interface: unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
@@ -141,7 +140,6 @@ struct UnknownVtbl {
     release: unsafe extern "system" fn(*mut c_void) -> u32,
 }
 
-#[allow(dead_code)]
 #[repr(C)]
 struct FileOpVtbl {
     base: UnknownVtbl,
@@ -170,7 +168,6 @@ struct FileOpVtbl {
 type P = *mut c_void;
 type W = *const u16;
 
-#[allow(dead_code)]
 #[repr(C)]
 struct SinkVtbl {
     base: UnknownVtbl,
@@ -194,7 +191,6 @@ struct SinkVtbl {
 
 /// Our `IFileOperationProgressSink`: a heap object whose first field is its vtable, freed
 /// when its last reference goes.
-#[allow(dead_code)]
 #[repr(C)]
 struct Sink {
     vtbl: &'static SinkVtbl,

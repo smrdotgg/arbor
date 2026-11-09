@@ -301,7 +301,6 @@ pub(crate) mod win {
     const IID_ISHELLITEMIMAGEFACTORY: GUID = GUID::from_u128(0xbcc18b79_ba16_442f_80c4_8a59c30c463b);
 
     // Read by COM through pointers, not by name.
-    #[allow(dead_code)]
     #[repr(C)]
     struct FactoryVtbl {
         query_interface: usize,
