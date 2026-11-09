@@ -18,7 +18,9 @@ Format: date · decision · why · how to undo.
   refused with "…or it changed since" until the folder is read again. Get Info and search
   rechecks compare only device and inode (`Ident::node`): they aren't acting on the item.
   Windows still can't see a replacement within NTFS's 15 s creation-time tunnelling that has
-  the same size and write time (its file index needs every file opened). Undo: `fs::Ident`.
+  the same size and write time (its file index needs every file opened), and a folder's write
+  time isn't compared there (NTFS updates the copy a listing reads lazily: CI's Windows runner
+  refused to delete a folder whose contents had changed). Undo: `fs::Ident`.
 - **2026-11-09 · Empty Trash refuses a whole trash whose folders aren't safe** rather than
   emptying part of it: a trash folder, its `files/` or `info/` that's a link or someone else's,
   or a shared `.Trash` that isn't sticky, is said in the dialog and nothing in it is read or

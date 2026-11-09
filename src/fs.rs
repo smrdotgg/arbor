@@ -48,7 +48,7 @@ pub struct Ident {
     kind: u8,
     /// A file's size (0 for anything else: a folder's changes as entries come and go).
     size: u64,
-    /// Unix: when its inode last changed (ctime). Windows: when it was last written. In ns.
+    /// Unix: when its inode last changed (ctime). Windows: when a file was last written. In ns.
     changed: i128,
     /// When it was made, where the file system says (Linux's statx btime, macOS's birth time,
     /// Windows' creation time), in ns.
@@ -109,7 +109,9 @@ pub fn ident(m: &std::fs::Metadata) -> Option<Ident> {
     }
     #[cfg(not(unix))]
     {
-        let changed = m.modified().ok().map_or(0, ns);
+        // A file's last write. Not a folder's: NTFS updates the copy of it in the parent's index
+        // (what a listing reads) lazily, so it can differ from the folder's own.
+        let changed = if kind == 0 { m.modified().ok().map_or(0, ns) } else { 0 };
         Some(Ident { node: (born.map_or(0, |b| b as u64), u64::from(m.is_dir())), kind, size, changed, born })
     }
 }

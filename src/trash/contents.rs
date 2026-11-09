@@ -434,6 +434,9 @@ pub fn list(bins: &[Bin], stop: &dyn Fn() -> bool) -> Option<(Vec<Item>, Option<
                 }
             };
             let name = de.file_name();
+            if !b.reach.split && name == ".DS_Store" {
+                continue;
+            }
             let path = de.path();
             let info = b.info.as_ref().map(|i| {
                 let mut n = name.clone();
