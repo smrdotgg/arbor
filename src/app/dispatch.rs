@@ -1,0 +1,413 @@
+//! Keys and commands: a key goes to the open overlay or field first, then through the keymap to
+//! a command; `run` asks first for what can't be undone, and `run_cmd` does each command
+//! (`unavailable` says when one can't run). Both match on `Cmd` exhaustively.
+
+use super::*;
+
+impl State {
+    pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        let handled = self.key(ev, tx);
+        if handled {
+            self.sync_preview();
+        }
+        handled
+    }
+
+    pub(super) fn key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        tx.instant();
+        // The confirmation dialog is modal: it has every key.
+        if self.asking.is_some() {
+            return self.ask_key(ev, tx);
+        }
+        if self.menu.is_some() {
+            return self.menu_key(ev, tx);
+        }
+        // While renaming, the field has the keys; only Escape (which it passes on) gets here.
+        if self.rename.is_some() {
+            if ev.key == Key::Escape {
+                self.rename = None;
+                tx.blur();
+            }
+            return true;
+        }
+        if self.palette.is_some() {
+            return self.palette_key(ev, tx);
+        }
+        if self.jump.is_some() {
+            return self.jump_key(ev, tx);
+        }
+        if self.pick.is_some() {
+            return self.pick_key(ev, tx);
+        }
+        if self.batch.is_some() {
+            return self.batch_key(ev, tx);
+        }
+        if self.open_with.is_some() {
+            return self.open_with_key(ev, tx);
+        }
+        // In a search with the results focused, ⌫ edits the query (as typing does, below).
+        let m = ev.mods;
+        if self.cur().searching() && ev.key == Key::Backspace && !m.cmd && !m.ctrl && !m.alt {
+            self.type_in_search(self.active, None, tx);
+            return true;
+        }
+        if self.edit_filter(ev, tx) {
+            return true;
+        }
+        if let Some(mut cmd) = self.keymap.find(|c| c.matches_tx(ev, tx)) {
+            // Esc closes the preview before it clears anything (the palette and a rename have
+            // had it first, above).
+            if cmd == Cmd::Clear && self.preview.is_some() {
+                cmd = Cmd::ClosePreview;
+            }
+            // And Get Info's panel, which takes its place.
+            if cmd == Cmd::Clear && self.info.is_some() {
+                cmd = Cmd::Info;
+            }
+            // Then a running file operation; then in a search, it stops the walk or leaves.
+            if cmd == Cmd::Clear && self.job.is_none() && self.cur().searching() {
+                self.search_escape(self.active, tx);
+                return true;
+            }
+            if let Some(why) = self.unavailable(cmd) {
+                // Closing the last tab does nothing, the same on every platform: passed on, ⌘W
+                // would close the window on macOS (Rune's standard Close item).
+                if cmd == Cmd::CloseTab {
+                    self.note = Some(why.into());
+                    return true;
+                }
+                // Any other command that can't run lets the key go on (Esc with nothing to clear).
+                return false;
+            }
+            self.run(cmd, tx);
+            return true;
+        }
+        if self.cur().searching() {
+            if let Key::Text(t) = &ev.key
+                && !ev.mods.cmd
+                && !ev.mods.ctrl
+            {
+                self.type_in_search(self.active, Some(t), tx);
+                return true;
+            }
+            return false;
+        }
+        let f = self.cur_mut();
+        match &ev.key {
+            // Space with nothing typed (and Toggle Preview unbound from it) types nothing: a
+            // filter never starts with a space.
+            Key::Text(t) if t == " " && f.filter.is_empty() => false,
+            Key::Text(t) if !ev.mods.cmd && !ev.mods.ctrl => {
+                f.type_filter(t);
+                f.reveal(tx);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// While the filter has text, typing, ⌫ and ⌥⌫ edit it, and in go-to mode Enter goes and
+    /// Tab completes (`complete.rs`), before any command sees those keys.
+    pub(super) fn edit_filter(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        let f = self.cur_mut();
+        if f.filter.is_empty() {
+            return false;
+        }
+        let m = ev.mods;
+        match &ev.key {
+            Key::Backspace if m.alt && !m.cmd && !m.ctrl => {
+                f.filter.clear();
+                f.refilter(None);
+            }
+            Key::Backspace if !m.cmd && !m.ctrl && !m.alt => {
+                f.filter.pop();
+                let keep = f.cursor_name();
+                f.refilter(keep.as_deref());
+                f.reveal(tx);
+            }
+            Key::Tab if !m.cmd && !m.ctrl && !m.alt && f.path_mode() => self.complete_tab(m.shift, tx),
+            Key::Enter if !m.cmd && !m.ctrl && !m.alt && f.path_mode() => self.submit_path(),
+            Key::Text(t) if !m.cmd && !m.ctrl => {
+                f.type_filter(t);
+                f.reveal(tx);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Why `cmd` can't run right now, or `None` when it can. Keys for an unavailable command
+    /// pass through; the palette shows it dimmed and says this when it's chosen. Every command
+    /// is listed, so a new one has to decide.
+    pub fn unavailable(&self, cmd: Cmd) -> Option<&'static str> {
+        use Cmd::*;
+        let f = self.cur();
+        let nothing = f.selected().is_none();
+        let empty = f.visible.is_empty();
+        // File operations run one at a time (`State::start`).
+        let busy = self.job.is_some();
+        let pane = &self.panes[self.active];
+        let when = |cond: bool, why: &'static str| cond.then_some(why);
+        let searching = f.searching();
+        match cmd {
+            // Start a file operation.
+            Trash | Delete => when(busy, BUSY).or(when(nothing, "Select an item first")),
+            // A duplicate goes beside its original, so all of them must be in one folder.
+            Duplicate => when(busy, BUSY).or(when(nothing, "Select an item first")).or(when(
+                searching && f.target_paths().iter().map(|p| p.parent()).collect::<std::collections::HashSet<_>>().len() > 1,
+                "Duplicate items from one folder at a time",
+            )),
+            CopyToOther | MoveToOther => when(!self.split(), NOT_SPLIT)
+                .or(when(busy, BUSY))
+                .or(when(nothing, "Select an item first"))
+                .or(when(self.other().is_some_and(Folder::searching), IN_OTHER_SEARCH))
+                .or(when(self.other().is_some_and(|o| o.shows(&f.cwd, f.dir_id)), "Both panes show the same folder")),
+            // Paste always shows as available otherwise: Rune can't ask the clipboard what it
+            // holds without reading it (RUNE-GAPS.md). Pasting nothing says so.
+            Paste | PasteMove => when(busy, BUSY).or(when(searching, "Leave the search (Esc) to paste into this folder")),
+            Undo => when(busy, BUSY).or(when(self.undo.is_empty(), "Nothing to undo")),
+            Redo => when(busy, BUSY).or(when(self.redo.is_empty(), "Nothing to redo")),
+            Cancel => when(!busy, "No file operation is running"),
+            Open | Copy | Cut | Rename | BatchRename => when(nothing, "Select an item first"),
+            Into => when(!f.selected().is_some_and(|e| e.is_dir), "Select a folder first"),
+            Parent => when(searching, "Leave the search first (Esc)").or(when(f.cwd.parent().is_none(), "Already at the top")),
+            // In a search, Back leaves it.
+            Back => when(!searching && f.back.is_empty(), "Nothing to go back to"),
+            Forward => when(f.fwd.is_empty(), "Nothing to go forward to"),
+            Clear => when(!busy && !searching && f.filter.is_empty() && self.note.is_none() && f.marked.is_empty(), "Nothing to clear"),
+            Up | Down | PageUp | PageDown | First | Last | ExtendUp | ExtendDown | ExtendPageUp | ExtendPageDown | ExtendFirst
+            | ExtendLast | SelectAll | SelectPattern | InvertSelection => when(empty, "Nothing to select"),
+            SelectKind => when(nothing, "Select an item first"),
+            Jump => when(!self.history.enabled, "Jump is turned off in the settings (jump.enabled)"),
+            SortName => when(f.sort.key == SortKey::Name, "Already sorted by name"),
+            SortKind => when(f.sort.key == SortKey::Kind, "Already sorted by kind"),
+            SortSize => when(f.sort.key == SortKey::Size, "Already sorted by size"),
+            SortModified => when(f.sort.key == SortKey::Modified, "Already sorted by date modified"),
+            CloseTab => when(!self.split() && pane.tabs.len() == 1, "This is the only tab"),
+            NextTab | PrevTab => when(pane.tabs.len() == 1, "There's only one tab here"),
+            ReopenTab => when(self.closed.is_empty(), "No closed tabs to reopen"),
+            OtherPane => when(!self.split(), NOT_SPLIT),
+            // Closing always works; opening needs something to show.
+            TogglePreview => when(self.preview.is_none() && nothing, "Select an item first"),
+            ClosePreview => when(self.preview.is_none(), "The preview isn't open"),
+            Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
+                when(cmd.place().is_some_and(|i| i >= self.place_count()), "No sidebar place there")
+            }
+            OpenWith => when(!f.targets().iter().any(|e| !e.is_dir), "Select a file first"),
+            SidebarRemove => when(self.favorite_here().is_none(), "This folder isn't in the sidebar"),
+            Eject => when(self.ejecting.is_some(), "Already ejecting a volume")
+                .or(when(self.volume_here().is_none(), "This folder isn't on a volume that can be ejected")),
+            // Always available.
+            NewFolder => when(searching, "Leave the search (Esc) to make a folder here"),
+            MakeDefault | RestoreDefault => when(self.handler_job.is_pending(), "Already changing the default for folders"),
+            GoTo | Reload | Reveal | Palette | OpenSettings | ReloadSettings | CopyPath | Hidden | SortReverse | NewTab | Split
+            | ClearJump | Search | Info | SidebarAdd => None,
+        }
+    }
+
+    /// The title the palette shows, with what's here filled in.
+    pub fn title(&self, cmd: Cmd) -> Cow<'static, str> {
+        match cmd {
+            Cmd::Hidden if self.show_hidden => "Hide Hidden Files".into(),
+            Cmd::Hidden => "Show Hidden Files".into(),
+            Cmd::Split if self.split() => "Close Split View".into(),
+            Cmd::Split => "Split View".into(),
+            Cmd::TogglePreview if self.preview.is_some() => "Close Preview".into(),
+            Cmd::TogglePreview => "Quick Preview".into(),
+            Cmd::Rename if self.cur().marked.len() > 1 => Cmd::BatchRename.title().into(),
+            Cmd::Info if self.info.is_some() => "Close Get Info".into(),
+            Cmd::Eject => match self.volume_here().and_then(|v| self.volumes.get(v)) {
+                Some(v) => format!("Eject “{}”", v.name).into(),
+                None => cmd.title().into(),
+            },
+            _ => match cmd.place().and_then(|i| self.place_at(i)) {
+                Some((name, _)) => format!("Go to {name}").into(),
+                None => cmd.title().into(),
+            },
+        }
+    }
+
+    /// Runs `cmd`, from a key, the palette or the context menu. Check `unavailable` first.
+    pub fn run(&mut self, cmd: Cmd, tx: &mut Tx) {
+        // What can't be undone, or changes the system, asks first; only the dialog's button runs
+        // it (`run_permanent`).
+        if cmd.asks() {
+            self.ask(cmd, tx);
+            return;
+        }
+        self.run_cmd(cmd, tx);
+        self.sync_preview();
+    }
+
+    /// Runs a permanent command, confirmed in the dialog.
+    pub(crate) fn run_permanent(&mut self, cmd: Cmd, tx: &mut Tx) {
+        self.run_cmd(cmd, tx);
+        self.sync_preview();
+    }
+
+    pub(super) fn run_cmd(&mut self, cmd: Cmd, tx: &mut Tx) {
+        use Cmd::*;
+        let page = PAGE as isize;
+        match cmd {
+            Open => self.open_selected(),
+            Into => {
+                let f = self.cur_mut();
+                f.select(f.sel);
+                self.open_selected();
+            }
+            Parent => self.parent(),
+            Back if self.cur().searching() => self.leave_search(self.active, tx),
+            Back => self.go_back(),
+            Forward => self.go_forward(),
+            GoTo => {
+                self.leave_search(self.active, tx);
+                let f = self.cur_mut();
+                let mut p = fs::pretty(&f.cwd);
+                if !p.ends_with(std::path::MAIN_SEPARATOR) {
+                    p.push(std::path::MAIN_SEPARATOR);
+                }
+                f.filter = p;
+                f.refilter(None);
+            }
+            Reload if self.cur().searching() => {
+                self.refresh_volumes();
+                self.restart_search(self.active, tx);
+            }
+            Reload => {
+                // ⌘R also reads the sidebar's volumes again (one of the explicit refreshes).
+                self.refresh_volumes();
+                self.reload();
+            }
+            Reveal => self.reveal_selected(),
+            OpenWith => self.open_with(tx),
+            Info => self.toggle_info(),
+            SidebarAdd => self.add_to_sidebar(),
+            SidebarRemove => {
+                if let Some(i) = self.favorite_here() {
+                    self.remove_favorite(i);
+                }
+            }
+            Eject => {
+                if let Some(v) = self.volume_here() {
+                    self.eject(v);
+                }
+            }
+            Palette => {
+                self.close_overlays(tx);
+                self.open_palette();
+            }
+            Jump => self.open_jump(tx),
+            Search => self.open_search(tx),
+            ClearJump => self.clear_jump_history(),
+            SelectPattern => self.open_pick(tx),
+            InvertSelection => self.invert_selection(tx),
+            SelectKind => self.select_kind(tx),
+            OpenSettings => self.open_settings(),
+            ReloadSettings => self.reload_settings(),
+            MakeDefault => self.change_default(crate::handler::Change::Make),
+            RestoreDefault => self.change_default(crate::handler::Change::Restore),
+            Clear => {
+                if let Some(job) = &self.job {
+                    job.cancel();
+                    self.note = Some("Cancelling…".into());
+                } else if self.cur().searching() {
+                    self.search_escape(self.active, tx);
+                } else {
+                    self.note = None;
+                    let f = self.cur_mut();
+                    f.marked.clear();
+                    let keep = f.cursor_name();
+                    f.filter.clear();
+                    f.refilter(keep.as_deref());
+                    f.reveal(tx);
+                }
+            }
+            Copy => self.copy_selected(false, tx),
+            Cut => self.copy_selected(true, tx),
+            // The clipboard answers a frame or more later, to this request alone: where it goes
+            // and whether it moves are fixed now, by the pane it was asked in.
+            Paste | PasteMove => {
+                self.next_paste += 1;
+                let (id, f) = (self.next_paste, self.cur());
+                self.paste_reqs.push(PasteReq { id, dest: f.cwd.clone(), dest_id: f.dir_id, mv: cmd == PasteMove });
+                tx.read_clipboard(move |s: &mut State, content, tx| {
+                    tx.instant();
+                    s.paste_reply(id, content);
+                });
+            }
+            CopyPath => self.copy_path(tx),
+            Duplicate => self.duplicate(),
+            // Two or more: Batch Rename, as Finder does.
+            Rename if self.cur().marked.len() > 1 => self.open_batch(tx),
+            Rename => self.start_rename(),
+            BatchRename => self.open_batch(tx),
+            NewFolder => self.new_folder(),
+            Trash => self.trash_selected(),
+            // Runs from the dialog (`State::answer`), with the items it named.
+            Delete => {}
+            Undo => self.undo_last(),
+            Redo => self.redo_last(),
+            Cancel => {
+                if let Some(job) = &self.job {
+                    job.cancel();
+                    self.note = Some("Cancelling…".into());
+                }
+            }
+            CopyToOther => self.send_to_other_pane(false),
+            MoveToOther => self.send_to_other_pane(true),
+            Up => self.cur_mut().step(-1, false, tx),
+            Down => self.cur_mut().step(1, false, tx),
+            PageUp => self.cur_mut().step(-page, false, tx),
+            PageDown => self.cur_mut().step(page, false, tx),
+            First => self.cur_mut().step(isize::MIN / 2, false, tx),
+            Last => self.cur_mut().step(isize::MAX / 2, false, tx),
+            ExtendUp => self.cur_mut().step(-1, true, tx),
+            ExtendDown => self.cur_mut().step(1, true, tx),
+            ExtendPageUp => self.cur_mut().step(-page, true, tx),
+            ExtendPageDown => self.cur_mut().step(page, true, tx),
+            ExtendFirst => self.cur_mut().step(isize::MIN / 2, true, tx),
+            ExtendLast => self.cur_mut().step(isize::MAX / 2, true, tx),
+            SelectAll => self.cur_mut().select_all(),
+            Hidden => {
+                self.toggle_hidden();
+                // Hidden folders are walked or skipped: searches start again.
+                for ix in 0..self.panes.len() {
+                    if self.panes[ix].f.searching() {
+                        self.restart_search(ix, tx);
+                    }
+                }
+            }
+            SortName => self.sort_by(SortKey::Name, tx),
+            SortKind => self.sort_by(SortKey::Kind, tx),
+            SortSize => self.sort_by(SortKey::Size, tx),
+            SortModified => self.sort_by(SortKey::Modified, tx),
+            SortReverse => {
+                let key = self.cur().sort.key;
+                self.sort_by(key, tx);
+            }
+            NewTab => self.new_tab(tx),
+            CloseTab => {
+                let (ix, tab) = (self.active, self.panes[self.active].tab);
+                self.close_tab(ix, tab, tx);
+            }
+            NextTab => self.cycle_tab(1, tx),
+            PrevTab => self.cycle_tab(-1, tx),
+            ReopenTab => self.reopen_tab(tx),
+            Split => self.toggle_split(tx),
+            OtherPane => self.activate(1 - self.active, tx),
+            TogglePreview => self.toggle_preview(),
+            ClosePreview => self.close_preview(),
+            Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
+                if let Some(i) = cmd.place() {
+                    self.go_place(i);
+                }
+            }
+        }
+    }
+
+    pub(super) fn sort_by(&mut self, key: SortKey, tx: &mut Tx) {
+        let f = self.cur_mut();
+        f.set_sort(key);
+        f.reveal(tx);
+    }
+}
