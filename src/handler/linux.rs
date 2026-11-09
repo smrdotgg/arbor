@@ -66,7 +66,11 @@ pub fn service_file(data_home: &Path) -> PathBuf {
 
 /// Whether Arbor wrote this activation file (so it should serve the name).
 pub fn is_ours(text: &str) -> bool {
-    text.starts_with(MARKER)
+    is_ours_bytes(text.as_bytes())
+}
+
+fn is_ours_bytes(b: &[u8]) -> bool {
+    b.starts_with(MARKER.as_bytes())
 }
 
 /// The activation file: the session bus runs Arbor when something asks for the name and
@@ -171,9 +175,23 @@ fn first(value: &str) -> &str {
     value.split(';').next().unwrap_or("").trim()
 }
 
+/// A key file Arbor edits (`mimeapps.list`): its text, `None` when there's none. One that
+/// isn't UTF-8 (the spec says it is) is an error: rewriting it would turn every byte that isn't
+/// into U+FFFD, changing lines of the user's that aren't Arbor's.
 fn read(path: &Path) -> Result<Option<String>, String> {
+    match read_bytes(path)? {
+        Some(b) => {
+            String::from_utf8(b).map(Some).map_err(|_| format!("{} isn't text (UTF-8), so nothing was changed", crate::fs::pretty(path)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// A file's bytes as they are (the activation file another file manager wrote, kept and put
+/// back exactly), `None` when there's none.
+fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match std::fs::read(path) {
-        Ok(b) => Ok(Some(String::from_utf8_lossy(&b).into_owned())),
+        Ok(b) => Ok(Some(b)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", crate::fs::pretty(path))),
     }
@@ -202,13 +220,13 @@ fn make(d: &Dirs, backup: &Path) -> Result<String, String> {
     let had_mimeapps = old_text.is_some();
     let text = old_text.unwrap_or_default();
     let service = service_file(&d.data_home);
-    let old_service = read(&service)?;
+    let old_service = read_bytes(&service)?;
     // The backup is on the disk before anything changes.
     let fresh = Backup::require(Backup::read(backup)?, &required(), backup)?.is_none();
     if fresh {
         let mut b = Backup::default();
         b.put(MIME_KEY, default_app(&text, MIME).as_deref().map(str::as_bytes));
-        b.put(SERVICE_KEY, old_service.as_deref().filter(|t| !is_ours(t)).map(str::as_bytes));
+        b.put(SERVICE_KEY, old_service.as_deref().filter(|t| !is_ours_bytes(t)));
         b.write(backup)?;
     }
     let new_text = set_default_app(&text, MIME, Some(DESKTOP_ID));
@@ -276,8 +294,8 @@ fn restore(d: &Dirs, backup: &Path) -> Result<String, String> {
         }
     }
     let service = service_file(&d.data_home);
-    if let Some(text) = read(&service)? {
-        if is_ours(&text) {
+    if let Some(text) = read_bytes(&service)? {
+        if is_ours_bytes(&text) {
             match b.get(SERVICE_KEY).flatten() {
                 Some(old) => write_file(&service, old)?,
                 None => std::fs::remove_file(&service).map_err(|e| format!("{}: {e}", crate::fs::pretty(&service)))?,

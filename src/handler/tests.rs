@@ -612,3 +612,71 @@ fn a_value_that_isnt_hex_is_damage_not_a_panic_or_a_guess() {
     }
     assert_eq!(Backup::decode(&format!("{BACKUP_HEADER}\n0aFf\tkey\n")).unwrap().get("key"), Some(Some(&b"\x0a\xff"[..])));
 }
+
+/// Any mimeapps.list text: setting the folder default reads back as what was set, removing it
+/// leaves none, and every line not about it stays as it was (line breaks aside).
+#[test]
+fn any_mimeapps_text_takes_the_folder_default_and_keeps_the_rest() {
+    const BITS: &[&str] = &[
+        "[Default Applications]",
+        "[Added Associations]",
+        "[Other]",
+        "\n",
+        "\r\n",
+        "inode/directory",
+        "=",
+        " = ",
+        "x.desktop",
+        ";",
+        "#",
+        " ",
+        "text/plain=a.desktop",
+        "[",
+        "é",
+    ];
+    crate::prop::check("mimeapps_edit", 3000, |r| {
+        let text = if r.one_in(4) { r.string(60) } else { r.from(BITS, 30) };
+        let v = r.pick(&["arbor.desktop", "old.desktop;fallback.desktop;"]).to_string();
+        let set = linux::set_default_app(&text, linux::MIME, Some(&v));
+        assert_eq!(linux::default_app(&set, linux::MIME).as_deref(), Some(v.as_str()), "{text:?} → {set:?}");
+        let gone = linux::set_default_app(&set, linux::MIME, None);
+        assert_eq!(linux::default_app(&gone, linux::MIME), None, "{set:?} → {gone:?}");
+        let about = |l: &str| l.trim().split_once('=').is_some_and(|(k, _)| k.trim() == linux::MIME);
+        let others = |t: &str| {
+            t.lines()
+                .filter(|l| !about(l) && l.trim() != "[Default Applications]" && !l.trim().is_empty())
+                .map(|l| l.trim_end_matches('\r').to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(others(&gone), others(&text), "{text:?}");
+    });
+}
+
+/// Found by reading `linux::read`: mimeapps.list was read with U+FFFD for bytes that aren't
+/// UTF-8 and written back, so Make changed the user's other lines (a comment in Latin-1, say).
+/// Now such a file is refused, untouched; and another file manager's activation file is kept
+/// and put back byte for byte, whatever it holds.
+#[test]
+fn linux_never_rewrites_a_file_it_cant_read_exactly() {
+    let d = tmp("linux-bytes");
+    let dirs = linux_dirs(&d, true);
+    let backup = d.join("arbor").join(BACKUP_FILE);
+    let mimeapps = dirs.config_home.join("mimeapps.list");
+    std::fs::create_dir_all(&dirs.config_home).unwrap();
+    let latin1 = b"# caf\xe9\n[Default Applications]\ninode/directory=old.desktop\n";
+    std::fs::write(&mimeapps, latin1).unwrap();
+    let e = linux::run(Change::Make, &dirs, &backup).unwrap_err();
+    assert!(e.contains("isn't text (UTF-8)"), "{e}");
+    assert_eq!(std::fs::read(&mimeapps).unwrap(), latin1, "untouched");
+    assert!(!backup.exists());
+    // Their activation file, with bytes that aren't UTF-8, round-trips exactly.
+    std::fs::write(&mimeapps, "[Default Applications]\ninode/directory=old.desktop\n").unwrap();
+    let service = linux::service_file(&dirs.data_home);
+    std::fs::create_dir_all(service.parent().unwrap()).unwrap();
+    let theirs = b"[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=/opt/caf\xe9/fm\n";
+    std::fs::write(&service, theirs).unwrap();
+    linux::run(Change::Make, &dirs, &backup).unwrap();
+    linux::run(Change::Restore, &dirs, &backup).unwrap();
+    assert_eq!(std::fs::read(&service).unwrap(), theirs);
+    let _ = std::fs::remove_dir_all(&d);
+}
