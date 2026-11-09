@@ -226,7 +226,8 @@ Typing, outside the palette:
 - **Type `/` or `~`** (or ⌘L) for go-to-path mode. Enter navigates, or opens a file. **Tab**
   completes the last part of the path against what's in its folder: the first Tab as far as
   every match agrees (all of a single match, with a `/` after a folder) and, with several, lists
-  them in a small card over the status bar; Tab again cycles through them, ⇧Tab backwards.
+  them in a small card over the status bar; Tab again cycles through them, ⇧Tab backwards (each
+  Tab reads the folder again, so a name removed meanwhile is skipped and a new one joins).
   Typing anything else carries on from there. Capitals count on Linux and don't on macOS and
   Windows; hidden items are matches while hidden files are shown, or once you type a dot. The
   folder is read fresh on a worker for each completion (no cache), and the key waits at most a

@@ -7,7 +7,7 @@
 //!
 //! The folder is read on a worker for each completion, as showing a tab is: the key waits at
 //! most a frame for it (`State::show_wait`), and a slower answer applies when it lands if the
-//! field hasn't changed since. Nothing is kept: the next completion reads again. Capitals count
+//! field hasn't changed since. Nothing is kept: each Tab, cycling too, reads it again. Capitals count
 //! on Linux and don't on macOS and Windows, as their usual file systems do. Hidden items are
 //! candidates while hidden files are shown, or once what's typed starts with a dot (as shells
 //! do).
@@ -22,6 +22,8 @@ pub struct Completion {
     pub pane: u64,
     /// What's typed up to and including the last separator: the folder, as typed.
     pub dir: String,
+    /// The start of the name that was completed (each Tab reads the folder for it again).
+    pub prefix: String,
     /// The matching names, sorted, a folder's with a separator after it.
     pub cands: Vec<String>,
     /// The candidate shown in the field while cycling (`None` right after the first Tab).
@@ -103,6 +105,24 @@ pub fn candidates(dir: &std::path::Path, prefix: &str, hidden: bool, sensitive: 
     out.into_iter().map(|(n, dir)| if dir { format!("{n}{sep}") } else { n }).collect()
 }
 
+/// Where Tab (or ⇧Tab, `back`) goes from `current` in `cands` (sorted as `candidates` sorts):
+/// the next one, wrapping; the first (or last) when nothing is shown yet; and when `current`
+/// is gone, the one that sorts after (or before) where it was.
+fn next(cands: &[String], current: Option<&str>, back: bool) -> usize {
+    let n = cands.len();
+    let key = |s: &str| (s.to_lowercase(), s.to_string());
+    match (current, back) {
+        (None, false) => 0,
+        (None, true) => n - 1,
+        (Some(c), _) => match cands.iter().position(|x| x == c) {
+            Some(i) if back => (i + n - 1) % n,
+            Some(i) => (i + 1) % n,
+            None if back => cands.iter().rposition(|x| key(x) < key(c)).unwrap_or(n - 1),
+            None => cands.iter().position(|x| key(x) > key(c)).unwrap_or(0),
+        },
+    }
+}
+
 /// The separator to put after a completed folder: the one the typed path uses last, else the
 /// platform's.
 fn sep_for(dir: &str) -> char {
@@ -114,18 +134,37 @@ impl State {
     pub(crate) fn complete_tab(&mut self, back: bool, tx: &mut Tx) {
         tx.instant();
         let (pane, typed) = (self.cur().id, self.cur().filter.clone());
-        // Tab again: the next candidate.
-        if let Some(c) = self.complete.as_mut().filter(|c| c.pane == pane && c.shown == typed && c.cands.len() > 1) {
-            let n = c.cands.len();
-            let at = match (c.at, back) {
-                (None, false) => 0,
-                (None, true) => n - 1,
-                (Some(i), false) => (i + 1) % n,
-                (Some(i), true) => (i + n - 1) % n,
-            };
-            c.at = Some(at);
-            c.shown = format!("{}{}", c.dir, c.cands[at]);
-            self.cur_mut().filter = c.shown.clone();
+        // Tab again: the next candidate, from the folder read again (a name removed since is
+        // skipped, one added joins), waiting at most a frame as the first Tab does; a slower
+        // folder cycles through what the last read found, and its answer is dropped.
+        if let Some(c) = self.complete.as_ref().filter(|c| c.pane == pane && c.shown == typed && c.cands.len() > 1) {
+            let (dir, prefix, at, old) = (c.dir.clone(), c.prefix.clone(), c.at, c.cands.clone());
+            let current = at.and_then(|i| old.get(i).cloned());
+            let (folder, sep, hidden) = (crate::fs::expand(&dir), sep_for(&dir), self.show_hidden);
+            let fresh = crate::folder::read_waiting(&self.completer, self.show_wait, move || {
+                Some((String::new(), candidates(&folder, &prefix, hidden, CASE_SENSITIVE, sep)))
+            });
+            let cands = fresh.map_or(old, |(_, c)| c);
+            match cands.as_slice() {
+                [] => {
+                    self.complete = None;
+                    self.note = Some(format!("Nothing in {dir} starts with “{}” any more", split(&typed).1));
+                }
+                [one] => {
+                    self.complete = None;
+                    self.cur_mut().filter = format!("{dir}{one}");
+                }
+                _ => {
+                    let at = next(&cands, current.as_deref(), back);
+                    let shown = format!("{dir}{}", cands[at]);
+                    if let Some(c) = self.complete.as_mut() {
+                        c.cands = cands;
+                        c.at = Some(at);
+                        c.shown = shown.clone();
+                    }
+                    self.cur_mut().filter = shown;
+                }
+            }
             return;
         }
         self.complete = None;
@@ -156,6 +195,7 @@ impl State {
         let pane = f.id;
         let (dir, prefix) = split(&typed);
         let (dir, prefix) = (dir.to_string(), prefix.to_string());
+        let prefix_typed = prefix.clone();
         match cands.as_slice() {
             [] => {
                 let folder = if dir.is_empty() { typed.clone() } else { dir.clone() };
@@ -168,7 +208,7 @@ impl State {
                 let name = if common.chars().count() > prefix.chars().count() { common } else { prefix };
                 let shown = format!("{dir}{name}");
                 self.cur_mut().filter = shown.clone();
-                self.complete = Some(Completion { pane, dir, cands, at: None, shown });
+                self.complete = Some(Completion { pane, dir, prefix: prefix_typed, cands, at: None, shown });
             }
         }
     }
@@ -269,6 +309,38 @@ mod tests {
         let f = s.cur_mut();
         f.filter.clear();
         f.type_filter(path);
+    }
+
+    /// The review's case: a candidate removed between Tabs used to be cycled to anyway (one
+    /// read for the whole completion). Each Tab reads the folder again, so a removed name is
+    /// skipped, one that appears joins, and the last one left completes whole.
+    #[test]
+    fn cycling_reads_the_folder_again_each_tab() {
+        let d = tmp("cycle-fresh");
+        for n in ["Photographs", "Photos", "Pictures old"] {
+            std::fs::create_dir(d.join(n)).unwrap();
+        }
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        let mut tx = Tx::default();
+        let base = format!("{}/", d.display());
+        type_path(&mut s, &format!("{base}P"));
+        s.on_key(&tab(false), &mut tx);
+        s.on_key(&tab(false), &mut tx);
+        assert_eq!(s.cur().filter, format!("{base}Photographs/"));
+        std::fs::remove_dir(d.join("Photos")).unwrap();
+        s.on_key(&tab(false), &mut tx);
+        assert_eq!(s.cur().filter, format!("{base}Pictures old/"), "the removed one is skipped");
+        assert_eq!(s.completion().unwrap().cands, ["Photographs/", "Pictures old/"]);
+        std::fs::create_dir(d.join("Plans")).unwrap();
+        s.on_key(&tab(false), &mut tx);
+        assert_eq!(s.cur().filter, format!("{base}Plans/"), "a new one joins in its place");
+        std::fs::remove_dir(d.join("Photographs")).unwrap();
+        std::fs::remove_dir(d.join("Pictures old")).unwrap();
+        s.on_key(&tab(false), &mut tx);
+        assert_eq!(s.cur().filter, format!("{base}Plans/"));
+        assert!(s.completion().is_none(), "one left: completed whole, the card goes");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The first Tab completes the common prefix and lists the candidates; Tab again cycles
