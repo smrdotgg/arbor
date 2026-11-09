@@ -27,6 +27,8 @@ mod jump;
 mod menu;
 mod noclobber;
 mod ops;
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod packaging_tests;
 mod palette;
 mod panes;
 mod pattern;

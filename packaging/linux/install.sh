@@ -23,9 +23,33 @@ cp "$here/arbor" "$bin/arbor.new"
 chmod 755 "$bin/arbor.new"
 mv -f "$bin/arbor.new" "$bin/arbor"
 
-# The desktop file runs this copy, wherever PATH points.
-sed -e "s|^Exec=.*|Exec=$bin/arbor %F|" -e "s|^TryExec=.*|TryExec=$bin/arbor|" \
-	"$here/arbor.desktop" >"$data/applications/arbor.desktop"
+# The desktop file runs this copy, wherever PATH points. The path is written as data, never
+# into a sed expression (where `&` or `|` would mean something), with the Desktop Entry
+# escaping: in Exec, quoted when it has a reserved character ("…", with " ` $ \ escaped), % as
+# %%, and every backslash doubled again for the string itself; in TryExec, backslashes doubled.
+exe=$bin/arbor
+case $exe in
+*'
+'*)
+	echo "Can't install into a path with a line break in it: $bin" >&2
+	exit 1
+	;;
+esac
+exec_arg=$(printf '%s' "$exe" | sed -e 's/%/%%/g')
+case $exe in
+*[[:space:]\"\'\\\>\<~\|\&\;\$\*\?\#\(\)\`]*)
+	exec_arg=\"$(printf '%s' "$exec_arg" | sed -e 's/[\\"`$]/\\&/g')\"
+	;;
+esac
+exec_arg=$(printf '%s' "$exec_arg" | sed -e 's/\\/\\\\/g')
+try_arg=$(printf '%s' "$exe" | sed -e 's/\\/\\\\/g')
+while IFS= read -r line || [ -n "$line" ]; do
+	case $line in
+	Exec=*) printf '%s\n' "Exec=$exec_arg %F" ;;
+	TryExec=*) printf '%s\n' "TryExec=$try_arg" ;;
+	*) printf '%s\n' "$line" ;;
+	esac
+done <"$here/arbor.desktop" >"$data/applications/arbor.desktop"
 chmod 644 "$data/applications/arbor.desktop"
 
 for n in 16 24 32 48 64 128 256 512; do
