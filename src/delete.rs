@@ -111,15 +111,16 @@ pub fn count_left(path: &Path, mounts: &Mounts, go: &mut dyn FnMut() -> bool) ->
 
 #[cfg(unix)]
 mod imp {
-    use std::ffi::{CStr, CString, OsStr};
+    use std::ffi::{CStr, OsStr};
     use std::io;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::os::fd::{AsRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
 
     use super::Halt;
     use crate::mounts::{Mounts, volume};
 
+    use crate::dirfd::{fstat, is_dir, names, open_dir, same, stat_at};
     use crate::ffi::cstr;
 
     fn fail(at: &Path, err: io::Error) -> Halt {
@@ -174,39 +175,6 @@ mod imp {
         remove_at(&dir, &name, path, &canon, &mut w)
     }
 
-    fn open_dir(at: RawFd, name: &CStr, follow: bool) -> io::Result<OwnedFd> {
-        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | if follow { 0 } else { libc::O_NOFOLLOW };
-        // SAFETY: `name` is NUL-terminated; a non-negative result is a new descriptor we own.
-        let fd = unsafe { libc::openat(at, name.as_ptr(), flags) };
-        if fd < 0 { Err(io::Error::last_os_error()) } else { Ok(unsafe { OwnedFd::from_raw_fd(fd) }) }
-    }
-
-    fn stat_at(dir: &OwnedFd, name: &CStr) -> io::Result<libc::stat> {
-        // SAFETY: a zeroed stat is a valid out-buffer; `name` is NUL-terminated.
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstatat(dir.as_raw_fd(), name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(st)
-    }
-
-    fn fstat(fd: &OwnedFd) -> io::Result<libc::stat> {
-        // SAFETY: a zeroed stat is a valid out-buffer for an open descriptor.
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(st)
-    }
-
-    fn is_dir(st: &libc::stat) -> bool {
-        st.st_mode & libc::S_IFMT == libc::S_IFDIR
-    }
-
-    fn same(a: &libc::stat, b: &libc::stat) -> bool {
-        (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
-    }
-
     fn remove_at(dir: &OwnedFd, name: &CStr, shown: &Path, canon: &Path, w: &mut Walk) -> Result<(), Halt> {
         if !(w.go)(shown) {
             return Err(Halt::Cancelled);
@@ -252,37 +220,6 @@ mod imp {
         }
         *w.removed += 1;
         Ok(())
-    }
-
-    /// The names in open folder `dir`, without `.` and `..`.
-    fn names(dir: &OwnedFd) -> io::Result<Vec<CString>> {
-        // SAFETY: fdopendir takes over the duplicate, and closedir closes it; each entry's name
-        // is read before the next readdir.
-        unsafe {
-            let fd = libc::dup(dir.as_raw_fd());
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let d = libc::fdopendir(fd);
-            if d.is_null() {
-                let e = io::Error::last_os_error();
-                libc::close(fd);
-                return Err(e);
-            }
-            let mut out = Vec::new();
-            loop {
-                let e = libc::readdir(d);
-                if e.is_null() {
-                    break;
-                }
-                let n = CStr::from_ptr((*e).d_name.as_ptr());
-                if n.to_bytes() != b"." && n.to_bytes() != b".." {
-                    out.push(n.to_owned());
-                }
-            }
-            libc::closedir(d);
-            Ok(out)
-        }
     }
 }
 
