@@ -91,8 +91,12 @@ all three on every push to `main`: they're the run's artifacts (`arbor-macOS`, `
   "Windows protected your PC": choose More info, then Run anyway.
 - **Linux** (x86-64): `tar xzf arbor-<version>-linux-x86_64.tar.gz`, then `./install.sh` in the
   folder it made. It installs for you only, no root: `~/.local/bin/arbor`, `arbor.desktop` in
-  `~/.local/share/applications` (so menus list it) and its icons. `./uninstall.sh` removes them
-  (putting back the folder default first, if Arbor has it). Running under X11 needs
+  `~/.local/share/applications` (so menus list it) and its icons (the desktop file names the
+  binary by its full path, quoted as the Desktop Entry spec says, so any home folder works).
+  `./uninstall.sh` removes them, putting back the folder default first if Arbor has it: with
+  the installed Arbor, or the one beside the script if that's gone, or with neither, by taking
+  back Arbor's D-Bus activation file and folder default itself (from the backup) and saying
+  what it did. Running under X11 needs
   `libxkbcommon-x11` (see [Platform notes](#platform-notes)).
 
 Installing never makes Arbor the default for anything. That's a command:
@@ -102,9 +106,14 @@ Installing never makes Arbor the default for anything. That's a command:
 **"Make Arbor the Default for Folders…"** (in the palette) has other apps open folders in Arbor,
 and **"Restore the System Default for Folders…"** undoes it. Both ask first, in Arbor's dialog,
 saying what changes and how to undo it. Before the first change, whatever it replaces is saved in
-`folder-handler-backup.txt` beside the settings file; Restore puts exactly that back, but only
-where the setting is still Arbor's (anything changed since is left alone, and the status bar says
-so), then deletes the backup. Without a backup, Restore still takes back what Arbor wrote.
+`folder-handler-backup.txt` beside the settings file, and flushed to the disk before anything is
+changed: if it can't be saved, nothing changes. A change that fails halfway (a registry write
+refused, say) puts back what it had written and says nothing was changed; on Windows the
+commands are written before what makes them the default, so a default never points at a
+missing command. Restore puts exactly the backup back, but only where the setting is still
+Arbor's (anything changed since is left alone, and the status bar says so), then deletes the
+backup. Without a backup, Restore still takes back what Arbor wrote; a backup that's empty,
+cut short or missing an entry is refused, and nothing changes.
 `arbor --restore-folder-default` does the same without opening a window (the uninstall script
 runs it).
 
@@ -129,8 +138,9 @@ folder still opens a window of its own, and two started at the same instant may 
   bus is asked to reload. In Arbor: `xdg-open` and `gio open` on a folder, and "Show in folder"
   (or "Open containing folder") in browsers, editors and other apps that ask
   `org.freedesktop.FileManager1` (ShowFolders, ShowItems; ShowItemProperties selects the item,
-  since Arbor has no properties window). While Arbor runs it owns that name and opens a tab; when
-  it doesn't, the bus starts it. **Limits:** a desktop's own list (`gnome-mimeapps.list`, say)
+  since Arbor has no properties window). While Arbor runs it owns that name and opens a tab
+  (from the moment Make succeeds, and it lets the name go when Restore does); when it doesn't
+  run, the bus starts it. **Limits:** a desktop's own list (`gnome-mimeapps.list`, say)
   wins over `mimeapps.list` (Make says so when it finds one); a file manager already running
   that holds the D-Bus name and won't give it up (Nautilus running in the background on GNOME)
   keeps it until it exits; `xdg-open` on a folder starts a new Arbor window rather than a tab; and

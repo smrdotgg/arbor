@@ -109,6 +109,19 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-09 · Review of milestone 10, fixed** (each with a test that fails on the old code):
+  the backup is saved and flushed before any change on all three platforms, Windows writes
+  commands before the default selectors and puts a half-made change back from the snapshot; a
+  damaged backup (empty, no header, an entry missing) is refused before anything changes;
+  several folders requested at once each get a tab (a tab hidden on its way to a folder keeps
+  that folder, which also fixes ⌘T right after opening a folder); Linux's install and uninstall
+  scripts. Calls made: (1) the Linux bus thread now stays for the session, parked on a channel
+  when Arbor isn't the default (it used to end at once), so Make and Restore take effect in
+  the running Arbor; (2) uninstall without any Arbor binary edits `mimeapps.list` itself
+  (only the `[Default Applications]` line Arbor wrote), decoding the backup with `awk`, and
+  removes the activation file only if it's Arbor's. The Windows trash race stays accepted
+  (above). Undo: the commits after 9376bf8.
+
 - **2026-11-09 · File-list rows are named from their cells, with no separate description.**
   A reader hears "notes.txt, txt, 5 KB, Today 10:30" as the row's name. A description holding
   kind, size and date apart would cost a string per visible row every frame for everyone, since
