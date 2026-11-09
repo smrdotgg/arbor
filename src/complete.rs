@@ -136,7 +136,8 @@ impl State {
         let (pane, typed) = (self.cur().id, self.cur().filter.clone());
         // Tab again: the next candidate, from the folder read again (a name removed since is
         // skipped, one added joins), waiting at most a frame as the first Tab does; a slower
-        // folder cycles through what the last read found, and its answer is dropped.
+        // folder cycles through what the last read found, and its answer applies when it lands
+        // (`cycled_late`).
         if let Some(c) = self.complete.as_ref().filter(|c| c.pane == pane && c.shown == typed && c.cands.len() > 1) {
             let (dir, prefix, at, old) = (c.dir.clone(), c.prefix.clone(), c.at, c.cands.clone());
             let current = at.and_then(|i| old.get(i).cloned());
@@ -216,10 +217,49 @@ impl State {
     /// A late completion answer, from `poll`. True when it changed something.
     pub(crate) fn poll_completion(&mut self) -> bool {
         let Some(a) = self.completer.take() else { return false };
+        // A cycling Tab's read (asked with no field text): the candidates it found.
+        if a.0.is_empty() {
+            return self.cycled_late(a.1);
+        }
         if self.completing.as_ref() != Some(&a.0) {
             return false;
         }
         self.completed(a);
+        true
+    }
+
+    /// A cycling Tab's fresh read that came after the key, while its card still shows: the
+    /// candidates become what the folder holds now, and a name shown that's gone since gives
+    /// way to the one after it. True when it changed something.
+    fn cycled_late(&mut self, cands: Vec<String>) -> bool {
+        let Some(c) = self.completion() else { return false };
+        let (dir, current) = (c.dir.clone(), c.at.and_then(|i| c.cands.get(i).cloned()));
+        if c.cands == cands {
+            return false;
+        }
+        match cands.as_slice() {
+            [] => {
+                self.complete = None;
+                self.note = Some(format!("Nothing in {dir} starts with “{}” any more", current.as_deref().map_or("", |s| s)));
+            }
+            [one] => {
+                self.complete = None;
+                self.cur_mut().filter = format!("{dir}{one}");
+            }
+            _ => {
+                let at = match current.as_deref() {
+                    Some(cur) => cands.iter().position(|x| x == cur).unwrap_or_else(|| next(&cands, Some(cur), false)),
+                    None => 0,
+                };
+                let shown = if current.is_some() { format!("{dir}{}", cands[at]) } else { self.cur().filter.clone() };
+                if let Some(c) = self.complete.as_mut() {
+                    c.cands = cands;
+                    c.at = current.is_some().then_some(at);
+                    c.shown = shown.clone();
+                }
+                self.cur_mut().filter = shown;
+            }
+        }
         true
     }
 
@@ -441,5 +481,37 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         s.poll(&mut tx);
         assert_eq!(s.cur().filter, format!("{base}alx"));
+    }
+
+    /// A cycling Tab whose folder answers late: the answer applies when it lands, so a name
+    /// removed since doesn't stay in the field.
+    #[test]
+    fn a_late_answer_while_cycling_applies_when_it_lands() {
+        let d = std::env::temp_dir().join(format!("arbor-complete-late-cycle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for n in ["Photo", "Picture", "Plan"] {
+            std::fs::create_dir_all(d.join(n)).unwrap();
+        }
+        let mut s = crate::app::tests::state_in(&d);
+        crate::app::tests::settle_all(&mut s);
+        let mut tx = Tx::default();
+        s.show_wait = std::time::Duration::from_secs(5);
+        s.cur_mut().filter = format!("{}/P", d.display());
+        s.complete_tab(false, &mut tx);
+        s.complete_tab(false, &mut tx);
+        assert!(s.cur().filter.ends_with("/Photo/"), "{}", s.cur().filter);
+        std::fs::remove_dir(d.join("Picture")).unwrap();
+        // The folder answers after the key: the field shows what the last read said, then
+        // what the folder holds now.
+        s.show_wait = std::time::Duration::ZERO;
+        s.complete_tab(false, &mut tx);
+        assert!(s.cur().filter.ends_with("/Picture/"), "from the last read: {}", s.cur().filter);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !s.poll_completion() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(s.cur().filter.ends_with("/Plan/"), "the one after the removed name: {}", s.cur().filter);
+        assert_eq!(s.completion().map(|c| c.cands.len()), Some(2));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
