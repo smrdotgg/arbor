@@ -147,17 +147,37 @@ impl Fence {
         }
     }
 
+    /// [`Fence::new`] for a walk that only reads (Get Info's total): the root may itself be a
+    /// mount point (`/`, a volume's top folder), and what's on it is what was asked for, so only
+    /// the mount points below it are boundaries.
+    pub fn below(root: &Path, mounts: &Mounts) -> Fence {
+        let mut f = Fence::new(root, mounts);
+        let canon = f.canon.clone();
+        f.inside.retain(|m| *m != canon);
+        f
+    }
+
     /// Whether `p` (in the tree, with its own `lstat`) is a mount point or on another disk.
     pub fn crosses(&self, p: &Path, m: &std::fs::Metadata) -> bool {
         #[cfg(unix)]
-        if self.dev.is_some_and(|d| d != std::os::unix::fs::MetadataExt::dev(m)) {
-            return true;
-        }
-        if m.is_dir() && self.vol.is_some() && volume::of_path(p) != self.vol {
+        let dev = Some(std::os::unix::fs::MetadataExt::dev(m));
+        #[cfg(not(unix))]
+        let dev = None;
+        self.crosses_dev(p, dev, m.is_dir())
+    }
+
+    /// [`Fence::crosses`] with what an `lstat` said: `p`'s device (Unix) and whether it's a
+    /// folder.
+    pub fn crosses_dev(&self, p: &Path, dev: Option<u64>, is_dir: bool) -> bool {
+        #[cfg(unix)]
+        if self.dev.is_some() && dev.is_some() && self.dev != dev {
             return true;
         }
         #[cfg(not(unix))]
-        let _ = m;
+        let _ = dev;
+        if is_dir && self.vol.is_some() && volume::of_path(p) != self.vol {
+            return true;
+        }
         let rel = p.strip_prefix(&self.root).unwrap_or(p);
         !self.inside.is_empty() && self.inside.iter().any(|i| self.canon.join(rel).starts_with(i))
     }

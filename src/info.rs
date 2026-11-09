@@ -34,6 +34,11 @@ use crate::mounts::{Fence, Mounts};
 /// How often a walk wakes the window at most while it counts.
 const WAKE_EVERY: Duration = Duration::from_millis(30);
 
+/// How long a key that opens or moves Get Info waits for the item's details: a local `lstat`
+/// answers in microseconds, so they land with the key; a slow disk costs the frame this much at
+/// most, and its details land when they come.
+pub const META_WAIT: Duration = Duration::from_millis(2);
+
 /// What the disk says about one item.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Meta {
@@ -117,65 +122,170 @@ pub fn walk(roots: &[PathBuf], seed: Total, out: &Shared, stop: &AtomicBool, wak
 
 /// [`walk`], with the mount points to stop at (besides another device).
 fn walk_with(roots: &[PathBuf], seed: Total, out: &Shared, stop: &AtomicBool, wake: &dyn Fn(), mounts: &Mounts) {
-    let mut t = seed;
-    let mut last = Instant::now();
-    let mut n = 0u32;
-    let publish = |t: &Total| {
-        if let Ok(mut o) = out.lock() {
-            *o = t.clone();
-        }
-    };
+    let mut c = Counting { t: seed, n: 0, last: Instant::now(), out, wake };
     for root in roots {
-        let fence = Fence::new(root, mounts);
-        let mut stack = vec![root.clone()];
-        t.folders += 1;
-        while let Some(dir) = stack.pop() {
-            if stop.load(Relaxed) {
-                return;
-            }
-            #[cfg(test)]
-            hook::at(&dir);
-            let rd = match std::fs::read_dir(&dir) {
-                Ok(rd) => rd,
-                Err(_) => {
-                    t.unreadable += 1;
-                    continue;
-                }
-            };
-            for de in rd {
-                if stop.load(Relaxed) {
-                    return;
-                }
-                let Ok(de) = de else {
-                    t.unreadable += 1;
-                    break;
-                };
-                let p = de.path();
-                // An lstat: links are counted as themselves, never followed.
-                let Ok(m) = p.symlink_metadata() else { continue };
-                if m.is_dir() {
-                    if fence.crosses(&p, &m) {
-                        t.mounts += 1;
-                        continue;
-                    }
-                    t.folders += 1;
-                    stack.push(p);
-                } else {
-                    t.files += 1;
-                    t.bytes += m.len();
-                }
-                n += 1;
-                if n.is_multiple_of(64) && last.elapsed() >= WAKE_EVERY {
-                    last = Instant::now();
-                    publish(&t);
-                    wake();
-                }
-            }
+        let fence = Fence::below(root, mounts);
+        c.t.folders += 1;
+        if !walk_tree(root, &fence, &mut c, stop) {
+            return;
         }
     }
-    t.done = true;
-    publish(&t);
-    wake();
+    c.t.done = true;
+    c.publish();
+}
+
+/// A walk's running count, published at most every [`WAKE_EVERY`].
+struct Counting<'a> {
+    t: Total,
+    n: u32,
+    last: Instant,
+    out: &'a Shared,
+    wake: &'a dyn Fn(),
+}
+
+impl Counting<'_> {
+    fn publish(&self) {
+        if let Ok(mut o) = self.out.lock() {
+            *o = self.t.clone();
+        }
+        (self.wake)();
+    }
+
+    /// One more entry counted.
+    fn tick(&mut self) {
+        self.n += 1;
+        if self.n.is_multiple_of(64) && self.last.elapsed() >= WAKE_EVERY {
+            self.last = Instant::now();
+            self.publish();
+        }
+    }
+}
+
+/// Counts everything under folder `root` (reached as the user reached it, links in its path
+/// followed). Below it nothing is followed: each folder is opened without following a link
+/// and only if it's still the folder that was listed, and its entries are `lstat`ed through
+/// it, so a folder swapped for a link mid-walk is never entered. A folder whose entries can't
+/// be described (readable but not searchable) counts as one that couldn't be read. False when
+/// stopped.
+#[cfg(unix)]
+fn walk_tree(root: &Path, fence: &Fence, c: &mut Counting, stop: &AtomicBool) -> bool {
+    use crate::dirfd::{fstat, is_dir, names, open_dir, same, stat_at};
+    use std::os::unix::ffi::OsStrExt;
+    let opened = crate::ffi::cstr(root).and_then(|r| open_dir(libc::AT_FDCWD, &r, true)).and_then(|fd| Ok((fstat(&fd)?, fd)));
+    let Ok((st, fd)) = opened else {
+        c.t.unreadable += 1;
+        return true;
+    };
+    let mut stack = vec![(root.to_path_buf(), st, Some(fd))];
+    while let Some((dir, want, fd)) = stack.pop() {
+        if stop.load(Relaxed) {
+            return false;
+        }
+        #[cfg(test)]
+        hook::at(&dir);
+        let fd = match fd {
+            Some(fd) => Ok(fd),
+            None => crate::ffi::cstr(&dir).and_then(|d| open_dir(libc::AT_FDCWD, &d, false)),
+        };
+        let fd = match fd.and_then(|fd| Ok((fstat(&fd)?, fd))) {
+            Ok((now, fd)) if same(&now, &want) => fd,
+            _ => {
+                c.t.unreadable += 1;
+                continue;
+            }
+        };
+        let Ok(entries) = names(&fd) else {
+            c.t.unreadable += 1;
+            continue;
+        };
+        let mut denied = false;
+        for n in entries {
+            if stop.load(Relaxed) {
+                return false;
+            }
+            match stat_at(&fd, &n) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => denied = true,
+                Ok(st) if is_dir(&st) => {
+                    let p = dir.join(std::ffi::OsStr::from_bytes(n.as_bytes()));
+                    // As `MetadataExt::dev` gives it (`dev_t` is i32 on macOS).
+                    #[allow(clippy::unnecessary_cast)]
+                    let dev = st.st_dev as u64;
+                    if fence.crosses_dev(&p, Some(dev), true) {
+                        c.t.mounts += 1;
+                        continue;
+                    }
+                    c.t.folders += 1;
+                    stack.push((p, st, None));
+                }
+                Ok(st) => {
+                    c.t.files += 1;
+                    c.t.bytes += st.st_size as u64;
+                }
+            }
+            c.tick();
+        }
+        if denied {
+            c.t.unreadable += 1;
+        }
+    }
+    true
+}
+
+/// [`walk_tree`] where there are no descriptor-relative calls (Windows): each folder is
+/// checked right before it's read to be a folder, not a link or junction, with the identity it
+/// was listed with.
+#[cfg(not(unix))]
+fn walk_tree(root: &Path, fence: &Fence, c: &mut Counting, stop: &AtomicBool) -> bool {
+    let mut stack: Vec<(PathBuf, Option<fs::Ident>)> = vec![(root.to_path_buf(), None)];
+    while let Some((dir, want)) = stack.pop() {
+        if stop.load(Relaxed) {
+            return false;
+        }
+        #[cfg(test)]
+        hook::at(&dir);
+        if want.is_some() && !dir.symlink_metadata().is_ok_and(|m| m.is_dir() && !m.is_symlink() && fs::ident(&m) == want) {
+            c.t.unreadable += 1;
+            continue;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            c.t.unreadable += 1;
+            continue;
+        };
+        let mut denied = false;
+        for de in rd {
+            if stop.load(Relaxed) {
+                return false;
+            }
+            let Ok(de) = de else {
+                denied = true;
+                break;
+            };
+            let p = de.path();
+            // An lstat: links are counted as themselves, never followed.
+            match p.symlink_metadata() {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => denied = true,
+                Ok(m) if m.is_dir() => {
+                    if fence.crosses(&p, &m) {
+                        c.t.mounts += 1;
+                        continue;
+                    }
+                    c.t.folders += 1;
+                    stack.push((p, fs::ident(&m)));
+                }
+                Ok(m) => {
+                    c.t.files += 1;
+                    c.t.bytes += m.len();
+                }
+            }
+            c.tick();
+        }
+        if denied {
+            c.t.unreadable += 1;
+        }
+    }
+    true
 }
 
 /// Test only: holds a walk as it reaches a folder, until told.
@@ -189,6 +299,16 @@ pub(crate) mod hook {
     type Gate = (PathBuf, Sender<()>, Receiver<()>);
 
     pub(crate) static GATES: Mutex<Vec<Gate>> = Mutex::new(Vec::new());
+
+    /// Paths whose details take this long to read (a slow disk).
+    pub(crate) static SLOW: Mutex<Vec<(PathBuf, std::time::Duration)>> = Mutex::new(Vec::new());
+
+    pub(super) fn slow_meta(p: &Path) {
+        let wait = SLOW.lock().unwrap().iter().find(|(q, _)| q == p).map(|(_, w)| *w);
+        if let Some(w) = wait {
+            std::thread::sleep(w);
+        }
+    }
 
     pub(super) fn at(p: &Path) {
         let gate = {
@@ -205,6 +325,8 @@ pub(crate) mod hook {
 /// Reads what the disk says about `p` (an `lstat`, the owner's names, a link's target). On a
 /// worker.
 pub fn meta(p: &Path) -> Result<Meta, String> {
+    #[cfg(test)]
+    hook::slow_meta(p);
     let m = p.symlink_metadata().map_err(|e| e.to_string())?;
     let ms = |t: std::io::Result<std::time::SystemTime>| {
         t.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64)
@@ -402,6 +524,10 @@ impl State {
     /// Points the panel at the selection (the folder on screen when nothing is selected),
     /// stopping the last walk and starting what this one needs.
     fn retarget_info(&mut self) {
+        // The last walk stops before anything else happens.
+        if let Some(old) = &self.info {
+            old.stop.store(true, Relaxed);
+        }
         let key = self.info_key();
         let f = self.cur();
         let picked = f.targets();
@@ -426,7 +552,7 @@ impl State {
         let req = self.next_info;
         let meta = if paths.len() == 1 {
             let p = paths[0].clone();
-            crate::bounded::read_waiting(&self.meta_loader, self.show_wait, move || Some((req, meta(&p)))).map(|(_, m)| m)
+            crate::bounded::read_waiting(&self.meta_loader, self.show_wait.min(META_WAIT), move || Some((req, meta(&p)))).map(|(_, m)| m)
         } else {
             self.meta_loader.cancel();
             None
@@ -545,6 +671,102 @@ mod tests {
         assert_eq!((t.bytes, t.files, t.folders, t.mounts, t.done), (3, 1, 1, 1, true), "{t:?}");
         assert_eq!(t.caveats().as_deref(), Some("1 mounted disk inside not counted"));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Get Info on a mount point itself (`/`, a volume's top folder): what's on it counts; only
+    /// mounts below it are left out (it used to count one folder).
+    #[test]
+    fn a_mount_root_counts_what_is_on_it() {
+        let d = temp("mount-root");
+        std::fs::create_dir_all(d.join("a/b")).unwrap();
+        std::fs::create_dir_all(d.join("disk")).unwrap();
+        std::fs::write(d.join("a/f"), "abcd").unwrap();
+        let out: Shared = Arc::default();
+        let canon = std::fs::canonicalize(&d).unwrap();
+        walk_with(
+            std::slice::from_ref(&d),
+            Total::default(),
+            &out,
+            &AtomicBool::new(false),
+            &|| {},
+            &Mounts::of(&[&canon, &canon.join("disk")]),
+        );
+        let t = out.lock().unwrap().clone();
+        assert_eq!((t.folders, t.files, t.bytes, t.mounts), (3, 1, 4, 1), "{t:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A folder that can be listed but whose entries can't be looked at (read, not search,
+    /// permission) is one that couldn't be read, not a quiet zero.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_whose_entries_cant_be_described_is_said() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = temp("unsearchable");
+        let locked = d.join("list-only");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("secret"), "hidden").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let root = locked.join("secret").symlink_metadata().is_ok();
+        let t = total_of(std::slice::from_ref(&d));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        if root {
+            return;
+        }
+        assert_eq!(t.unreadable, 1, "{t:?}");
+        assert_eq!(t.caveats().as_deref(), Some("1 folder couldn't be read"));
+    }
+
+    /// A folder swapped for a link to somewhere else while the walk waits to enter it is never
+    /// followed, whether it's the root or a folder below it.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_swapped_for_a_link_mid_walk_isnt_followed() {
+        for at_root in [false, true] {
+            let d = temp(if at_root { "swap-root" } else { "swap-sub" });
+            let root = d.join("root");
+            let queued = if at_root { root.clone() } else { root.join("sub") };
+            std::fs::create_dir_all(&queued).unwrap();
+            std::fs::create_dir_all(d.join("other")).unwrap();
+            std::fs::write(d.join("other/outside"), vec![0u8; 12345]).unwrap();
+            let (reached_tx, reached) = std::sync::mpsc::channel();
+            let (go, go_rx) = std::sync::mpsc::channel();
+            hook::GATES.lock().unwrap().push((queued.clone(), reached_tx, go_rx));
+            let out: Shared = Arc::default();
+            let (o, r) = (out.clone(), root.clone());
+            let walker = std::thread::spawn(move || walk(&[r], Total::default(), &o, &AtomicBool::new(false), &|| {}));
+            reached.recv_timeout(Duration::from_secs(5)).unwrap();
+            std::fs::rename(&queued, d.join("aside")).unwrap();
+            std::os::unix::fs::symlink(d.join("other"), &queued).unwrap();
+            go.send(()).unwrap();
+            walker.join().unwrap();
+            let t = out.lock().unwrap().clone();
+            assert_eq!(t.bytes, 0, "at_root={at_root}: counted what's outside through the link: {t:?}");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// A slow disk never holds up the key that opens Get Info: the panel shows at once, and the
+    /// item's details land when they're read (the key used to wait a whole frame for them).
+    #[test]
+    fn a_slow_disk_never_holds_up_the_panel() {
+        let d = temp("slow-meta");
+        std::fs::write(d.join("f"), "x").unwrap();
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        hook::SLOW.lock().unwrap().push((d.join("f"), Duration::from_millis(200)));
+        let t = Instant::now();
+        s.toggle_info();
+        let took = t.elapsed();
+        assert!(took < Duration::from_millis(5), "the key waited {took:?}");
+        assert!(s.info.as_ref().is_some_and(|i| i.meta.is_none()), "shown before the details");
+        let until = Instant::now() + Duration::from_secs(5);
+        while s.info.as_ref().is_some_and(|i| i.meta.is_none()) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+            s.poll_info();
+        }
+        assert!(s.info.as_ref().is_some_and(|i| matches!(i.meta, Some(Ok(_)))), "and they land later");
     }
 
     /// On Linux, a real one: walking `/dev` never goes into `/dev/pts` and the like.
