@@ -9,6 +9,46 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-09 · Empty the Trash: which trashes, and what's deleted (Review: never run on a
+  real Trash; Windows never run at all).** Linux: the home trash plus `.Trash/$uid` and
+  `.Trash-$uid` on local disks only (no network shares, no FUSE mounts but `fuseblk`: a dead
+  one could hang the count). macOS: `~/.Trash` plus local `/Volumes/*/.Trashes/$uid`, with the
+  shared no-follow delete, not Finder through AppleScript (that would show Finder's own
+  confirmation and needs Automation permission; listing `~/.Trash` needs Full Disk Access, which
+  Arbor explains on `EPERM`). Only the items the dialog's count found are deleted, each only
+  while it's still that item; anything trashed after the count stays, and `.trashinfo` files
+  without an item are left (Arbor's own trash writes the record a moment before the item, so
+  "orphans" can be in flight). Windows: `SHEmptyRecycleBinW` with `SHERB_NOCONFIRMATION`,
+  `SHERB_NOPROGRESSUI` (Arbor's status bar shows it; the shell's window would be a second
+  dialog, at the cost of the shell's own Cancel) and `SHERB_NOSOUND` (Arbor makes no sounds);
+  it can't be stopped once started, and the bin is counted again to report what's left. Undo:
+  `trash::contents::bins` and `ops/trashed.rs`.
+- **2026-11-09 · "Empty the Trash…" and "Go to the Trash", not Finder's "Empty Trash…".** With the
+  shorter titles the palette ranked them above "Move to Trash" for "trash" (shorter wins a tie),
+  so typing "trash" and Enter would no longer trash the selection. Undo: `EMPTY_TRASH` and
+  `GO_TRASH` in `src/commands.rs`, and the ranking test.
+- **2026-11-09 · The sidebar's Trash sits under the favorites, not as one** (no ⌘ number, no
+  drag, its own menu: Open, Empty the Trash…). None on Windows. Undo: `trash_row` in
+  `src/view/sidebar.rs`.
+- **2026-11-09 · Put Back is Linux only, refuses when the item's folder is gone, and is
+  undoable.** macOS has no public API for Finder's Put Back (the original location is kept in
+  Finder's private metadata), so the command is dimmed there and says to use Finder; Windows
+  can't list the Recycle Bin. A taken name gets a free one beside it ("name 2", said in the
+  status bar); a missing folder isn't made again (Nautilus recreates it; refusing is the
+  smaller surprise). Undo trashes the items again. Undo: `Worker::restore_from_trash`.
+- **2026-11-09 · Tabs: keys and drops.** Move Tab Left/Right are ⌃⇧Page Up/Down on every platform
+  (browsers' keys off macOS; macOS has no standard), Move Tab to Other Pane is ⇧⌘\\ (beside
+  ⌘\\ for split) and is dimmed unsplit rather than splitting. A tab let go anywhere over the
+  other pane moves there (where the pointer is over its strip, else at the end); moving a
+  pane's only tab closes that pane without adding it to Reopen Closed Tab (the tab lives on).
+  Undo: `State::move_tab_to_pane`, the three commands in `src/commands.rs`.
+- **2026-11-09 · Universal Mac package, macOS 11 for both slices (Review: the Intel slice runs
+  only on CI's runner, under Rosetta).** One `LSMinimumSystemVersion` (11.0) and
+  `MACOSX_DEPLOYMENT_TARGET=11.0` for both slices, so the binary's own minimum matches the
+  Info.plist (Intel's default would be 10.12, which nothing here tests; Big Sur is the first
+  macOS on Apple silicon). The M4 Pro has no Rosetta and a nearly full disk, so neither Rosetta
+  nor the x86_64 target was installed there. Undo: `ARCH=native` in `scripts/package.sh`.
+
 - **2026-11-09 · Windows: one Arbor per session through a named pipe (Review: never run on
   a real Windows machine; CI runs a hand-off between two threads).** A second `arbor.exe
   <folder>` writes its folders to `\\.\pipe\gg.smr.arbor.<session>.<user>` and exits; the first

@@ -27,6 +27,31 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-09, milestone 14 (Empty Trash, Put Back, tab drags and moves, universal Mac build)
+
+What could cost time: one more sidebar row (the Trash) built every frame, a drag handler on
+each tab built, and three more commands in the table. Emptying, counting and Put Back cost
+nothing until asked for. Measured against 0990d0f, the commit before it, on tabot-dev.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+`xvfb-run /tmp/bench 11 10 --tabs 3 --bin …`, the two release binaries alternating, three passes
+each. The machine was very busy (load average 8.4–9.8 at the start, 4.1–8.0 later), so the
+spread is wide:
+
+| Measure (median per pass) | 0990d0f | this |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 234.0, 381.7, 300.0 ms | 213.4, 381.1, 319.2 ms |
+| Listing visible (10k, nav → frame) | 100.1, 107.9, 107.2 ms | 66.0, 100.6, 104.4 ms |
+| Key → frame (synthetic ↓) | 19.6, 17.4, 14.5 ms | 12.1, 16.9, 16.3 ms |
+| Tab switch to 10k (key → frame) | 93.0, 99.0, 100.2 ms | 100.2, 99.3, 102.0 ms |
+
+`frame_cost` (Arbor's own work per key, no GPU), the two test binaries alternating: medians
+1.816, 1.830, 1.844, 1.901 ms before and 1.861, 1.833, 1.866, 1.867 ms after (one pass of
+each ran at 3.0 ms while the load spiked, and is left out). No difference beyond noise.
+
+The release binary: 39,704,328 bytes before, 39,876,880 after (+0.4%).
+
 ## 2026-11-09, milestone 13 (consolidation, no behaviour change)
 
 Files split into folders, shared modules extracted (`persist`, `bounded`, `mounts`, `ffi`), no

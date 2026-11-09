@@ -26,9 +26,9 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `config.rs` | `config.toml`: settings and key bindings, the template |
 | | `palette.rs`, `menu.rs`, `confirm.rs` | Palette, Linux's in-window context menu, the one dialog |
 | File ops | `actions.rs` | UI side of file operations: clipboard, paste, rename, drag and drop, context menu |
-| | `ops/` | The operation worker (`worker.rs`), undo and redo (`undo.rs`), batch rename (`batch.rs`), fingerprints (`print.rs`) |
+| | `ops/` | The operation worker (`worker.rs`), undo and redo (`undo.rs`), batch rename (`batch.rs`), fingerprints (`print.rs`), Empty Trash and Put Back (`trashed.rs`) |
 | | `noclobber.rs` | Renames, copies and file ids that never replace anything |
-| | `trash/` | Each platform's trash, and telling a disk with none (`win.rs`: the Recycle Bin) |
+| | `trash/` | Each platform's trash, and telling a disk with none (`win.rs`: the Recycle Bin); what's in the trashes, their count for Empty Trash's dialog, `.trashinfo` records (`contents.rs`) |
 | | `delete.rs` | Permanent delete without following links |
 | Features | `preview/` (+ `thumb.rs`) | Quick preview: dispatch (`mod.rs`), its thread (`worker.rs`), text, image decoders (`decode.rs`); OS thumbnails |
 | | `search/` | Recursive search: the walk and its threads (`walk.rs`), results and rechecks (`mod.rs`) |
@@ -72,6 +72,9 @@ Nothing runs in the background unless the user did something, and nothing polls.
   blocks on its source; none polls.
 - **The operation worker** (`ops::start`): one thread per file operation; only one runs at a
   time (`State::job`).
+- **The Trash's count** (`arbor-trash-count`, `trash::contents::Counting`): while Empty
+  Trash's dialog is open, one thread lists the items, then adds up their size, waking the
+  window after each, and ends; closing the dialog stops it.
 - **Favorite looks** (`sidebar::Lookers`): at most two threads sharing a queue, started from
   Rune's `on_ready` (the first frame on screen), ending when it's empty.
 - Short-lived threads: reaping launched processes (`fs::reap`, `openwith`).
@@ -96,7 +99,8 @@ Nothing runs in the background unless the user did something, and nothing polls.
 - **Mount boundaries** (`mounts.rs`). `Mounts` (Linux's mount table, read once per operation)
   and `volume` (macOS's volume per folder) decide what's "another disk"; `Fence` bundles them
   for a walk. Used by permanent delete, cleanup of cancelled copies, cross-disk
-  moves and Get Info's total. Search uses device numbers alone (`search::devices_for`).
+  moves and Get Info's total. `local_points` lists the local disks (Empty Trash's per-disk
+  trashes). Search uses device numbers alone (`search::devices_for`).
 - **User data on disk** (`persist.rs`). `replace` rewrites a file atomically (`Durable` also
   flushes it first, for the handler backup); `locked` holds a file's lock file around a
   read-then-write so two Arbor processes don't interleave; a writer thread reports a run of

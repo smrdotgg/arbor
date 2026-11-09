@@ -56,7 +56,7 @@ A small, fast file manager for macOS, Linux and Windows, built on [Rune](https:/
   the disk's timestamp granularity (2 s on FAT, 1 s on HFS+ and ext3; ext4 and NTFS stamp from
   a clock that ticks every few milliseconds).
 
-About 33,500 lines of Rust in `src/`, over a third of it tests. [`ARCHITECTURE.md`](ARCHITECTURE.md)
+About 36,000 lines of Rust in `src/`, over a third of it tests. [`ARCHITECTURE.md`](ARCHITECTURE.md)
 maps the modules, the threads, the patterns they share and where platform code lives.
 
 ## Install
@@ -65,8 +65,9 @@ maps the modules, the threads, the patterns they share and where platform code l
 all three on every push to `main`: they're the run's artifacts (`arbor-macOS`, `arbor-Linux`,
 `arbor-Windows`). A tag starting with `v` also publishes them as a GitHub Release.
 
-- **macOS** (Apple silicon, macOS 11 or later): unzip `Arbor-<version>-macos-arm64.zip` and move
-  `Arbor.app` to Applications. It's signed ad hoc, not notarized (that needs an Apple Developer
+- **macOS** (Apple silicon and Intel, macOS 11 or later): unzip
+  `Arbor-<version>-macos-universal.zip` and move `Arbor.app` to Applications. One binary holds
+  both: an Apple silicon slice and an Intel one. It's signed ad hoc, not notarized (that needs an Apple Developer
   account), so the first time, right-click it, choose Open, and Open again (or run
   `xattr -d com.apple.quarantine /Applications/Arbor.app`). Finder then lists it under "Open
   With" for folders.
@@ -155,7 +156,13 @@ cargo build --profile dist          # stripped, LTO build: target/dist/arbor
 
 Builds are fully offline. Dependencies are vendored in `vendor/` (see `.cargo/config.toml`).
 `vendor/` is gitignored because it's about 550 MB, so a fresh clone runs `scripts/vendor.sh` first.
-`scripts/package.sh` makes the package (see [Install](#install)). The icon is drawn by
+`scripts/package.sh` makes the package (see [Install](#install)); on a Mac it builds a
+universal `Arbor.app`: this Mac's slice as usual and the other with `--target` (once:
+`rustup target add x86_64-apple-darwin` on Apple silicon), joined with `lipo`, both built for
+macOS 11 (`MACOSX_DEPLOYMENT_TARGET`, matching the Info.plist's `LSMinimumSystemVersion`);
+`ARCH=native` builds this Mac's slice alone. `arbor --version` prints the version without a
+window. CI checks both slices and their minimum version, and runs the Intel slice's
+`--version` under Rosetta. The icon is drawn by
 `scripts/icon.py` (an original tree glyph; pure Python) into `assets/icon/`, and
 `scripts/package.sh --icns` turns it into `Arbor.icns` on a Mac. On Windows, `build.rs` writes
 the icon and version information into a resource file the linker takes (no resource compiler,
@@ -235,6 +242,15 @@ current folder, **⌘W** closes it, **⌃Tab** / **⌃⇧Tab** (or ⇧⌘] / ⇧
 **⇧⌘T** reopens the last closed one. Each tab has its own folder, back and forward history,
 selection, scroll, filter and sort. The tab bar appears only when a pane has two or more tabs:
 click a tab to show it, middle-click to close it, hover for its full path, "+" for a new one.
+**Drag a tab** along its strip to put it elsewhere (where it would land is highlighted, Esc
+leaves it), or onto the other pane of a split window to move it there: over that pane's tab
+strip it goes where you let go, anywhere else in the pane at the end. **Move Tab Left** and
+**Move Tab Right** (⌃⇧Page Up / ⌃⇧Page Down) do the first from the keyboard, and **Move Tab to
+Other Pane** (⇧⌘\\) the second. A moved tab keeps its folder, history, selection, scroll,
+filter and sort (the same lightweight state a hidden tab keeps); moved into the other pane it's
+shown there, read fresh, and that pane becomes active. Moving a pane's only tab closes that
+pane. The drag is Arbor's own inside the window, so it works the same on every platform (see
+`RUNE-GAPS.md`).
 When they don't all fit, the bar shows the tabs around the active one, with "‹ 3" and "5 ›"
 for how many are hidden on each side (click one to show the nearest).
 
@@ -286,6 +302,12 @@ The sidebar lists **Favorites**, in your order, then **Locations**, the volumes 
   there. Each favorite is looked at once per launch, once the window's first frame is on
   screen, by at most two threads that share the list (a dead network folder holds up one of
   them, never the window), never again until the next launch, and never watched. One that vanishes later is marked when a click finds it gone.
+- **Trash**, below the favorites (not one of them: no ⌘ number, no reordering): opens the
+  Trash folder, on Linux the home trash's `files/` (`~/.local/share/Trash/files`; "The Trash is
+  empty" before anything has gone there) and on macOS `~/.Trash` (which macOS lets Arbor read
+  only with Full Disk Access; the status bar says how to grant it). Right-click it for
+  **Empty the Trash…**. Windows has none: the Recycle Bin is a shell folder, not one Arbor can
+  list. "Go to the Trash" in the palette does the same.
 - **Locations**: on macOS what's mounted in `/Volumes` (not the boot volume's alias, or a
   folder left there with nothing mounted); on Linux the mounts under `/media/$USER`,
   `/run/media/$USER`, `/media` and `/mnt` from `/proc/self/mounts` (not the kernel's own file
@@ -579,6 +601,45 @@ Cancel has the focus, and Esc keeps them.
   without putting it in the bin anyway, the status bar says so plainly. Restore from the Recycle
   Bin: Windows doesn't say where an item went, so Arbor can't undo it.
 
+**Empty the Trash…** (palette, or the sidebar's Trash) deletes what's in the Trash for good, so
+it asks first, in the same dialog, saying it can't be undone. The dialog opens at once; a
+thread of its own counts the items (each with its identity) and then adds up their size, and
+the dialog says "The 12 items in the Trash (1.4 GB) will be deleted permanently" as each lands
+("The Trash is already empty", when it is). Closing the dialog stops the count. Emptying runs
+on the worker with progress, and Esc stops it between items: it deletes exactly the items the
+count found, each only while it's still that item (one replaced since is left alone and
+named; one put in the Trash after the count stays), the way Delete Permanently deletes (never
+following a link, never crossing into another disk), then the item's `.trashinfo`. The result
+says what happened: "Emptied the Trash: deleted 12 items permanently", or how many went and
+what stopped it. There's no undo.
+
+- **Linux:** the home trash and, on each local disk mounted now, `$top/.Trash/$uid` (under a
+  sticky `.Trash` that isn't a link) and `$top/.Trash-$uid` (each a real folder of yours), the
+  trashes Arbor's own Move to Trash uses. Network shares and FUSE mounts other than `fuseblk`
+  (sshfs, rclone, gvfs) aren't looked at (a dead one could hang the count); empty their trash
+  from the share itself.
+- **macOS:** `~/.Trash`, and `.Trashes/<your uid>` on each local volume under `/Volumes` (from
+  `getmntinfo` without waiting on any file system). Recent macOS lets an app read `~/.Trash`
+  only with Full Disk Access; without it, the dialog and the result say: "Arbor needs Full Disk
+  Access to see what's in the Trash: open System Settings → Privacy & Security → Full Disk
+  Access, turn on Arbor (or the app you started it from), then quit and reopen Arbor". Finder
+  isn't asked (through AppleScript), so nothing outside Arbor's own dialog shows.
+- **Windows:** the Recycle Bin of every drive: `SHQueryRecycleBinW` counts it for the dialog,
+  and `SHEmptyRecycleBinW` empties it after Arbor's dialog, with no confirmation of its own,
+  no progress window (Arbor's status bar shows it, and a second window would be a second
+  dialog) and no sound. The shell empties in one call, so Esc can't stop it (the status bar says
+  so). Afterwards it's counted again, and the result says if anything is still in it.
+
+**Put Back** (Linux; palette, or the context menu of an item in a Trash folder) puts the
+selected items back where they came from, which each item's `.trashinfo` says (a relative path
+in a disk's own trash is from that disk's top folder). It never replaces anything: when the
+original name is taken it goes beside it under a free one ("report 2.txt"), and the status bar
+says so ("“report.txt” went back as “report 2.txt”: “report.txt” is taken in ~/docs"). An item
+whose folder isn't there any more stays in the Trash, said so. It runs on the worker, the items'
+records go once they're out, and ⌘Z puts them in the Trash again. macOS has no public way for
+an app to do Finder's Put Back (Finder keeps where each item came from to itself), so there
+it's dimmed and says to use Finder; Windows doesn't let Arbor list the Recycle Bin.
+
 **Delete Permanently…** (⌥⌘⌫ on macOS, as in Finder; Shift+Delete on Windows and Linux, as in
 Explorer and Files) always asks first. The dialog names the count and the first few items, says
 folders go with everything in them, and that it can't be undone. It runs as a file operation on
@@ -760,7 +821,8 @@ Two panes on one folder by different paths (a symlink to it) are known to be the
 The palette names ⌘\ "Split View" or "Close Split View", and Space "Quick Preview" or "Close
 Preview", whichever it will do. Delete Permanently is ⌥⌘⌫ on macOS and Shift+Delete on Windows and
 Linux, each platform's own convention. Undo and redo refuse if any item changed since. Ctrl+Y
-(redo) is Windows' only; Linux has Ctrl+Shift+Z. ⌘R also reads the sidebar's Locations again. ⌘E ejects the volume the active pane is on; the palette names it ("Eject “USB”"). Add to Sidebar has no key: Finder's ⌃⌘T is ⌘T (New Tab) off macOS, so a settings file shared between machines would clash. Rename selects the name before the extension; Enter saves, Esc cancels. With two or more items selected, Rename opens Batch Rename. Esc also cancels
+(redo) is Windows' only; Linux has Ctrl+Shift+Z. Move Tab Left and Right are ⌃⇧Page Up and
+⌃⇧Page Down on every platform, as in browsers off macOS. ⌘R also reads the sidebar's Locations again. ⌘E ejects the volume the active pane is on; the palette names it ("Eject “USB”"). Add to Sidebar has no key: Finder's ⌃⌘T is ⌘T (New Tab) off macOS, so a settings file shared between machines would clash. Rename selects the name before the extension; Enter saves, Esc cancels. With two or more items selected, Rename opens Batch Rename. Esc also cancels
 a running copy or move.
 
 ## Accessibility
@@ -899,6 +961,10 @@ All three build, pass tests and pass clippy in CI. How much has been run for rea
   input methods, drag and drop, clipboard, undoing a trash, `xdg-open`.
 - **Windows**: drive letters, hidden attribute, Recycle Bin, `explorer /select,`. Compiles and
   passes tests in CI but **has never been run**: everything at runtime is unchecked.
+- **Milestone 14, not run for real:** emptying a real Trash on any platform (tests use fixture
+  trashes, never the user's), the Full Disk Access message on a Mac without it, Windows'
+  `SHEmptyRecycleBinW`, and dragging tabs with a real pointer. The universal package's Intel
+  slice is run only on CI's macOS runner (under Rosetta); the M4 Pro here has no Rosetta.
 - **macOS packaging**, checked on the M4 Pro: `Arbor.app` passes `plutil -lint` and `codesign
   --verify`, its icon has every size, it launches with `open` and quits, a folder passed at
   launch (`open -a Arbor.app dir`) opens in its first tab, and one sent to the running app opens
@@ -929,6 +995,11 @@ On the Mac, check:
       Created and accessed dates show; permissions and owner look like `ls -l`.
 - [ ] Add a folder to the sidebar, quit, reopen: it's still there. Drag a favorite up and down.
       Rename the folder in Finder, relaunch: it's dimmed, and a click says it isn't there.
+- [ ] Without Full Disk Access, the sidebar's Trash and "Empty the Trash…" say how to grant it;
+      with it, the dialog counts the items and size, Cancel keeps them, Empty Trash empties
+      `~/.Trash` (and a USB stick's `.Trashes`), and Finder's Trash shows empty.
+- [ ] On an Intel Mac (or `arch -x86_64` with Rosetta), the universal `Arbor.app` opens.
+- [ ] Drag a tab along its strip, and onto the other pane of a split window.
 
 ### Test by hand on Windows
 
@@ -955,6 +1026,8 @@ one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine
       its label. Eject it (⏏): "Ejected “…”"; with a file on it open in Notepad, it says it's in
       use. A card reader with no card adds no "insert a disk" dialog.
 - [ ] Right-click a file → Open With…: Windows' own dialog, with the default app first.
+- [ ] "Empty the Recycle Bin…": the dialog counts the items and size; Empty Recycle Bin empties
+      it with no Windows dialog, progress window or sound, and the result's count matches.
 - [ ] Get Info (Ctrl+I) shows attributes (Read-only, Hidden…) and a folder's total.
 - [ ] "Make Arbor the Default for Folders…": double-clicking a folder in Explorer, a drive in
       This PC and Win+E open Arbor; "Restore the System Default for Folders…" brings Explorer
@@ -962,11 +1035,11 @@ one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine
 
 ## Not yet
 
-Emptying the Trash, file watching (use ⌘R), Open With's "Other…" on macOS and Linux, the
+File watching (use ⌘R), Open With's "Other…" on macOS and Linux, Put Back on macOS and
+Windows, emptying the trashes of network shares, the
 sidebar's Locations refreshing by themselves on Linux (right-click or ⌘R), changing attributes
 in Get Info, rich previews (PDF, video, documents) on Linux and
 new (uncached) thumbnails on Windows (see Quick preview), syntax highlighting in the text
 preview, regular expressions in Select by Pattern, more than one operation
-at a time, reordering tabs or dragging them between panes, a universal (Intel and Apple silicon) Mac build,
-notarized and signed packages, and
+at a time, dragging a tab out into a window of its own, notarized and signed packages, and
 dragging rows out to Finder while the window is split on macOS (see `RUNE-GAPS.md`).
