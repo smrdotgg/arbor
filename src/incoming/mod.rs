@@ -58,7 +58,8 @@ pub fn classify(paths: Vec<PathBuf>, items: bool) -> Vec<Show> {
 
 #[cfg_attr(not(any(test, all(unix, not(target_os = "macos")))), allow(dead_code))]
 /// The local path a `file://` URI names (`file:///a%20b` → `/a b`), or `None` for another
-/// scheme or host.
+/// scheme or host, a fragment (`#…`), or an escaped NUL or `/` (a separator inside a name),
+/// which GLib refuses too. A `%` not followed by two hex digits is itself.
 pub fn file_uri_path(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     let slash = rest.find('/')?;
@@ -66,14 +67,22 @@ pub fn file_uri_path(uri: &str) -> Option<PathBuf> {
     if !host.is_empty() && host != "localhost" {
         return None;
     }
+    if path.contains('#') {
+        return None;
+    }
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     let mut bytes = Vec::with_capacity(path.len());
     let b = path.as_bytes();
     let mut i = 0;
     while i < b.len() {
+        // Two hex digits, checked as such: `from_str_radix` would take "+f" for 0x0f.
         if b[i] == b'%'
-            && i + 2 < b.len()
-            && let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).ok()?, 16)
+            && let (Some(h), Some(l)) = (b.get(i + 1).and_then(|&c| hex(c)), b.get(i + 2).and_then(|&c| hex(c)))
         {
+            let v = h * 16 + l;
+            if v == 0 || v == b'/' {
+                return None;
+            }
             bytes.push(v);
             i += 3;
             continue;

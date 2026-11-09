@@ -11,6 +11,103 @@ fn file_uris_become_paths() {
     assert_eq!(file_uri_path("file:///"), Some(PathBuf::from("/")));
 }
 
+/// Percent-encodes a path's bytes as a file manager's caller would (unreserved and `/` as they
+/// are).
+fn encode(b: &[u8]) -> String {
+    b.iter()
+        .map(|&c| if c.is_ascii_alphanumeric() || b"/-._~".contains(&c) { (c as char).to_string() } else { format!("%{c:02X}") })
+        .collect()
+}
+
+/// Any path (any bytes but NUL) sent as a `file://` URI comes back exactly.
+#[cfg(unix)]
+#[test]
+fn any_path_round_trips_through_a_file_uri() {
+    use std::os::unix::ffi::OsStrExt;
+    crate::prop::check("file_uri_round_trip", 3000, |r| {
+        let mut b = vec![b'/'];
+        b.extend(r.bytes(30).into_iter().filter(|&c| c != 0));
+        let host = r.pick(&["", "localhost"]);
+        let uri = format!("file://{host}{}", encode(&b));
+        assert_eq!(file_uri_path(&uri).as_deref().map(|p| p.as_os_str().as_bytes()), Some(&b[..]), "{uri}");
+    });
+}
+
+/// What a `file://` URI names, the plain way: a local host, no fragment, each `%` and two hex
+/// digits a byte (never a NUL or a `/`, which no name holds), anything else as it is.
+fn reference(uri: &str) -> Option<Vec<u8>> {
+    let rest = uri.strip_prefix("file://")?;
+    let at = rest.find('/')?;
+    let (host, path) = rest.split_at(at);
+    if !(host.is_empty() || host == "localhost") || path.contains('#') {
+        return None;
+    }
+    let (b, mut out, mut i) = (path.as_bytes(), Vec::new(), 0);
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() && b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit() {
+            let v = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).ok()?, 16).ok()?;
+            if v == 0 || v == b'/' {
+                return None;
+            }
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    Some(out)
+}
+
+/// Any text: never a panic, and what's read is what the URI names, the plain way.
+#[test]
+fn any_uri_gives_what_it_names_or_nothing() {
+    const BITS: &[&str] = &[
+        "file://",
+        "file:",
+        "localhost",
+        "server",
+        "/",
+        "%",
+        "%2F",
+        "%2f",
+        "%00",
+        "%+f",
+        "%-1",
+        "%41",
+        "%C3%A9",
+        "%zz",
+        "#",
+        "?",
+        "a",
+        "é",
+        " ",
+        "%\u{e9}",
+    ];
+    crate::prop::check("file_uri_any", 5000, |r| {
+        let uri = r.from(BITS, 10);
+        let got = file_uri_path(&uri);
+        #[cfg(unix)]
+        assert_eq!(got.as_deref().map(|p| std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()).to_vec()), reference(&uri), "{uri:?}");
+        #[cfg(not(unix))]
+        assert_eq!(got.is_some(), reference(&uri).is_some(), "{uri:?}");
+    });
+}
+
+/// Found by `any_uri_gives_what_it_names_or_nothing`: "%+f" was read as the byte 0x0f
+/// (`from_str_radix` takes a sign), "%2F" became a separator inside a name, "%00" a NUL, and a
+/// fragment ("#…") part of the path; a "%" before a character that isn't ASCII threw the whole
+/// URI away. GLib refuses the first four too; the last is a literal "%" now.
+#[test]
+fn a_file_uri_never_hides_a_separator_a_nul_or_a_fragment() {
+    for uri in ["file:///a%2Fb", "file:///a%2fb", "file:///a%00b", "file:///a#frag", "file:///a%2F..%2Fetc"] {
+        assert_eq!(file_uri_path(uri), None, "{uri}");
+    }
+    assert_eq!(file_uri_path("file:///a%+fb"), Some(PathBuf::from("/a%+fb")));
+    assert_eq!(file_uri_path("file:///a%-1b"), Some(PathBuf::from("/a%-1b")));
+    assert_eq!(file_uri_path("file:///caf%\u{e9}"), Some(PathBuf::from("/caf%\u{e9}")));
+}
+
 fn tmp(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("arbor-incoming-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
