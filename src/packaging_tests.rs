@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::handler::{BACKUP_FILE, Backup};
+
 /// A package folder as the tarball unpacks it: the scripts, the desktop file, icons, and an
 /// `arbor` that records `--restore-folder-default` (when `with_arbor`).
 fn package(root: &Path, with_arbor: bool) -> PathBuf {
@@ -71,5 +73,71 @@ fn install_writes_any_path_into_the_desktop_file_correctly() {
             assert!(v.status.success() && !said.contains("error"), "{name}: {said}");
         }
     }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Arbor made the default (activation file, folder default, backup), as Make leaves them.
+fn made_default(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let service = home.join(".local/share/dbus-1/services/org.freedesktop.FileManager1.service");
+    std::fs::create_dir_all(service.parent().unwrap()).unwrap();
+    std::fs::write(&service, crate::handler::linux::service_text(&home.join(".local/bin/arbor"))).unwrap();
+    let mimeapps = home.join(".config/mimeapps.list");
+    std::fs::create_dir_all(mimeapps.parent().unwrap()).unwrap();
+    std::fs::write(&mimeapps, "[Added Associations]\ninode/directory=arbor.desktop;\n\n[Default Applications]\ninode/directory=arbor.desktop\ntext/plain=gedit.desktop\n").unwrap();
+    let backup = home.join(".config/arbor").join(BACKUP_FILE);
+    let mut b = Backup::default();
+    b.put("mimeapps.list inode/directory", Some(b"old.desktop;fallback.desktop;"));
+    b.put("dbus-1/services/org.freedesktop.FileManager1.service", None);
+    b.write(&backup).unwrap();
+    (service, mimeapps, backup)
+}
+
+/// The review's case: with the installed binary gone, uninstall used to skip Restore and leave
+/// Arbor's activation file, so "Show in folder" failed to start anything. Now the Arbor beside
+/// the script restores; with none at all, the script takes back what Arbor wrote itself.
+#[test]
+fn uninstall_never_strands_the_folder_default() {
+    let root = tmp("uninstall");
+    // The installed binary gone, the package's still there: it restores.
+    let pkg = package(&root, true);
+    let home = root.join("home1");
+    std::fs::create_dir_all(&home).unwrap();
+    assert!(run(&pkg, "install.sh", &home).0);
+    std::fs::remove_file(home.join(".local/bin/arbor")).unwrap();
+    let (ok, out) = run(&pkg, "uninstall.sh", &home);
+    assert!(ok, "{out}");
+    let log = std::fs::read_to_string(home.join("restore.log")).unwrap_or_default();
+    assert!(log.contains(&*pkg.join("arbor").display().to_string()), "the package's Arbor restored: {log:?} {out}");
+    // Neither: the script puts it back from the backup.
+    let _ = std::fs::remove_dir_all(&root);
+    let root = tmp("uninstall-bare");
+    let pkg = package(&root, false);
+    let home = root.join("home2");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::copy(Path::new("/bin/true"), pkg.join("arbor")).unwrap();
+    assert!(run(&pkg, "install.sh", &home).0);
+    std::fs::remove_file(pkg.join("arbor")).unwrap();
+    std::fs::remove_file(home.join(".local/bin/arbor")).unwrap();
+    let (service, mimeapps, backup) = made_default(&home);
+    let (ok, out) = run(&pkg, "uninstall.sh", &home);
+    assert!(ok, "{out}");
+    assert!(!service.exists(), "Arbor's activation file is gone: {out}");
+    assert_eq!(
+        std::fs::read_to_string(&mimeapps).unwrap(),
+        "[Added Associations]\ninode/directory=arbor.desktop;\n\n[Default Applications]\ninode/directory=old.desktop;fallback.desktop;\ntext/plain=gedit.desktop\n",
+        "the old default is back, only in its section: {out}"
+    );
+    assert!(!backup.exists());
+    assert!(
+        out.contains("Removed Arbor's D-Bus activation file") && out.contains("Folders open in old.desktop;fallback.desktop; again"),
+        "{out}"
+    );
+    // Someone else's activation file stays.
+    let home = root.join("home3");
+    std::fs::create_dir_all(&home).unwrap();
+    let (service, _, _) = made_default(&home);
+    std::fs::write(&service, "[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=/usr/bin/nautilus\n").unwrap();
+    assert!(run(&pkg, "uninstall.sh", &home).0);
+    assert!(service.exists(), "not Arbor's: left alone");
     let _ = std::fs::remove_dir_all(&root);
 }
