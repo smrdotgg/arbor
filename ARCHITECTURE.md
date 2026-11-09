@@ -1,0 +1,117 @@
+# Architecture
+
+A map for finding your way. What Arbor does is in `README.md`; why, and what it must never do,
+in `NORTHSTAR.md`. Each module's own `//!` comment says more about it.
+
+## The shape
+
+One window, one `State` (`src/app.rs`), one UI thread. Rune calls four functions on it:
+`view::view` (build the element tree from `State`, every frame), `State::on_key`,
+`State::poll` (after a waker fires: land whatever background work finished) and `setup`.
+Handlers change `State` and land the change with `tx.instant()` (nothing animates). Anything
+that can touch a disk runs off the UI thread and lands through `poll`.
+
+## Modules
+
+| Area | Modules | What they own |
+| --- | --- | --- |
+| Entry | `main.rs` | Start-up order, Rune's callbacks, exit drains |
+| State | `app.rs` | `State`, navigation, startup read, key dispatch, `run`/`unavailable` per command |
+| | `folder.rs` | One folder on screen: listing, cursor, selection, filter, sort, history; `TabMemo` |
+| | `panes.rs` | Tabs and split view |
+| Commands | `commands.rs` | The command table (`Cmd`: id, title, default keys), `Keymap`, palette scoring |
+| | `config.rs` | `config.toml`: settings and key bindings, the template |
+| | `palette.rs`, `menu.rs`, `confirm.rs` | Palette, Linux's in-window context menu, the one dialog |
+| File ops | `actions.rs` | UI side of file operations: clipboard, paste, rename, drag and drop, context menu |
+| | `ops.rs` | The operation worker: copy, move, trash, delete, batch rename, undo/redo, fingerprints |
+| | `noclobber.rs` | Renames, copies and file ids that never replace anything |
+| | `trash.rs` | Each platform's trash, and telling a disk with none |
+| | `delete.rs` | Permanent delete without following links; mount boundaries (`Mounts`, `Fence`) |
+| Features | `preview.rs` (+ `thumb.rs`) | Quick preview: its worker, text, image decoders; OS thumbnails |
+| | `search.rs` (+ `search_tests.rs`) | Recursive search: walker pool, results, rechecks |
+| | `jump.rs` | Jump to Folder: frecency, history writer, the box |
+| | `select.rs`, `pattern.rs` | Select by Pattern and other selection commands; globs |
+| | `batch.rs`, `rename.rs` | Batch Rename's dialog; its rules (pure functions) |
+| | `complete.rs` | Tab completion in go-to mode |
+| | `info.rs`, `openwith.rs` | Get Info (and its streaming total); Open With |
+| | `sidebar.rs`, `volumes.rs` | Favorites and their file; Locations and Eject |
+| Platform glue | `handler.rs` | Making Arbor the default for folders, and restoring |
+| | `incoming.rs` | Folders other apps send (Apple events, D-Bus, a named pipe on Windows) |
+| UI | `view.rs` | Every element: sidebar, pane (path bar, tabs, list), panels, overlays |
+| Tooling | `timing.rs`, `fs.rs` | Opt-in speed logs; folder reads, sorting and formatting |
+| Tests only | `a11y_tests.rs`, `frame_bench.rs`, `packaging_tests.rs` | Accessibility tree, per-key cost, install scripts |
+
+## Threads
+
+Nothing runs in the background unless the user did something, and nothing polls.
+
+- **Startup read** (`app::Booting`): started by `main` before Rune's loop; reads
+  `config.toml`, `sidebar.toml`, then the first folder. The first window waits at most
+  `FIRST_PAINT_WAIT` (8 ms) for it, then lands it in `poll`.
+- **`rune::Latest` workers**: Rune's shared pool (≤ 4 threads) runs every latest-wins request:
+  folder listings (`Folder::loader`), settings reload, typed-path checks, completion, Get
+  Info's metadata, Open With's list, batch rename's reads and plans, search rechecks, volume
+  lists, eject, launching apps. An older answer never lands over a newer one.
+- **Preview worker** (`arbor-preview`, `preview::Worker`): one thread, started by the first
+  preview; one job at a time, at most one waiting; a stop flag checked between reads and rows.
+- **Search pool** (`search::Pool`): up to four walker threads, started by the first search,
+  below the window's priority, sharing one queue and a stop flag per walk.
+- **Writers**: `arbor-history` (`jump::Store`: appends, load, compaction, clear, under a lock
+  file) and `arbor-sidebar` (`sidebar::Writer`: atomic rewrites). Each gets up to 100 ms at
+  exit (`drain_at_exit`).
+- **Get Info's total** (`arbor-info`): one walk per request, waking the window at most every
+  30 ms.
+- **Listeners** (not in tests or the bench): `incoming::listen` (macOS open-documents events,
+  Linux `arbor-dbus` serving `org.freedesktop.FileManager1`, Windows `arbor-pipe`) and
+  `volumes::watch` (macOS mount notifications, Windows `arbor-devices` hidden window). Each
+  blocks on its source; none polls.
+- **The operation worker** (`ops::start`): one thread per file operation; only one runs at a
+  time (`State::job`).
+- Short-lived threads: one `stat` per favorite (`sidebar`), reaping launched processes
+  (`fs::reap`, `openwith`).
+
+## Patterns to reuse
+
+- **Bounded wait, then async.** `folder::read_waiting(loader, wait, work)` runs `work` on a
+  `Latest` and waits up to `wait` (usually ≤ one frame) for it: in time, the answer comes back
+  from the call; late, it lands in `poll` through the loader. Never both, never neither. Used
+  by listings, tab switches, typed paths, completion, Get Info, Open With and batch rename.
+  The startup read and Jump's load do the same over their own channels.
+- **Request numbers.** Every listing request takes `folder::next_request()` (one process-wide
+  counter); an answer lands only if it carries the number its folder is still waiting for.
+  Navigations that need follow-up (a Jump, a sidebar click) remember the number. Preview,
+  Get Info and Open With keep their own counters the same way.
+- **Identity, re-checked right before acting.** A source's identity (`fs::Ident`: device and
+  inode, or volume and file index on Windows) is captured when an operation is asked for
+  (from the listing, or the search walk) and checked on the worker immediately before each
+  item is touched (`Op::Checked`, `ops::Doomed`, `ops::Seen` for batch rename). Undo keeps a
+  fuller fingerprint (`ops::Print`: identity, type, size, mtime, and a tree for folders) and
+  refuses if anything differs.
+- **Mount boundaries.** `delete::Mounts` (Linux's mount table, read once per operation) and
+  `delete::volume` (macOS's volume per folder) decide what's "another disk"; `delete::Fence`
+  bundles them for a walk. Used by permanent delete, cleanup of cancelled copies, cross-disk
+  moves and Get Info's total. Search uses device numbers alone (`search::devices_for`).
+- **Stop flags.** Every background read has an `Arc<AtomicBool>` set when its result stops
+  mattering (navigated away, tab hidden, dropped); work checks it between entries.
+
+## How a command flows
+
+1. A key arrives in `State::on_key` (`app.rs`), which handles text fields and overlays first,
+   then looks the chord up in the `Keymap` built from `commands.rs` and `config.toml`. The
+   palette and the context menus resolve to the same `Cmd`, and dim or skip it when
+   `State::unavailable(cmd)` gives a reason (each command's own code says it again).
+2. `State::run(cmd)` asks first through `confirm.rs` when `Cmd::asks` (what can't be undone,
+   or changes the system; the dialog's button calls `run_permanent`), then `run_cmd` matches
+   on `Cmd` exhaustively, as `unavailable` does.
+3. Navigation calls `State::go*` → `Folder::read` → a `Latest` listing, landed by
+   `State::land`. File commands go to `actions.rs`, which builds an `ops::Op` (capturing
+   identities) and calls `ops::start`; the outcome lands in `poll` (`State::job`) and goes on
+   the undo stack.
+
+## Platform code
+
+Per-platform code lives beside its portable logic, behind `#[cfg]`, in one module per concern:
+`noclobber.rs` (no-replace primitives), `trash.rs`, `delete.rs` (`imp` per family), `thumb.rs`,
+`volumes.rs`, `openwith.rs`, `handler.rs` (`linux`, `windows`, `mac`), `incoming.rs` (`mac`,
+`linux`, `windows`) and `fs.rs` (open, reveal, hidden files). Linux's handler code is plain
+files and is tested on every platform; Windows' registry plan is tested in CI under a test key.
