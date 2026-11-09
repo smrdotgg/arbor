@@ -110,9 +110,9 @@ impl Worker<'_> {
                     {
                         None
                     }
-                    (Some(_), Ok(_)) => Some(format!(
-                        "“{name}” isn't the item you chose (something else is at its path now, or it changed since), so it was left alone"
-                    )),
+                    (Some(_), Ok(_)) => {
+                        Some(format!("“{name}” isn't the item you chose (something else is at its path now), so it was left alone"))
+                    }
                     (Some(_), Err(e)) => Some(format!("Couldn't delete “{name}”: {e}")),
                 };
                 if let Some(why) = problem {

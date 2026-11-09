@@ -34,18 +34,6 @@ Format: date · decision · why · how to undo.
     `ARBOR_PROP_SEED` and `ARBOR_PROP_CASES` hunt locally. There's no crate (`src/prop.rs`).
     Undo: per item.
 
-- **2026-11-09 · Identity now includes type, size, ctime and birth time, so an item changed
-  since it was chosen is left alone too (Review: a visible behaviour change).** Device and inode
-  alone let a replacement that got the freed inode back through (ext4 here: 200 of 200), so
-  every destructive check (Delete, Empty Trash, Trash, Move, inline and batch rename, Put Back,
-  and Copy, which shares the check) now compares the fuller `fs::Ident`. The cost: a file
-  edited after its folder was listed (a download still growing, an editor saving in place) is
-  refused with "…or it changed since" until the folder is read again. Get Info and search
-  rechecks compare only device and inode (`Ident::node`): they aren't acting on the item.
-  Windows still can't see a replacement within NTFS's 15 s creation-time tunnelling that has
-  the same size and write time (its file index needs every file opened), and a folder's write
-  time isn't compared there (NTFS updates the copy a listing reads lazily: CI's Windows runner
-  refused to delete a folder whose contents had changed). Undo: `fs::Ident`.
 - **2026-11-09 · Empty Trash refuses a whole trash whose folders aren't safe** rather than
   emptying part of it: a trash folder, its `files/` or `info/` that's a link or someone else's,
   or a shared `.Trash` that isn't sticky, is said in the dialog and nothing in it is read or
@@ -206,6 +194,24 @@ Format: date · decision · why · how to undo.
   12 MP led to 4 MP.
 
 ## Made by the agent (owner said "I trust your judgment")
+
+- **2026-11-09 · Object identity and content fingerprint are two notions** (the PM's call;
+  replaces the entry that made identity type, size, ctime and birth time, under which a file
+  edited after its folder was listed was refused by Delete and by every action on a search
+  result until the folder was read again: Arbor watches nothing, so that would block users all
+  the time). `fs::Ident` is now the object: device and inode (Windows: creation time), type,
+  and birth time where the file system keeps one (Linux statx btime, macOS `st_birthtime`).
+  Every action on chosen items compares it: Delete, Empty Trash (plus Linux's file handle),
+  trash, move, copy, rename, F5/F6, drag, Put Back, batch rename's search results, and the
+  worker's "replaced while it ran". An edit doesn't change it; a replacement that got the freed
+  inode back does (new birth time). `ops::Print` (identity, type, size, mtime) stays the
+  content fingerprint for undo, redo, batch rename and a cancelled copy's cleanup, unchanged.
+  Batch rename still refuses an item edited between its preview and Apply (its rollback shares
+  that fingerprint). Limits: without a birth time (ext2/3, some FUSE or network file systems,
+  no statx), or a replacement made in the original's clock tick, device, inode and type are all
+  there is, so a reused inode reads as the same item; Windows' identity no longer includes a
+  file's size and write time, so a replacement within NTFS's 15 s tunnelling isn't seen at all
+  (the file index needs every file opened). Undo: `fs::Ident` (add the size and ctime back).
 
 - **2026-11-09 · The inline rename and New Folder are worker operations** (review of milestone
   13: they touched the disk on the window's thread). The list shows the new name at once and

@@ -311,9 +311,8 @@ mod imp {
             }
             // Its name must still lead to it (as far as Windows says without opening it).
             match path.symlink_metadata() {
-                // (The same folder: its write time changed as its contents went.)
-                Ok(now)
-                    if now.file_type().is_dir() && crate::fs::ident(&now).map(|i| i.node()) == crate::fs::ident(&m).map(|i| i.node()) => {}
+                // The same folder (its object identity: its write time changed as its contents went).
+                Ok(now) if now.file_type().is_dir() && crate::fs::ident(&now) == crate::fs::ident(&m) => {}
                 _ => return Err(Halt::Changed { at: path.to_path_buf() }),
             }
         }

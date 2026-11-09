@@ -31,33 +31,39 @@ pub struct Entry {
     pub pending: Option<String>,
 }
 
-/// What tells an item from another put at its path later, and from itself changed since: the
-/// one definition every destructive check compares (delete, Empty Trash, trash, move, rename,
-/// batch rename), from the metadata already read for it (no extra call; see [`ident`]).
+/// Object identity: whether what's at a path is still the item chosen from a listing (or a
+/// search), edited or not. Every action on chosen items compares it right before acting
+/// (delete, Empty Trash, trash, move, copy, rename, batch rename's search results, Put Back,
+/// drag), from the metadata already read for it (no extra call; see [`ident`]).
 ///
-/// Device and inode alone aren't enough: a file system reuses a freed inode at once (ext4 gave
-/// a new file at the same name the old one's inode in 100 of 100 tries), so the type, a file's
-/// size, the time its inode last changed (ctime, to the nanosecond) and, where the file system
-/// keeps it, its birth time come too. A replacement has a new birth time and ctime; the same
-/// item edited since has a new ctime, and is left alone just the same ("changed since").
+/// It's the object, not its contents: device and inode (Windows: creation time and whether
+/// it's a folder), type and birth time. Size and times of change aren't part of it, so a file
+/// edited after its folder was listed (Arbor doesn't watch folders) is still the item the user
+/// chose. Whether an item is *unchanged* is another question, with its own type: undo, redo,
+/// batch rename's rollback and a cancelled copy's cleanup compare `ops::Print` (identity, type,
+/// size, mtime) and refuse on any edit.
+///
+/// Device and inode alone aren't enough: a file system reuses a freed inode at once (ext4 gave a
+/// new file at the same name the old one's inode in 100 of 100 tries). The birth time tells
+/// them apart, where the file system keeps one (Linux's statx btime: ext4, btrfs, xfs, tmpfs on
+/// recent kernels; macOS's birth time; Windows' creation time). Limits: where it keeps none
+/// (ext2/3, some network and FUSE file systems, kernels without statx) a replacement that got
+/// the inode back reads as the same item; and ext4 stamps from a clock that ticks every few ms,
+/// so a replacement made in the tick the original was made in does too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Ident {
     /// Unix: device and inode. Windows: creation time (ns) and whether it's a folder.
     node: (u64, u64),
     /// 0 a file, 1 a folder, 2 a link, 3 anything else.
     kind: u8,
-    /// A file's size (0 for anything else: a folder's changes as entries come and go).
-    size: u64,
-    /// Unix: when its inode last changed (ctime). Windows: when a file was last written. In ns.
-    changed: i128,
     /// When it was made, where the file system says (Linux's statx btime, macOS's birth time,
     /// Windows' creation time), in ns.
     born: Option<i128>,
 }
 
 impl Ident {
-    /// The same object on the disk, changed or not (Unix: device and inode). For checking that
-    /// a folder being walked wasn't swapped for another, never for deciding to act on an item.
+    /// Device and inode, for comparing with a folder's `fstat` (Get Info's walk).
+    #[cfg(unix)]
     pub fn node(&self) -> (u64, u64) {
         self.node
     }
@@ -65,14 +71,14 @@ impl Ident {
     /// From its parts, for metadata read without `std` (`dirfd::ident_at`).
     #[cfg(unix)]
     #[allow(clippy::unnecessary_cast)] // mode_t is u16 on macOS
-    pub(crate) fn of_parts(dev: u64, ino: u64, mode: u32, size: u64, changed: i128, born: Option<i128>) -> Ident {
+    pub(crate) fn of_parts(dev: u64, ino: u64, mode: u32, born: Option<i128>) -> Ident {
         let kind = match mode & libc::S_IFMT as u32 {
             m if m == libc::S_IFREG as u32 => 0,
             m if m == libc::S_IFDIR as u32 => 1,
             m if m == libc::S_IFLNK as u32 => 2,
             _ => 3,
         };
-        Ident { node: (dev, ino), kind, size: if kind == 0 { size } else { 0 }, changed, born }
+        Ident { node: (dev, ino), kind, born }
     }
 }
 
@@ -87,7 +93,7 @@ fn ns(t: std::time::SystemTime) -> i128 {
 /// An item's [`Ident`] from its metadata (not following a link). Windows gives a file created
 /// under a name within 15 s of deleting one there the old one's creation time ("tunnelling"),
 /// and its file index needs the file opened (one call per item), so there a replacement that
-/// quick, of the same size and written in the same clock tick, reads as the same item.
+/// quick reads as the same item.
 pub fn ident(m: &std::fs::Metadata) -> Option<Ident> {
     let ft = m.file_type();
     let kind = if ft.is_symlink() {
@@ -99,20 +105,19 @@ pub fn ident(m: &std::fs::Metadata) -> Option<Ident> {
     } else {
         3
     };
-    let size = if kind == 0 { m.len() } else { 0 };
+    // Linux: statx's btime, `Err` where the file system keeps none (then device, inode and type).
     let born = m.created().ok().map(ns);
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let changed = m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128;
-        Some(Ident { node: (m.dev(), m.ino()), kind, size, changed, born })
+        Some(Ident { node: (m.dev(), m.ino()), kind, born })
     }
     #[cfg(not(unix))]
     {
-        // A file's last write. Not a folder's: NTFS updates the copy of it in the parent's index
-        // (what a listing reads) lazily, so it can differ from the folder's own.
-        let changed = if kind == 0 { m.modified().ok().map_or(0, ns) } else { 0 };
-        Some(Ident { node: (born.map_or(0, |b| b as u64), u64::from(m.is_dir())), kind, size, changed, born })
+        // Without a creation time nothing tells it from any other item: no identity (and
+        // nothing is deleted on a guess).
+        let b = born?;
+        Some(Ident { node: (b as u64, u64::from(m.is_dir())), kind, born })
     }
 }
 
@@ -120,6 +125,73 @@ pub fn ident(m: &std::fs::Metadata) -> Option<Ident> {
 /// can't be read: compare it with the one captured earlier, right before acting on the path.
 pub fn ident_at(path: &Path) -> Option<Ident> {
     ident(&path.symlink_metadata().ok()?)
+}
+
+/// Tests: the file at `p` removed and another made there holding `content`, one that got `p`'s
+/// inode back (ext4 hands a new file the inode just freed) and has its own birth time. Returns
+/// the identity the item it replaced had, which device, inode and type alone can't tell from the
+/// new one. `None` where it can't be shown: a file system that keeps no birth time, or doesn't
+/// reuse an inode at once (APFS, tmpfs).
+///
+/// A test running alongside can take the freed inode first; then it's tried again with the
+/// newcomer, so the identity returned may be of that one, not of the item `p` held when called
+/// (which the caller may have captured: that item is then simply replaced).
+#[cfg(all(test, unix))]
+pub(crate) fn reuse_inode(p: &Path, content: &str) -> Option<Ident> {
+    for _ in 0..5 {
+        // Not reused: the newcomer at `p` is the item to try again with.
+        if let Some(id) = reuse_inode_once(p, content) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+#[cfg(all(test, unix))]
+fn reuse_inode_once(p: &Path, content: &str) -> Option<Ident> {
+    use std::os::unix::fs::MetadataExt;
+    let before = ident_at(p)?;
+    before.born?;
+    let ino = p.symlink_metadata().ok()?.ino();
+    // More than a tick of the clock the file system stamps from (ext4: a few ms) after the
+    // original was made, so the newcomer's birth time is its own.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::remove_file(p).ok()?;
+    // ext4 hands out the lowest free inode in the folder's group: one freed by a test running
+    // alongside comes first. Each such newcomer is kept aside, filling the gap, until the freed
+    // one comes back.
+    let mut aside = Vec::new();
+    let mut got = None;
+    for i in 0..200 {
+        std::fs::write(p, content).ok()?;
+        let m = p.symlink_metadata().ok()?;
+        if m.ino() == ino {
+            assert_ne!(ident(&m)?.born, before.born, "a newcomer has its own birth time");
+            got = Some(before);
+            break;
+        }
+        let filler = p.with_file_name(format!(".reuse-filler-{i}"));
+        std::fs::rename(p, &filler).ok()?;
+        aside.push(filler);
+    }
+    for f in aside {
+        let _ = std::fs::remove_file(f);
+    }
+    got
+}
+
+/// Tests: whether [`reuse_inode`] can show inode reuse in the temp folder; says so when not.
+#[cfg(all(test, unix))]
+pub(crate) fn inode_reuse_shows(test: &str) -> bool {
+    let d = std::env::temp_dir().join(format!("arbor-reuse-probe-{test}-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&d);
+    let p = d.join("probe");
+    let shows = std::fs::write(&p, "probe").is_ok() && reuse_inode(&p, "again").is_some();
+    let _ = std::fs::remove_dir_all(&d);
+    if !shows {
+        eprintln!("{test}: skipped (the temp folder's file system keeps no birth time, or doesn't reuse an inode at once)");
+    }
+    shows
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

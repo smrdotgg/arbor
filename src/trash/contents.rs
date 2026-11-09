@@ -237,7 +237,7 @@ fn real_dir(p: &Path, uid: Option<u32>) -> bool {
 pub fn bins_in(home: &Path, tops: &[PathBuf], uid: u32) -> Vec<Bin> {
     use std::os::unix::fs::PermissionsExt;
     let mut out = vec![Bin::freedesktop(home, uid)];
-    let mut seen: Vec<(u64, u64)> = crate::fs::ident_at(&home.join("files")).map(|i| i.node()).into_iter().collect();
+    let mut seen: Vec<Ident> = crate::fs::ident_at(&home.join("files")).into_iter().collect();
     for top in tops {
         let shared = top.join(".Trash");
         let admin = shared
@@ -249,7 +249,7 @@ pub fn bins_in(home: &Path, tops: &[PathBuf], uid: u32) -> Vec<Bin> {
             if !real_dir(&root, Some(uid)) || !real_dir(&bin.items, None) {
                 continue;
             }
-            let Some(id) = crate::fs::ident_at(&bin.items).map(|i| i.node()) else { continue };
+            let Some(id) = crate::fs::ident_at(&bin.items) else { continue };
             if seen.contains(&id) {
                 continue;
             }
@@ -789,7 +789,7 @@ pub fn original(trashed: &Path, home: Option<&Path>) -> Result<Origin, String> {
         // The item really is in the folder that was checked.
         let here = crate::ffi::cstr(name).map_err(|e| e.to_string())?;
         let item = crate::dirfd::ident_at(&o.files, &here).map_err(|e| format!("it couldn't be read ({e})"))?;
-        if crate::fs::ident_at(trashed).map(|i| i.node()) != Some(item.node()) {
+        if crate::fs::ident_at(trashed) != Some(item) {
             return Err("it isn't in the Trash folder Arbor checked".into());
         }
         let info = o.info.ok_or("it has no record in the Trash saying where it came from")?;

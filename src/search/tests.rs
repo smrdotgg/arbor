@@ -1009,16 +1009,92 @@ fn every_action_on_a_replaced_result_refuses() {
 }
 
 /// The review's blocker, for search results: a result replaced by an item that got its inode
-/// back (here, the same inode rewritten: what ext4 hands a new file at once) passed the
-/// device-and-inode check, and every action went ahead on the newcomer.
+/// back (what ext4 hands a new file at once) passed the device-and-inode check, and every action
+/// went ahead on the newcomer. Its birth time tells it apart (skipped where the file system
+/// keeps none, or doesn't reuse inodes at once).
 #[cfg(unix)]
 #[test]
 fn every_action_on_a_result_whose_inode_was_reused_refuses() {
+    if !crate::fs::inode_reuse_shows("every_action_on_a_result_whose_inode_was_reused_refuses") {
+        return;
+    }
     every_action_refuses("reused", |p| {
-        let before = crate::fs::ident_at(p).unwrap();
-        std::fs::write(p, "SOMEONE ELSE'S FILE").unwrap();
-        assert_eq!(crate::fs::ident_at(p).unwrap().node(), before.node());
+        crate::fs::reuse_inode(p, "SOMEONE ELSE'S FILE").expect("the inode was reused");
     });
+}
+
+/// A result edited after the walk found it (Arbor doesn't watch folders) is still the item the
+/// search found: trash, cut and paste, F6, the inline rename, Batch Rename and Delete
+/// Permanently all go ahead, and a drag carries it.
+#[test]
+fn every_action_on_an_edited_result_goes_ahead() {
+    let names = ["a/report-trash.txt", "b/report-cut.txt", "c/report-f6.txt", "d/report-rename.txt", "e/report-delete.txt"];
+    let d = tree("edited", &names);
+    let into = tree("edited-into", &[]);
+    let mut s = state_in(&d);
+    search(&mut s, "report");
+    finish_walk(&mut s);
+    for n in names {
+        // Another size and another mtime and ctime: an editor saving in place.
+        std::fs::write(d.join(n), "edited since the walk, and longer").unwrap();
+        let t = std::time::SystemTime::now() + Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(d.join(n)).unwrap().set_modified(t).unwrap();
+    }
+    let ok = |s: &State, what: &str| assert!(!s.note.as_deref().is_some_and(|n| n.contains("left alone")), "{what}: {:?}", s.note);
+    // A drag carries it.
+    pick(&mut s, "a/report-trash.txt");
+    let (i, id) = (s.cur().sel, s.cur().id);
+    assert!(s.drag_item(id, i).is_some(), "drag");
+    // Trash.
+    s.run(Cmd::Trash, &mut tx());
+    finish_job(&mut s);
+    ok(&s, "trash");
+    assert!(!d.join("a/report-trash.txt").exists(), "trash");
+    // Cut and paste elsewhere.
+    pick(&mut s, "b/report-cut.txt");
+    s.run(Cmd::Cut, &mut tx());
+    let clip = s.clip.as_ref().unwrap();
+    let req = crate::app::PasteReq { id: 0, dest: into.clone(), dest_id: None, mv: false };
+    let content = rune::ClipboardContent::new("").with_files(clip.paths.clone());
+    s.paste_reqs.push(req);
+    s.paste_reply(0, &content);
+    finish_job(&mut s);
+    ok(&s, "cut and paste");
+    assert!(into.join("report-cut.txt").exists(), "cut and paste");
+    // Rename, inline.
+    pick(&mut s, "d/report-rename.txt");
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "report-renamed.txt".into();
+    s.commit_rename(&mut tx());
+    crate::app::tests::wait_job(&mut s);
+    ok(&s, "rename");
+    assert!(d.join("d/report-renamed.txt").exists(), "rename");
+    // Batch Rename: no problem with it.
+    pick(&mut s, "c/report-f6.txt");
+    s.run(Cmd::BatchRename, &mut tx());
+    crate::batch::tests::settle_batch(&mut s);
+    let b = s.batch.as_ref().unwrap();
+    assert!(b.known());
+    assert!(!b.plan.status.iter().any(|st| matches!(st, crate::rename::Status::Problem(_))), "batch: {:?}", b.plan.status);
+    s.close_batch(&mut tx());
+    // Delete Permanently.
+    pick(&mut s, "e/report-delete.txt");
+    s.run(Cmd::Delete, &mut tx());
+    s.answer(true, &mut tx());
+    finish_job(&mut s);
+    ok(&s, "delete");
+    assert!(!d.join("e/report-delete.txt").exists(), "delete");
+    // F6 into the other pane.
+    s.run(Cmd::Split, &mut tx());
+    settle_all(&mut s);
+    s.panes[1].f.cwd = into.clone();
+    s.activate(0, &mut tx());
+    assert!(s.cur().searching());
+    pick(&mut s, "c/report-f6.txt");
+    s.run(Cmd::MoveToOther, &mut tx());
+    finish_job(&mut s);
+    ok(&s, "F6");
+    assert!(into.join("report-f6.txt").exists(), "F6");
 }
 
 fn every_action_refuses(name: &str, replace: fn(&Path)) {

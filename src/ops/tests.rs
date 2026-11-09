@@ -1651,25 +1651,19 @@ fn an_item_without_an_identity_is_never_deleted() {
     let _ = fs::remove_dir_all(&d);
 }
 
-/// Another item at `p` with `p`'s device and inode, as a file system reusing a freed inode at
-/// once gives it (ext4 does, every time): `p` rewritten in place, another size. Returns the
-/// identity `p` had before, which device and inode alone can't tell from the new one.
-#[cfg(unix)]
-fn inode_reused(p: &Path) -> crate::fs::Ident {
-    let before = crate::fs::ident_at(p).unwrap();
-    fs::write(p, "another item, of another size").unwrap();
-    assert_eq!(crate::fs::ident_at(p).unwrap().node(), before.node(), "same device and inode");
-    before
-}
-
 /// The review's blocker: identity was device and inode, so an item replaced by one that got its
-/// inode back passed every check and was acted on. Now each destructive path leaves it alone:
-/// delete, trash, move, rename, Put Back (search results' identities, `Op::Checked`) and Empty
-/// Trash. And a real remove-and-recreate at the same name never inherits the identity.
+/// inode back passed every check and was acted on. Its birth time tells them apart: each
+/// destructive path leaves it alone (delete, trash, move, rename, Put Back: search results'
+/// identities, `Op::Checked`; and Empty Trash). Skipped where the file system keeps no birth
+/// time or doesn't reuse inodes at once (there, device, inode and type are all there is).
 #[cfg(unix)]
 #[test]
 fn an_item_with_a_reused_inode_is_never_acted_on() {
     use crate::trash::contents;
+    if !crate::fs::inode_reuse_shows("an_item_with_a_reused_inode_is_never_acted_on") {
+        return;
+    }
+    let reused = |p: &Path| crate::fs::reuse_inode(p, "another item").expect("the inode was reused");
     let d = tmp("inode-reuse");
     let target = d.join("t");
     fs::create_dir(d.join("into")).unwrap();
@@ -1683,30 +1677,81 @@ fn an_item_with_a_reused_inode_is_never_acted_on() {
     ];
     for (what, op) in &ops {
         fs::write(&target, "the item chosen").unwrap();
-        let id = inode_reused(&target);
+        let id = reused(&target);
         let o = run_now(op(id));
-        assert_eq!(fs::read_to_string(&target).unwrap(), "another item, of another size", "{what}: left alone");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "another item", "{what}: left alone");
         assert!(o.removed.is_empty() && o.moved.is_empty() && o.results.is_empty(), "{what}");
         assert!(o.refused.is_some() || !o.errors.is_empty(), "{what}: and said");
     }
     // Empty Trash and Put Back.
     let root = fixture_trash(&d, &[("a", "a")]);
     let (items, _) = contents::list(&[trash_bin(&root)], &|| false).unwrap();
-    inode_reused(&root.join("files/a"));
+    reused(&root.join("files/a"));
     let o = run_now(Op::EmptyTrash { items: Some(items) });
     assert!(o.removed.is_empty() && root.join("files/a").exists() && root.join("info/a.trashinfo").exists(), "empty trash");
     let item = root.join("files/a");
-    let id = inode_reused(&item);
+    let id = reused(&item);
     let o = run_now(Op::Checked { expect: vec![(item.clone(), id)], op: Box::new(Op::PutBack { items: vec![item.clone()] }) });
     assert!(o.refused.is_some() && item.exists() && !d.join("a").exists(), "put back");
-    // The real thing: removed and made again at once, the same size, twenty times.
-    for _ in 0..20 {
-        fs::write(&target, "old").unwrap();
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// A file edited after its folder was listed (Arbor doesn't watch folders) is still the item
+/// the user chose: delete, trash, move, rename and Put Back go ahead (identity is the object,
+/// not its contents), and so does Empty Trash. Undo still refuses once it's edited again: its
+/// fingerprint is the contents too.
+#[test]
+fn an_item_edited_since_it_was_chosen_is_still_acted_on() {
+    let d = tmp("edited-since");
+    let target = d.join("t");
+    fs::create_dir(d.join("into")).unwrap();
+    let checked = |op: Op, id: crate::fs::Ident| Op::Checked { expect: vec![(target.clone(), id)], op: Box::new(op) };
+    type MakeOp<'a> = Box<dyn Fn(crate::fs::Ident) -> Op + 'a>;
+    let ops: Vec<(&str, MakeOp, PathBuf)> = vec![
+        ("delete", Box::new(|id| Op::Delete { items: vec![Doomed { path: target.clone(), id: Some(id), dir: false }] }), PathBuf::new()),
+        ("trash", Box::new(|id| checked(Op::Trash { sources: vec![target.clone()] }, id)), PathBuf::new()),
+        ("move", Box::new(|id| checked(Op::Move { sources: vec![target.clone()], dest: d.join("into") }, id)), d.join("into/t")),
+        ("rename", Box::new(|id| checked(Op::RenameOne { from: target.clone(), to: d.join("renamed") }, id)), d.join("renamed")),
+    ];
+    for (what, op, lands) in &ops {
+        fs::write(&target, "as listed").unwrap();
         let id = crate::fs::ident_at(&target).unwrap();
-        fs::remove_file(&target).unwrap();
-        fs::write(&target, "new").unwrap();
-        let o = run_now(Op::Delete { items: vec![Doomed { path: target.clone(), id: Some(id), dir: false }] });
-        assert!(o.removed.is_empty() && fs::read_to_string(&target).unwrap() == "new", "a replacement is never deleted");
+        // Another size, another mtime and ctime: an editor saving in place.
+        fs::write(&target, "edited since, and longer").unwrap();
+        bump(&target);
+        let o = run_now(op(id));
+        assert!(o.refused.is_none() && o.errors.is_empty(), "{what}: {:?} {:?}", o.refused, o.errors);
+        assert!(!target.exists(), "{what}: done");
+        if !lands.as_os_str().is_empty() {
+            assert_eq!(fs::read_to_string(lands).unwrap(), "edited since, and longer", "{what}");
+            // Edited again after the operation: its undo refuses, as before.
+            let u = take(o);
+            edit(lands);
+            let why = undo_refused(u);
+            assert!(why.contains("was edited"), "{what}: {why}");
+            assert!(lands.exists() && !target.exists(), "{what}: undo left it where it is");
+            fs::remove_file(lands).unwrap();
+        }
+    }
+    #[cfg(unix)]
+    {
+        use crate::trash::contents;
+        let root = fixture_trash(&d, &[("a", "a"), ("b", "b")]);
+        // Put Back of a search result edited since the walk found it.
+        let item = root.join("files/b");
+        let id = crate::fs::ident_at(&item).unwrap();
+        fs::write(&item, "edited in the Trash").unwrap();
+        bump(&item);
+        let o = run_now(Op::Checked { expect: vec![(item.clone(), id)], op: Box::new(Op::PutBack { items: vec![item.clone()] }) });
+        assert!(o.refused.is_none() && o.errors.is_empty(), "put back: {:?} {:?}", o.refused, o.errors);
+        // Empty Trash: an item edited in the Trash after the count is still the one counted.
+        let (items, _) = contents::list(&[trash_bin(&root)], &|| false).unwrap();
+        fs::write(root.join("files/a"), "edited in the Trash").unwrap();
+        bump(&root.join("files/a"));
+        let o = run_now(Op::EmptyTrash { items: Some(items) });
+        assert!(o.errors.is_empty(), "{:?}", o.errors);
+        assert!(!root.join("files/a").exists() && !root.join("info/a.trashinfo").exists(), "empty trash");
+        assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "edited in the Trash", "put back");
     }
     let _ = fs::remove_dir_all(&d);
 }

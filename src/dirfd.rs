@@ -65,14 +65,7 @@ pub fn ident_at(dir: &OwnedFd, name: &CStr) -> io::Result<crate::fs::Ident> {
             let t = |s: i64, n: u32| s as i128 * 1_000_000_000 + n as i128;
             let born = (x.stx_mask & libc::STATX_BTIME != 0).then(|| t(x.stx_btime.tv_sec, x.stx_btime.tv_nsec));
             let dev = libc::makedev(x.stx_dev_major, x.stx_dev_minor);
-            return Ok(crate::fs::Ident::of_parts(
-                dev,
-                x.stx_ino,
-                u32::from(x.stx_mode),
-                x.stx_size,
-                t(x.stx_ctime.tv_sec, x.stx_ctime.tv_nsec),
-                born,
-            ));
+            return Ok(crate::fs::Ident::of_parts(dev, x.stx_ino, u32::from(x.stx_mode), born));
         }
         let e = io::Error::last_os_error();
         // No statx (an old kernel, a sandbox): what `std` falls back to, without a birth time.
@@ -82,13 +75,12 @@ pub fn ident_at(dir: &OwnedFd, name: &CStr) -> io::Result<crate::fs::Ident> {
     }
     let st = stat_at(dir, name)?;
     let (dev, ino) = node(&st);
-    let changed = st.st_ctime as i128 * 1_000_000_000 + st.st_ctime_nsec as i128;
     #[cfg(target_os = "macos")]
     let born = Some(st.st_birthtime as i128 * 1_000_000_000 + st.st_birthtime_nsec as i128);
     #[cfg(not(target_os = "macos"))]
     let born = None;
     #[allow(clippy::unnecessary_cast)]
-    Ok(crate::fs::Ident::of_parts(dev, ino, st.st_mode as u32, st.st_size as u64, changed, born))
+    Ok(crate::fs::Ident::of_parts(dev, ino, st.st_mode as u32, born))
 }
 
 /// Linux: the file system's handle for `name` in open folder `dir` (a link's own, not

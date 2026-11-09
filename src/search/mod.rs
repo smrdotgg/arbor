@@ -528,9 +528,7 @@ impl Folder {
             let mut seen: HashMap<PathBuf, bool> = HashMap::new();
             // What's at `path`, if it's the item `id` (any item, when not known): the same object
             // on the disk, edited or not (an edit shows as a change to its row).
-            let found = |path: &Path, id: Option<fs::Ident>| {
-                path.symlink_metadata().ok().filter(|m| id.is_none() || fs::ident(m).map(|i| i.node()) == id.map(|i| i.node()))
-            };
+            let found = |path: &Path, id: Option<fs::Ident>| path.symlink_metadata().ok().filter(|m| id.is_none() || fs::ident(m) == id);
             let info = |key: String, path: &Path, m: &std::fs::Metadata| {
                 let target = if m.file_type().is_symlink() { std::fs::metadata(path).ok() } else { None };
                 let t = target.as_ref().unwrap_or(m);

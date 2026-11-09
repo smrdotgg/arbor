@@ -377,9 +377,7 @@ impl<'a> Worker<'a> {
             let name = name_of(path);
             let problem = match path.symlink_metadata() {
                 Ok(m) if crate::fs::ident(&m) == Some(*id) => continue,
-                Ok(_) => format!(
-                    "“{name}” isn't the item the search found (something else is at its path now, or it changed since), so it was left alone"
-                ),
+                Ok(_) => format!("“{name}” isn't the item the search found (something else is at its path now), so it was left alone"),
                 Err(_) => format!("“{name}” isn't where the search found it any more, so it was left alone"),
             };
             why.push(problem);
@@ -424,11 +422,9 @@ impl<'a> Worker<'a> {
         let name = name_of(src);
         Some(match (src.symlink_metadata(), self.seen_by_search) {
             (Ok(m), _) if crate::fs::ident(&m) == Some(*want) => return None,
-            (Ok(_), true) => format!(
-                "“{name}” isn't the item the search found (something else is at its path now, or it changed since), so it was left alone"
-            ),
+            (Ok(_), true) => format!("“{name}” isn't the item the search found (something else is at its path now), so it was left alone"),
             (Err(_), true) => format!("“{name}” isn't where the search found it any more, so it was left alone"),
-            (Ok(_), false) => format!("“{name}” was replaced while the operation ran (or changed), so it was left alone"),
+            (Ok(_), false) => format!("“{name}” was replaced while the operation ran, so it was left alone"),
             (Err(_), false) => format!("“{name}” was moved or deleted while the operation ran, so it was left alone"),
         })
     }
@@ -451,9 +447,9 @@ impl<'a> Worker<'a> {
                 // Nothing to check it against: whatever is there now can't be told from the
                 // item chosen, so it's never deleted on a guess.
                 Ok(_) if d.id.is_none() => Some(format!("“{name}” couldn't be identified when it was chosen, so it was left alone")),
-                Ok(m) if crate::fs::ident(&m) != d.id => Some(format!(
-                    "“{name}” isn't the item you chose (something else is at its path now, or it changed since), so it was left alone"
-                )),
+                Ok(m) if crate::fs::ident(&m) != d.id => {
+                    Some(format!("“{name}” isn't the item you chose (something else is at its path now), so it was left alone"))
+                }
                 Ok(_) => None,
             };
             if let Some(why) = problem {

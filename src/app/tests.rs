@@ -515,3 +515,47 @@ fn rename_and_new_folder_run_on_the_worker() {
     assert!(s.rename.is_some() && s.note.as_deref() == Some(BUSY));
     assert_eq!(s.unavailable(Cmd::NewFolder), Some(BUSY));
 }
+
+/// A file edited after its folder was listed (Arbor doesn't watch folders): Delete Permanently,
+/// which checks each item against its identity from the listing, still deletes it, and Trash
+/// and the inline rename still go ahead.
+#[test]
+fn an_item_edited_after_the_listing_is_still_acted_on() {
+    let d = folder("edited-after-listing", 0);
+    for n in ["a-delete", "b-trash", "c-rename"] {
+        std::fs::write(d.join(n), "as listed").unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    for n in ["a-delete", "b-trash", "c-rename"] {
+        std::fs::write(d.join(n), "edited after the listing, and longer").unwrap();
+        let t = std::time::SystemTime::now() + Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(d.join(n)).unwrap().set_modified(t).unwrap();
+    }
+    let at = |s: &State, n: &str| s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == n).unwrap();
+    let ok = |s: &State, what: &str| assert!(!s.note.as_deref().is_some_and(|n| n.contains("left alone")), "{what}: {:?}", s.note);
+    let i = at(&s, "a-delete");
+    s.cur_mut().select(i);
+    s.run(Cmd::Delete, &mut Tx::default());
+    s.answer(true, &mut Tx::default());
+    finish_job(&mut s);
+    ok(&s, "delete");
+    assert!(!d.join("a-delete").exists(), "delete");
+    settle_all(&mut s);
+    let i = at(&s, "b-trash");
+    s.cur_mut().select(i);
+    s.run(Cmd::Trash, &mut Tx::default());
+    finish_job(&mut s);
+    ok(&s, "trash");
+    assert!(!d.join("b-trash").exists(), "trash");
+    settle_all(&mut s);
+    let i = at(&s, "c-rename");
+    s.cur_mut().select(i);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "c-renamed".into();
+    s.commit_rename(&mut Tx::default());
+    finish_job(&mut s);
+    ok(&s, "rename");
+    assert!(d.join("c-renamed").exists() && !d.join("c-rename").exists(), "rename");
+    let _ = std::fs::remove_dir_all(&d);
+}

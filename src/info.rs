@@ -274,9 +274,9 @@ fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) ->
 #[cfg(not(unix))]
 fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) -> bool {
     let still = match root {
-        Root::Picked(p, id) => p
-            .symlink_metadata()
-            .is_ok_and(|m| m.is_dir() && !m.is_symlink() && id.is_none_or(|id| fs::ident(&m).map(|i| i.node()) == Some(id.node()))),
+        Root::Picked(p, id) => {
+            p.symlink_metadata().is_ok_and(|m| m.is_dir() && !m.is_symlink() && id.is_none_or(|id| fs::ident(&m) == Some(id)))
+        }
         Root::Here(p, id) => id.is_none_or(|id| crate::noclobber::dir_id(p) == Some(id)),
     };
     if !still {
@@ -290,13 +290,9 @@ fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) ->
         }
         #[cfg(test)]
         hook::at(&dir);
-        // The same folder (device and inode, or Windows' creation time): its own times change as
-        // things in it do.
-        if want.is_some()
-            && !dir
-                .symlink_metadata()
-                .is_ok_and(|m| m.is_dir() && !m.is_symlink() && fs::ident(&m).map(|i| i.node()) == want.map(|w| w.node()))
-        {
+        // The same folder (its object identity, which its times changing as things in it do
+        // don't touch).
+        if want.is_some() && !dir.symlink_metadata().is_ok_and(|m| m.is_dir() && !m.is_symlink() && fs::ident(&m) == want) {
             c.t.unreadable += 1;
             continue;
         }
