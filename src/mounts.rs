@@ -55,7 +55,12 @@ pub fn unescape_bytes(s: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'\\' && i + 3 < b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+        // At most `\377`: a first digit past 3 is no byte, and stays as it is.
+        if b[i] == b'\\'
+            && i + 3 < b.len()
+            && (b'0'..=b'3').contains(&b[i + 1])
+            && b[i + 2..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
+        {
             out.push((b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0'));
             i += 4;
         } else {
@@ -288,6 +293,53 @@ pub(crate) fn canonical(p: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the kernel writes: `\` and three octal digits for a byte (at most `\377`); anything
+    /// else is itself.
+    fn reference(s: &str) -> Vec<u8> {
+        let b = s.as_bytes();
+        let (mut out, mut i) = (Vec::new(), 0);
+        while i < b.len() {
+            let oct = |c: u8| (b'0'..=b'7').contains(&c);
+            if b[i] == b'\\' && i + 3 < b.len() && (b'0'..=b'3').contains(&b[i + 1]) && oct(b[i + 2]) && oct(b[i + 3]) {
+                out.push((b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0'));
+                i += 4;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Any field: escapes undone exactly as the kernel writes them, never a panic (or, in a
+    /// release build, a wrapped byte) on one it can't have written.
+    #[test]
+    fn any_mount_field_unescapes_exactly() {
+        crate::prop::check("mount_unescape", 5000, |r| {
+            let s = r.from(&["\\", "0", "1", "3", "4", "7", "8", "a", " ", "/", "\\040", "\\777", "\\400", "é"], 16);
+            assert_eq!(unescape_bytes(&s), reference(&s), "{s:?}");
+        });
+    }
+
+    /// Any mount table text: never a panic, and every mount point a full path.
+    #[test]
+    fn any_mount_table_parses() {
+        crate::prop::check("mount_table", 2000, |r| {
+            let text =
+                r.from(&["22 1 8:1 / ", "/media/a\\040b", " ", "\n", " - ", "ext4 ", "fuse.sshfs ", "nfs ", "/dev/sdb1 ", "\\", "x"], 30);
+            let _ = Mounts::parse(&text);
+            let _ = local_points_in(&text);
+        });
+    }
+
+    /// Found by `any_mount_field_unescapes_exactly`: `\777` (no byte: the kernel writes at most
+    /// `\377`) overflowed a byte, a panic in a debug build and a wrong byte in a release one.
+    #[test]
+    fn an_escape_past_a_byte_is_left_as_it_is() {
+        assert_eq!(unescape_bytes("/a\\777b"), b"/a\\777b");
+        assert_eq!(unescape_bytes("/a\\377b"), b"/a\xffb");
+    }
 
     #[test]
     fn reads_the_mount_table() {
