@@ -27,6 +27,30 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-09, milestone 13 (consolidation, no behaviour change)
+
+Files split into folders, shared modules extracted (`persist`, `bounded`, `mounts`, `ffi`), no
+logic changed. Measured against 39782cd, the commit before it, on tabot-dev.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+`xvfb-run /tmp/bench 11 10 --preview 3 --bin …`, the two release binaries alternating, three
+passes each (load average 0.6–2.8):
+
+| Measure (median per pass) | 39782cd | this |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 135.5, 134.3, 134.7 ms | 128.8, 135.5, 138.7 ms |
+| Listing visible (10k, nav → frame) | 42.7, 41.6, 42.9 ms | 42.6, 41.1, 42.5 ms |
+| Key → frame (synthetic ↓) | 6.3, 6.4, 6.4 ms | 6.4, 6.5, 6.4 ms |
+| Preview 256 KB text (Space → frame) | 15.0, 15.2, 15.3 ms | 15.2, 14.9, 15.2 ms |
+| Preview 12 MP JPEG (Space → frame) | 111.2, 113.3, 110.7 ms | 111.3, 110.3, 112.9 ms |
+| Key → frame, preview open | 4.9, 5.1, 5.1 ms | 5.3, 5.1, 5.4 ms |
+
+`frame_cost` (Arbor's own work per key, no GPU), the two test binaries alternating: medians
+1.789, 1.833, 1.825 ms before and 1.817, 1.812, 1.813 ms after. No difference beyond noise.
+
+The stripped `dist` binary: 26,915,384 bytes before, 26,914,488 after (−0.003%).
+
 ## 2026-11-09, milestone 12 (sidebar favorites, Locations and Eject, Open With, Get Info)
 
 What could cost time: at startup, reading `sidebar.toml` (on the thread that reads the first

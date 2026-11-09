@@ -109,6 +109,30 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-09 · Milestone 13: consolidation, with no behaviour change.** Big files became
+  folders whose `mod.rs` is the interface (`ops/`, `preview/`, `view/`, `app/`, `jump/`,
+  `search/`, `handler/`, `incoming/`, `trash/`, `openwith/`), tests moved out of inline
+  modules into `tests.rs` beside them (same test names), and four shared modules took over
+  duplicated code: `persist` (atomic rewrites, "say a failure once", exit drains),
+  `bounded` (the wait-at-most-a-frame hand-off), `mounts` (mount boundaries), `ffi` (C and
+  UTF-16 paths); `fs::ident_at` for the re-check idiom. Moved items got `pub(super)` rather
+  than a hand-tuned visibility each. `ARCHITECTURE.md` maps it; README and AGENTS.md point
+  there (AGENTS.md: one line). Only visible change: the folder-handler backup's temporary
+  file is now named like the others (`<name>.<pid>-<n>.tmp`, was `<name>.arbor-<pid>`).
+  Left alone on purpose: Search keeps its device-only boundary (it walks bind mounts and
+  stops repeats by identity; `mounts::Fence` would change what it finds); the startup read
+  and Jump's load keep their own channels (they're not `Latest` requests); BENCH.md's dated
+  sections stay as history; `ops/tests.rs` stays one file. Undo: revert the commits from
+  fd1279d to 7ed423d (each stands alone).
+- **2026-11-09 · `startup_does_no_history_io_and_a_visit_appends` was a test race, not a bug.**
+  The history writer counts an operation as it starts it, so on the M4 the test read the log
+  before the append landed. The test now flushes the writer after the count; the code is
+  unchanged. Undo: 3785041.
+- **2026-11-09 · Windows and macOS are clippy-checked on tabot-dev too**, with
+  `cargo clippy --target x86_64-pc-windows-msvc` / `aarch64-apple-darwin` (no linking), under
+  `CARGO_FEATURE_PURE=1` so blake3's build script needs no C cross-compiler. CI still builds
+  and tests all three. Undo: nothing to undo (a habit, not code).
+
 - **2026-11-09 · Review of milestone 11, fixed** (each with a test that fails on the old code,
   except the Windows pipe's, which runs only on CI's Windows runner): Make again failing halfway
   on Windows puts back the registry as it was just before that attempt and the first backup
