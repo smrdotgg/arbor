@@ -531,6 +531,7 @@ fn renaming_a_result_renames_it_in_its_own_folder() {
     s.start_rename();
     s.rename.as_mut().unwrap().edit.text = "renamed.txt".into();
     s.commit_rename(&mut tx());
+    crate::app::tests::wait_job(&mut s);
     assert!(d.join("deep/er/renamed.txt").exists() && !d.join("renamed.txt").exists());
     assert!(!d.join("deep/er/target.txt").exists());
     assert_eq!(
@@ -545,6 +546,7 @@ fn renaming_a_result_renames_it_in_its_own_folder() {
     s.start_rename();
     s.rename.as_mut().unwrap().edit.text = "moved".into();
     s.commit_rename(&mut tx());
+    crate::app::tests::wait_job(&mut s);
     let r = results(&s);
     assert!(r.contains(&"deep/moved".into()) && r.contains(&"deep/moved/renamed.txt".into()), "{r:?}");
     assert!(!r.iter().any(|p| p.starts_with("deep/er")), "{r:?}");
@@ -952,6 +954,7 @@ fn a_stale_result_never_acts_on_what_took_its_path() {
     s.start_rename();
     s.rename.as_mut().unwrap().edit.text = "hit-moved".into();
     s.commit_rename(&mut tx());
+    crate::app::tests::wait_job(&mut s);
     frames(&mut s, 4);
     go.send(()).unwrap();
     left.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -1046,6 +1049,7 @@ fn every_action_on_a_replaced_result_refuses() {
     s.start_rename();
     s.rename.as_mut().unwrap().edit.text = "renamed.txt".into();
     s.commit_rename(&mut tx());
+    crate::app::tests::wait_job(&mut s);
     untouched(&s, "rename");
     assert!(!d.join("a/renamed.txt").exists());
     // Batch Rename: a problem, so nothing applies.
@@ -1090,6 +1094,7 @@ fn results_read_before_a_rename_land_under_the_new_path() {
     s.start_rename();
     s.rename.as_mut().unwrap().edit.text = "hit-moved".into();
     s.commit_rename(&mut tx());
+    crate::app::tests::wait_job(&mut s);
     go.send(()).unwrap();
     left.recv_timeout(Duration::from_secs(5)).unwrap();
     finish_walk(&mut s);
@@ -1147,6 +1152,7 @@ fn a_change_made_through_another_path_reaches_the_search() {
     s.start_rename();
     s.rename.as_mut().unwrap().edit.text = "hit-moved".into();
     s.commit_rename(&mut tx());
+    crate::app::tests::wait_job(&mut s);
     assert!(d.join("hit-moved/hit.txt").exists());
     s.activate(1 - other, &mut tx());
     frames(&mut s, 10);

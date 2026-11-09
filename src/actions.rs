@@ -10,7 +10,7 @@ use rune::{ClipboardContent, DragItem, PointerPress, PopupItem, PopupMenu, TextE
 use crate::app::{Clip, Nav, PasteReq, Rename, State};
 use crate::commands::Cmd;
 use crate::menu::Act;
-use crate::ops::{self, Op, Undo};
+use crate::ops::{self, Op};
 
 impl State {
     // ---- clipboard --------------------------------------------------------------------------
@@ -151,21 +151,12 @@ impl State {
 
     // ---- rename and new folder --------------------------------------------------------------
 
-    /// Makes "untitled folder" here and starts renaming it once it's listed. Every pane showing
-    /// this folder reads it again (and selects the new folder).
+    /// Makes "untitled folder" here, on the worker (the window never touches the disk), and
+    /// starts renaming it once it's listed: every pane showing this folder reads it again,
+    /// selecting the new folder (`poll_job`).
     pub fn new_folder(&mut self) {
         let dir = self.cur().cwd.clone();
-        match ops::new_folder(&dir, "untitled folder") {
-            Ok(path) => {
-                self.did(Undo::new_folder(path.clone()));
-                self.rename = None;
-                self.refresh(&[(dir.clone(), self.cur().dir_id)], std::slice::from_ref(&path), &[]);
-                if let Some(p) = self.cur_mut().pending.as_mut().filter(|p| p.path == dir && p.nav == Nav::Reload) {
-                    p.rename = true;
-                }
-            }
-            Err(e) => self.note = Some(format!("Couldn't make a folder: {e}")),
-        }
+        self.start(Op::NewFolder { dir });
     }
 
     /// Starts an inline rename of the cursor's entry, with the name before its extension
@@ -184,10 +175,16 @@ impl State {
         self.rename = Some(Rename { os, edit });
     }
 
-    /// Return in the rename field. Renames on the spot (it's one syscall), never over an
-    /// existing name. Every pane showing the folder reads it again; until then each shows the
-    /// item under its new name, and its selection follows it.
+    /// Return in the rename field. Renames on the worker (the window never touches the disk,
+    /// which may be slow), never over an existing name. Each pane showing the folder shows the
+    /// item under its new name at once, its selection following it, and reads the folder again
+    /// when the rename lands (which puts it right if the rename was refused).
     pub fn commit_rename(&mut self, tx: &mut Tx) {
+        // One operation at a time: the field stays open until it can go.
+        if self.job.is_some() {
+            self.note = Some(crate::app::BUSY.into());
+            return;
+        }
         let Some(r) = self.rename.take() else { return };
         tx.blur();
         let new = r.edit.text.trim().to_string();
@@ -201,48 +198,23 @@ impl State {
             self.note = Some(format!("“{new}” isn't a valid name"));
             return;
         }
-        // A search result must still be the item the walk found there (one lstat: the rename
-        // itself is one call here too).
+        // A search result must still be the item the walk found there (checked on the worker).
         let found = self.cur().searching().then(|| self.cur().entries.iter().find(|e| e.os == r.os).and_then(|e| e.id)).flatten();
-        if let Some(id) = found
-            && crate::fs::ident_at(&from) != Some(id)
-        {
-            self.note = Some(format!(
-                "“{}” isn't the item the search found (it was moved, deleted or replaced since), so it wasn't renamed",
-                old.to_string_lossy()
-            ));
-            return;
-        }
         // Beside it, in its own folder: never "the folder on screen + the new name".
         let Some(dir) = from.parent().map(Path::to_path_buf) else { return };
         let to = dir.join(&new);
-        // Never over an existing item, even one that appears this instant (a case-only change
-        // on a case-insensitive disk is the item itself, and goes through).
-        match ops::rename(&from, &to) {
-            Ok(()) => {
-                // One lstat to fingerprint it, so undo can tell whether it changed since.
-                let undo = Undo::renamed(to.clone(), from.clone());
-                self.note = undo.is_none().then(|| format!("Renamed, but it can't be undone: “{new}” couldn't be read right after"));
-                self.did(undo);
-                let f = self.cur();
-                let id = if dir == f.cwd && !f.searching() { f.dir_id } else { crate::noclobber::dir_id(&dir) };
-                // Every pane on this folder, by whatever path (a symlink to it too), and every
-                // search showing the item (through a symlink to its folder too: one more call
-                // here, only then, to know the folder's canonical path).
-                let new = OsString::from(new);
-                let aliased = self.panes.iter().any(|p| p.f.searching() && !from.starts_with(&p.f.cwd));
-                let canon: Vec<(PathBuf, PathBuf)> =
-                    if aliased { std::fs::canonicalize(&dir).ok().map(|c| (dir.clone(), c)).into_iter().collect() } else { Vec::new() };
-                for p in &mut self.panes {
-                    if p.f.searching() {
-                        p.f.note_moves(&[(from.clone(), to.clone())], &[], &canon);
-                    } else if p.f.shows(&dir, id) {
-                        p.f.renamed(&old, &new);
-                    }
-                }
-                self.refresh(&[(dir, id)], &[], &canon);
+        let expect: Vec<(PathBuf, crate::fs::Ident)> = found.map(|id| (from.clone(), id)).into_iter().collect();
+        if !self.start(checked(Op::RenameOne { from, to }, expect)) {
+            return;
+        }
+        // At once, before the worker answers: the panes on this folder show the new name.
+        let f = self.cur();
+        let id = if dir == f.cwd && !f.searching() { f.dir_id } else { None };
+        let new = OsString::from(new);
+        for p in &mut self.panes {
+            if !p.f.searching() && p.f.shows(&dir, id) {
+                p.f.renamed(&old, &new);
             }
-            Err(e) => self.note = Some(e),
         }
     }
 
@@ -276,13 +248,6 @@ impl State {
             return;
         };
         self.start(Op::Undo(u));
-    }
-
-    /// A new operation done on this thread (a rename, a new folder): its undo, if any, goes on
-    /// the stack, and what was undone before can't be redone any more.
-    fn did(&mut self, undo: Option<Undo>) {
-        self.redo.clear();
-        self.undo.extend(undo);
     }
 
     // ---- jobs -------------------------------------------------------------------------------
@@ -347,6 +312,7 @@ impl State {
             self.ask_next = Some(crate::confirm::Ask::delete(std::mem::take(&mut out.no_trash), Some(&why)));
         }
         let failed = out.refused.is_some() || !out.errors.is_empty();
+        let said = out.said.is_some();
         let notes = std::mem::take(&mut out.notes);
         self.note = Some(if let Some(why) = out.refused {
             why
@@ -386,9 +352,21 @@ impl State {
             let more = if notes.len() > 1 { format!(" (+{} more)", notes.len() - 1) } else { String::new() };
             note.push_str(&format!(". {first}{more}"));
         }
+        // The inline rename and New Folder have nothing to say when they go well.
+        if out.quiet && !failed && !said {
+            self.note = None;
+        }
         self.alert = if failed { self.note.clone() } else { None };
         self.rename = None;
         self.refresh(&out.folders, &out.results, &out.canon);
+        // A new folder: renamed once it's listed in the active pane, unless the user picked
+        // something else before then (`State::land`).
+        if verb == ops::NEW_FOLDER
+            && let Some(made) = out.results.first()
+            && let Some(p) = self.cur_mut().pending.as_mut().filter(|p| Some(p.path.as_path()) == made.parent() && p.nav == Nav::Reload)
+        {
+            p.rename = true;
+        }
         true
     }
 

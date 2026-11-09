@@ -773,6 +773,7 @@ mod tests {
         s.start_rename();
         s.rename.as_mut().expect("renaming").edit.text = name.into();
         s.commit_rename(&mut Tx::default());
+        crate::app::tests::wait_job(s);
     }
 
     /// Both panes on one folder: a rename in one re-reads the other too, so no row there names
@@ -834,7 +835,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&real.target_paths()[0]).unwrap(), "first", "and acts on the file it shows");
         // A new folder made through the link shows up in the pane on the real path.
         run(&mut s, Cmd::NewFolder);
-        settle(&mut s);
+        finish(&mut s);
         s.rename = None;
         assert!(s.panes[0].f.entries.iter().any(|e| e.name == "untitled folder"));
     }
@@ -846,7 +847,7 @@ mod tests {
         let mut s = state_in(&a);
         run(&mut s, Cmd::Split);
         run(&mut s, Cmd::NewFolder);
-        settle(&mut s);
+        finish(&mut s);
         assert!(s.rename.is_some(), "renaming the new folder");
         assert_eq!(s.panes[0].f.entries.len(), 2);
     }

@@ -185,6 +185,7 @@ impl<'a> Worker<'a> {
                 partly: None,
                 said: None,
                 notes: Vec::new(),
+                quiet: false,
                 canon: Vec::new(),
                 folders: Vec::new(),
             };
@@ -226,6 +227,7 @@ impl<'a> Worker<'a> {
             partly: None,
             said: None,
             notes: Vec::new(),
+            quiet: false,
             canon,
             folders,
         };
@@ -330,6 +332,33 @@ impl<'a> Worker<'a> {
             Op::Delete { items } => self.delete(items, &mut out),
             Op::EmptyTrash { items } => self.empty_trash(items, &mut out),
             Op::PutBack { items } => self.restore_from_trash(items, &mut out),
+            Op::RenameOne { from, to } => {
+                self.p.items_total.store(1, Relaxed);
+                out.quiet = true;
+                match rename(&from, &to) {
+                    // No result to select: each pane keeps its own selection, which followed the
+                    // item when the window showed the new name.
+                    Ok(()) => {
+                        out.moved.push((from.clone(), to.clone()));
+                        out.undo = Undo::renamed(to.clone(), from);
+                        if out.undo.is_none() {
+                            out.said = Some(format!("Renamed, but it can't be undone: “{}” couldn't be read right after", name_of(&to)));
+                        }
+                    }
+                    Err(e) => out.refused = Some(e),
+                }
+            }
+            Op::NewFolder { dir } => {
+                self.p.items_total.store(1, Relaxed);
+                out.quiet = true;
+                match new_folder(&dir, "untitled folder") {
+                    Ok(path) => {
+                        out.undo = Undo::new_folder(path.clone());
+                        out.results.push(path);
+                    }
+                    Err(e) => out.refused = Some(format!("Couldn't make a folder: {e}")),
+                }
+            }
             Op::Rename { items } => self.batch_rename(items, &mut out),
             Op::Undo(undo) if undo.what == What::BatchRename => self.undo_batch_rename(undo, &mut out),
             Op::Undo(undo) => self.undo(undo, &mut out),
@@ -374,6 +403,7 @@ impl<'a> Worker<'a> {
                 partly: None,
                 said: None,
                 notes: Vec::new(),
+                quiet: false,
                 canon: Vec::new(),
                 folders: Vec::new(),
             };

@@ -110,7 +110,10 @@ fn a_reload_keeps_a_selection_made_while_it_was_on_its_way() {
     std::fs::write(d.join("delete-me-1.txt"), "x").unwrap();
     std::fs::write(d.join("other.txt"), "x").unwrap();
     let mut s = state_in(&d);
+    settle_all(&mut s);
     s.new_folder();
+    assert!(s.job.is_some(), "made on the worker, not on the window's thread");
+    wait_job(&mut s);
     assert!(s.is_loading(), "the reload is on its way");
     let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "delete-me-1.txt").unwrap();
     s.cur_mut().select(i);
@@ -121,7 +124,7 @@ fn a_reload_keeps_a_selection_made_while_it_was_on_its_way() {
     assert_eq!(s.clip.as_ref().map(|c| c.paths.clone()), Some(vec![d.join("delete-me-1.txt")]));
     // With nothing picked meanwhile, the reload still selects the new folder, renaming it.
     s.new_folder();
-    settle_all(&mut s);
+    finish_job(&mut s);
     assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("untitled folder 2"));
     assert!(s.rename.is_some());
 }
@@ -151,6 +154,17 @@ fn a_reload_never_selects_an_item_the_user_deselected() {
     assert_eq!(want, [d.join("f0")]);
     settle_all(&mut s);
     assert_eq!(s.cur().target_paths(), want);
+}
+
+/// Lands the file operation once it's done (or 10 s pass), without letting any listing land:
+/// what a frame's `poll_job` does, alone.
+pub(crate) fn wait_job(s: &mut State) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while s.job.is_some() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(1));
+        s.poll_job();
+    }
+    assert!(s.job.is_none(), "the operation never finished");
 }
 
 /// Polls as frames would until the file operation lands (or 10 s pass).
@@ -192,7 +206,7 @@ fn redo_after_undo_and_a_new_operation_clears_it() {
     assert_eq!(s.redo.len(), 1);
     s.new_folder();
     assert!(s.redo.is_empty(), "a new folder ends the redo");
-    settle_all(&mut s);
+    finish_job(&mut s);
     s.rename = None;
     s.run(Cmd::Undo, &mut tx);
     finish_job(&mut s);
@@ -423,4 +437,51 @@ fn a_listing_read_under_an_old_sort_is_sorted_again() {
     assert!(s.land(0, a, &mut Tx::default()));
     let names: Vec<&str> = s.cur().entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["c", "b", "a"]);
+}
+
+/// The review's case: the inline rename and New Folder touched the disk on the window's
+/// thread (a slow disk froze it). Both are operations on the worker now: the list shows the
+/// new name at once, the disk changes when the worker gets to it, undo is as before, and
+/// while another operation runs the rename field stays open (and says why).
+#[test]
+fn rename_and_new_folder_run_on_the_worker() {
+    let d = folder("rename-worker", 0);
+    std::fs::write(d.join("a.txt"), "x").unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let mut tx = Tx::default();
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "b.txt".into();
+    s.commit_rename(&mut tx);
+    assert!(s.job.is_some(), "on the worker");
+    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("b.txt"), "shown at once");
+    finish_job(&mut s);
+    assert!(d.join("b.txt").exists() && !d.join("a.txt").exists());
+    assert_eq!((s.note.as_deref(), s.undo.len()), (None, 1), "nothing to say; undoable");
+    s.new_folder();
+    assert!(s.job.is_some(), "on the worker");
+    finish_job(&mut s);
+    assert!(d.join("untitled folder").is_dir());
+    assert!(s.rename.is_some(), "renaming the new folder once it's listed");
+    assert_eq!(s.undo.len(), 2);
+    s.rename = None;
+    // A refused rename says why, and the list shows what's on disk again.
+    std::fs::write(d.join("c.txt"), "c").unwrap();
+    s.reload();
+    settle_all(&mut s);
+    let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "b.txt").unwrap();
+    s.cur_mut().select(i);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "c.txt".into();
+    s.commit_rename(&mut tx);
+    finish_job(&mut s);
+    assert_eq!(s.note.as_deref(), Some("“c.txt” already exists"));
+    assert!(s.cur().entries.iter().any(|e| e.name == "b.txt"), "the list put right");
+    assert_eq!(std::fs::read_to_string(d.join("c.txt")).unwrap(), "c", "never over it");
+    // Busy: the field stays open.
+    s.job = Some(ops::start(ops::Op::Copy { sources: Vec::new(), dest: d.clone() }, None, None));
+    s.start_rename();
+    s.commit_rename(&mut tx);
+    assert!(s.rename.is_some() && s.note.as_deref() == Some(BUSY));
+    assert_eq!(s.unavailable(Cmd::NewFolder), Some(BUSY));
 }

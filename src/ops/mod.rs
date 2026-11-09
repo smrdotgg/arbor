@@ -72,6 +72,15 @@ pub enum Op {
     PutBack {
         items: Vec<PathBuf>,
     },
+    /// The inline rename: `from` becomes `to` in its folder, never over another item.
+    RenameOne {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    /// New Folder: "untitled folder" (or a free variant) in `dir`.
+    NewFolder {
+        dir: PathBuf,
+    },
     /// Reverse an earlier operation, if the disk still looks the way it left it.
     Undo(Undo),
     /// `op` on search results: each item in `expect` must still be the one the walk found at
@@ -82,6 +91,9 @@ pub enum Op {
         op: Box<Op>,
     },
 }
+
+/// Making a new folder, as the status bar says it.
+pub const NEW_FOLDER: &str = "Making a New Folder";
 
 /// Emptying the Trash, as the status bar says it.
 pub const EMPTYING: &str = if cfg!(windows) { "Emptying the Recycle Bin" } else { "Emptying the Trash" };
@@ -104,6 +116,8 @@ impl Op {
             Op::EmptyTrash { .. } => Vec::new(),
             Op::Delete { items } => items.iter().filter_map(|d| d.path.parent().map(Path::to_path_buf)).collect(),
             Op::Rename { items } => items.iter().filter_map(|r| r.from.parent().map(Path::to_path_buf)).collect(),
+            Op::RenameOne { from, .. } => from.parent().map(Path::to_path_buf).into_iter().collect(),
+            Op::NewFolder { dir } => vec![dir.clone()],
             Op::Checked { op, .. } => return op.folders(),
             Op::Undo(u) => u
                 .steps
@@ -126,6 +140,8 @@ impl Op {
             Op::Delete { .. } => "Deleting",
             Op::EmptyTrash { .. } => EMPTYING,
             Op::PutBack { .. } => "Putting Back",
+            Op::RenameOne { .. } => "Renaming",
+            Op::NewFolder { .. } => NEW_FOLDER,
             Op::Rename { .. } => "Renaming",
             Op::Undo(u) if u.redo => "Redoing",
             Op::Undo(_) => "Undoing",
@@ -151,6 +167,10 @@ impl Op {
                 keep(&mut sources);
                 let any = !sources.is_empty();
                 (Op::Trash { sources }, any)
+            }
+            Op::RenameOne { from, to } => {
+                let any = !left_out.contains(from.as_path());
+                (Op::RenameOne { from, to }, any)
             }
             Op::PutBack { mut items } => {
                 keep(&mut items);
@@ -270,6 +290,9 @@ pub struct Outcome {
     pub said: Option<String>,
     /// Said after the usual message: an item Put Back gave a free name, say.
     pub notes: Vec<String>,
+    /// Nothing to say when it goes well (the inline rename, New Folder: what changed is in
+    /// the list).
+    pub quiet: bool,
     /// Each of `folders` and its canonical path (links resolved), so a search through a
     /// symlink to one of them knows them by its own paths.
     pub canon: Vec<(PathBuf, PathBuf)>,
