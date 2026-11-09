@@ -118,6 +118,11 @@ impl Panes {
         let inside = |[px, py, w, h]: [f32; 4]| x >= px && x < px + w && y >= py && y < py + h;
         [self.left, self.right].into_iter().find(|&(r, _)| inside(r)).map(|(_, id)| id)
     }
+
+    /// Pane `id`'s rect.
+    fn rect(self, id: u64) -> Option<[f32; 4]> {
+        [self.left, self.right].into_iter().find(|&(_, i)| i == id).map(|(r, _)| r)
+    }
 }
 
 /// How a pane draws: which pane, whether it's the active one of two, and its columns.

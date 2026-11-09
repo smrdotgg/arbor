@@ -117,6 +117,25 @@ impl State {
         }
     }
 
+    /// "Empty Trash…", confirmed: the items the dialog's count found (each deleted only while
+    /// it's still that item), or what's there when the worker starts if the count hadn't
+    /// landed, or found nothing it could read (the worker says why).
+    pub fn empty_trash(&mut self) {
+        let items = self.trash_count.take().and_then(|mut c| {
+            let problem = c.got.problem.is_some();
+            c.got.items.take().filter(|i| !i.is_empty() || !problem)
+        });
+        self.start(Op::EmptyTrash { items });
+    }
+
+    /// "Put Back": the selected items in a Trash go back where they came from.
+    pub fn put_back_selected(&mut self) {
+        let items = self.target_paths();
+        if !items.is_empty() {
+            self.start(checked(Op::PutBack { items }, self.cur().target_checks()));
+        }
+    }
+
     /// A drag out of the list ended (macOS: an OS drag session). Moved: what went is gone from
     /// here. Nothing took it: say how to move files into a folder here, since an OS drag can't
     /// land in the window it came from, and Rune doesn't say where it was let go (RUNE-GAPS.md).
@@ -320,7 +339,7 @@ impl State {
             }
         }
         // A trash and a delete have no results to select: what they did is what's gone.
-        let n = if matches!(verb, "Moving to Trash" | "Deleting") { out.removed.len() } else { out.results.len() };
+        let n = if matches!(verb, "Moving to Trash" | "Deleting" | ops::EMPTYING) { out.removed.len() } else { out.results.len() };
         // Items the trash left because their disk has none: one question for all of them.
         let asks = !out.no_trash.is_empty();
         if asks {
@@ -328,10 +347,19 @@ impl State {
             self.ask_next = Some(crate::confirm::Ask::delete(std::mem::take(&mut out.no_trash), Some(&why)));
         }
         let failed = out.refused.is_some() || !out.errors.is_empty();
+        let notes = std::mem::take(&mut out.notes);
         self.note = Some(if let Some(why) = out.refused {
             why
+        } else if let Some(said) = out.said.take() {
+            said
         } else if verb == "Deleting" {
-            deleted_note(&out, n, total)
+            deleted_note(&out, n, total, "")
+        } else if verb == ops::EMPTYING {
+            if !out.cancelled && out.errors.is_empty() && n == total {
+                format!("Emptied the {}: deleted {n} item{} permanently", crate::trash::BIN, plural(n))
+            } else {
+                deleted_note(&out, n, total, &format!(" in the {}", crate::trash::BIN))
+            }
         } else if !out.errors.is_empty() {
             let more = if out.errors.len() > 1 { format!(" (+{} more)", out.errors.len() - 1) } else { String::new() };
             format!("{}{more}", out.errors[0])
@@ -348,10 +376,16 @@ impl State {
                 "Moving" => "Moved",
                 "Renaming" => "Renamed",
                 "Redoing" => "Redid",
+                "Putting Back" => "Put back",
                 _ => "Restored",
             };
             format!("{done} {n} item{}", plural(n))
         });
+        // What it adds (an item Put Back gave a free name).
+        if let (Some(note), Some(first)) = (self.note.as_mut(), notes.first()) {
+            let more = if notes.len() > 1 { format!(" (+{} more)", notes.len() - 1) } else { String::new() };
+            note.push_str(&format!(". {first}{more}"));
+        }
         self.alert = if failed { self.note.clone() } else { None };
         self.rename = None;
         self.refresh(&out.folders, &out.results, &out.canon);
@@ -487,6 +521,13 @@ impl State {
         self.menu_volume = i.checked_sub(self.places.len()).and_then(|v| self.volumes.get(v)).map(|v| (i, v.clone()));
         self.refresh_volumes();
         let items = self.sidebar_menu_items(i);
+        self.show_menu(items, None, press, tx);
+    }
+
+    /// Right-click on the sidebar's Trash: open it, or empty it.
+    pub fn trash_menu(&mut self, press: PointerPress, tx: &mut Tx) {
+        let item = |cmd: Cmd, title: &str| Some((Act::Cmd(cmd), title.to_string(), self.unavailable(cmd).is_none()));
+        let items = vec![item(Cmd::GoTrash, "Open"), None, item(Cmd::EmptyTrash, Cmd::EmptyTrash.title())];
         self.show_menu(items, None, press, tx);
     }
 
@@ -653,6 +694,10 @@ impl State {
             Some((Act::Cmd(cmd), title, on))
         };
         let mut v = vec![item(Cmd::Open), item(Cmd::OpenWith), item(Cmd::Reveal), None];
+        // In a Trash Put Back can restore from (Linux), it comes first.
+        if on_row && self.unavailable(Cmd::PutBack).is_none() {
+            v.insert(0, item(Cmd::PutBack));
+        }
         v.extend([item(Cmd::Info), item(Cmd::Rename), item(Cmd::Duplicate), item(Cmd::Trash), None]);
         v.extend([item(Cmd::Copy), item(Cmd::Cut), item(Cmd::Paste), item(Cmd::CopyPath), None]);
         // The commander commands only when there's another pane to send to.
@@ -671,10 +716,11 @@ pub(crate) fn checked(op: Op, expect: Vec<(PathBuf, crate::fs::Ident)>) -> Op {
 
 /// What a permanent delete did, in words: how many items are gone (they stay gone, even after a
 /// cancel), what it left and why.
-fn deleted_note(out: &ops::Outcome, n: usize, total: usize) -> String {
+/// `place` says where they were (" in the Trash"), or is empty.
+fn deleted_note(out: &ops::Outcome, n: usize, total: usize, place: &str) -> String {
     let gone = match (n, total) {
-        (n, t) if n == t => format!("Deleted {n} item{} permanently", plural(n)),
-        (n, t) => format!("Deleted {n} of {t} item{} permanently", plural(t)),
+        (n, t) if n == t => format!("Deleted {n} item{}{place} permanently", plural(n)),
+        (n, t) => format!("Deleted {n} of {t} item{}{place} permanently", plural(t)),
     };
     let partly = out.partly.as_deref().map_or_else(String::new, |p| format!("; “{}” was partly deleted", name(p)));
     if out.cancelled {

@@ -24,6 +24,7 @@ mod batch;
 mod print;
 #[cfg(test)]
 mod tests;
+mod trashed;
 mod undo;
 mod worker;
 
@@ -60,6 +61,17 @@ pub enum Op {
     Rename {
         items: Vec<Renaming>,
     },
+    /// Empty the Trash, confirmed first in Arbor's one dialog: the items its count found
+    /// (each only while it's still that item), or when the count hadn't landed, what's there
+    /// when the worker starts (`trash::contents`). Windows empties the shell's Recycle Bin.
+    EmptyTrash {
+        items: Option<Vec<crate::trash::contents::Item>>,
+    },
+    /// Put items in a freedesktop.org trash's `files/` back where their `.trashinfo` says they
+    /// came from, under a free name when that's taken (see [`Worker::put_back`]).
+    PutBack {
+        items: Vec<PathBuf>,
+    },
     /// Reverse an earlier operation, if the disk still looks the way it left it.
     Undo(Undo),
     /// `op` on search results: each item in `expect` must still be the one the walk found at
@@ -71,13 +83,23 @@ pub enum Op {
     },
 }
 
+/// Emptying the Trash, as the status bar says it.
+pub const EMPTYING: &str = if cfg!(windows) { "Emptying the Recycle Bin" } else { "Emptying the Trash" };
+
 impl Op {
+    /// Whether Esc can stop it: everything but the Recycle Bin's emptying, which the shell does
+    /// in one call.
+    fn cancellable(&self) -> bool {
+        !(crate::trash::contents::SHELL && matches!(self, Op::EmptyTrash { .. }))
+    }
+
     /// The folders it changes: where items go and where they come from.
     /// Every path it reads or writes.
     fn paths(&self) -> Vec<PathBuf> {
         match self {
             Op::Copy { sources, dest } | Op::Move { sources, dest } => sources.iter().chain([dest]).cloned().collect(),
-            Op::Trash { sources } => sources.clone(),
+            Op::Trash { sources } | Op::PutBack { items: sources } => sources.clone(),
+            Op::EmptyTrash { items } => items.iter().flatten().map(|i| i.path.clone()).collect(),
             Op::Delete { items } => items.iter().map(|d| d.path.clone()).collect(),
             Op::Rename { items } => items.iter().flat_map(|r| [r.from.clone(), r.to.clone()]).collect(),
             Op::Checked { op, .. } => op.paths(),
@@ -90,7 +112,9 @@ impl Op {
         let mut v = match self {
             Op::Copy { dest, .. } => vec![dest.clone()],
             Op::Move { sources, dest } => [vec![dest.clone()], parents(sources)].concat(),
-            Op::Trash { sources } => parents(sources),
+            Op::Trash { sources } | Op::PutBack { items: sources } => parents(sources),
+            // Which trash folders it empties is known on the worker (`Worker::empty_trash`).
+            Op::EmptyTrash { .. } => Vec::new(),
             Op::Delete { items } => items.iter().filter_map(|d| d.path.parent().map(Path::to_path_buf)).collect(),
             Op::Rename { items } => items.iter().filter_map(|r| r.from.parent().map(Path::to_path_buf)).collect(),
             Op::Checked { op, .. } => return op.folders(),
@@ -113,6 +137,8 @@ impl Op {
             Op::Move { .. } => "Moving",
             Op::Trash { .. } => "Moving to Trash",
             Op::Delete { .. } => "Deleting",
+            Op::EmptyTrash { .. } => EMPTYING,
+            Op::PutBack { .. } => "Putting Back",
             Op::Rename { .. } => "Renaming",
             Op::Undo(u) if u.redo => "Redoing",
             Op::Undo(_) => "Undoing",
@@ -138,6 +164,11 @@ impl Op {
                 keep(&mut sources);
                 let any = !sources.is_empty();
                 (Op::Trash { sources }, any)
+            }
+            Op::PutBack { mut items } => {
+                keep(&mut items);
+                let any = !items.is_empty();
+                (Op::PutBack { items }, any)
             }
             Op::Delete { mut items } => {
                 items.retain(|d| !left_out.contains(d.path.as_path()));
@@ -192,6 +223,8 @@ pub enum What {
     Duplicate,
     NewFolder,
     Trash,
+    /// Put Back from the Trash: undone by trashing the items again.
+    PutBack,
 }
 
 impl What {
@@ -204,6 +237,7 @@ impl What {
             What::Duplicate => "duplicate",
             What::NewFolder => "new folder",
             What::Trash => "move to Trash",
+            What::PutBack => "put back",
         }
     }
 }
@@ -244,6 +278,11 @@ pub struct Outcome {
     pub no_trash_why: Option<String>,
     /// A permanent delete stopped (cancelled or failed) inside this folder: part of it is gone.
     pub partly: Option<PathBuf>,
+    /// What the operation says instead of the usual message (emptying the Recycle Bin, or a
+    /// Trash Arbor isn't allowed to read).
+    pub said: Option<String>,
+    /// Said after the usual message: an item Put Back gave a free name, say.
+    pub notes: Vec<String>,
     /// Each of `folders` and its canonical path (links resolved), so a search through a
     /// symlink to one of them knows them by its own paths.
     pub canon: Vec<(PathBuf, PathBuf)>,
@@ -254,6 +293,8 @@ pub struct Outcome {
 
 pub struct Running {
     pub verb: &'static str,
+    /// Esc can stop it (see [`Op::cancellable`]).
+    pub cancellable: bool,
     pub progress: Arc<Progress>,
     done: Arc<Mutex<Option<Outcome>>>,
     /// Every path the operation reads or writes (sources, destination, undo's steps).
@@ -296,13 +337,14 @@ pub fn start(op: Op, dest_id: Option<noclobber::FileId>, waker: Option<rune::Wak
     let done = Arc::new(Mutex::new(None));
     let verb = op.verb();
     let paths = op.paths();
+    let cancellable = op.cancellable();
     let (p, d) = (progress.clone(), done.clone());
     // Headless runs (scripts, snapshots) run on a virtual clock far faster than real time, so
     // they do the work inline to stay deterministic.
     if rune::tooling::headless_run().is_some() {
         let outcome = Worker::new(&p, None, TRASH).run_into(op, dest_id);
         *done.lock().expect("fresh mutex") = Some(outcome);
-        return Running { verb, progress, done, paths };
+        return Running { verb, cancellable, progress, done, paths };
     }
     std::thread::spawn(move || {
         let outcome = Worker::new(&p, waker.as_ref(), TRASH).run_into(op, dest_id);
@@ -313,7 +355,7 @@ pub fn start(op: Op, dest_id: Option<noclobber::FileId>, waker: Option<rune::Wak
             wake();
         }
     });
-    Running { verb, progress, done, paths }
+    Running { verb, cancellable, progress, done, paths }
 }
 
 /// Renames `from` to `to` in place (the inline rename), never over another item. A case-only

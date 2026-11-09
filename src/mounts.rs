@@ -66,6 +66,98 @@ pub fn unescape_bytes(s: &str) -> Vec<u8> {
     out
 }
 
+/// The mount points of local disks, for the trashes on them (Empty Trash): never a network
+/// share or anything the kernel makes up (`proc`, `sysfs`, `cgroup`…), and never a FUSE file
+/// system other than `fuseblk` (a USB disk through ntfs-3g): most of those are remote (sshfs,
+/// rclone, gvfs), and looking into a dead one can hang. Linux reads `/proc/self/mountinfo`;
+/// macOS asks `getmntinfo` without waiting on any file system (`MNT_NOWAIT`) and keeps the
+/// `MNT_LOCAL` ones. Read on a worker. Elsewhere empty.
+#[cfg_attr(any(test, windows), allow(dead_code))]
+pub fn local_points() -> Vec<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Ok(s) = std::fs::read_to_string("/proc/self/mountinfo") {
+        return local_points_in(&s);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf: *mut libc::statfs = std::ptr::null_mut();
+        // SAFETY: getmntinfo points `buf` at its own array of `n` entries, valid until the next
+        // call on this thread; it's read at once.
+        let n = unsafe { libc::getmntinfo(&mut buf, libc::MNT_NOWAIT) };
+        if n > 0 && !buf.is_null() {
+            // SAFETY: as above, `n` entries.
+            let all = unsafe { std::slice::from_raw_parts(buf, n as usize) };
+            return all
+                .iter()
+                .filter(|s| s.f_flags & libc::MNT_LOCAL as u32 != 0)
+                .map(|s| {
+                    let b: Vec<u8> = s.f_mntonname.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+                    PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(b))
+                })
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+/// [`local_points`] from `/proc/self/mountinfo`'s text: each line's mount point (fifth field)
+/// unless its type (the first field after " - ") is a network, kernel or FUSE one.
+#[cfg(any(target_os = "linux", test))]
+pub fn local_points_in(s: &str) -> Vec<PathBuf> {
+    const NOT_LOCAL: &[&str] = &[
+        // Network shares.
+        "nfs",
+        "nfs4",
+        "cifs",
+        "smb3",
+        "smbfs",
+        "ncpfs",
+        "afs",
+        "9p",
+        "ceph",
+        "glusterfs",
+        "davfs",
+        "sshfs",
+        "lustre",
+        "gpfs",
+        // What the kernel makes up, and read-only images.
+        "proc",
+        "sysfs",
+        "devtmpfs",
+        "devpts",
+        "cgroup",
+        "cgroup2",
+        "securityfs",
+        "debugfs",
+        "tracefs",
+        "pstore",
+        "bpf",
+        "configfs",
+        "fusectl",
+        "hugetlbfs",
+        "mqueue",
+        "autofs",
+        "binfmt_misc",
+        "efivarfs",
+        "nsfs",
+        "rpc_pipefs",
+        "squashfs",
+        "overlay",
+        "iso9660",
+        "udf",
+        "ramfs",
+        "selinuxfs",
+    ];
+    s.lines()
+        .filter_map(|l| {
+            let (head, tail) = l.split_once(" - ")?;
+            let kind = tail.split(' ').next()?;
+            let local = kind == "fuseblk" || !(kind.starts_with("fuse") || NOT_LOCAL.contains(&kind));
+            local.then(|| head.split(' ').nth(4).map(unescape)).flatten()
+        })
+        .collect()
+}
+
 /// A mount point from the mount table, as a path.
 #[cfg(any(target_os = "linux", test))]
 fn unescape(s: &str) -> PathBuf {
@@ -207,5 +299,22 @@ mod tests {
         assert_eq!(m.0, [PathBuf::from("/"), PathBuf::from("/media/my disk"), PathBuf::from("/srv/bind")]);
         assert_eq!(m.under(Path::new("/media")), [PathBuf::from("/media/my disk")]);
         assert!(m.under(Path::new("/srv/bin")).is_empty(), "a path prefix isn't a parent");
+    }
+
+    /// Empty Trash looks only on local disks: not a network share, a FUSE mount (but a USB
+    /// disk through `fuseblk`), or the kernel's own file systems.
+    #[test]
+    fn local_points_leave_out_network_kernel_and_fuse_mounts() {
+        let got = local_points_in(
+            "22 1 8:1 / / rw - ext4 /dev/root rw\n\
+             23 22 0:5 / /proc rw - proc proc rw\n\
+             24 22 0:31 / /media/my\\040disk rw - vfat /dev/sdb1 rw\n\
+             25 22 0:32 / /mnt/share rw - cifs //nas/share rw\n\
+             26 22 0:33 / /mnt/remote rw - fuse.sshfs host: rw\n\
+             27 22 0:34 / /media/usb rw - fuseblk /dev/sdc1 rw\n\
+             28 22 0:35 / /tmp rw - tmpfs tmpfs rw\n\
+             29 22 0:36 / /mnt/nfs rw - nfs4 server:/x rw\n",
+        );
+        assert_eq!(got, ["/", "/media/my disk", "/media/usb", "/tmp"].map(PathBuf::from));
     }
 }

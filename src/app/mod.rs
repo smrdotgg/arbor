@@ -207,6 +207,12 @@ pub struct State {
     pub info: Option<crate::info::Info>,
     pub(crate) meta_loader: crate::info::MetaLoader,
     pub(crate) next_info: u64,
+    /// The sidebar's Trash: the folder it opens (`None` on Windows). A path only.
+    pub trash_place: Option<PathBuf>,
+    /// What's in the Trash, counted on a thread of its own while Empty Trash's dialog is open.
+    pub(crate) trash_count: Option<crate::trash::contents::Counting>,
+    /// A tab being dragged: its pane, from where, and where it would land in its own strip.
+    pub tab_drag: Option<(u64, usize, usize)>,
 }
 
 /// What's at a typed path.
@@ -344,6 +350,9 @@ impl State {
             info: None,
             meta_loader: Latest::default(),
             next_info: 0,
+            trash_place: crate::trash::contents::place(),
+            trash_count: None,
+            tab_drag: None,
         };
         let f = &mut s.panes[0].f;
         match listing {
@@ -578,6 +587,7 @@ impl State {
             self.side.look_due = false;
             self.look_at_favorites();
         }
+        changed |= self.poll_trash_count();
         changed |= self.poll_sidebar();
         changed |= self.poll_volumes();
         changed |= self.poll_open_with();
@@ -679,6 +689,18 @@ impl State {
         match a.listing.result {
             Err(_) if jumped && a.listing.missing => self.jump_missed(&p.path),
             Err(_) if placed && a.listing.missing => self.place_missed(&p.path),
+            // The sidebar's Trash: Linux makes its folder the first time something goes in it,
+            // and macOS needs Full Disk Access to read it.
+            Err(e) if self.trash_place.as_ref() == Some(&p.path) => {
+                self.note = Some(if a.listing.missing {
+                    format!("The {} is empty", crate::trash::BIN)
+                } else if cfg!(target_os = "macos") && e.contains("not permitted") {
+                    crate::trash::contents::NEEDS_ACCESS.to_string()
+                } else {
+                    format!("{}: {e}", fs::pretty(&p.path))
+                });
+                self.alert = self.note.clone();
+            }
             Err(e) => {
                 self.note = Some(format!("{}: {e}", fs::pretty(&p.path)));
                 self.alert = self.note.clone();

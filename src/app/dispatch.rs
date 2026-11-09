@@ -152,6 +152,14 @@ impl State {
         match cmd {
             // Start a file operation.
             Trash | Delete => when(busy, BUSY).or(when(nothing, "Select an item first")),
+            EmptyTrash => when(busy, BUSY),
+            PutBack => when(cfg!(target_os = "macos"), "macOS has no public way for apps to put items back: use Put Back in Finder")
+                .or(when(cfg!(windows), "Restore items from the Recycle Bin in Explorer: Windows doesn't let Arbor list it"))
+                .or(when(busy, BUSY))
+                .or(when(searching, "Leave the search first (Esc)"))
+                .or(when(!crate::trash::contents::can_put_back_in(&f.cwd), "Put Back works on items in the Trash: Go to Trash first"))
+                .or(when(nothing, "Select an item first")),
+            GoTrash => when(self.trash_place.is_none(), "The Recycle Bin is a shell folder Arbor can't show: open it in Explorer"),
             // A duplicate goes beside its original, so all of them must be in one folder.
             Duplicate => when(busy, BUSY).or(when(nothing, "Select an item first")).or(when(
                 searching && f.target_paths().iter().map(|p| p.parent()).collect::<std::collections::HashSet<_>>().len() > 1,
@@ -186,6 +194,10 @@ impl State {
             CloseTab => when(!self.split() && pane.tabs.len() == 1, "This is the only tab"),
             NextTab | PrevTab => when(pane.tabs.len() == 1, "There's only one tab here"),
             ReopenTab => when(self.closed.is_empty(), "No closed tabs to reopen"),
+            MoveTabLeft => when(pane.tabs.len() == 1, "There's only one tab here").or(when(pane.tab == 0, "This is already the first tab")),
+            MoveTabRight => when(pane.tabs.len() == 1, "There's only one tab here")
+                .or(when(pane.tab + 1 == pane.tabs.len(), "This is already the last tab")),
+            MoveTabOther => when(!self.split(), NOT_SPLIT),
             OtherPane => when(!self.split(), NOT_SPLIT),
             // Closing always works; opening needs something to show.
             TogglePreview => when(self.preview.is_none() && nothing, "Select an item first"),
@@ -308,8 +320,7 @@ impl State {
             RestoreDefault => self.change_default(crate::handler::Change::Restore),
             Clear => {
                 if let Some(job) = &self.job {
-                    job.cancel();
-                    self.note = Some("Cancelling…".into());
+                    self.note = Some(cancel_job(job));
                 } else if self.cur().searching() {
                     self.search_escape(self.active, tx);
                 } else {
@@ -345,14 +356,28 @@ impl State {
             Trash => self.trash_selected(),
             // Runs from the dialog (`State::answer`), with the items it named.
             Delete => {}
+            MoveTabLeft => self.move_tab_by(-1, tx),
+            MoveTabRight => self.move_tab_by(1, tx),
+            MoveTabOther => {
+                let (ix, tab) = (self.active, self.panes[self.active].tab);
+                let n = self.panes[1 - ix].tabs.len();
+                self.move_tab_to_pane(ix, tab, 1 - ix, n, tx);
+            }
             Undo => self.undo_last(),
             Redo => self.redo_last(),
             Cancel => {
                 if let Some(job) = &self.job {
-                    job.cancel();
-                    self.note = Some("Cancelling…".into());
+                    self.note = Some(cancel_job(job));
                 }
             }
+            GoTrash => {
+                if let Some(p) = self.trash_place.clone() {
+                    self.leave_search(self.active, tx);
+                    self.go_to(p);
+                }
+            }
+            PutBack => self.put_back_selected(),
+            EmptyTrash => self.empty_trash(),
             CopyToOther => self.send_to_other_pane(false),
             MoveToOther => self.send_to_other_pane(true),
             Up => self.cur_mut().step(-1, false, tx),
@@ -409,5 +434,15 @@ impl State {
         let f = self.cur_mut();
         f.set_sort(key);
         f.reveal(tx);
+    }
+}
+
+/// Asks a running operation to stop, and what the status bar says.
+fn cancel_job(job: &crate::ops::Running) -> String {
+    if job.cancellable {
+        job.cancel();
+        "Cancelling…".into()
+    } else {
+        format!("{} can't be stopped once it has started", job.verb)
     }
 }

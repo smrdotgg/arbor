@@ -183,6 +183,8 @@ impl<'a> Worker<'a> {
                 no_trash: Vec::new(),
                 no_trash_why: None,
                 partly: None,
+                said: None,
+                notes: Vec::new(),
                 canon: Vec::new(),
                 folders: Vec::new(),
             };
@@ -201,7 +203,7 @@ impl<'a> Worker<'a> {
             })
             .collect();
         let canon = folders.iter().filter_map(|(p, _)| Some((p.clone(), std::fs::canonicalize(p).ok()?))).collect();
-        if let Op::Copy { sources, .. } | Op::Move { sources, .. } | Op::Trash { sources } = &op {
+        if let Op::Copy { sources, .. } | Op::Move { sources, .. } | Op::Trash { sources } | Op::PutBack { items: sources } = &op {
             for src in sources {
                 if !self.seen.contains_key(src)
                     && let Some(id) = crate::fs::ident_at(src)
@@ -222,6 +224,8 @@ impl<'a> Worker<'a> {
             no_trash: Vec::new(),
             no_trash_why: None,
             partly: None,
+            said: None,
+            notes: Vec::new(),
             canon,
             folders,
         };
@@ -324,6 +328,8 @@ impl<'a> Worker<'a> {
                 }
             }
             Op::Delete { items } => self.delete(items, &mut out),
+            Op::EmptyTrash { items } => self.empty_trash(items, &mut out),
+            Op::PutBack { items } => self.restore_from_trash(items, &mut out),
             Op::Rename { items } => self.batch_rename(items, &mut out),
             Op::Undo(undo) if undo.what == What::BatchRename => self.undo_batch_rename(undo, &mut out),
             Op::Undo(undo) => self.undo(undo, &mut out),
@@ -366,6 +372,8 @@ impl<'a> Worker<'a> {
                 no_trash: Vec::new(),
                 no_trash_why: None,
                 partly: None,
+                said: None,
+                notes: Vec::new(),
                 canon: Vec::new(),
                 folders: Vec::new(),
             };

@@ -44,7 +44,7 @@ impl Cmd {
     /// Commands that can't be undone. Running one asks first, in Arbor's one dialog
     /// (`confirm.rs`), and only its destructive button runs it.
     pub fn permanent(self) -> bool {
-        matches!(self, Cmd::ClearJump | Cmd::Delete)
+        matches!(self, Cmd::ClearJump | Cmd::Delete | Cmd::EmptyTrash)
     }
 
     /// Commands that ask first: the permanent ones, and those that change how the system
@@ -85,6 +85,10 @@ pub const REVEAL: &str = if cfg!(target_os = "macos") {
     "Show in File Manager"
 };
 
+/// "Empty Trash…" and "Go to Trash", by each platform's name for it.
+pub const EMPTY_TRASH: &str = if cfg!(windows) { "Empty the Recycle Bin…" } else { "Empty the Trash…" };
+pub const GO_TRASH: &str = if cfg!(windows) { "Go to the Recycle Bin" } else { "Go to the Trash" };
+
 commands! {
     Open "nav.open" "Open", ["enter", "cmd+o", "cmd+down", "alt+down"];
     Into "nav.into" "Open Folder", ["right"];
@@ -97,6 +101,7 @@ commands! {
     ClearJump "nav.clear_jump_history" "Clear Jump History…", [];
     Reload "nav.reload" "Reload", ["cmd+r"];
     Reveal "nav.reveal" REVEAL, ["cmd+enter"];
+    GoTrash "nav.trash" GO_TRASH, [];
     OpenWith "file.open_with" "Open With…", [];
     Info "file.info" "Get Info", ["cmd+i"];
     Palette "app.palette" "Command Palette", ["cmd+k", "cmd+shift+p"];
@@ -119,6 +124,8 @@ commands! {
     NewFolder "file.new_folder" "New Folder", ["cmd+shift+n"];
     Trash "file.trash" "Move to Trash", ["cmd+backspace", "delete"];
     Delete "file.delete" "Delete Permanently…", ["mac:cmd+alt+backspace", "pc:shift+delete"];
+    PutBack "file.put_back" "Put Back", [];
+    EmptyTrash "file.empty_trash" EMPTY_TRASH, [];
     Undo "file.undo" "Undo", ["cmd+z"];
     Redo "file.redo" "Redo", ["cmd+shift+z", "win:ctrl+y"];
     Cancel "file.cancel" "Cancel File Operation", [];
@@ -154,6 +161,9 @@ commands! {
     NextTab "tab.next" "Next Tab", ["ctrl+tab", "cmd+shift+]"];
     PrevTab "tab.previous" "Previous Tab", ["ctrl+shift+tab", "cmd+shift+["];
     ReopenTab "tab.reopen" "Reopen Closed Tab", ["cmd+shift+t"];
+    MoveTabLeft "tab.move_left" "Move Tab Left", ["ctrl+shift+pageup"];
+    MoveTabRight "tab.move_right" "Move Tab Right", ["ctrl+shift+pagedown"];
+    MoveTabOther "tab.move_to_other_pane" "Move Tab to Other Pane", ["cmd+shift+backslash"];
     Split "pane.split" "Split View (Toggle)", ["cmd+backslash"];
     OtherPane "pane.switch" "Switch to Other Pane", ["tab"];
 
@@ -465,7 +475,11 @@ mod tests {
         assert_eq!(top, ["New Folder", "New Tab"]);
         assert_eq!(rank("folder")[0], "New Folder", "a word start beats a scatter");
         assert_eq!(rank("nf")[0], "New Folder", "initials");
+        // The everyday command first; "Go to the Trash" and "Empty the Trash…" follow.
         assert_eq!(rank("trash")[0], "Move to Trash");
+        if !cfg!(windows) {
+            assert_eq!(rank("trash")[..3], ["Move to Trash", "Go to the Trash", "Empty the Trash…"]);
+        }
         let mut top = rank("settings")[..2].to_vec();
         top.sort();
         assert_eq!(top, ["Open Settings File", "Reload Settings"]);

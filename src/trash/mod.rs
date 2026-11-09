@@ -107,11 +107,7 @@ fn writable(dir: &Path) -> bool {
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn trash(path: &Path, _stop: &dyn Fn() -> bool) -> Result<Option<PathBuf>, TrashError> {
     use std::os::unix::fs::MetadataExt;
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| crate::fs::home().join(".local/share"));
-    let home = data.join("Trash");
+    let home = home_trash();
     let dev = path.symlink_metadata().map_err(|e| TrashError::Failed(e.to_string()))?.dev();
     // The home trash is for items on its own disk (the nearest folder of it that exists says
     // which, before it's made).
@@ -121,6 +117,16 @@ pub fn trash(path: &Path, _stop: &dyn Fn() -> bool) -> Result<Option<PathBuf>, T
     let top = mount_top(dir, dev);
     // SAFETY: getuid can't fail.
     trash_with(path, home, &top, unsafe { libc::getuid() })
+}
+
+/// The home trash: `$XDG_DATA_HOME/Trash` (`~/.local/share/Trash` by default). A path only.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn home_trash() -> PathBuf {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| crate::fs::home().join(".local/share"));
+    data.join("Trash")
 }
 
 /// The top folder of the disk holding `dir` (whose device is `dev`): the last folder up from it
@@ -511,6 +517,8 @@ fn recycle(abs: &Path, root: &str) -> Result<Option<PathBuf>, TrashError> {
 
 #[cfg(windows)]
 mod win;
+
+pub mod contents;
 
 #[cfg(test)]
 mod tests;

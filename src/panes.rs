@@ -202,6 +202,121 @@ impl State {
         self.activate(1, tx);
     }
 
+    /// Moves tab `from` of pane `ix` to place `to` in the same strip. The shown tab stays
+    /// shown; nothing is read (each tab keeps its own state).
+    pub fn move_tab(&mut self, ix: usize, from: usize, to: usize) {
+        let Some(p) = self.panes.get_mut(ix) else { return };
+        let n = p.tabs.len();
+        if from >= n || to >= n || from == to {
+            return;
+        }
+        let t = p.tabs.remove(from);
+        p.tabs.insert(to, t);
+        // The shown tab is the one slot without a memo.
+        p.tab = p.tabs.iter().position(Option::is_none).unwrap_or(0);
+    }
+
+    /// "Move Tab Left/Right": the active pane's shown tab, one place along its strip.
+    pub fn move_tab_by(&mut self, by: isize, _tx: &mut Tx) {
+        let ix = self.active;
+        let p = &self.panes[ix];
+        let to = (p.tab as isize + by).clamp(0, p.tabs.len() as isize - 1) as usize;
+        self.move_tab(ix, p.tab, to);
+    }
+
+    /// Moves tab `j` of pane `from` into pane `to`'s strip at place `at` (the end when past
+    /// it), where it's shown, read fresh, and that pane becomes active. It keeps its state (a
+    /// lightweight memo, as a hidden tab does). A pane left with no tabs closes.
+    pub fn move_tab_to_pane(&mut self, from: usize, j: usize, to: usize, at: usize, tx: &mut Tx) {
+        let n = self.panes.len();
+        if from == to || from >= n || to >= n || j >= self.panes[from].tabs.len() {
+            return;
+        }
+        let p = &mut self.panes[from];
+        let memo = match p.tabs[j].take() {
+            Some(m) => m,
+            None => p.f.memo(),
+        };
+        let alone = p.tabs.len() == 1;
+        let mut to = to;
+        if alone {
+            // Its pane's only tab: the pane goes (nothing to remember: the tab lives on).
+            self.panes.remove(from);
+            if self.rename.take().is_some() {
+                tx.blur();
+            }
+            self.pane_drop = None;
+            to = 0;
+            self.active = 0;
+        } else {
+            let p = &mut self.panes[from];
+            p.tabs.remove(j);
+            if j < p.tab {
+                p.tab -= 1;
+            } else if j == p.tab {
+                let next = j.min(p.tabs.len() - 1);
+                p.tab = next;
+                let m = p.tabs[next].take().expect("a hidden tab has its memo");
+                self.reveal_tab(from, m, tx);
+            }
+        }
+        let p = &mut self.panes[to];
+        p.tabs[p.tab] = Some(p.f.memo());
+        let at = at.min(p.tabs.len());
+        p.tabs.insert(at, None);
+        p.tab = at;
+        self.activate(to, tx);
+        self.reveal_tab(to, memo, tx);
+    }
+
+    /// A drag of tab `j` in pane `id`: along its own strip, the place it would land shows
+    /// while it moves (one place per tab's width travelled, `step`) and letting go moves it
+    /// there; over the other pane (`over`: that pane and the place in its strip), letting go
+    /// moves it into that pane.
+    #[allow(clippy::too_many_arguments)]
+    pub fn drag_tab(
+        &mut self,
+        id: u64,
+        j: usize,
+        phase: rune::Phase,
+        dx: f32,
+        step: f32,
+        cancelled: bool,
+        over: Option<(u64, usize)>,
+        tx: &mut Tx,
+    ) {
+        tx.instant();
+        let Some(ix) = self.pane_ix(id) else { return };
+        let n = self.panes[ix].tabs.len();
+        if j >= n {
+            return;
+        }
+        let to = (j as f32 + (dx / step.max(1.0)).round()).clamp(0.0, (n - 1) as f32) as usize;
+        if phase == rune::Phase::Up {
+            self.tab_drag = None;
+            self.pane_drop = None;
+            if cancelled {
+                return;
+            }
+            match over.and_then(|(o, at)| Some((self.pane_ix(o)?, at))) {
+                Some((oix, at)) => self.move_tab_to_pane(ix, j, oix, at, tx),
+                None if to != j => self.move_tab(ix, j, to),
+                None => {}
+            }
+            return;
+        }
+        let (drag, drop) = match over {
+            Some((o, _)) => (None, Some(o)),
+            None => (Some((id, j, to)), None),
+        };
+        if self.tab_drag != drag || self.pane_drop != drop {
+            self.tab_drag = drag;
+            self.pane_drop = drop;
+        } else {
+            tx.live_only();
+        }
+    }
+
     /// F5 / F6: copies or moves the selection into the other pane's folder, as a paste would
     /// (on a worker, never over anything, undoable).
     pub fn send_to_other_pane(&mut self, mv: bool) {
@@ -748,5 +863,107 @@ mod tests {
         assert!(!s.activate_id(gone, &mut Tx::default()));
         s.drop_on_pane(gone, 0, 0, s.panes[0].id(), &mut Tx::default());
         assert!(s.job.is_none());
+    }
+
+    fn tab_paths(s: &State, ix: usize) -> Vec<PathBuf> {
+        (0..s.panes[ix].tabs.len()).map(|j| s.panes[ix].tab_path(j).to_path_buf()).collect()
+    }
+
+    /// Move Tab Left/Right: the shown tab moves along its strip and stays shown; the others
+    /// keep their memos (nothing is read); at the ends they can't run, and say why.
+    #[test]
+    fn move_tab_left_and_right_keeps_every_tab_as_it_was() {
+        let (a, b, c) = (folder("mv-a", &["x"]), folder("mv-b", &["y", "z"]), folder("mv-c", &[]));
+        let mut s = state_in(&a);
+        assert_eq!(s.unavailable(Cmd::MoveTabLeft), Some("There's only one tab here"));
+        run(&mut s, Cmd::NewTab);
+        go(&mut s, &b);
+        s.cur_mut().select(1);
+        run(&mut s, Cmd::NewTab);
+        go(&mut s, &c);
+        assert_eq!(tab_paths(&s, 0), [a.clone(), b.clone(), c.clone()]);
+        assert_eq!(s.unavailable(Cmd::MoveTabRight), Some("This is already the last tab"));
+        let lands = s.lands;
+        run(&mut s, Cmd::MoveTabLeft);
+        run(&mut s, Cmd::MoveTabLeft);
+        assert_eq!(tab_paths(&s, 0), [c.clone(), a.clone(), b.clone()]);
+        assert_eq!((s.panes[0].tab, s.cur().cwd.clone()), (0, c.clone()), "still shown");
+        assert_eq!(s.lands, lands, "nothing read");
+        assert_eq!(s.unavailable(Cmd::MoveTabLeft), Some("This is already the first tab"));
+        run(&mut s, Cmd::MoveTabRight);
+        assert_eq!(tab_paths(&s, 0), [a.clone(), c.clone(), b.clone()]);
+        // B kept its state: its selection comes back when it's shown.
+        run(&mut s, Cmd::NextTab);
+        settle(&mut s);
+        assert_eq!((s.cur().cwd.clone(), cursor(&s)), (b, "z".to_string()));
+        assert_eq!(s.cur().back, vec![a], "and its history");
+    }
+
+    /// Dragging a tab along its strip: the place it would land shows while it moves (a tab's
+    /// width per place), letting go moves it, Escape (a cancelled drag) leaves it.
+    #[test]
+    fn dragging_a_tab_along_its_strip_reorders_it() {
+        let (a, b, c) = (folder("drag-a", &[]), folder("drag-b", &[]), folder("drag-c", &[]));
+        let mut s = state_in(&a);
+        run(&mut s, Cmd::NewTab);
+        go(&mut s, &b);
+        run(&mut s, Cmd::NewTab);
+        go(&mut s, &c);
+        let id = s.panes[0].id();
+        let mut tx = Tx::default();
+        use rune::Phase::{Move, Up};
+        s.drag_tab(id, 0, Move, 130.0, 100.0, false, None, &mut tx);
+        assert_eq!(s.tab_drag, Some((id, 0, 1)));
+        s.drag_tab(id, 0, Move, 260.0, 100.0, false, None, &mut tx);
+        assert_eq!(s.tab_drag, Some((id, 0, 2)));
+        s.drag_tab(id, 0, Up, 260.0, 100.0, true, None, &mut tx);
+        assert_eq!((s.tab_drag, tab_paths(&s, 0)), (None, vec![a.clone(), b.clone(), c.clone()]), "cancelled: nothing moved");
+        s.drag_tab(id, 0, Up, 260.0, 100.0, false, None, &mut tx);
+        assert_eq!(tab_paths(&s, 0), [b.clone(), c.clone(), a.clone()]);
+        assert_eq!(s.cur().cwd, c, "the shown tab stays shown");
+        s.drag_tab(id, 2, Up, -1000.0, 100.0, false, None, &mut tx);
+        assert_eq!(tab_paths(&s, 0), [a, b, c], "clamped to the strip");
+    }
+
+    /// Move Tab to Other Pane, and a tab dropped on the other pane: it goes into that pane's
+    /// strip with its state (history, selection), shown there and read fresh, and that pane is
+    /// active; its old pane shows its neighbour. A pane's only tab moving closes the pane.
+    #[test]
+    fn a_tab_moves_to_the_other_pane_with_its_state() {
+        let (a, b, c) = (folder("other-a", &["a1", "a2"]), folder("other-b", &["b1"]), folder("other-c", &[]));
+        let mut s = state_in(&a);
+        assert_eq!(s.unavailable(Cmd::MoveTabOther), Some(crate::app::NOT_SPLIT));
+        go(&mut s, &c);
+        go(&mut s, &a);
+        s.cur_mut().select(1);
+        run(&mut s, Cmd::NewTab);
+        go(&mut s, &b);
+        run(&mut s, Cmd::Split); // right pane on B, active
+        run(&mut s, Cmd::OtherPane);
+        run(&mut s, Cmd::PrevTab); // left pane shows A
+        settle(&mut s);
+        assert_eq!((s.active, s.cur().cwd.clone()), (0, a.clone()));
+        run(&mut s, Cmd::MoveTabOther);
+        settle(&mut s);
+        assert_eq!(s.active, 1, "the pane it went to is active");
+        assert_eq!(tab_paths(&s, 1), [b.clone(), a.clone()]);
+        assert_eq!((s.cur().cwd.clone(), cursor(&s)), (a.clone(), "a2".to_string()), "its selection came with it");
+        assert_eq!(s.cur().back, vec![a.clone(), c.clone()], "and its history");
+        assert_eq!(tab_paths(&s, 0), std::slice::from_ref(&b), "its old pane shows the neighbour");
+        assert_eq!(s.panes[0].f.cwd, b);
+        // Dropped on the left pane's strip at the front: the right pane's shown tab (A).
+        let (left, right) = (s.panes[0].id(), s.panes[1].id());
+        s.drag_tab(right, 1, rune::Phase::Up, -400.0, 100.0, false, Some((left, 0)), &mut Tx::default());
+        settle(&mut s);
+        assert_eq!((s.active, tab_paths(&s, 0)), (0, vec![a.clone(), b.clone()]));
+        assert_eq!(cursor(&s), "a2");
+        // The right pane's only tab moves: that pane closes, and nothing goes to the closed list.
+        let closed = s.closed.len();
+        run(&mut s, Cmd::OtherPane);
+        run(&mut s, Cmd::MoveTabOther);
+        settle(&mut s);
+        assert_eq!((s.panes.len(), s.active), (1, 0));
+        assert_eq!(tab_paths(&s, 0), [a, b.clone(), b]);
+        assert_eq!(s.closed.len(), closed);
     }
 }

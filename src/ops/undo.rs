@@ -66,7 +66,7 @@ impl Undo {
     pub(super) fn in_trash(&self) -> bool {
         match self.what {
             What::Trash => !self.redo,
-            What::Copy | What::Duplicate | What::NewFolder => self.redo,
+            What::Copy | What::Duplicate | What::NewFolder | What::PutBack => self.redo,
             What::Rename | What::BatchRename | What::Move => false,
         }
     }

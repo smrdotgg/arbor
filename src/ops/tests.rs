@@ -1563,3 +1563,133 @@ fn an_item_that_cant_be_recorded_for_undo_is_said() {
     assert_eq!(u.map(|u| u.steps.len()), Some(1));
     assert!(errors.len() == 1 && errors[0].starts_with("“gone” can't be undone"), "{errors:?}");
 }
+
+/// A freedesktop.org trash on a "disk" at `top`: `files/` and `info/`, with an item at each
+/// name whose record says it came from `from` (relative to `top`, or absolute).
+fn fixture_trash(top: &Path, items: &[(&str, &str)]) -> PathBuf {
+    let root = top.join(".Trash-1000");
+    fs::create_dir_all(root.join("files")).unwrap();
+    fs::create_dir_all(root.join("info")).unwrap();
+    for (name, from) in items {
+        match name.strip_suffix('/') {
+            Some(dir) => {
+                fs::create_dir_all(root.join("files").join(dir).join("inner")).unwrap();
+                fs::write(root.join("files").join(dir).join("inner/f"), "x").unwrap();
+            }
+            None => fs::write(root.join("files").join(name), *name).unwrap(),
+        }
+        let n = name.trim_end_matches('/');
+        fs::write(
+            root.join("info").join(format!("{n}.trashinfo")),
+            format!("[Trash Info]\nPath={from}\nDeletionDate=2026-11-09T10:00:00\n"),
+        )
+        .unwrap();
+    }
+    root
+}
+
+/// Empty Trash deletes exactly what was counted, each with its record: a link inside goes and
+/// what it points to stays; an item replaced since the count is left alone and named; one put
+/// in the Trash after the count stays; a record with no item of its own stays.
+#[test]
+fn empty_trash_deletes_what_was_counted_and_their_records() {
+    use crate::trash::contents::{self, Bin};
+    let d = tmp("empty");
+    let root = fixture_trash(&d, &[("a.txt", "a.txt"), ("dir/", "dir"), ("swapped", "swapped")]);
+    fs::create_dir_all(d.join("keep")).unwrap();
+    fs::write(d.join("keep/precious"), "keep").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(d.join("keep"), root.join("files/dir/to-keep")).unwrap();
+    fs::write(root.join("info/orphan.trashinfo"), "[Trash Info]\nPath=orphan\n").unwrap();
+    let bins = [Bin { items: root.join("files"), info: Some(root.join("info")) }];
+    let (items, problem) = contents::list(&bins, &|| false).unwrap();
+    assert_eq!((items.len(), problem), (3, None));
+    // After the count: one replaced, one new.
+    // (Made before the old one goes, so it can't reuse its inode.)
+    fs::write(d.join("another"), "another").unwrap();
+    fs::rename(d.join("another"), root.join("files/swapped")).unwrap();
+    fs::write(root.join("files/late"), "late").unwrap();
+    let o = run_now(Op::EmptyTrash { items: Some(items) });
+    assert_eq!(o.removed.len(), 2, "{:?}", o.errors);
+    assert!(!root.join("files/a.txt").exists() && !root.join("files/dir").exists());
+    assert!(!root.join("info/a.txt.trashinfo").exists() && !root.join("info/dir.trashinfo").exists());
+    assert_eq!(fs::read_to_string(d.join("keep/precious")).unwrap(), "keep", "a link is removed, never followed");
+    assert_eq!(fs::read_to_string(root.join("files/swapped")).unwrap(), "another");
+    assert!(root.join("info/swapped.trashinfo").exists(), "its record stays with it");
+    assert!(o.errors[0].contains("“swapped” isn't the item you chose"), "{:?}", o.errors);
+    assert!(root.join("files/late").exists() && root.join("info/orphan.trashinfo").exists());
+    assert!(o.undo.is_none(), "it can't be undone");
+    assert!(o.folders.iter().any(|(p, _)| *p == root.join("files")), "panes on the trash read it again");
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// Esc stops it between entries: what's gone stays gone, the rest stays in the Trash.
+#[test]
+fn empty_trash_stops_when_cancelled() {
+    use crate::trash::contents::{self, Bin};
+    let d = tmp("empty-cancel");
+    let root = fixture_trash(&d, &[("a", "a"), ("b", "b"), ("c", "c")]);
+    let (mut items, _) = contents::list(&[Bin { items: root.join("files"), info: Some(root.join("info")) }], &|| false).unwrap();
+    items.sort_by(|a, b| a.path.cmp(&b.path));
+    let stop = root.join("files/b");
+    let o = run_hooked(
+        Op::EmptyTrash { items: Some(items) },
+        fake_trash,
+        Hooks { cancel_at: Some(Box::new(move |p| p == stop)), ..Hooks::default() },
+    );
+    assert!(o.cancelled);
+    assert_eq!(o.removed, [root.join("files/a")]);
+    assert!(root.join("files/b").exists() && root.join("info/b.trashinfo").exists() && root.join("files/c").exists());
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// Put Back reads each item's record: back where it came from (a relative record from the
+/// disk's top folder), or beside it under a free name when that's taken (never over it), which
+/// the result says; one whose folder is gone stays in the Trash, said so. Records go with the
+/// items restored. Undo puts them in the Trash again.
+#[test]
+fn put_back_restores_from_records_and_never_clobbers() {
+    let d = tmp("putback");
+    fs::create_dir_all(d.join("docs")).unwrap();
+    fs::write(d.join("docs/b.txt"), "someone else's").unwrap();
+    let abs = d.join("docs/b.txt").display().to_string().replace(' ', "%20");
+    let root = fixture_trash(&d, &[("a.txt", "docs/a.txt"), ("b.txt", &abs), ("c.txt", "gone/c.txt"), ("dir/", "docs/dir")]);
+    let files = root.join("files");
+    let items = vec![files.join("a.txt"), files.join("b.txt"), files.join("c.txt"), files.join("dir")];
+    let o = run_now(Op::PutBack { items });
+    assert_eq!(fs::read_to_string(d.join("docs/a.txt")).unwrap(), "a.txt");
+    assert_eq!(fs::read_to_string(d.join("docs/b.txt")).unwrap(), "someone else's", "never over what's there");
+    assert_eq!(fs::read_to_string(d.join("docs/b 2.txt")).unwrap(), "b.txt");
+    assert!(d.join("docs/dir/inner/f").exists());
+    assert_eq!(o.notes, ["“b.txt” went back as “b 2.txt”: “b.txt” is taken in “".to_string() + &crate::fs::pretty(&d.join("docs")) + "”"]);
+    assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
+    assert!(o.errors[0].starts_with("“c.txt” stayed in the Trash: the folder it came from"), "{:?}", o.errors);
+    assert!(files.join("c.txt").exists() && root.join("info/c.txt.trashinfo").exists());
+    for n in ["a.txt", "b.txt", "dir"] {
+        assert!(!files.join(n).exists() && !root.join(format!("info/{n}.trashinfo")).exists(), "{n}");
+    }
+    assert!(o.folders.iter().any(|(p, _)| *p == d.join("docs")), "the pane on its folder reads it again");
+    let u = o.undo.expect("undoable");
+    assert_eq!(u.what, What::PutBack);
+    let back = run_now(Op::Undo(u));
+    assert!(back.errors.is_empty() && back.refused.is_none(), "{:?} {:?}", back.errors, back.refused);
+    assert!(!d.join("docs/a.txt").exists() && !d.join("docs/b 2.txt").exists() && d.join("docs/b.txt").exists());
+    assert!(d.join("docs/.trash/a.txt").exists(), "undo trashed it again");
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// An item replaced in the Trash since it was listed is left alone (its record too).
+#[test]
+fn put_back_checks_each_item_is_still_the_one_listed() {
+    let d = tmp("putback-swap");
+    fs::create_dir_all(d.join("docs")).unwrap();
+    let root = fixture_trash(&d, &[("a.txt", "docs/a.txt")]);
+    let item = root.join("files/a.txt");
+    let id = crate::fs::ident_at(&item).unwrap();
+    fs::write(d.join("replacement"), "replaced").unwrap();
+    fs::rename(d.join("replacement"), &item).unwrap();
+    let o = run_now(Op::Checked { expect: vec![(item.clone(), id)], op: Box::new(Op::PutBack { items: vec![item.clone()] }) });
+    assert!(o.refused.is_some_and(|r| r.contains("“a.txt”")));
+    assert!(item.exists() && !d.join("docs/a.txt").exists());
+    let _ = fs::remove_dir_all(&d);
+}

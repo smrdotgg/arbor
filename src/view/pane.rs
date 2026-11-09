@@ -25,7 +25,8 @@ pub(super) fn pane(s: &State, p: &Pane, c: Ctx) -> El {
         })
         .child(pathbar(f, l, c.w));
     if p.tabs.len() > 1 {
-        col = col.child(hr(l)).child(tabbar(p, l, c.w));
+        let drag = s.tab_drag.filter(|d| d.0 == id).map(|d| (d.1, d.2));
+        col = col.child(hr(l)).child(tabbar(p, l, c.w, c.split, drag));
     }
     if let Some(search) = &f.search {
         col = col.child(hr(l)).child(search_bar(f, search, c));
@@ -291,11 +292,36 @@ pub(super) fn tab_window(n: usize, active: usize, avail: f32) -> std::ops::Range
     start..start + slots
 }
 
+/// Where a tab dragged over pane `p` (laid out at `rect`) would go in its strip, from the
+/// pointer at `[x, y]`: before the tab under the pointer's left half or after one under its
+/// right half, when the pointer is over the strip; at the end anywhere else in the pane (and
+/// when it has no strip, with one tab). From the strip's layout constants, as Rune draws it:
+/// equal tabs from the left, up to 220 pt each, after "‹ 3" when tabs are hidden before.
+pub(super) fn strip_slot(rect: [f32; 4], p: &Pane, [x, y]: [f32; 2]) -> usize {
+    let n = p.tabs.len();
+    let top = rect[1] + BAR_H + 1.0;
+    if n < 2 || y < top || y >= top + TABS_H {
+        return n;
+    }
+    let avail = rect[2] - TABBAR_CHROME;
+    let shown = tab_window(n, p.tab, avail);
+    let before = shown.start > 0;
+    let markers = (before as u8 + (shown.end < n) as u8) as f32;
+    let k = shown.len().max(1) as f32;
+    let room = avail - markers * (TAB_MORE + TAB_GAP);
+    let tw = ((room - TAB_GAP * (k - 1.0)) / k).clamp(1.0, 220.0);
+    let x0 = rect[0] + 6.0 + if before { TAB_MORE + TAB_GAP } else { 0.0 };
+    let i = ((x - x0) / (tw + TAB_GAP) + 0.5).floor().max(0.0) as usize;
+    (shown.start + i).clamp(shown.start, shown.end)
+}
+
 /// The pane's tabs, only when it has two or more: each shows its folder's name (the whole
 /// path in a tooltip). A click shows it, a middle click closes it, "+" opens a new one. When
 /// they don't all fit, the strip shows the ones around the active tab, with "‹ 3" and "5 ›"
 /// for how many are hidden on each side (a click shows the nearest of them); "+" stays.
-pub(super) fn tabbar(p: &Pane, l: Look, width: f32) -> El {
+/// A tab drags along its strip to reorder, or onto the other pane (split) to move there;
+/// `drag` is a drag along this strip: from where, to where.
+pub(super) fn tabbar(p: &Pane, l: Look, width: f32, split: Option<Panes>, drag: Option<(usize, usize)>) -> El {
     let id = p.id();
     let mut bar = row().key("tabs").role("tablist").label("Tabs").w_full().h(TABS_H).px(6.0).gap(TAB_GAP).center_y();
     let n = p.tabs.len();
@@ -351,8 +377,27 @@ pub(super) fn tabbar(p: &Pane, l: Look, width: f32) -> El {
                     s.show_tab(ix, j, tx);
                 }
             })
+            .on_drag(move |s: &mut State, d: &mut Drag, tx| {
+                // A middle click closes; only the primary button drags.
+                if tx.button() == PointerButton::Middle {
+                    return;
+                }
+                // Over the other pane (split), past a small travel: into its strip.
+                let at = d.window_point();
+                let over = split
+                    .and_then(|ps| Some((ps, ps.at(at)?)))
+                    .filter(|&(_, o)| o != id && d.dx.hypot(d.dy) > DRAG_START)
+                    .and_then(|(ps, o)| Some((o, strip_slot(ps.rect(o)?, s.pane(o)?, at))));
+                s.drag_tab(id, j, d.phase, d.dx, d.w + TAB_GAP, d.cancelled(), over, tx);
+            })
             .child(text(tab_label(path)).font(TAB).color(if on { l.t.text } else { l.t.text_secondary }).truncate().min_w(0.0));
-        bar = bar.child(if on { t.fill(l.t.control_off) } else { t.hover(l.t.hover) });
+        bar = bar.child(match drag {
+            // The dragged tab, dimmed, and where it would land.
+            Some((from, _)) if from == j => t.fill(l.t.control_off).opacity(0.6),
+            Some((_, to)) if to == j => t.fill(l.accent.alpha(0.22)),
+            _ if on => t.fill(l.t.control_off),
+            _ => t.hover(l.t.hover),
+        });
     }
     if after > 0 {
         bar = bar.child(more(format!("{after} ›"), "tabs-after", shown.end, after));

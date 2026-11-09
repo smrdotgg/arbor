@@ -40,6 +40,9 @@ pub(super) fn sidebar(s: &State, l: Look, under_titlebar: bool) -> El {
     for i in 0..s.places.len() {
         c = c.child(place_row(s, i, l));
     }
+    if let Some(path) = &s.trash_place {
+        c = c.child(trash_row(s, path, l));
+    }
     if !s.volumes.is_empty() {
         c = c.child(section("Locations"));
         for i in s.places.len()..s.place_count() {
@@ -117,4 +120,32 @@ pub(super) fn place_row(s: &State, i: usize, l: Look) -> El {
         _ if here => item.fill(l.t.control_off),
         _ => item.hover(l.t.hover),
     }
+}
+
+/// The Trash (Linux's home trash, macOS's `~/.Trash`; none on Windows): below the favorites,
+/// not one of them (no ⌘ number, no reordering). A click opens it; its menu also empties it.
+pub(super) fn trash_row(s: &State, path: &std::path::Path, l: Look) -> El {
+    let here = path == s.cur().cwd;
+    let item = row()
+        .key("place-trash")
+        .role("option")
+        .focus_selected(here)
+        .h(26.0)
+        .px(8.0)
+        .gap(6.0)
+        .center_y()
+        .radius(5.0)
+        .cursor(Cursor::Pointer)
+        .on_press_tx(|s: &mut State, tx| {
+            tx.instant();
+            if s.unavailable(Cmd::GoTrash).is_none() {
+                s.run(Cmd::GoTrash, tx);
+            }
+        })
+        .on_secondary_press(|s: &mut State, press, tx| {
+            tx.instant();
+            s.trash_menu(press, tx);
+        })
+        .child(text(crate::trash::BIN).font(BODY).color(l.t.text).truncate().grow(1.0).min_w(0.0));
+    if here { item.fill(l.t.control_off) } else { item.hover(l.t.hover) }
 }

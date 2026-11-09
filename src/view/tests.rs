@@ -148,3 +148,30 @@ fn measured_breadcrumbs_fit_a_split_pane() {
     assert!(used + 2.0 * CRUMB_PAD <= avail, "{used} of {avail}");
     assert!(measure_crumb("Photos") > 20.0);
 }
+
+/// A tab dropped on the other pane goes where the pointer is in its strip (before the tab
+/// under its left half, after one under its right half), and at the end anywhere else in the
+/// pane, or when it has no strip.
+#[test]
+fn a_tab_dropped_on_a_pane_lands_where_the_pointer_is() {
+    let pane = |n: usize, tab: usize| Pane {
+        f: Folder::new(9, PathBuf::from("/"), crate::fs::Sort { key: SortKey::Name, desc: false }, false, None),
+        tabs: (0..n)
+            .map(|j| {
+                (j != tab)
+                    .then(|| Folder::new(9, PathBuf::from("/"), crate::fs::Sort { key: SortKey::Name, desc: false }, false, None).memo())
+            })
+            .collect(),
+        tab,
+    };
+    // 3 tabs in a 600 pt pane at x = 100: each 220 pt (the most), from x = 106.
+    let rect = [100.0, 0.0, 600.0, 400.0];
+    let y = BAR_H + 1.0 + TABS_H / 2.0;
+    let p = pane(3, 0);
+    assert_eq!(strip_slot(rect, &p, [110.0, y]), 0);
+    assert_eq!(strip_slot(rect, &p, [106.0 + 150.0, y]), 1, "right half of the first tab: after it");
+    assert_eq!(strip_slot(rect, &p, [106.0 + 224.0 + 50.0, y]), 1);
+    assert_eq!(strip_slot(rect, &p, [690.0, y]), 3, "past the last: the end");
+    assert_eq!(strip_slot(rect, &p, [300.0, 200.0]), 3, "over the list: the end");
+    assert_eq!(strip_slot(rect, &pane(1, 0), [110.0, y]), 1, "no strip: after its one tab");
+}

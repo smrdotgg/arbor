@@ -58,6 +58,10 @@ impl Ask {
                 ("Clear Jump History?".to_string(), format!("Jump to Folder forgets {what}. This can't be undone."), "Clear History")
             }
             Cmd::Delete => return Ask::delete(s.cur().doomed(), None),
+            Cmd::EmptyTrash => {
+                let (title, body, action) = crate::trash::contents::ask_words(s.trash_count.as_ref().map(|c| &c.got));
+                (title, body, action)
+            }
             Cmd::MakeDefault => ("Make Arbor the Default for Folders?".into(), MAKE_DEFAULT.into(), "Make Default"),
             Cmd::RestoreDefault => ("Restore the System Default for Folders?".into(), RESTORE_DEFAULT.into(), "Restore"),
             // Not permanent: never asked (see `Cmd::permanent`).
@@ -138,6 +142,27 @@ impl State {
     pub(crate) fn ask(&mut self, cmd: Cmd, tx: &mut Tx) {
         let a = Ask::for_cmd(self, cmd);
         self.ask_with(a, tx);
+        // Empty Trash: what's in it is counted on a thread of its own; the dialog is already
+        // up and says the count when it lands (`poll_trash_count`).
+        if cmd == Cmd::EmptyTrash {
+            self.trash_count = Some(crate::trash::contents::Counting::start(self.waker.clone()));
+        }
+    }
+
+    /// The Trash's count, while Empty Trash's dialog is open: its words follow what's found.
+    /// Once the dialog has closed, the count stops. True when anything changed.
+    pub(crate) fn poll_trash_count(&mut self) -> bool {
+        let Some(c) = self.trash_count.as_mut() else { return false };
+        let Some(a) = self.asking.as_mut().filter(|a| a.cmd == Cmd::EmptyTrash) else {
+            self.trash_count = None;
+            return false;
+        };
+        if !c.poll() {
+            return false;
+        }
+        let (title, body, action) = crate::trash::contents::ask_words(Some(&c.got));
+        (a.title, a.body, a.action) = (title, body, action);
+        true
     }
 
     /// Opens the dialog asking `a`.
@@ -171,6 +196,8 @@ impl State {
                 None => self.run_permanent(a.cmd, tx),
             }
         }
+        // Its count stops (Empty Trash took what it found, if it ran).
+        self.trash_count = None;
     }
 
     /// The dialog's keys (it's modal: it takes every key while open).
@@ -269,9 +296,9 @@ mod tests {
         s.answer(true, &mut tx);
         assert!(s.history.agg.as_ref().unwrap().is_empty());
         let permanent: Vec<Cmd> = Cmd::ALL.iter().copied().filter(|c| c.permanent()).collect();
-        assert_eq!(permanent, [Cmd::ClearJump, Cmd::Delete]);
+        assert_eq!(permanent, [Cmd::ClearJump, Cmd::Delete, Cmd::EmptyTrash]);
         let asking: Vec<Cmd> = Cmd::ALL.iter().copied().filter(|c| c.asks()).collect();
-        assert_eq!(asking, [Cmd::ClearJump, Cmd::MakeDefault, Cmd::RestoreDefault, Cmd::Delete]);
+        assert_eq!(asking, [Cmd::ClearJump, Cmd::MakeDefault, Cmd::RestoreDefault, Cmd::Delete, Cmd::EmptyTrash]);
         assert!(asking.iter().all(|c| c.title().ends_with('…')), "a command that asks says so in its title");
         assert!(Cmd::ClearJump.title().ends_with('…'), "a command that asks says so in its title");
     }
@@ -403,6 +430,68 @@ mod tests {
         s.run(Cmd::Undo, &mut tx);
         settle_job(&mut s);
         assert!(d.join("a").exists() && !d.join("notrash-b").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Empty Trash asks at once (the dialog never waits for the count), says the count and
+    /// size once a thread has counted, keeps everything on Enter (Cancel), and only the
+    /// destructive button empties, with a truthful result and nothing to undo. Then an empty
+    /// Trash says so. Fixture trashes only (`contents::FIXTURE`): never the user's own.
+    #[test]
+    fn empty_trash_asks_counts_and_empties_only_on_the_button() {
+        use crate::trash::contents::{Bin, FIXTURE};
+        let (d, mut s) = folder_of("empty-trash", &[]);
+        let root = d.join(".Trash-1000");
+        std::fs::create_dir_all(root.join("files/sub")).unwrap();
+        std::fs::create_dir_all(root.join("info")).unwrap();
+        for n in ["a", "b"] {
+            std::fs::write(root.join("files").join(n), vec![b'x'; 512]).unwrap();
+            std::fs::write(root.join("info").join(format!("{n}.trashinfo")), "[Trash Info]\nPath=/x\n").unwrap();
+        }
+        std::fs::write(root.join("files/sub/c"), vec![b'x'; 1024]).unwrap();
+        *FIXTURE.lock().unwrap() = vec![Bin { items: root.join("files"), info: Some(root.join("info")) }];
+        let mut tx = Tx::default();
+        let undos = s.undo.len();
+        let counted = |s: &mut State| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !s.asking.as_ref().is_some_and(|a| a.body.contains("KB")) && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                s.poll(&mut Tx::default());
+            }
+        };
+        s.run(Cmd::EmptyTrash, &mut tx);
+        let a = s.asking.as_ref().expect("it asks at once");
+        assert_eq!((a.title.as_str(), a.focus), (&*format!("Empty the {BIN}?"), Button::Cancel));
+        assert!(a.body.ends_with("This can't be undone."), "{}", a.body);
+        counted(&mut s);
+        assert_eq!(
+            s.asking.as_ref().unwrap().body,
+            format!("The 3 items in the {BIN} (2.0 KB) will be deleted permanently. This can't be undone.")
+        );
+        assert!(s.on_key(&key(Key::Enter), &mut tx), "Enter on Cancel");
+        assert!(s.asking.is_none() && s.trash_count.is_none());
+        assert!(root.join("files/a").exists() && root.join("files/sub/c").exists(), "Cancel deletes nothing");
+        s.run(Cmd::EmptyTrash, &mut tx);
+        counted(&mut s);
+        assert!(s.on_key(&key(Key::Tab), &mut tx));
+        assert!(s.on_key(&key(Key::Enter), &mut tx));
+        settle_job(&mut s);
+        assert_eq!(s.note.as_deref(), Some(&*format!("Emptied the {BIN}: deleted 3 items permanently")));
+        assert_eq!(std::fs::read_dir(root.join("files")).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(root.join("info")).unwrap().count(), 0, "their records went too");
+        assert_eq!(s.undo.len(), undos, "nothing to undo");
+        // Now empty: the dialog says so, and so does the button.
+        s.run(Cmd::EmptyTrash, &mut tx);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !s.asking.as_ref().is_some_and(|a| a.body.contains("already empty")) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            s.poll(&mut Tx::default());
+        }
+        assert_eq!(s.asking.as_ref().unwrap().body, format!("The {BIN} is already empty."));
+        s.answer(true, &mut tx);
+        settle_job(&mut s);
+        assert_eq!(s.note.as_deref(), Some(&*format!("The {BIN} is already empty")));
+        FIXTURE.lock().unwrap().clear();
         let _ = std::fs::remove_dir_all(&d);
     }
 }
