@@ -1604,17 +1604,18 @@ fn empty_trash_deletes_what_was_counted_and_their_records() {
     let bins = [Bin { items: root.join("files"), info: Some(root.join("info")) }];
     let (items, problem) = contents::list(&bins, &|| false).unwrap();
     assert_eq!((items.len(), problem), (3, None));
-    // After the count: one replaced, one new.
-    // (Made before the old one goes, so it can't reuse its inode.)
-    fs::write(d.join("another"), "another").unwrap();
-    fs::rename(d.join("another"), root.join("files/swapped")).unwrap();
+    // After the count: one replaced (by a folder, which no platform can take for the file:
+    // Windows' identity is creation time, which a new file at the name may inherit), one new.
+    fs::remove_file(root.join("files/swapped")).unwrap();
+    fs::create_dir(root.join("files/swapped")).unwrap();
+    fs::write(root.join("files/swapped/another"), "another").unwrap();
     fs::write(root.join("files/late"), "late").unwrap();
     let o = run_now(Op::EmptyTrash { items: Some(items) });
     assert_eq!(o.removed.len(), 2, "{:?}", o.errors);
     assert!(!root.join("files/a.txt").exists() && !root.join("files/dir").exists());
     assert!(!root.join("info/a.txt.trashinfo").exists() && !root.join("info/dir.trashinfo").exists());
     assert_eq!(fs::read_to_string(d.join("keep/precious")).unwrap(), "keep", "a link is removed, never followed");
-    assert_eq!(fs::read_to_string(root.join("files/swapped")).unwrap(), "another");
+    assert_eq!(fs::read_to_string(root.join("files/swapped/another")).unwrap(), "another");
     assert!(root.join("info/swapped.trashinfo").exists(), "its record stays with it");
     assert!(o.errors[0].contains("“swapped” isn't the item you chose"), "{:?}", o.errors);
     assert!(root.join("files/late").exists() && root.join("info/orphan.trashinfo").exists());
@@ -1686,8 +1687,9 @@ fn put_back_checks_each_item_is_still_the_one_listed() {
     let root = fixture_trash(&d, &[("a.txt", "docs/a.txt")]);
     let item = root.join("files/a.txt");
     let id = crate::fs::ident_at(&item).unwrap();
-    fs::write(d.join("replacement"), "replaced").unwrap();
-    fs::rename(d.join("replacement"), &item).unwrap();
+    // Replaced by a folder (see `empty_trash_deletes_what_was_counted_and_their_records`).
+    fs::remove_file(&item).unwrap();
+    fs::create_dir(&item).unwrap();
     let o = run_now(Op::Checked { expect: vec![(item.clone(), id)], op: Box::new(Op::PutBack { items: vec![item.clone()] }) });
     assert!(o.refused.is_some_and(|r| r.contains("“a.txt”")));
     assert!(item.exists() && !d.join("docs/a.txt").exists());

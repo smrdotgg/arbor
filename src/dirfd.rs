@@ -191,7 +191,7 @@ mod tests {
         hook::watch(&d, Some(5));
         let all: Vec<io::Result<CString>> = Names::open(&fd).unwrap().collect();
         assert!(all.last().is_some_and(|r| r.as_ref().is_err_and(|e| e.raw_os_error() == Some(libc::EIO))), "{all:?}");
-        assert!(all.len() <= 5);
+        assert!(all.len() <= 6, "five reads at most, then the error: {all:?}");
         assert!(names(&fd).is_err(), "and the collected form says so too");
         hook::WATCH.lock().unwrap().retain(|w| w.0 != ino);
         let _ = std::fs::remove_dir_all(&d);
