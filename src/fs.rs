@@ -93,12 +93,6 @@ impl std::hash::Hash for Ident {
 }
 
 impl Ident {
-    /// Device and inode, for comparing with a folder's `fstat` (Get Info's walk).
-    #[cfg(unix)]
-    pub fn node(&self) -> (u64, u64) {
-        self.node
-    }
-
     /// From its parts, for metadata read without `std` (`dirfd`). `changed` (ctime) is kept
     /// only without a birth time.
     #[cfg(unix)]

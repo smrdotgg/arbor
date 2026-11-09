@@ -187,16 +187,20 @@ impl Counting<'_> {
 fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) -> bool {
     use crate::dirfd::{Names, fstat, is_dir, open_dir, same, stat_at};
     use std::os::unix::ffi::OsStrExt;
-    let (path, follow, want) = match root {
-        Root::Picked(p, id) => (p, false, id.map(|i| i.node())),
-        Root::Here(p, id) => (p, true, *id),
+    let (path, follow) = match root {
+        Root::Picked(p, _) => (p, false),
+        Root::Here(p, _) => (p, true),
     };
     let opened = crate::ffi::cstr(path).and_then(|r| open_dir(libc::AT_FDCWD, &r, follow)).and_then(|fd| Ok((fstat(&fd)?, fd)));
-    // As `MetadataExt` gives them (`dev_t` is i32 on macOS).
-    #[allow(clippy::unnecessary_cast)]
-    let still = |st: &libc::stat| want.is_none_or(|w| w == (st.st_dev as u64, st.st_ino as u64));
+    // A selected folder: the object listed, birth time and all (a folder made where it was,
+    // that got its inode back, isn't it). The folder on screen: the one listed, links followed.
+    #[allow(clippy::unnecessary_cast)] // `dev_t` is i32 on macOS
+    let still = |st: &libc::stat, fd: &std::os::fd::OwnedFd| match root {
+        Root::Picked(_, id) => id.is_none_or(|id| crate::dirfd::ident_of_fd(fd).is_ok_and(|now| now == id)),
+        Root::Here(_, id) => id.is_none_or(|w| w == (st.st_dev as u64, st.st_ino as u64)),
+    };
     let (st, fd) = match opened {
-        Ok((st, fd)) if still(&st) => (st, fd),
+        Ok((st, fd)) if still(&st, &fd) => (st, fd),
         _ => {
             c.t.unreadable += 1;
             return true;
@@ -880,6 +884,46 @@ mod tests {
     /// The review's case: a selected folder replaced by a link after it was listed used to be
     /// followed (12,345 bytes from outside counted). It's opened without following a link and
     /// only while it's the item listed, so it counts as unreadable. The folder on screen,
+    /// The review's case: a selected folder replaced by another made at its path, which got its
+    /// inode back (ext4), was counted: the walk compared device and inode only. Its birth time
+    /// (or, without one, its handle or ctime) tells them apart.
+    #[cfg(unix)]
+    #[test]
+    fn a_selected_folder_whose_inode_was_reused_isnt_counted() {
+        use std::os::unix::fs::MetadataExt;
+        let d = temp("dir-reuse");
+        let p = d.join("folder");
+        let mut shown = false;
+        for _ in 0..20 {
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir(&p).unwrap();
+            let (id, ino) = (crate::fs::ident_at(&p).unwrap(), p.symlink_metadata().unwrap().ino());
+            std::thread::sleep(Duration::from_millis(20));
+            std::fs::remove_dir(&p).unwrap();
+            std::fs::create_dir(&p).unwrap();
+            if p.symlink_metadata().unwrap().ino() != ino {
+                continue;
+            }
+            shown = true;
+            std::fs::write(p.join("only in the newcomer"), "x").unwrap();
+            let total = std::sync::Arc::new(std::sync::Mutex::new(Total::default()));
+            walk(&[Root::Picked(p.clone(), Some(id))], Total::default(), &total, &AtomicBool::new(false), &|| {});
+            let t = total.lock().unwrap().clone();
+            assert_eq!((t.files, t.unreadable), (0, 1), "{t:?}");
+            // The folder chosen, with something put in it since: counted.
+            let id = crate::fs::ident_at(&p).unwrap();
+            std::fs::write(p.join("added since"), "y").unwrap();
+            let total = std::sync::Arc::new(std::sync::Mutex::new(Total::default()));
+            walk(&[Root::Picked(p.clone(), Some(id))], Total::default(), &total, &AtomicBool::new(false), &|| {});
+            assert_eq!(total.lock().unwrap().files, 2);
+            break;
+        }
+        if !shown {
+            eprintln!("a_selected_folder_whose_inode_was_reused_isnt_counted: skipped (no inode reuse here)");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// reached through a link to it, is still counted (that's how the user got there).
     #[cfg(unix)]
     #[test]

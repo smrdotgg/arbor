@@ -59,6 +59,16 @@ pub fn ident_at(dir: &OwnedFd, name: &CStr) -> io::Result<crate::fs::Ident> {
     Ok(if id.wants_handle() { id.with_handle(handle_key(dir.as_raw_fd(), name, 0)) } else { id })
 }
 
+/// The [`crate::fs::Ident`] of the open file or folder `fd` itself, handle and all.
+pub fn ident_of_fd(fd: &OwnedFd) -> io::Result<crate::fs::Ident> {
+    #[cfg(target_os = "linux")]
+    let (flags, handle_flags) = (libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW, libc::AT_EMPTY_PATH);
+    #[cfg(not(target_os = "linux"))]
+    let (flags, handle_flags) = (0, 0);
+    let id = ident_raw(fd.as_raw_fd(), c"", flags)?;
+    Ok(if id.wants_handle() { id.with_handle(handle_key(fd.as_raw_fd(), c"", handle_flags)) } else { id })
+}
+
 /// `statx` (Linux) or `fstatat`/`fstat` for `name` relative to `dir` with `flags`, as an
 /// identity without a handle. An empty `name` is `dir` itself.
 fn ident_raw(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<crate::fs::Ident> {
