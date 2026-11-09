@@ -9,7 +9,11 @@ One window, one `State` (`src/app/`), one UI thread. Rune calls four functions o
 `view::view` (build the element tree from `State`, every frame), `State::on_key`,
 `State::poll` (after a waker fires: land whatever background work finished) and `setup`.
 Handlers change `State` and land the change with `tx.instant()` (nothing animates). Anything
-that can touch a disk runs off the UI thread and lands through `poll`.
+that reads or changes the disk runs off the UI thread and lands through `poll`: listings, every
+file operation (the inline rename and New Folder too, since milestone 13's review), Get Info's
+details. What's left on the UI thread is small and named: starting other apps (`fs::open`,
+reveal), creating the settings file when it's opened, and one `lstat` per item for a drop's
+"same disk?" and for a pasted list of paths.
 
 ## Modules
 
@@ -91,7 +95,9 @@ Nothing runs in the background unless the user did something, and nothing polls.
   Navigations that need follow-up (a Jump, a sidebar click) remember the number. Preview,
   Get Info and Open With keep their own counters the same way.
 - **Identity, re-checked right before acting.** A source's identity (`fs::Ident`: device and
-  inode, or volume and file index on Windows) is captured when an operation is asked for
+  inode on Unix; on Windows its creation time and whether it's a folder, from the metadata the
+  listing already has, since the file index needs the file opened, so a replacement within
+  Windows' 15 s creation-time tunnelling isn't seen there) is captured when an operation is asked for
   (from the listing, or the search walk) and checked on the worker immediately before each
   item is touched (`fs::ident_at`; `Op::Checked`, `ops::Doomed`, `ops::Seen` for batch
   rename). Undo keeps a fuller fingerprint (`ops/print.rs`: identity, type, size, mtime, and a

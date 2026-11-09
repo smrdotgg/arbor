@@ -149,6 +149,16 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-09 · The inline rename and New Folder are worker operations** (review of milestone
+  13: they touched the disk on the window's thread). The list shows the new name at once and
+  reads the folder again when the worker answers (which puts it right if the rename was
+  refused); undo is as before. They're file operations like the rest, so they wait for one
+  that's running: the rename field stays open and says so, New Folder is dimmed. A rename has
+  nothing to say when it goes well. Undo: `Op::RenameOne`, `Op::NewFolder`.
+- **2026-11-09 · Windows `fs::Ident` stays creation time and type** (review of milestone 13:
+  ARCHITECTURE.md called it volume and file index). The file index needs each item opened (a
+  call per listed item, on a disk that may be slow), so ARCHITECTURE.md now says what it is,
+  and the tunnelling limit, instead.
 - **2026-11-09 · Get Info's details are fully asynchronous** (review of milestone 13; replaces
   the milestone 12 call of a 2 ms wait, which macOS CI stretched to 9.5 ms). The key shows
   what the listing knows (name, kind, size, modified) and "…" in the rows still to come;
