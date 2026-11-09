@@ -149,6 +149,11 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-09 · Get Info's details are fully asynchronous** (review of milestone 13; replaces
+  the milestone 12 call of a 2 ms wait, which macOS CI stretched to 9.5 ms). The key shows
+  what the listing knows (name, kind, size, modified) and "…" in the rows still to come;
+  the rest lands from a worker in the same rows, so nothing moves. Undo: `retarget_info` in
+  `src/info.rs` (a `bounded::read_waiting` again).
 - **2026-11-09 · Eject waits for any running file operation** (review of milestone 13). The
   old check compared paths, so an operation reaching the volume through a link, or copying a
   folder that holds it, was missed. Telling it surely would mean resolving every source,

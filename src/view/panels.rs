@@ -31,7 +31,11 @@ pub(super) fn info_panel(s: &State, i: &crate::info::Info, l: Look, width: Optio
         None => panel.grow(1.0),
     };
     let single = i.paths.len() == 1;
-    let meta = i.meta.as_ref().and_then(|m| m.as_ref().ok());
+    let read = i.meta.as_ref().and_then(|m| m.as_ref().ok());
+    // Until its details land, what the listing knows (and "…" for the rest, in the same rows,
+    // so nothing moves when they come).
+    let loading = single && i.meta.is_none();
+    let meta = read.or(i.known.as_ref().filter(|_| loading));
     let kind = match meta {
         Some(m) => m.kind.clone(),
         None if single => "…".into(),
@@ -81,21 +85,23 @@ pub(super) fn info_panel(s: &State, i: &crate::info::Info, l: Look, width: Optio
         _ => {}
     }
     if let Some(m) = meta {
+        let later = |v: Option<String>| v.unwrap_or_else(|| if loading { "…".into() } else { "—".into() });
+        let date = |t: Option<i64>| if loading && t.is_none() { "…".into() } else { fmt_date(t) };
         body = body
-            .child(line("Created", fmt_date(m.created)))
-            .child(line("Modified", fmt_date(m.modified)))
-            .child(line("Accessed", fmt_date(m.accessed)));
-        if let Some(t) = &m.link {
-            body = body.child(line("Link to", t.clone()));
+            .child(line("Created", date(m.created)))
+            .child(line("Modified", date(m.modified)))
+            .child(line("Accessed", date(m.accessed)));
+        if let Some(t) = m.link.clone().or_else(|| (loading && m.kind == "Link").then(|| "…".into())) {
+            body = body.child(line("Link to", t));
         }
-        if let Some(mode) = &m.mode {
-            body = body.child(line("Permissions", mode.clone()));
+        if m.mode.is_some() || (loading && cfg!(unix)) {
+            body = body.child(line("Permissions", later(m.mode.clone())));
         }
-        if let Some(o) = &m.owner {
-            body = body.child(line("Owner", o.clone()));
+        if m.owner.is_some() || (loading && cfg!(unix)) {
+            body = body.child(line("Owner", later(m.owner.clone())));
         }
-        if let Some(a) = &m.attrs {
-            body = body.child(line("Attributes", a.clone()));
+        if m.attrs.is_some() || (loading && cfg!(windows)) {
+            body = body.child(line("Attributes", later(m.attrs.clone())));
         }
     }
     let button = |label: &'static str, key: &'static str| {

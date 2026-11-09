@@ -414,12 +414,15 @@ screen; with several items, how many files and folders and their total.
 
 **A folder's size and item count** (or the total of several items) are counted on demand,
 following NORTHSTAR's rules for view-triggered work: the panel shows at once with what the
-listing knows (the key waits at most 2 ms for the item's own details, which a local disk
-answers within; a slow one's land from the worker a moment later), and the count streams
+listing knows (name, kind, size, modified; the key never waits for the rest, which a worker
+reads and which lands in the same rows, "…" until then), and the count streams
 in ("7,041 items · 414 MB so far…") on a thread of its own that wakes the window at most every
 30 ms. Moving the selection or closing the panel stops it at the next entry. It never follows
 links (on macOS and Linux each folder is opened without following one, and only while it's
-still the folder that was listed, as Delete Permanently does), never enters another file system
+still the folder that was listed, as Delete Permanently does; a selected folder is opened that
+way too, while the folder on screen is reached as you reached it, a link to it included), reads
+each folder a name at a time (so a stop reads nothing more, and a read error counts the folder as
+unreadable rather than ending it quietly), never enters another file system
 mounted inside (as Delete Permanently tells them apart: the device, and on macOS the volume;
 Get Info on a mount point itself, `/` or a volume's top folder, counts what's on it) and says
 how many it left out, counts folders it couldn't read (or whose entries it couldn't look at)

@@ -5,8 +5,9 @@
 //!
 //! The total is view-triggered background work and follows NORTHSTAR's rules for it:
 //!
-//! - **First paint never waits:** the panel shows at once with what the listing knows; the
-//!   item's own details land from a worker a moment later, and the total streams in.
+//! - **First paint never waits:** the panel shows at once with what the listing knows (name,
+//!   kind, size, modified); the item's own details land from a worker a moment later (the key
+//!   never waits for them), and the total streams in.
 //! - **Scoped to what's on screen:** moving the selection or closing the panel sets the walk's
 //!   stop flag, checked before every entry; its later counts never land.
 //! - **Finishes and stops:** one walk, no watching. It never follows links, never enters
@@ -33,11 +34,6 @@ use crate::mounts::{Fence, Mounts};
 
 /// How often a walk wakes the window at most while it counts.
 const WAKE_EVERY: Duration = Duration::from_millis(30);
-
-/// How long a key that opens or moves Get Info waits for the item's details: a local `lstat`
-/// answers in microseconds, so they land with the key; a slow disk costs the frame this much at
-/// most, and its details land when they come.
-pub const META_WAIT: Duration = Duration::from_millis(2);
 
 /// What the disk says about one item.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -353,7 +349,11 @@ pub(crate) mod hook {
     /// Paths whose details take this long to read (a slow disk).
     pub(crate) static SLOW: Mutex<Vec<(PathBuf, std::time::Duration)>> = Mutex::new(Vec::new());
 
+    /// The threads `meta` ran on: never the window's.
+    pub(crate) static META_THREADS: Mutex<Vec<std::thread::ThreadId>> = Mutex::new(Vec::new());
+
     pub(super) fn slow_meta(p: &Path) {
+        META_THREADS.lock().unwrap().push(std::thread::current().id());
         let wait = SLOW.lock().unwrap().iter().find(|(q, _)| q == p).map(|(_, w)| *w);
         if let Some(w) = wait {
             std::thread::sleep(w);
@@ -521,6 +521,9 @@ pub struct Info {
     pub size: u64,
     /// One item's details, once read (`None` while on its way; always `None` for several).
     pub meta: Option<Result<Meta, String>>,
+    /// What the listing already says about the one item (kind, size, modified), shown until
+    /// its details land.
+    pub known: Option<Meta>,
     req: u64,
     /// The total, for a folder or several items: what the walk has counted so far.
     pub total: Option<Shared>,
@@ -596,17 +599,34 @@ impl State {
         } else {
             picked.iter().filter(|e| e.is_dir && !e.is_link).map(|e| Root::Picked(f.cwd.join(&e.os), e.id)).collect()
         };
+        let known = match picked.as_slice() {
+            [e] => Some(Meta {
+                kind: if e.is_link {
+                    "Link".into()
+                } else if e.is_dir {
+                    "Folder".into()
+                } else {
+                    kind_name(&e.name)
+                },
+                size: e.size,
+                is_dir: e.is_dir && !e.is_link,
+                modified: (e.mtime_ms != 0).then_some(e.mtime_ms),
+                ..Meta::default()
+            }),
+            [] => Some(Meta { kind: "Folder".into(), is_dir: true, ..Meta::default() }),
+            _ => None,
+        };
         let seed = Total { bytes: size, files: files as u64, ..Total::default() };
         let stop = Arc::new(AtomicBool::new(false));
         self.next_info += 1;
         let req = self.next_info;
-        let meta = if paths.len() == 1 {
-            let p = paths[0].clone();
-            crate::bounded::read_waiting(&self.meta_loader, self.show_wait.min(META_WAIT), move || Some((req, meta(&p)))).map(|(_, m)| m)
+        // The item's details come from a worker; the key never waits for them (a local disk
+        // answers within the next frame, a slow one when it can).
+        if paths.len() == 1 {
+            self.meta_loader.request((req, paths[0].clone()), |(req, p)| (req, meta(&p)));
         } else {
             self.meta_loader.cancel();
-            None
-        };
+        }
         let total = (!walk_roots.is_empty() || paths.len() > 1).then(|| {
             let shared: Shared = Arc::new(Mutex::new(seed.clone()));
             let (out, stop, waker) = (shared.clone(), stop.clone(), self.waker.clone());
@@ -625,7 +645,7 @@ impl State {
             shared
         });
         // Replacing the old panel drops it, which stops its walk.
-        self.info = Some(Info { key, dir, paths, name, dirs, files, size, meta, req, total, stop });
+        self.info = Some(Info { key, dir, paths, name, dirs, files, size, meta: None, known, req, total, stop });
     }
 
     /// An item's details that landed after the panel's wait, from `poll`.
@@ -895,29 +915,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// A slow disk never holds up the key that opens Get Info: the panel shows at once, and the
-    /// item's details land when they're read (the key used to wait a whole frame for them).
+    /// The key that opens Get Info (or moves its selection) never reads the disk or waits for
+    /// a worker: the panel shows at once with what the listing knows, and the item's details
+    /// land through `poll`, even for a local file (the key used to wait up to 2 ms, which
+    /// macOS stretched to 9.5 ms on CI), and from a slow disk whenever they come.
     #[test]
-    fn a_slow_disk_never_holds_up_the_panel() {
+    fn the_key_never_waits_for_the_details() {
         let d = temp("slow-meta");
-        std::fs::write(d.join("f"), "x").unwrap();
+        std::fs::write(d.join("f.txt"), "x").unwrap();
+        std::fs::write(d.join("g.txt"), "yy").unwrap();
         let mut s = state_in(&d);
         settle_all(&mut s);
-        hook::SLOW.lock().unwrap().push((d.join("f"), Duration::from_millis(300)));
-        // Even where the window's other bounded waits are long, this one is META_WAIT (the old
-        // code waited out the window's own wait, here longer than the slow read).
-        s.show_wait = Duration::from_secs(2);
-        let t = Instant::now();
+        let here = std::thread::current().id();
         s.toggle_info();
-        let took = t.elapsed();
-        assert!(took < Duration::from_millis(150), "the key waited {took:?}");
-        assert!(s.info.as_ref().is_some_and(|i| i.meta.is_none()), "shown before the details");
+        let i = s.info.as_ref().unwrap();
+        assert!(i.meta.is_none(), "the key didn't wait for the details");
+        assert_eq!(i.known.as_ref().map(|k| (k.kind.as_str(), k.size)), Some(("TXT file", 1)), "what the listing knows shows at once");
         let until = Instant::now() + Duration::from_secs(5);
         while s.info.as_ref().is_some_and(|i| i.meta.is_none()) && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(2));
             s.poll_info();
         }
         assert!(s.info.as_ref().is_some_and(|i| matches!(i.meta, Some(Ok(_)))), "and they land later");
+        // A slow disk: moving the selection doesn't wait either.
+        hook::SLOW.lock().unwrap().push((d.join("g.txt"), Duration::from_millis(300)));
+        s.cur_mut().select(1);
+        let t = Instant::now();
+        s.sync_preview();
+        assert!(t.elapsed() < Duration::from_millis(100), "the key waited {:?}", t.elapsed());
+        assert!(s.info.as_ref().is_some_and(|i| i.meta.is_none() && i.known.as_ref().is_some_and(|k| k.size == 2)));
+        assert!(!hook::META_THREADS.lock().unwrap().contains(&here), "the details were read on the window's thread");
     }
 
     /// On Linux, a real one: walking `/dev` never goes into `/dev/pts` and the like.
