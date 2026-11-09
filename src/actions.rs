@@ -305,9 +305,11 @@ impl State {
                 }
             }
         }
-        // An inline rename's label goes: the row renamed, or back to its own name.
+        // An inline rename's label goes: the row renamed, or back to its own name. Rows of items
+        // Arbor's action changed the ctime of take what it made of them, where that's identity.
         for p in &mut self.panes {
             p.f.land_pending(&out.moved);
+            p.f.reidentify(&out.reidentified);
         }
         // A trash and a delete have no results to select: what they did is what's gone.
         let n = if matches!(verb, "Moving to Trash" | "Deleting" | ops::EMPTYING) { out.removed.len() } else { out.results.len() };

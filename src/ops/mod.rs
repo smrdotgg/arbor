@@ -331,6 +331,18 @@ pub struct Outcome {
     /// The folders the operation may have changed, with their identities (links followed), so
     /// the panes showing them, by any path, read them again.
     pub folders: Vec<(PathBuf, Option<noclobber::FileId>)>,
+    /// Where identity is told by ctime alone ([`crate::fs::Ident::by_ctime`]): each identity an
+    /// item had when it was chosen, and the one Arbor's own action gave it, read right after
+    /// (renaming, moving or trashing an item changes its ctime, and its other names' too). Rows
+    /// still showing the first take the second ([`reidentified`]), so the next action on them,
+    /// before their folder is read again, doesn't take Arbor's change for a replacement.
+    pub reidentified: Vec<(crate::fs::Ident, crate::fs::Ident)>,
+}
+
+/// `id` as Arbor's own action left it, from an outcome's [`Outcome::reidentified`]; `id` when
+/// it wasn't touched.
+pub fn reidentified(id: crate::fs::Ident, pairs: &[(crate::fs::Ident, crate::fs::Ident)]) -> crate::fs::Ident {
+    pairs.iter().find(|(was, _)| *was == id).map_or(id, |&(_, now)| now)
 }
 
 pub struct Running {

@@ -119,6 +119,17 @@ impl Ident {
         Ident { node: (born as u64, u64::from(is_dir)), kind, born: Some(born), changed: None, handle }
     }
 
+    /// Whether it tells an item from a replacement by its ctime alone (no birth time, no
+    /// handle), so Arbor's own rename, move or trash of it (or of another name for it) changes it.
+    pub(crate) fn by_ctime(&self) -> bool {
+        self.changed.is_some() && self.handle.is_none()
+    }
+
+    /// The same device and inode, type and birth time: the same object, whatever its ctime.
+    pub(crate) fn same_but_ctime(&self, o: &Ident) -> bool {
+        (self.node, self.kind, self.born) == (o.node, o.kind, o.born)
+    }
+
     /// Whether there's no birth time in it, so a handle would tell more (Linux).
     pub(crate) fn wants_handle(&self) -> bool {
         cfg!(target_os = "linux") && self.born.is_none()

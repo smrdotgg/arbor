@@ -738,3 +738,19 @@ fn a_row_listed_without_an_identity_is_never_moved_or_removed() {
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&into);
 }
+
+/// What an operation's own change made of an item's identity (`Outcome::reidentified`) reaches
+/// every row still showing the old one, under any name (the item renamed, other hard links to
+/// it); other rows keep theirs.
+#[test]
+fn rows_take_the_identities_arbors_change_gave_them() {
+    let d = folder("reidentify", 3);
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let id = |s: &State, n: &str| s.cur().entries.iter().find(|e| e.name == n).unwrap().id.unwrap();
+    let (a, b, c) = (id(&s, "f0"), id(&s, "f1"), id(&s, "f2"));
+    // (Any identity will do as "what Arbor made of it".)
+    s.cur_mut().reidentify(&[(a, c)]);
+    assert_eq!((id(&s, "f0"), id(&s, "f1"), id(&s, "f2")), (c, b, c));
+    let _ = std::fs::remove_dir_all(&d);
+}

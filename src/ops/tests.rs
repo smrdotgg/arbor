@@ -1765,6 +1765,64 @@ fn windows_a_tunnelled_replacement_is_refused() {
     let _ = fs::remove_dir_all(&d);
 }
 
+/// The review's case, where identity is told by ctime alone (no birth time, no handle):
+/// Arbor's own change was taken for a replacement. Trashing (or deleting) two hard links to one
+/// file trashed the first and refused the second (the first's trash changed their shared
+/// ctime), and the next action on an item Arbor had just renamed, before its folder was read
+/// again, was refused as "replaced". Another app's change is still refused.
+#[cfg(unix)]
+#[test]
+fn by_ctime_alone_arbors_own_changes_arent_replacements() {
+    use super::{Checks, Chosen, reidentified};
+    let d = tmp("ctime-own");
+    let _p = crate::fs::pretend::without_birth_times(true);
+    let listed = |names: &[&str]| -> Checks {
+        Checks::new(Chosen::Listing, names.iter().map(|n| (d.join(n), crate::fs::ident_at(&d.join(n)))).collect())
+    };
+    let settle = || std::thread::sleep(Duration::from_millis(20));
+    // Two hard links, trashed together.
+    fs::write(d.join("a"), "one file").unwrap();
+    fs::hard_link(d.join("a"), d.join("b")).unwrap();
+    settle();
+    let expect = listed(&["a", "b"]);
+    assert!(expect.items[0].1.unwrap().by_ctime());
+    let o = run_now(Op::Checked { expect, op: Box::new(Op::Trash { sources: vec![d.join("a"), d.join("b")] }) });
+    assert!(o.errors.is_empty() && o.refused.is_none(), "trash: {:?} {:?}", o.refused, o.errors);
+    assert!(!d.join("a").exists() && !d.join("b").exists());
+    // And deleted together.
+    fs::write(d.join("c"), "one file").unwrap();
+    fs::hard_link(d.join("c"), d.join("e")).unwrap();
+    settle();
+    let items = ["c", "e"].iter().map(|n| Doomed { path: d.join(n), id: crate::fs::ident_at(&d.join(n)), dir: false }).collect();
+    let o = run_now(Op::Delete { items });
+    assert!(o.errors.is_empty(), "delete: {:?}", o.errors);
+    assert!(!d.join("c").exists() && !d.join("e").exists());
+    // Renamed, then trashed from the row as it was before its folder was read again.
+    fs::write(d.join("f"), "x").unwrap();
+    settle();
+    let expect = listed(&["f"]);
+    let row = expect.items[0].1.unwrap();
+    let o = run_now(Op::Checked { expect, op: Box::new(Op::RenameOne { from: d.join("f"), to: d.join("g") }) });
+    assert!(o.refused.is_none(), "{:?}", o.refused);
+    let row = reidentified(row, &o.reidentified);
+    let o = run_now(Op::Checked {
+        expect: Checks::new(Chosen::Listing, vec![(d.join("g"), Some(row))]),
+        op: Box::new(Op::Trash { sources: vec![d.join("g")] }),
+    });
+    assert!(o.refused.is_none() && o.errors.is_empty(), "after Arbor's rename: {:?} {:?}", o.refused, o.errors);
+    assert!(!d.join("g").exists());
+    // Another app's change to it (a chmod changes the ctime) is still refused.
+    fs::write(d.join("h"), "x").unwrap();
+    settle();
+    let expect = listed(&["h"]);
+    settle();
+    let mode = fs::metadata(d.join("h")).unwrap().permissions();
+    fs::set_permissions(d.join("h"), mode).unwrap();
+    let o = run_now(Op::Checked { expect, op: Box::new(Op::Trash { sources: vec![d.join("h")] }) });
+    assert!(o.refused.is_some() && d.join("h").exists(), "{:?}", o.errors);
+    let _ = fs::remove_dir_all(&d);
+}
+
 /// A file edited after its folder was listed (Arbor doesn't watch folders) is still the item
 /// the user chose: delete, trash, move, rename and Put Back go ahead (identity is the object,
 /// not its contents), and so does Empty Trash. Undo still refuses once it's edited again: its

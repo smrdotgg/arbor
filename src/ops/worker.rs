@@ -188,6 +188,7 @@ impl<'a> Worker<'a> {
                 notes: Vec::new(),
                 quiet: false,
                 canon: Vec::new(),
+                reidentified: Vec::new(),
                 folders: Vec::new(),
             };
         }
@@ -231,6 +232,7 @@ impl<'a> Worker<'a> {
             quiet: false,
             canon,
             folders,
+            reidentified: Vec::new(),
         };
         match op {
             Op::Copy { sources, dest } => {
@@ -274,6 +276,7 @@ impl<'a> Worker<'a> {
                     }
                     match self.move_one(src, &dest) {
                         Ok(to) => {
+                            self.acted(src, Some(&to), &mut out);
                             if &to != src {
                                 pairs.push((to.clone(), Some(src.clone())));
                                 out.moved.push((src.clone(), to.clone()));
@@ -302,10 +305,12 @@ impl<'a> Worker<'a> {
                     let p = self.p;
                     match (self.trash)(src, &|| p.cancel.load(Relaxed)) {
                         Ok(Some(at)) => {
+                            self.acted(src, Some(&at), &mut out);
                             pairs.push((at, Some(src.clone())));
                             out.removed.push(src.clone());
                         }
                         Ok(None) => {
+                            self.acted(src, None, &mut out);
                             restorable = false;
                             out.removed.push(src.clone());
                         }
@@ -340,6 +345,7 @@ impl<'a> Worker<'a> {
                     // No result to select: each pane keeps its own selection, which followed the
                     // item when the window showed the new name.
                     Ok(()) => {
+                        self.acted(&from, Some(&to), &mut out);
                         out.moved.push((from.clone(), to.clone()));
                         out.undo = Undo::renamed(to.clone(), from);
                         if out.undo.is_none() {
@@ -410,6 +416,7 @@ impl<'a> Worker<'a> {
                 notes: Vec::new(),
                 quiet: false,
                 canon: Vec::new(),
+                reidentified: Vec::new(),
                 folders: Vec::new(),
             };
         }
@@ -434,12 +441,43 @@ impl<'a> Worker<'a> {
         })
     }
 
+    /// After Arbor renamed, moved, trashed or deleted `src` (now at `at`, when it's still
+    /// somewhere it can be read), where identity is told by ctime alone: what Arbor's change
+    /// made of it, read right away where it went or through another name for it (a hard link)
+    /// this operation still has to act on, goes to those other names' expected identities and
+    /// to the outcome ([`Outcome::reidentified`]). Without it a second hard link was refused
+    /// as "replaced", and so was the next action on an item Arbor had just renamed. Where
+    /// identity has a birth time or a handle, Arbor's change doesn't touch it: nothing to do.
+    pub(super) fn acted(&mut self, src: &Path, at: Option<&Path>, out: &mut Outcome) {
+        let Some(before) = self.seen.get(src).copied().filter(crate::fs::Ident::by_ctime) else { return };
+        let others: Vec<PathBuf> =
+            self.seen.iter().filter(|(p, id)| p.as_path() != src && **id == before).map(|(p, _)| p.clone()).collect();
+        let mut after = at.and_then(crate::fs::ident_at).filter(|a| a.same_but_ctime(&before));
+        for p in others {
+            // Still linked by this name, the inode can't have been reused: the same object.
+            if let Some(now) = crate::fs::ident_at(&p).filter(|n| n.same_but_ctime(&before)) {
+                self.seen.insert(p, now);
+                after.get_or_insert(now);
+            }
+        }
+        if let Some(after) = after {
+            out.reidentified.push((before, after));
+        }
+    }
+
     /// [`Op::Delete`]: each item is checked right before it goes (an item replaced or gone since
     /// the user chose it is left alone and said so), then removed whole. A cancel stops at once:
     /// what's gone stays gone, and a folder it stopped in is partly deleted, which the outcome
     /// says ([`Outcome::partly`]).
     pub(super) fn delete(&mut self, items: Vec<Doomed>, out: &mut Outcome) {
         self.p.items_total.store(items.len(), Relaxed);
+        // What each must still be, which deleting another name for it (a hard link) updates
+        // where identity is told by ctime alone (`Worker::acted`).
+        for d in &items {
+            if let Some(id) = d.id {
+                self.seen.entry(d.path.clone()).or_insert(id);
+            }
+        }
         for d in &items {
             if self.cancelled() {
                 break;
@@ -452,7 +490,7 @@ impl<'a> Worker<'a> {
                 // Nothing to check it against: whatever is there now can't be told from the
                 // item chosen, so it's never deleted on a guess.
                 Ok(_) if d.id.is_none() => Some(format!("“{name}” couldn't be identified when it was chosen, so it was left alone")),
-                Ok(m) if crate::fs::ident_of(&d.path, &m) != d.id => {
+                Ok(m) if crate::fs::ident_of(&d.path, &m) != self.seen.get(&d.path).copied() => {
                     Some(format!("“{name}” isn't the item you chose (something else is at its path now), so it was left alone"))
                 }
                 Ok(_) => None,
@@ -463,7 +501,9 @@ impl<'a> Worker<'a> {
                 continue;
             }
             let mounts = self.mounts().clone();
-            self.remove_with(&d.path, &mounts, out, |path, mounts, go, removed| crate::delete::remove_tree(path, mounts, go, removed));
+            if self.remove_with(&d.path, &mounts, out, |path, mounts, go, removed| crate::delete::remove_tree(path, mounts, go, removed)) {
+                self.acted(&d.path, None, out);
+            }
             self.p.items_done.fetch_add(1, Relaxed);
         }
     }

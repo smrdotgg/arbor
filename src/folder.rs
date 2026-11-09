@@ -651,6 +651,21 @@ impl Folder {
         self.refilter(keep.as_deref());
     }
 
+    /// Rows whose identity is one an operation's own change replaced (`ops::Outcome::reidentified`:
+    /// where identity is told by ctime alone) take the new one, whatever their name: the item
+    /// renamed, and other names for the same inode (hard links). A row whose identity was already
+    /// stale (changed by another app first) matches nothing and stays so.
+    pub fn reidentify(&mut self, pairs: &[(crate::fs::Ident, crate::fs::Ident)]) {
+        if pairs.is_empty() {
+            return;
+        }
+        for e in &mut self.entries {
+            if let Some(id) = e.id.as_mut() {
+                *id = crate::ops::reidentified(*id, pairs);
+            }
+        }
+    }
+
     pub fn type_filter(&mut self, text: &str) {
         let keep = self.cursor_name();
         self.filter.push_str(text);

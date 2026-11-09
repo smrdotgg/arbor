@@ -163,6 +163,7 @@ impl Worker<'_> {
             }
             match self.put_back_one(src, home.as_deref()) {
                 Ok((to, wanted, kept)) => {
+                    self.acted(src, Some(&to), out);
                     if let Some(e) = kept {
                         out.errors.push(format!(
                             "“{name}” is back in “{}”, but its record in the Trash couldn't be removed ({e})",

@@ -24,7 +24,18 @@ impl Worker<'_> {
             out.refused = Some(format!("Nothing was renamed: {why}."));
             return;
         }
+        // Where identity is told by ctime alone, what each was just before (checked above) and
+        // what the rename made of it, for the rows still showing it (`Outcome::reidentified`).
+        let before: Vec<Option<crate::fs::Ident>> =
+            moves.iter().map(|(from, _)| crate::fs::ident_at(from).filter(crate::fs::Ident::by_ctime)).collect();
         if self.rename_all(&moves, &seen, out) {
+            for ((_, to), was) in moves.iter().zip(&before) {
+                if let Some(was) = was
+                    && let Some(now) = crate::fs::ident_at(to).filter(|n| n.same_but_ctime(was))
+                {
+                    out.reidentified.push((*was, now));
+                }
+            }
             out.results = moves.iter().map(|(_, to)| to.clone()).collect();
             out.undo =
                 Undo::record_or_say(What::BatchRename, moves.iter().map(|(from, to)| (to.clone(), Some(from.clone()))), &mut out.errors);
