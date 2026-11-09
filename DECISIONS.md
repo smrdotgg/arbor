@@ -109,6 +109,22 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-09 · Review of milestone 11, fixed** (each with a test that fails on the old code,
+  except the Windows pipe's, which runs only on CI's Windows runner): Make again failing halfway
+  on Windows puts back the registry as it was just before that attempt and the first backup
+  file as it was; the Linux uninstall without any Arbor puts back the saved activation file
+  and folder default, refuses a damaged backup before changing anything, and keeps it until all
+  is back; redo of an undone folder copy checks everything inside; completion reads the folder
+  again on each Tab; the README says what accessibility costs. Calls made: (1) the Windows
+  hand-off now waits for a one-byte answer from the running Arbor, at most 1 s once connected
+  (the pipe is duplex, and a request ends with an extra NUL; an older Arbor's request, ended by
+  closing, still reads). On time out the blocked call is cancelled and the new Arbor opens its
+  own window; if the running one was only slow, both may show the folder, which beats a launch
+  that hangs. The running one now answers before it sorts folders from files, on another
+  thread. (2) A damaged backup makes `uninstall.sh` stop with nothing removed, rather than take
+  back only Arbor's own values. The Windows trash race stays accepted (above). Undo: the
+  commits after 3e06dd7.
+
 - **2026-11-09 · Scope: Milestone 12 (everyday parity: sidebar favorites, volumes and eject,
   Open With, Get Info)** chosen by the agent after all NORTHSTAR Core features were built, to
   serve milestone 1 (a month without Finder/Explorer). NORTHSTAR's 'Later' list (operation
