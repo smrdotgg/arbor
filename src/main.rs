@@ -41,6 +41,8 @@ mod panes;
 mod pattern;
 mod persist;
 mod preview;
+#[cfg(test)]
+mod prop;
 mod rename;
 mod search;
 mod select;

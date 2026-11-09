@@ -732,6 +732,170 @@ mod tests {
         println!("no file: {:.1} µs", t.elapsed().as_secs_f64() * 1e6);
     }
 
+    const TOML_BITS: &[&str] = &[
+        "[general]",
+        "[keys]",
+        "[jump]",
+        "[select]",
+        "[search]",
+        "[[x]]",
+        "[",
+        "]",
+        "\n",
+        "\r\n",
+        " ",
+        "=",
+        "\"",
+        "'",
+        "'''",
+        "\"\"\"",
+        "#",
+        ",",
+        "{",
+        "}",
+        ".",
+        "\\",
+        "\\u",
+        "show_hidden",
+        "sort",
+        "true",
+        "false",
+        "1",
+        "-1e9",
+        "\"size\"",
+        "places",
+        "start_folder",
+        "\"~\"",
+        "\"/tmp\"",
+        "exclude",
+        "\"**/x\"",
+        "\"{a,b}\"",
+        "\"file.trash\"",
+        "\"nav.goto\"",
+        "\"cmd+g\"",
+        "\"ctrl+shift+f2\"",
+        "\"+\"",
+        "\"cmd++\"",
+        "\"é\"",
+        "\0",
+        "\u{feff}",
+        "\u{301}",
+        "😀",
+        "case_sensitive",
+        "cross_devices",
+        "enabled",
+    ];
+
+    /// Any text: never a panic, every error names a line within the text (or none), and no
+    /// chord ends up bound to two commands.
+    #[test]
+    fn any_settings_text_parses_without_panicking() {
+        crate::prop::check("config_parse", 400, |r| {
+            let text = if r.one_in(4) { r.string(200) } else { r.from(TOML_BITS, 80) };
+            let lines = text.matches('\n').count() + 1;
+            for platform in [KeyPlatform::Mac, KeyPlatform::Windows, KeyPlatform::Linux] {
+                let c = Config::parse(&text, platform);
+                for e in &c.errors {
+                    if let Some(n) = e.strip_prefix("line ").and_then(|r| r.split(':').next()).and_then(|n| n.parse::<usize>().ok()) {
+                        assert!((1..=lines).contains(&n), "{text:?}: {e}");
+                    }
+                }
+                let all: Vec<(Chord, Cmd)> = Cmd::ALL.iter().flat_map(|&cmd| c.keymap.chords(cmd).map(move |&k| (k, cmd))).collect();
+                for (i, a) in all.iter().enumerate() {
+                    for b in &all[i + 1..] {
+                        assert!(
+                            !(a.1 != b.1 && a.0.same_keys(&b.0, platform)),
+                            "{text:?}: {:?} on two commands",
+                            commands::chord_spec(&a.0)
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    /// A chord that parses is written back as text that parses to the same chord.
+    #[test]
+    fn chords_round_trip_through_their_text() {
+        const BITS: &[&str] = &[
+            "cmd",
+            "ctrl",
+            "alt",
+            "shift",
+            "super",
+            "option",
+            "win",
+            "meta",
+            "mod",
+            "command",
+            "primary",
+            "+",
+            " ",
+            "a",
+            "Z",
+            "1",
+            ".",
+            ",",
+            "[",
+            "]",
+            "/",
+            "=",
+            "-",
+            "`",
+            "'",
+            ";",
+            "enter",
+            "escape",
+            "backspace",
+            "delete",
+            "tab",
+            "space",
+            "up",
+            "down",
+            "left",
+            "pageup",
+            "home",
+            "f1",
+            "f12",
+            "f24",
+            "f25",
+            "f0",
+            "comma",
+            "plus",
+            "é",
+            "\u{301}",
+            "😀",
+            "\0",
+        ];
+        crate::prop::check("chord_round_trip", 2000, |r| {
+            let s = if r.one_in(5) { r.string(12) } else { r.from(BITS, 7) };
+            if let Ok(c) = commands::parse_chord(&s) {
+                let spec = commands::chord_spec(&c);
+                assert_eq!(commands::parse_chord(&spec), Ok(c), "{s:?} → {spec:?}");
+            }
+        });
+    }
+
+    /// Pathological files up to the size limit parse (or are refused) quickly, without
+    /// overflowing the stack: deep nesting, one huge line, thousands of bad lines.
+    #[test]
+    fn pathological_settings_are_bounded() {
+        let n = MAX_BYTES as usize / 4;
+        let cases: Vec<(&str, String)> = vec![
+            ("deep arrays", format!("[general]\nplaces = {}", "[".repeat(n))),
+            ("deep inline tables", format!("[general]\nx = {}", "{a=".repeat(n / 3))),
+            ("one huge string", format!("[general]\nstart_folder = \"{}\"\n", "a".repeat(n))),
+            ("many bad lines", "show_hidden = yes\n".repeat(n / 20)),
+            ("many keys", (0..n / 40).map(|i| format!("\"file.trash\" = [\"f{}\"]\n", i % 30)).collect::<String>()),
+            ("many sections", "[keys]\n".repeat(n / 8)),
+        ];
+        for (what, text) in cases {
+            assert!(text.len() as u64 <= MAX_BYTES);
+            let c = crate::prop::within(std::time::Duration::from_secs(5), what, move || Config::parse(&text, LINUX).errors.len());
+            let _ = c;
+        }
+    }
+
     #[test]
     fn path_follows_the_platform() {
         let p = path().unwrap();
