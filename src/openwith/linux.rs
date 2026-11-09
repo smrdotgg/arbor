@@ -90,17 +90,7 @@ pub fn list(file: &Path) -> Result<Vec<Handler>, String> {
 /// A desktop file by id, in the first applications folder that has it (`a-b.desktop` may
 /// be `a/b.desktop`).
 fn find_desktop(apps: &[PathBuf], id: &str) -> Option<String> {
-    for dir in apps {
-        if let Some(t) = read(&dir.join(id)) {
-            return Some(t);
-        }
-        if let Some((sub, rest)) = id.split_once('-')
-            && let Some(t) = read(&dir.join(sub).join(rest))
-        {
-            return Some(t);
-        }
-    }
-    None
+    desktop_paths(apps, id).iter().find_map(|p| read(p))
 }
 
 /// The folder's `mimeinfo.cache`, or its desktop files' `MimeType` lines when it has none.

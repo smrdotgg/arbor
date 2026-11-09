@@ -176,6 +176,41 @@ fn a_name_that_isnt_utf8_is_passed_exactly() {
     }
 }
 
+/// Found reading `find_desktop`: an id from `mimeapps.list` was joined to the applications
+/// folder as it was, so "../../x.desktop" or "/tmp/x.desktop" read a desktop file from anywhere
+/// (and ran its Exec line). Now only a file name ending in `.desktop` is looked up.
+#[test]
+fn a_desktop_id_never_reaches_outside_the_applications_folders() {
+    let apps = vec![PathBuf::from("/usr/share/applications")];
+    for id in [
+        "../../tmp/x.desktop",
+        "/tmp/x.desktop",
+        "a/../../b.desktop",
+        "..desktop",
+        ".hidden.desktop",
+        "x\0.desktop",
+        "",
+        "x.sh",
+        "kde-../x.desktop",
+    ] {
+        let got = desktop_paths(&apps, id);
+        assert!(
+            got.iter().all(|p| p.parent() == Some(apps[0].as_path()) || p.parent().and_then(Path::parent) == Some(apps[0].as_path())),
+            "{id:?}: {got:?}"
+        );
+        assert!(got.iter().all(|p| !p.components().any(|c| matches!(c, std::path::Component::ParentDir))), "{id:?}: {got:?}");
+    }
+    assert!(desktop_paths(&apps, "../../tmp/x.desktop").is_empty());
+    assert_eq!(desktop_paths(&apps, "org.gnome.gedit.desktop"), [apps[0].join("org.gnome.gedit.desktop")]);
+    assert_eq!(desktop_paths(&apps, "kde-dolphin.desktop"), [apps[0].join("kde-dolphin.desktop"), apps[0].join("kde/dolphin.desktop")]);
+    crate::prop::check("desktop_ids", 2000, |r| {
+        let id = r.from(&["a", "-", ".", "..", "/", "\\", ".desktop", "é", "\0", " "], 8);
+        for p in desktop_paths(&apps, &id) {
+            assert!(p.starts_with(&apps[0]) && !p.components().any(|c| matches!(c, std::path::Component::ParentDir)), "{id:?}: {p:?}");
+        }
+    });
+}
+
 /// Any key file: parsing never panics (desktop files, mimeapps.list, mimeinfo.cache).
 #[test]
 fn any_key_file_parses_without_panicking() {

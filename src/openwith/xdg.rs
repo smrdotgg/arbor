@@ -225,6 +225,28 @@ pub fn exec_argv(exec: &str, files: &[PathBuf]) -> Vec<Vec<OsString>> {
     runs.into_iter().filter(|r| !r.is_empty()).collect()
 }
 
+/// Where the desktop file with id `id` may be in `apps` (each applications folder), in order:
+/// `dir/id`, then `dir/a/b.desktop` for `a-b.desktop`. Nothing for an id that isn't one: it's a
+/// file name ending in `.desktop`, so one with a separator, a NUL, `..` or a leading dot (from a
+/// damaged or hostile `mimeapps.list`) never reaches outside the folders.
+pub fn desktop_paths(apps: &[PathBuf], id: &str) -> Vec<PathBuf> {
+    let ok = |s: &str| !s.is_empty() && !s.starts_with('.') && !s.contains(['/', '\\', '\0']);
+    if !ok(id) || !id.ends_with(".desktop") || id == ".desktop" {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for dir in apps {
+        out.push(dir.join(id));
+        if let Some((sub, rest)) = id.split_once('-')
+            && ok(sub)
+            && ok(rest)
+        {
+            out.push(dir.join(sub).join(rest));
+        }
+    }
+    out
+}
+
 /// The apps for `mime`, best first: the first default (in the files' order) that exists and
 /// isn't removed, then the added associations, then the caches'. `mimeapps` is in the spec's
 /// order (the user's first); `find` reads a desktop file by id.
