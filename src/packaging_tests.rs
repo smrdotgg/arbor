@@ -174,6 +174,18 @@ fn fallback_uninstall_restores_both_values_and_refuses_a_damaged_backup() {
     assert_eq!(std::fs::read_to_string(&service).unwrap(), theirs, "their activation file is back: {out}");
     assert!(std::fs::read_to_string(&mimeapps).unwrap().contains("\n[Default Applications]\ninode/directory=old.desktop;\n"), "{out}");
     assert!(!backup.exists(), "everything went back, so the backup goes: {out}");
+    // An empty activation file was there before (zero bytes, an empty hex field): a valid
+    // backup, and it goes back empty (it used to be refused as damaged).
+    let (pkg, home) = bare(&root, "home-empty");
+    let (service, _, backup) = made_default(&home);
+    let mut b = Backup::default();
+    b.put("mimeapps.list inode/directory", None);
+    b.put("dbus-1/services/org.freedesktop.FileManager1.service", Some(b""));
+    b.write(&backup).unwrap();
+    let (ok, out) = run(&pkg, "uninstall.sh", &home);
+    assert!(ok, "{out}");
+    assert_eq!(std::fs::read(&service).unwrap(), b"", "the empty file is back: {out}");
+    assert!(!backup.exists(), "{out}");
     // Damaged backups: empty, no header, an entry missing, or a record that isn't whole (hex
     // of half a byte, not hex, a field missing, a name twice).
     let header = std::fs::read_to_string({

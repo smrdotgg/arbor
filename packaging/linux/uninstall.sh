@@ -61,11 +61,11 @@ else
 			awk -F '\t' -v k="$k" '$2 == k { found = 1 } END { exit !found }' "$backup" 2>/dev/null || damaged=1
 		done
 		# Every record whole, as Arbor writes them: "<hex or ->\t<name>", the hex of whole
-		# bytes, and no name twice.
+		# bytes (none for an empty value), and no name twice.
 		LC_ALL=C awk -F '\t' '
 			/^#/ || /^[ \t]*$/ { next }
 			NF != 2 || $2 == "" { bad = 1 }
-			$1 != "-" && ($1 !~ /^[0-9a-fA-F]+$/ || length($1) % 2) { bad = 1 }
+			$1 != "-" && ($1 !~ /^[0-9a-fA-F]*$/ || length($1) % 2) { bad = 1 }
 			seen[$2]++ { bad = 1 }
 			END { exit bad }' "$backup" 2>/dev/null || damaged=1
 		if [ -n "$damaged" ]; then

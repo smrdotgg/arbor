@@ -14,6 +14,7 @@ fn the_backup_reads_back_what_it_wrote() {
     let mut b = Backup::default();
     b.put("a key with spaces|Icon", Some(b"\x00\x01text\xff"));
     b.put("absent", None);
+    b.put("empty", Some(b""));
     b.put("a key with spaces|Icon", Some(b"again"));
     let d = tmp("backup");
     let p = d.join(BACKUP_FILE);
@@ -21,6 +22,7 @@ fn the_backup_reads_back_what_it_wrote() {
     let back = Backup::read(&p).unwrap().unwrap();
     assert_eq!(back, b);
     assert_eq!(back.get("absent"), Some(None));
+    assert_eq!(back.get("empty"), Some(Some(&b""[..])), "an empty value is a value, not damage");
     assert_eq!(back.get("missing"), None);
     assert_eq!(back.get("a key with spaces|Icon"), Some(Some(&b"again"[..])));
     assert!(Backup::read(&d.join("none")).unwrap().is_none());
