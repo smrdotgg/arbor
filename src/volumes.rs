@@ -59,10 +59,12 @@ pub fn list() -> Vec<Volume> {
     v
 }
 
-/// What tells the volume mounted at `path` from another mounted there later: its device number
-/// and what it's mounted from (Linux: the mount table's source; macOS: `statfs`'s
-/// `f_mntfromname`), or on Windows the volume's GUID path. `None` when it can't be read.
-/// Touches the disk: call on a worker.
+/// What tells the volume mounted at `path` from another mounted there later: its device number,
+/// what it's mounted from (Linux: the mount table's source; macOS: `statfs`'s `f_mntfromname`)
+/// and its file system's UUID where it has one (Linux: the `/dev/disk/by-uuid` link to its
+/// source; macOS: `getattrlist`'s `ATTR_VOL_UUID`), since another stick can get the same device
+/// name and number and be mounted at the same place; on Windows the volume's GUID path. `None`
+/// when it can't be read. Touches the disk: call on a worker.
 pub fn identity(path: &Path) -> Option<String> {
     #[cfg(unix)]
     {
@@ -80,12 +82,55 @@ pub fn identity(path: &Path) -> Option<String> {
         };
         #[cfg(not(target_os = "macos"))]
         let from = std::fs::read_to_string("/proc/self/mounts").ok().and_then(|t| mount_source(&t, path)).unwrap_or_default();
-        Some(format!("{dev} {from}"))
+        #[cfg(target_os = "macos")]
+        let uuid = mac_volume_uuid(path);
+        #[cfg(not(target_os = "macos"))]
+        let uuid = fs_uuid(Path::new(&from), Path::new("/dev/disk/by-uuid"));
+        Some(format!("{dev} {from} {}", uuid.unwrap_or_default()))
     }
     #[cfg(windows)]
     {
         win::volume_guid(path)
     }
+}
+
+/// The UUID of the file system on device `source`: the name of the link in `by_uuid` (udev's
+/// `/dev/disk/by-uuid`) that leads to it. `None` without one (no udev, a file system with no
+/// UUID, a source that isn't a device).
+#[cfg_attr(not(any(test, all(unix, not(target_os = "macos")))), allow(dead_code))]
+pub fn fs_uuid(source: &Path, by_uuid: &Path) -> Option<String> {
+    let dev = std::fs::canonicalize(source).ok()?;
+    std::fs::read_dir(by_uuid)
+        .ok()?
+        .flatten()
+        .find(|e| std::fs::canonicalize(e.path()).is_ok_and(|t| t == dev))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+}
+
+/// The volume UUID macOS keeps for the volume mounted at `path` (`ATTR_VOL_UUID`), as hex.
+#[cfg(target_os = "macos")]
+fn mac_volume_uuid(path: &Path) -> Option<String> {
+    let c = crate::ffi::cstr(path).ok()?;
+    let mut list = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_UUID,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    // The answer: its length, then the 16-byte UUID.
+    #[repr(C, packed(4))]
+    struct Buf {
+        len: u32,
+        uuid: [u8; 16],
+    }
+    let mut buf = Buf { len: 0, uuid: [0; 16] };
+    // SAFETY: a NUL-terminated path, an attribute list and a buffer of the size given.
+    let r = unsafe { libc::getattrlist(c.as_ptr(), (&raw mut list).cast(), (&raw mut buf).cast(), std::mem::size_of::<Buf>(), 0) };
+    let uuid = buf.uuid;
+    (r == 0 && uuid != [0; 16]).then(|| uuid.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// The source of the last mount at `at` in a `/proc/self/mounts` text (a later mount on the same
@@ -813,6 +858,30 @@ systemd-1 /mnt/auto autofs rw 0 0
         settle_eject(&mut s);
         assert!(!ejected(&vols[1].name), "clicked USB, ejected Backup");
         assert!(ejected(&vols[0].name), "USB itself, still mounted, is ejected");
+    }
+
+    /// The review's case: another stick given the same device name and number, mounted at the
+    /// same place, used to pass for the one picked. Its file system's UUID tells them apart.
+    #[cfg(unix)]
+    #[test]
+    fn a_volumes_identity_includes_its_file_systems_uuid() {
+        let d = std::env::temp_dir().join(format!("arbor-eject-uuid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("dev")).unwrap();
+        std::fs::create_dir_all(d.join("by-uuid")).unwrap();
+        std::fs::write(d.join("dev/sdb1"), "").unwrap();
+        std::fs::write(d.join("dev/sdc1"), "").unwrap();
+        std::os::unix::fs::symlink("../dev/sdc1", d.join("by-uuid/1111-AAAA")).unwrap();
+        std::os::unix::fs::symlink("../dev/sdb1", d.join("by-uuid/2222-BBBB")).unwrap();
+        assert_eq!(fs_uuid(&d.join("dev/sdb1"), &d.join("by-uuid")).as_deref(), Some("2222-BBBB"));
+        std::fs::remove_file(d.join("by-uuid/2222-BBBB")).unwrap();
+        std::os::unix::fs::symlink("../dev/sdb1", d.join("by-uuid/3333-CCCC")).unwrap();
+        assert_eq!(fs_uuid(&d.join("dev/sdb1"), &d.join("by-uuid")).as_deref(), Some("3333-CCCC"), "another stick at sdb1");
+        assert_eq!(fs_uuid(&d.join("dev/none"), &d.join("by-uuid")), None);
+        // macOS: the boot volume has one.
+        #[cfg(target_os = "macos")]
+        assert!(mac_volume_uuid(Path::new("/")).is_some_and(|u| u.len() == 32));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Another volume mounted at the picked one's place since: nothing is ejected, and it says so.
