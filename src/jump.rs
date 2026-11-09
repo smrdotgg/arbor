@@ -21,7 +21,7 @@
 //!   append, and each writes through a temporary file of its own.
 //! - Failures are said: a write that fails shows in the status bar (once, until one works
 //!   again), and Clear says "cleared" only when the writer has removed the log (and any
-//!   compaction's leftover temporary files). At exit the writer gets up to [`DRAIN_WAIT`] to
+//!   compaction's leftover temporary files). At exit the writer gets up to [`persist::DRAIN_WAIT`] to
 //!   finish what's queued.
 //!
 //! The log: one line per event, `<unix seconds>\t<rank>\t<path>` for a visit (rank 1) or a
@@ -44,6 +44,7 @@ use crate::app::{Nav, State};
 use crate::commands::Cmd;
 use crate::fs;
 use crate::pattern::{Case, Glob};
+use crate::persist;
 
 /// How long opening Jump waits for the history to load before showing "Loading…": one frame
 /// at 120 Hz, as the first window waits for its folder.
@@ -466,39 +467,21 @@ struct Store {
 impl Store {
     fn spawn(log: Option<PathBuf>, waker: Option<rune::Waker>) -> Store {
         let (tx, rx) = std::sync::mpsc::channel::<Msg>();
-        let (err_tx, errors) = std::sync::mpsc::channel::<String>();
+        let (mut failures, errors) = persist::Failures::new(waker.clone());
         let io = Arc::new(AtomicU64::new(0));
         let count = io.clone();
-        #[cfg(not(test))]
-        if let Ok(mut at_exit) = AT_EXIT.lock() {
-            *at_exit = Some(tx.clone());
-        }
+        persist::at_exit(&tx, Msg::Flush);
         std::thread::Builder::new()
             .name("arbor-history".into())
             .spawn(move || {
                 // Without a file (tests), the log is kept here.
                 let mut memory = String::new();
-                // Writes are failing: said once, until one works again.
-                let mut failing = false;
-                let report = |e: String| {
-                    let _ = err_tx.send(e);
-                    if let Some(w) = &waker {
-                        w();
-                    }
-                };
                 for msg in rx {
                     match msg {
                         Msg::Append(line) => match &log {
                             Some(p) => {
                                 count.fetch_add(1, Relaxed);
-                                match append(p, &line) {
-                                    Ok(()) => failing = false,
-                                    Err(e) if !failing => {
-                                        failing = true;
-                                        report(format!("Couldn't save the Jump history ({}): {e}", fs::pretty(p)));
-                                    }
-                                    Err(_) => {}
-                                }
+                                failures.note(append(p, &line), |e| format!("Couldn't save the Jump history ({}): {e}", fs::pretty(p)));
                             }
                             None => memory.push_str(&line),
                         },
@@ -538,31 +521,6 @@ impl Store {
             .expect("can't start the history thread");
         Store { tx, errors, io }
     }
-}
-
-/// The history's writer, for [`drain_at_exit`] (set when it starts; not in tests, which make
-/// many).
-#[cfg(not(test))]
-static AT_EXIT: std::sync::Mutex<Option<Sender<Msg>>> = std::sync::Mutex::new(None);
-
-/// How long quitting waits for history writes still queued.
-#[cfg_attr(test, allow(dead_code))]
-pub const DRAIN_WAIT: Duration = Duration::from_millis(100);
-
-/// Waits at most [`DRAIN_WAIT`] for the writer to finish what's queued: called as the window
-/// closes and after the app's loop ends, so the last visits aren't lost (a slow disk costs the
-/// exit that long at most, and what's still queued then is lost).
-pub fn drain_at_exit() {
-    #[cfg(not(test))]
-    if let Some(tx) = AT_EXIT.lock().ok().and_then(|t| t.clone()) {
-        flush(&tx, DRAIN_WAIT);
-    }
-}
-
-/// Waits up to `wait` for everything sent on `tx` before this to be done. True when it was.
-fn flush(tx: &Sender<Msg>, wait: Duration) -> bool {
-    let (done, rx) = std::sync::mpsc::channel();
-    tx.send(Msg::Flush(done)).is_ok() && rx.recv_timeout(wait).is_ok()
 }
 
 /// Runs `f` holding the history's lock file (`history.lock` beside it), so two Arbor processes
@@ -643,20 +601,9 @@ fn load(p: &Path, io: &AtomicU64) -> Loaded {
 }
 
 /// Replaces the log with `text`, through a temporary file of its own (unique to this process
-/// and call) renamed over it.
+/// and call, `history.log.<pid>-<n>.tmp`, which [`clear`] knows) renamed over it.
 fn rewrite(p: &Path, text: &str) -> std::io::Result<()> {
-    let tmp = temp_for(p);
-    let res = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, p));
-    if res.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    res
-}
-
-/// A temporary file name beside `p`, never used before by any process: `history.log.<pid>-<n>.tmp`.
-fn temp_for(p: &Path) -> PathBuf {
-    static N: AtomicU64 = AtomicU64::new(0);
-    p.with_extension(format!("log.{}-{}.tmp", std::process::id(), N.fetch_add(1, Relaxed)))
+    persist::replace(p, text.as_bytes(), persist::Durability::Plain)
 }
 
 /// Where the history lives: beside the settings file.
@@ -793,7 +740,7 @@ impl History {
     /// Waits up to `wait` for the writer to finish what's queued. True when it did.
     #[cfg(test)]
     pub fn drain(&self, wait: Duration) -> bool {
-        self.store.as_ref().is_none_or(|s| flush(&s.tx, wait))
+        self.store.as_ref().is_none_or(|s| persist::flush(&s.tx, wait, Msg::Flush))
     }
 
     /// Asks for the aggregate if it isn't here, waiting up to `wait` for it. True once it's in.
@@ -1401,7 +1348,7 @@ mod tests {
         drop(lock);
         assert!(h.drain(Duration::from_secs(5)));
         assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
-        let names: std::collections::HashSet<PathBuf> = (0..3).map(|_| temp_for(&log)).collect();
+        let names: std::collections::HashSet<PathBuf> = (0..3).map(|_| persist::temp_beside(&log)).collect();
         assert_eq!(names.len(), 3, "each rewrite has a name of its own");
         assert!(names.iter().all(|n| n.to_string_lossy().contains(&format!(".{}-", std::process::id()))));
         rewrite(&log, "x\n").unwrap();

@@ -21,7 +21,7 @@
 //! It all runs on a worker (`State::change_default`): files, the registry and LaunchServices
 //! are disk work.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Which command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,31 +154,10 @@ impl Backup {
     }
 }
 
-/// Writes `data` to `path` through a temporary file beside it, flushed to the disk before it's
-/// renamed into place (and the folder after, on Unix), so a crash never leaves half a file and
-/// a backup is on the disk before anything it records is changed. Makes the folder if needed.
+/// Writes `data` to `path` durably ([`crate::persist::replace`]): a crash never leaves half a
+/// file, and a backup is on the disk before anything it records is changed.
 fn write_file(path: &Path, data: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    let say = |e: std::io::Error| format!("{}: {e}", crate::fs::pretty(path));
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(say)?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".arbor-{}", std::process::id()));
-    let tmp = PathBuf::from(tmp);
-    let written = std::fs::File::create(&tmp).and_then(|mut f| {
-        f.write_all(data)?;
-        f.sync_all()
-    });
-    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(say(e));
-    }
-    #[cfg(unix)]
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
-    }
-    Ok(())
+    crate::persist::replace(path, data, crate::persist::Durability::Durable).map_err(|e| format!("{}: {e}", crate::fs::pretty(path)))
 }
 
 fn remove_backup(path: &Path) -> Result<(), String> {
@@ -1069,6 +1048,7 @@ pub(crate) mod mac {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("arbor-handler-{name}-{}", std::process::id()));

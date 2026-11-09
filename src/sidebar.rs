@@ -24,16 +24,14 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(not(test))]
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
 
 use rune::{Drag, Phase, Tx};
 
 use crate::app::State;
 use crate::fs;
+use crate::persist;
 
 /// The file's name, beside `config.toml`.
 pub const FILE: &str = "sidebar.toml";
@@ -163,15 +161,11 @@ pub struct Writer {
 impl Writer {
     fn spawn(path: PathBuf, waker: Option<rune::Waker>) -> Writer {
         let (tx, rx) = std::sync::mpsc::channel::<Msg>();
-        let (err_tx, errors) = std::sync::mpsc::channel::<String>();
-        #[cfg(not(test))]
-        if let Ok(mut at_exit) = AT_EXIT.lock() {
-            *at_exit = Some(tx.clone());
-        }
+        let (mut failures, errors) = persist::Failures::new(waker);
+        persist::at_exit(&tx, Msg::Flush);
         std::thread::Builder::new()
             .name("arbor-sidebar".into())
             .spawn(move || {
-                let mut failing = false;
                 while let Ok(first) = rx.recv() {
                     // Everything queued: only the newest list is written; flushes answer after.
                     let mut text = None;
@@ -183,17 +177,8 @@ impl Writer {
                         }
                     }
                     if let Some(t) = text {
-                        match write_atomically(&path, &t) {
-                            Ok(()) => failing = false,
-                            Err(e) if !failing => {
-                                failing = true;
-                                let _ = err_tx.send(format!("Couldn't save the sidebar ({}): {e}", fs::pretty(&path)));
-                                if let Some(w) = &waker {
-                                    w();
-                                }
-                            }
-                            Err(_) => {}
-                        }
+                        let written = persist::replace(&path, t.as_bytes(), persist::Durability::Plain);
+                        failures.note(written, |e| format!("Couldn't save the sidebar ({}): {e}", fs::pretty(&path)));
                     }
                     for r in replies {
                         let _ = r.send(());
@@ -210,38 +195,8 @@ impl Writer {
 
     /// Waits up to `wait` for what's queued to be written. True when it was.
     #[cfg(test)]
-    pub fn flush(&self, wait: Duration) -> bool {
-        flush(&self.tx, wait)
-    }
-}
-
-fn flush(tx: &Sender<Msg>, wait: Duration) -> bool {
-    let (done, rx) = std::sync::mpsc::channel();
-    tx.send(Msg::Flush(done)).is_ok() && rx.recv_timeout(wait).is_ok()
-}
-
-/// Writes `text` to a temporary file beside `p` and renames it over `p`.
-fn write_atomically(p: &Path, text: &str) -> std::io::Result<()> {
-    if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    static N: AtomicU64 = AtomicU64::new(0);
-    let tmp = p.with_extension(format!("toml.{}-{}.tmp", std::process::id(), N.fetch_add(1, Relaxed)));
-    let res = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, p));
-    if res.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    res
-}
-
-#[cfg(not(test))]
-static AT_EXIT: Mutex<Option<Sender<Msg>>> = Mutex::new(None);
-
-/// Gives the writer up to 100 ms to finish what's queued, as the window closes.
-pub fn drain_at_exit() {
-    #[cfg(not(test))]
-    if let Some(tx) = AT_EXIT.lock().ok().and_then(|t| t.clone()) {
-        flush(&tx, crate::jump::DRAIN_WAIT);
+    pub fn flush(&self, wait: std::time::Duration) -> bool {
+        persist::flush(&self.tx, wait, Msg::Flush)
     }
 }
 
@@ -522,6 +477,7 @@ fn gone(name: &str, path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::app::tests::{settle_all, state_in};
+    use std::time::Duration;
 
     fn temp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("arbor-sidebar-{name}-{}", std::process::id()));
