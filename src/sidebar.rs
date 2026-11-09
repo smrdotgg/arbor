@@ -109,7 +109,12 @@ pub fn serialize(paths: &[PathBuf]) -> Option<String> {
         let text = p.to_str()?;
         let shown = match p.strip_prefix(&home) {
             Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-            Ok(rest) if !home.as_os_str().is_empty() && home != Path::new("/") => format!("~/{}", rest.to_str()?.replace('\\', "/")),
+            // `/` after the tilde everywhere; on Windows the rest's `\` too, but elsewhere a
+            // backslash is part of a name.
+            Ok(rest) if !home.as_os_str().is_empty() && home != Path::new("/") => {
+                let rest = rest.to_str()?;
+                format!("~/{}", if cfg!(windows) { rest.replace('\\', "/") } else { rest.to_string() })
+            }
             _ => text.to_string(),
         };
         s.push_str("    \"");
@@ -632,6 +637,65 @@ mod tests {
         let text = serialize(&list).unwrap();
         assert!(text.contains("\"~\",") && text.contains("\"~/Projects\","), "{text}");
         assert_eq!(parse(&text).unwrap(), list);
+    }
+
+    /// A folder name with anything in it: quotes, backslashes, controls, non-ASCII.
+    fn any_name(r: &mut crate::prop::Rng) -> String {
+        loop {
+            let n = r.string(10).replace(['/', '\0'], "");
+            let n = if cfg!(windows) { n.replace(['\\', ':', '<', '>', '"', '|', '?', '*'], "") } else { n };
+            if !n.is_empty() && n != "." && n != ".." {
+                return n;
+            }
+        }
+    }
+
+    /// Any favorites written are read back exactly, in order, in or out of the home folder.
+    #[test]
+    fn any_favorites_round_trip_through_the_file() {
+        let home = fs::home();
+        let root = PathBuf::from(if cfg!(windows) { r"D:\" } else { "/" });
+        crate::prop::check("sidebar_round_trip", 300, |r| {
+            let mut list: Vec<PathBuf> = Vec::new();
+            for _ in 0..r.len(6) {
+                let mut p = if r.one_in(2) { home.clone() } else { root.clone() };
+                for _ in 0..1 + r.below(3) {
+                    p.push(any_name(r));
+                }
+                if !list.contains(&p) {
+                    list.push(p);
+                }
+            }
+            let text = serialize(&list).expect("UTF-8 paths");
+            assert_eq!(parse(&text).as_ref(), Ok(&list), "{text}");
+        });
+    }
+
+    /// Any text: an error or a list of full paths without duplicates, never a panic.
+    #[test]
+    fn any_sidebar_text_is_a_list_of_full_paths_or_an_error() {
+        const BITS: &[&str] =
+            &["favorites", " = ", "[", "]", "\"", "'", ",", "\n", "~", "~/", "/", "\\", "a", "é", "#", "\\u0000", "{", "}", "1"];
+        crate::prop::check("sidebar_any_text", 600, |r| {
+            let text = if r.one_in(3) { r.string(60) } else { r.from(BITS, 40) };
+            if let Ok(list) = parse(&text) {
+                for (i, p) in list.iter().enumerate() {
+                    assert!(p.is_absolute(), "{text:?}: {p:?}");
+                    assert!(!list[..i].contains(p), "{text:?}: {p:?} twice");
+                }
+            }
+        });
+    }
+
+    /// Found by `any_favorites_round_trip_through_the_file`: on Linux and macOS a backslash is
+    /// part of a name, but a favorite in the home folder had its backslashes written as `/`,
+    /// so `~/a\b` came back as the folder `~/a/b`.
+    #[cfg(unix)]
+    #[test]
+    fn a_backslash_in_a_name_in_the_home_folder_stays_a_backslash() {
+        let p = fs::home().join("a\\b");
+        let text = serialize(std::slice::from_ref(&p)).unwrap();
+        assert_eq!(parse(&text).unwrap(), [p]);
     }
 
     #[test]
