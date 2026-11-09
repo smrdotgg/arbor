@@ -158,6 +158,12 @@ fn required(plan: &[Set], root: &str) -> Vec<String> {
 pub fn restore(store: &mut dyn Store, plan: &[Set], root: &str, backup: Option<&Backup>) -> Result<(usize, Vec<String>), String> {
     let empty = Backup::default();
     let b = backup.unwrap_or(&empty);
+    // A value Make recorded is its type (4 bytes) and its data: anything shorter is damage, and
+    // taking it for "there was none" would delete the value. Checked before anything changes.
+    if let Some(s) = plan.iter().find(|s| b.get(&before_key(s)).flatten().is_some_and(|v| v.len() < 4)) {
+        let name = if s.name.is_empty() { "(Default)" } else { s.name };
+        return Err(format!(r"The backup is damaged (what it recorded for HKCU\{}\{name} is cut short), so nothing was changed", s.key));
+    }
     let (mut changed, mut kept) = (0, Vec::new());
     for s in plan.iter().rev() {
         let ours = b.get(&wrote_key(s)).flatten().map_or_else(|| s.data.clone(), |v| String::from_utf8_lossy(v).into_owned());

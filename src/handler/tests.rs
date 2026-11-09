@@ -439,6 +439,25 @@ fn windows_make_and_restore_put_back_exactly_what_was_there() {
     assert_eq!(windows::restore(&mut reg, &plan, root, None).unwrap(), (0, Vec::new()), "nothing of Arbor's left");
 }
 
+/// A recorded value shorter than its type (4 bytes) was taken for "there was none", so Restore
+/// deleted the value. It's damage now: nothing changes.
+#[test]
+fn windows_restore_refuses_a_value_cut_short() {
+    let root = windows::CLASSES;
+    let mut reg = Reg::default();
+    use windows::Store;
+    reg.set(r"Software\Classes\Directory\shell", "", windows::REG_SZ, &windows::utf16z("theirs")).unwrap();
+    let plan = windows::plan(root, EXE);
+    let mut b = windows::make(&mut reg, &plan, root, None).unwrap();
+    let key = format!("before {}|{}", plan[0].key, plan[0].name);
+    assert!(b.get(&key).is_some());
+    b.put(&key, Some(b"ab"));
+    let before = reg.clone();
+    let e = windows::restore(&mut reg, &plan, root, Some(&b)).unwrap_err();
+    assert!(e.contains("damaged") && e.contains("nothing was changed"), "{e}");
+    assert!(reg == before, "nothing changed");
+}
+
 #[test]
 fn windows_restore_without_a_backup_and_after_changes() {
     let root = windows::CLASSES;
