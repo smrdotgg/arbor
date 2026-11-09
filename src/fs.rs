@@ -128,27 +128,31 @@ pub fn ident_at(path: &Path) -> Option<Ident> {
 }
 
 /// Tests: the file at `p` removed and another made there holding `content`, one that got `p`'s
-/// inode back (ext4 hands a new file the inode just freed) and has its own birth time. Returns
-/// the identity the item it replaced had, which device, inode and type alone can't tell from the
-/// new one. `None` where it can't be shown: a file system that keeps no birth time, or doesn't
-/// reuse an inode at once (APFS, tmpfs).
+/// inode back (ext4 hands a new file the lowest inode free) and has its own birth time. Returns
+/// the identity of the item it replaced, which device, inode and type alone can't tell from the
+/// new one. `None` where it can't be shown (nothing is changed): a file system that keeps no
+/// birth time.
 ///
-/// A test running alongside can take the freed inode first; then it's tried again with the
-/// newcomer, so the identity returned may be of that one, not of the item `p` held when called
-/// (which the caller may have captured: that item is then simply replaced).
+/// Tests running alongside free and take inodes too, so it's tried a few times, each newcomer
+/// becoming the item to replace next. If the inode never comes back (a busy machine), `p` still
+/// holds a newcomer, with another inode, and the identity of the item it replaced is returned:
+/// a plain replacement, said on stderr.
 #[cfg(all(test, unix))]
 pub(crate) fn reuse_inode(p: &Path, content: &str) -> Option<Ident> {
+    let mut last = None;
     for _ in 0..5 {
-        // Not reused: the newcomer at `p` is the item to try again with.
-        if let Some(id) = reuse_inode_once(p, content) {
-            return Some(id);
+        match reuse_inode_once(p, content)? {
+            (id, true) => return Some(id),
+            (id, false) => last = Some(id),
         }
     }
-    None
+    eprintln!("reuse_inode: {} never got its inode back; replaced by a newcomer with another one", p.display());
+    last
 }
 
+/// One try of [`reuse_inode`]: the identity replaced, and whether the newcomer got its inode.
 #[cfg(all(test, unix))]
-fn reuse_inode_once(p: &Path, content: &str) -> Option<Ident> {
+fn reuse_inode_once(p: &Path, content: &str) -> Option<(Ident, bool)> {
     use std::os::unix::fs::MetadataExt;
     let before = ident_at(p)?;
     before.born?;
@@ -157,36 +161,39 @@ fn reuse_inode_once(p: &Path, content: &str) -> Option<Ident> {
     // original was made, so the newcomer's birth time is its own.
     std::thread::sleep(std::time::Duration::from_millis(20));
     std::fs::remove_file(p).ok()?;
-    // ext4 hands out the lowest free inode in the folder's group: one freed by a test running
-    // alongside comes first. Each such newcomer is kept aside, filling the gap, until the freed
-    // one comes back.
+    // A lower inode freed by a test running alongside comes first: each newcomer that got one
+    // is kept aside, filling the gap, until the freed one comes back.
     let mut aside = Vec::new();
-    let mut got = None;
-    for i in 0..200 {
+    let mut reused = false;
+    for i in 0..2000 {
         std::fs::write(p, content).ok()?;
         let m = p.symlink_metadata().ok()?;
         if m.ino() == ino {
             assert_ne!(ident(&m)?.born, before.born, "a newcomer has its own birth time");
-            got = Some(before);
+            reused = true;
             break;
         }
         let filler = p.with_file_name(format!(".reuse-filler-{i}"));
-        std::fs::rename(p, &filler).ok()?;
-        aside.push(filler);
+        // The last newcomer stays at `p`.
+        if i < 1999 {
+            std::fs::rename(p, &filler).ok()?;
+            aside.push(filler);
+        }
     }
     for f in aside {
         let _ = std::fs::remove_file(f);
     }
-    got
+    Some((before, reused))
 }
 
-/// Tests: whether [`reuse_inode`] can show inode reuse in the temp folder; says so when not.
+/// Tests: whether the temp folder's file system keeps birth times, so a reused inode can be told
+/// from the item that had it (and whether it reuses one at once); says so when not.
 #[cfg(all(test, unix))]
 pub(crate) fn inode_reuse_shows(test: &str) -> bool {
     let d = std::env::temp_dir().join(format!("arbor-reuse-probe-{test}-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&d);
     let p = d.join("probe");
-    let shows = std::fs::write(&p, "probe").is_ok() && reuse_inode(&p, "again").is_some();
+    let shows = std::fs::write(&p, "probe").is_ok() && (0..5).any(|_| reuse_inode_once(&p, "again").is_some_and(|(_, r)| r));
     let _ = std::fs::remove_dir_all(&d);
     if !shows {
         eprintln!("{test}: skipped (the temp folder's file system keeps no birth time, or doesn't reuse an inode at once)");

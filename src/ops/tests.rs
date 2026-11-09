@@ -1663,7 +1663,7 @@ fn an_item_with_a_reused_inode_is_never_acted_on() {
     if !crate::fs::inode_reuse_shows("an_item_with_a_reused_inode_is_never_acted_on") {
         return;
     }
-    let reused = |p: &Path| crate::fs::reuse_inode(p, "another item").expect("the inode was reused");
+    let reused = |p: &Path| crate::fs::reuse_inode(p, "another item").expect("a birth time, as the probe found");
     let d = tmp("inode-reuse");
     let target = d.join("t");
     fs::create_dir(d.join("into")).unwrap();

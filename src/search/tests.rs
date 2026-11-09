@@ -1019,7 +1019,7 @@ fn every_action_on_a_result_whose_inode_was_reused_refuses() {
         return;
     }
     every_action_refuses("reused", |p| {
-        crate::fs::reuse_inode(p, "SOMEONE ELSE'S FILE").expect("the inode was reused");
+        crate::fs::reuse_inode(p, "SOMEONE ELSE'S FILE").expect("a birth time, as the probe found");
     });
 }
 
