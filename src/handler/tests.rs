@@ -560,3 +560,55 @@ fn mac_reads_the_current_folder_viewer() {
     eprintln!("public.folder viewer: {:?}, chosen: {:?}", mac::LaunchServices.current(), mac::LaunchServices.chosen());
     assert_eq!(mac::bundle_id(), None, "the test binary isn't an app bundle, so Make would explain instead");
 }
+
+// ---- robustness of the backup file ----
+
+/// Any text after the header (or without it): decoding never panics, and anything it accepts
+/// is what `encode` writes (each value whole bytes of hex, or `-`), so it reads the same again.
+#[test]
+fn any_backup_text_decodes_to_what_encode_writes_or_an_error() {
+    const BITS: &[&str] =
+        &["\n", "\r\n", "\t", "-", "#", " ", "0", "9", "a", "f", "F", "g", "+", "é", "\u{301}", "\0", "key", "61", "+a", "-1"];
+    crate::prop::check("backup_decode", 2000, |r| {
+        let body = if r.one_in(3) { r.string(40) } else { r.from(BITS, 30) };
+        let text = if r.one_in(5) { body } else { format!("{BACKUP_HEADER}\n{body}") };
+        if let Ok(b) = Backup::decode(&text) {
+            for line in text.lines().skip(1).filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+                let hex = line.split_once('\t').unwrap().0;
+                assert!(hex == "-" || (hex.len() % 2 == 0 && hex.bytes().all(|c| c.is_ascii_hexdigit())), "{text:?}: {hex:?} accepted");
+            }
+            assert_eq!(Backup::decode(&b.encode()), Ok(b), "{text:?}");
+        }
+    });
+}
+
+/// Every backup Arbor writes reads back the same.
+#[test]
+fn any_backup_round_trips() {
+    crate::prop::check("backup_round_trip", 500, |r| {
+        let mut b = Backup::default();
+        for _ in 0..r.len(6) {
+            let key = loop {
+                let k = r.string(12).replace(['\n', '\r'], "");
+                // A name is never blank or a comment (Arbor's are fixed words).
+                if !k.trim().is_empty() && !k.starts_with('#') {
+                    break k;
+                }
+            };
+            let value = if r.one_in(4) { None } else { Some(r.bytes(30)) };
+            b.put(&key, value.as_deref());
+        }
+        assert_eq!(Backup::decode(&b.encode()).as_ref(), Ok(&b));
+    });
+}
+
+/// Found by `any_backup_text_decodes_to_what_encode_writes_or_an_error`: a value with a
+/// multi-byte character in it panicked (slicing it between pairs of hex digits), and one with
+/// "+a" was read as the byte 0x0a. Both are damage.
+#[test]
+fn a_value_that_isnt_hex_is_damage_not_a_panic_or_a_guess() {
+    for hex in ["a\u{e9}b", "+a", "0x", " 1", "-1"] {
+        assert!(Backup::decode(&format!("{BACKUP_HEADER}\n{hex}\tkey\n")).is_err(), "{hex:?}");
+    }
+    assert_eq!(Backup::decode(&format!("{BACKUP_HEADER}\n0aFf\tkey\n")).unwrap().get("key"), Some(Some(&b"\x0a\xff"[..])));
+}

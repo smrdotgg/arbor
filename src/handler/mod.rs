@@ -111,14 +111,20 @@ impl Backup {
             }
             let bad = || format!("line {} isn't what Arbor wrote", n + 1);
             let (hex, key) = line.split_once('\t').ok_or_else(bad)?;
+            // A name never holds a line break (`put`); a lone CR is damage.
+            if key.contains('\r') {
+                return Err(bad());
+            }
             let value = if hex == "-" {
                 None
             } else {
-                if !hex.len().is_multiple_of(2) {
+                // Hex digits only, checked before slicing: a multi-byte character would split
+                // between two pairs, and `from_str_radix` would take "+a" for 0x0a.
+                if !hex.len().is_multiple_of(2) || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
                     return Err(bad());
                 }
-                let bytes: Result<Vec<u8>, _> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16)).collect();
-                Some(bytes.map_err(|_| bad())?)
+                let digit = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
+                Some(hex.as_bytes().chunks(2).map(|p| digit(p[0]) << 4 | digit(p[1])).collect())
             };
             if b.get(key).is_some() {
                 return Err(format!("line {} records {key} again", n + 1));
