@@ -9,6 +9,37 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-09 · Identity now includes type, size, ctime and birth time, so an item changed
+  since it was chosen is left alone too (Review: a visible behaviour change).** Device and inode
+  alone let a replacement that got the freed inode back through (ext4 here: 200 of 200), so
+  every destructive check (Delete, Empty Trash, Trash, Move, inline and batch rename, Put Back,
+  and Copy, which shares the check) now compares the fuller `fs::Ident`. The cost: a file
+  edited after its folder was listed (a download still growing, an editor saving in place) is
+  refused with "…or it changed since" until the folder is read again. Get Info and search
+  rechecks compare only device and inode (`Ident::node`): they aren't acting on the item.
+  Windows still can't see a replacement within NTFS's 15 s creation-time tunnelling that has
+  the same size and write time (its file index needs every file opened). Undo: `fs::Ident`.
+- **2026-11-09 · Empty Trash refuses a whole trash whose folders aren't safe** rather than
+  emptying part of it: a trash folder, its `files/` or `info/` that's a link or someone else's,
+  or a shared `.Trash` that isn't sticky, is said in the dialog and nothing in it is read or
+  deleted; one moved or replaced between the count and the button is refused the same way. On
+  Linux each item's file handle (inode plus generation, `name_to_handle_at`) is checked too,
+  where the file system gives one. Undo: `trash::contents::open`, `Worker::empty_bins`.
+- **2026-11-09 · Put Back from a disk's trash refuses any link on the way back, even one that
+  stays on the disk**, and an absolute record outside the disk. Telling a link that stays on
+  the disk from one that leaves it would mean resolving it; refusing is the smaller surprise
+  (the item stays in the Trash, and the message names the link). The home trash keeps
+  restoring to any absolute path through the user's own links. Left: the move itself is still
+  by path after the check, so a folder swapped for a link in that instant isn't caught. Undo:
+  `trash::contents::original`.
+- **2026-11-09 · A pending inline rename is a label: Open, Copy, Cut, Rename, Open With, Get
+  Info, Reveal, Copy Path and Add to Sidebar on that row say "Wait for the rename to finish"**
+  until it lands (Trash, Delete and the rest already waited for the operation). Undo:
+  `Entry::pending`, `renaming` in `State::unavailable`.
+- **2026-11-09 · The Intel slice's Rosetta run stays best effort; the README says so** (rather
+  than failing CI on a runner that can't install Rosetta, a download that has failed before).
+  Undo: drop the `|| true` and the `else` branch in `ci.yml`'s macOS package check.
+
 - **2026-11-09 · Empty the Trash: which trashes, and what's deleted (Review: never run on a
   real Trash; Windows never run at all).** Linux: the home trash plus `.Trash/$uid` and
   `.Trash-$uid` on local disks only (no network shares, no FUSE mounts but `fuseblk`: a dead
