@@ -201,7 +201,8 @@ impl Worker<'_> {
     /// Puts one trashed item back: where it went, where it came from, and why its record is
     /// still there if it is.
     fn put_back_one(&mut self, src: &Path, home: Option<&Path>) -> Result<(PathBuf, PathBuf, Option<io::Error>), String> {
-        let (wanted, info) = contents::original(src, home)?;
+        let origin = contents::original(src, home)?;
+        let wanted = origin.wanted.clone();
         let (Some(dir), Some(want)) = (wanted.parent(), wanted.file_name()) else { return Err("its record names no folder".into()) };
         if !dir.is_dir() {
             return Err(format!("the folder it came from, “{}”, isn't there any more", crate::fs::pretty(dir)));
@@ -212,7 +213,7 @@ impl Worker<'_> {
             match self.relocate(src, &to) {
                 Ok(()) => {
                     // Its record would list it in the Trash still.
-                    let kept = std::fs::remove_file(&info).err().filter(|e| e.kind() != ErrorKind::NotFound);
+                    let kept = origin.forget().err();
                     return Ok((to, wanted.clone(), kept));
                 }
                 // Taken since `free_name` looked: the next free name.

@@ -24,7 +24,9 @@
 //! - **macOS privacy.** `~/.Trash` can't be read without Full Disk Access on recent macOS
 //!   (`EPERM`); the dialog and the result say how to grant it ([`NEEDS_ACCESS`]).
 //! - **Put Back** (Linux): an item's `.trashinfo` says where it came from ([`parse_info`]); it
-//!   goes back there, or beside it under a free name when that's taken (`ops`). macOS has no
+//!   goes back there, or beside it under a free name when that's taken (`ops`). Only from a
+//!   trash that passes the same checks ([`original`]); from a disk's trash only to a place on
+//!   that disk, reached through real folders on it, never a link out of it. macOS has no
 //!   public API for Finder's Put Back (Finder keeps the original location to itself), and
 //!   Windows doesn't let Arbor list the Recycle Bin, so neither offers it.
 
@@ -728,17 +730,130 @@ pub fn parse_info(text: &str, top: Option<&Path>) -> Result<PathBuf, String> {
     }
 }
 
-/// Where the trashed item at `trashed` (in a trash's `files/`) came from, and its record's path.
-pub fn original(trashed: &Path, home: Option<&Path>) -> Result<(PathBuf, PathBuf), String> {
+/// Where a trashed item came from, checked, and its record (removed once it's back).
+pub struct Origin {
+    pub wanted: PathBuf,
+    /// The record: its trash's `info/`, opened and checked, and its name there (Unix).
+    #[cfg(unix)]
+    pub record: (std::os::fd::OwnedFd, std::ffi::CString),
+    #[cfg(not(unix))]
+    pub record: PathBuf,
+}
+
+impl Origin {
+    /// Removes the record, now that the item is out of the Trash.
+    pub fn forget(&self) -> io::Result<()> {
+        #[cfg(unix)]
+        let r = crate::dirfd::unlink_at(&self.record.0, &self.record.1);
+        #[cfg(not(unix))]
+        let r = std::fs::remove_file(&self.record);
+        r.or_else(|e| if e.kind() == io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
+    }
+}
+
+/// Where the trashed item at `trashed` (in a trash's `files/`) came from. Only a trash that
+/// passes the freedesktop.org checks counts ([`open`]: this user's `.Trash-$uid`, or `$uid`
+/// under a sticky `.Trash`, no links), and its record is read through its opened `info/`. For
+/// a disk's trash the place must be on that disk: a relative record starts from its top
+/// folder, an absolute one must be inside it, and the folders on the way must be real folders
+/// on the same disk, not links out of it (each opened without following one).
+pub fn original(trashed: &Path, home: Option<&Path>) -> Result<Origin, String> {
     let t = trashed.parent().and_then(|f| trash_of(f, home)).ok_or("it isn't in a Trash Arbor knows")?;
-    let mut name = trashed.file_name().ok_or("it has no name")?.to_os_string();
-    name.push(".trashinfo");
-    let info = t.root.join("info").join(name);
-    let text = read_info(&info)?;
-    Ok((parse_info(&text, t.top.as_deref())?, info))
+    let name = trashed.file_name().ok_or("it has no name")?;
+    let mut rec = name.to_os_string();
+    rec.push(".trashinfo");
+    #[cfg(unix)]
+    {
+        use crate::dirfd::{fstat, open_dir};
+        // SAFETY: getuid can't fail.
+        let uid = unsafe { libc::getuid() };
+        let uid_name = uid.to_string();
+        let bin = match &t.top {
+            None => Bin::freedesktop(&t.root, uid),
+            Some(top) if t.root == top.join(".Trash").join(&uid_name) => Bin::shared(top, uid),
+            Some(top) if t.root == top.join(format!(".Trash-{uid}")) => Bin::freedesktop(&t.root, uid),
+            Some(_) => return Err("it's in another user's Trash".into()),
+        };
+        let o = match open(&bin) {
+            Ok(Some(o)) => o,
+            Ok(None) => return Err("it isn't in a Trash Arbor knows".into()),
+            Err(p) => return Err(p.say()),
+        };
+        // The item really is in the folder that was checked.
+        let here = crate::ffi::cstr(name).map_err(|e| e.to_string())?;
+        let item = crate::dirfd::ident_at(&o.files, &here).map_err(|e| format!("it couldn't be read ({e})"))?;
+        if crate::fs::ident_at(trashed).map(|i| i.node()) != Some(item.node()) {
+            return Err("it isn't in the Trash folder Arbor checked".into());
+        }
+        let info = o.info.ok_or("it has no record in the Trash saying where it came from")?;
+        let rec = crate::ffi::cstr(&rec).map_err(|e| e.to_string())?;
+        let text = read_info_at(&info, &rec)?;
+        let wanted = parse_info(&text, t.top.as_deref())?;
+        if let Some(top) = &t.top {
+            let rel = wanted.strip_prefix(top).map_err(|_| "its record names a place outside the disk its Trash is on".to_string())?;
+            let top_fd = crate::ffi::cstr(top).and_then(|c| open_dir(libc::AT_FDCWD, &c, true)).map_err(|e| e.to_string())?;
+            let dev = fstat(&top_fd).map_err(|e| e.to_string())?.st_dev;
+            let mut fd = top_fd;
+            let mut at = top.clone();
+            for part in rel.parent().into_iter().flat_map(Path::components) {
+                at.push(part);
+                let c = crate::ffi::cstr(part.as_os_str()).map_err(|e| e.to_string())?;
+                fd = match open_dir(std::os::fd::AsRawFd::as_raw_fd(&fd), &c, false) {
+                    Ok(next) => next,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        return Err(format!("the folder it came from, “{}”, isn't there any more", crate::fs::pretty(&at)));
+                    }
+                    Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => {
+                        return Err(format!("the way back goes through “{}”, which is a link or not a folder", crate::fs::pretty(&at)));
+                    }
+                    Err(e) => return Err(format!("“{}” couldn't be opened ({e})", crate::fs::pretty(&at))),
+                };
+                let st = fstat(&fd).map_err(|e| e.to_string())?;
+                if st.st_dev != dev {
+                    return Err(format!("the way back goes into “{}”, another disk", crate::fs::pretty(&at)));
+                }
+            }
+        }
+        Ok(Origin { wanted, record: (info, rec) })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = name;
+        let info = t.root.join("info").join(rec);
+        let text = read_info(&info)?;
+        Ok(Origin { wanted: parse_info(&text, t.top.as_deref())?, record: info })
+    }
+}
+
+/// A `.trashinfo` file's text, read through its open `info/` folder: a regular file (not a
+/// link: `O_NOFOLLOW`; nothing that could block: `O_NONBLOCK`) of at most 64 KB.
+#[cfg(unix)]
+fn read_info_at(info: &std::os::fd::OwnedFd, rec: &std::ffi::CStr) -> Result<String, String> {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    // SAFETY: `rec` is NUL-terminated; a non-negative result is a descriptor we own.
+    let fd = unsafe { libc::openat(info.as_raw_fd(), rec.as_ptr(), flags) };
+    if fd < 0 {
+        let e = io::Error::last_os_error();
+        return Err(match e.kind() {
+            io::ErrorKind::NotFound => "it has no record in the Trash saying where it came from".into(),
+            _ if e.raw_os_error() == Some(libc::ELOOP) => "its record in the Trash isn't a file".into(),
+            _ => format!("its record in the Trash couldn't be read ({e})"),
+        });
+    }
+    // SAFETY: just opened, owned here.
+    let f = unsafe { std::fs::File::from_raw_fd(fd) };
+    if !f.metadata().is_ok_and(|m| m.is_file()) {
+        return Err("its record in the Trash isn't a file".into());
+    }
+    let mut s = String::new();
+    f.take(64 * 1024).read_to_string(&mut s).map_err(|e| format!("its record in the Trash couldn't be read ({e})"))?;
+    Ok(s)
 }
 
 /// A `.trashinfo` file's text: a regular file (not a link) of at most 64 KB.
+#[cfg(not(unix))]
 fn read_info(info: &Path) -> Result<String, String> {
     use std::io::Read;
     match info.symlink_metadata() {

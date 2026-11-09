@@ -1572,7 +1572,7 @@ fn trash_bin(root: &Path) -> crate::trash::contents::Bin {
 }
 
 fn fixture_trash(top: &Path, items: &[(&str, &str)]) -> PathBuf {
-    let root = top.join(".Trash-1000");
+    let root = top.join(format!(".Trash-{}", crate::trash::contents::me()));
     fs::create_dir_all(root.join("files")).unwrap();
     fs::create_dir_all(root.join("info")).unwrap();
     for (name, from) in items {
@@ -1832,6 +1832,46 @@ fn put_back_restores_from_records_and_never_clobbers() {
     assert!(back.errors.is_empty() && back.refused.is_none(), "{:?} {:?}", back.errors, back.refused);
     assert!(!d.join("docs/a.txt").exists() && !d.join("docs/b 2.txt").exists() && d.join("docs/b.txt").exists());
     assert!(d.join("docs/.trash/a.txt").exists(), "undo trashed it again");
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// The review's case: Put Back trusted a disk's trash by its name alone, so a record naming an
+/// absolute place outside the disk, or a relative one through a link on the disk to elsewhere,
+/// put the item outside the disk. Now the trash must pass the freedesktop.org checks (this
+/// user's, no links), and the place must be inside its disk, through real folders on it.
+#[cfg(unix)]
+#[test]
+fn put_back_stays_on_the_trashs_disk() {
+    use std::os::unix::fs::symlink;
+    let d = tmp("putback-escape");
+    let (top, outside) = (d.join("disk"), d.join("outside"));
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(&top).unwrap();
+    let abs = outside.join("a").display().to_string();
+    let root = fixture_trash(&top, &[("a", &abs), ("b", "docs/b"), ("c", "real/c")]);
+    symlink(&outside, top.join("docs")).unwrap();
+    fs::create_dir(top.join("real")).unwrap();
+    let files = root.join("files");
+    let o = run_now(Op::PutBack { items: vec![files.join("a"), files.join("b"), files.join("c")] });
+    assert!(fs::read_dir(&outside).unwrap().next().is_none(), "nothing went outside the disk");
+    assert!(files.join("a").exists() && files.join("b").exists(), "they stay in the Trash");
+    assert!(top.join("real/c").exists(), "a place on the disk is fine");
+    assert_eq!(o.errors.len(), 2, "{:?}", o.errors);
+    assert!(o.errors[0].contains("outside the disk its Trash is on"), "{:?}", o.errors);
+    assert!(o.errors[1].contains("is a link or not a folder"), "{:?}", o.errors);
+    // Another user's trash, by its name, isn't one Put Back trusts.
+    let theirs = top.join(format!(".Trash-{}", crate::trash::contents::me() + 1));
+    fs::create_dir_all(theirs.join("files")).unwrap();
+    fs::create_dir_all(theirs.join("info")).unwrap();
+    fs::write(theirs.join("files/x"), "x").unwrap();
+    fs::write(theirs.join("info/x.trashinfo"), "[Trash Info]\nPath=real/x\n").unwrap();
+    let o = run_now(Op::PutBack { items: vec![theirs.join("files/x")] });
+    assert!(!top.join("real/x").exists() && o.errors[0].contains("another user's Trash"), "{:?}", o.errors);
+    // A trash whose info/ is a link isn't trusted either.
+    fs::rename(root.join("info"), d.join("info-elsewhere")).unwrap();
+    symlink(d.join("info-elsewhere"), root.join("info")).unwrap();
+    let o = run_now(Op::PutBack { items: vec![files.join("b")] });
+    assert!(files.join("b").exists() && o.errors[0].contains("isn't a folder of yours"), "{:?}", o.errors);
     let _ = fs::remove_dir_all(&d);
 }
 
