@@ -631,6 +631,7 @@ impl State {
         changed |= self.poll_batch();
         // Select by Pattern's count follows the rows it counts (a listing that landed).
         changed |= self.pick_refresh();
+        changed |= self.sync_tiles();
         changed |= self.poll_tiles();
         // After everything that can move the selection this frame.
         changed |= self.sync_preview();

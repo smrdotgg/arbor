@@ -8,8 +8,10 @@
 //!   (`on_visible_rows`), whenever that changes; only their cells are asked for, top left
 //!   first. A cell that scrolls off has its request taken out of the queue, or its decode
 //!   stopped (each has a stop flag, checked between reads and rows; an OS request is cancelled,
-//!   its wait rung awake). Leaving the folder, switching to the list, hiding the tab or closing
-//!   the window drops it all the same way.
+//!   its wait rung awake). Whatever takes the grid off screen (the list view, another tab, a
+//!   filter that leaves nothing, the preview covering its pane, another folder, closing the
+//!   window) drops it all the same way, checked after every input and landing
+//!   ([`State::sync_tiles`]), never left to the vanishing grid's own callbacks.
 //! - **Finishes and stops.** One decode per cell, then nothing: no watching.
 //! - **Nothing is stored.** The decoded thumbnails of the cells on screen are part of the view,
 //!   dropped as their cells leave the screen; scrolling back decodes again. Nothing goes to
@@ -263,16 +265,39 @@ fn decode(job: &Job, bell: &Arc<Bell>) -> Option<Rgba> {
 static GRID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl State {
+    /// Whether pane `ix` shows a grid with cells in it: the icon view, something to show, and
+    /// not covered by the preview or Get Info (which take the other pane's place when split).
+    pub(crate) fn grid_on_screen(&self, ix: usize) -> bool {
+        let f = &self.panes[ix].f;
+        let covered = self.split() && ix != self.active && (self.preview.is_some() || self.info.is_some());
+        f.view == crate::grid::ViewMode::Icons && !f.visible.is_empty() && !covered
+    }
+
+    /// Keeps thumbnails to grids on screen: a pane whose grid isn't (another tab shown, the
+    /// list view, a filter that leaves nothing, the preview over it, the folder changing)
+    /// drops every thumbnail and stops what's queued or decoding for it. Called after every
+    /// key, command, click and listing (`sync_preview`) and from `poll`, so it never waits for
+    /// a grid that's going away to say so. True when anything went.
+    pub(crate) fn sync_tiles(&mut self) -> bool {
+        let mut changed = false;
+        for ix in 0..self.panes.len() {
+            if !self.grid_on_screen(ix) {
+                changed |= self.panes[ix].f.tiles.take().is_some();
+            }
+        }
+        changed
+    }
+
     /// Rune says rows `rows` of pane `id`'s grid are on screen: thumbnails for their cells are
     /// asked for (those not already shown or asked), and everything for cells that left is
     /// dropped or cancelled. True when the view changed (a thumbnail went).
     pub(crate) fn tiles_visible(&mut self, id: u64, rows: Range<usize>) -> bool {
         let Some(ix) = self.pane_ix(id) else { return false };
         let fit = self.tile_fit.get().max(1);
-        let f = &mut self.panes[ix].f;
-        if f.view != crate::grid::ViewMode::Icons {
-            return f.tiles.take().is_some();
+        if !self.grid_on_screen(ix) {
+            return self.panes[ix].f.tiles.take().is_some();
         }
+        let f = &mut self.panes[ix].f;
         let cols = f.grid_cols.get().max(1);
         let n = f.visible.len();
         let items = (rows.start * cols).min(n)..(rows.end.saturating_mul(cols)).min(n);

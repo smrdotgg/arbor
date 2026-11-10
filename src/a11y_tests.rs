@@ -1120,3 +1120,60 @@ fn scrolling_cancels_and_drops_what_left_the_screen() {
     assert!(rt.state.cur().tiles.is_none());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Thumbnails live only while their grid is on screen: a new tab in the list view, a filter
+/// that leaves nothing, the preview covering the pane of a split window, and another tab shown
+/// each drop every decoded thumbnail and stop what's queued or decoding, at once, without
+/// waiting for the vanishing grid to say so.
+#[test]
+fn thumbnails_go_with_the_grid_whatever_hides_it() {
+    let held = |d: &Path| {
+        let mut gates = Vec::new();
+        for i in 0..2 {
+            let (go, wait) = std::sync::mpsc::channel::<()>();
+            crate::tiles::hook::GATES.lock().unwrap().push((d.join(format!("i{i:03}.png")), wait));
+            gates.push(go);
+        }
+        gates
+    };
+    let idle = |rt: &mut Runtime<State>| {
+        until(rt, |s| s.tile_pool.as_ref().is_some_and(|p| p.stats().0 == 0 && p.stats().1 == 0));
+        let (waiting, running, ..) = rt.state.tile_pool.as_ref().unwrap().stats();
+        assert_eq!((waiting, running), (0, 0), "nothing queued or decoding");
+    };
+    // A new tab (list view by default): the hidden tab's grid goes, with its held decodes.
+    let d = images("gone-tab", 60);
+    let _gates = held(&d);
+    let mut rt = runtime(&d);
+    icons(&mut rt);
+    until(&mut rt, |s| s.tile_pool.as_ref().is_some_and(|p| p.stats().1 == 2));
+    run(&mut rt, Cmd::NewTab);
+    assert!(rt.state.cur().tiles.is_none(), "a list-view tab keeps no thumbnails");
+    idle(&mut rt);
+    // Showing the grid's tab again asks afresh; showing the other tab drops it again.
+    run(&mut rt, Cmd::PrevTab);
+    assert_eq!(rt.state.cur().view, crate::grid::ViewMode::Icons);
+    until(&mut rt, |s| s.cur().tiles.as_ref().is_some_and(|t| !t.shown.is_empty()));
+    run(&mut rt, Cmd::NextTab);
+    assert!(rt.state.cur().tiles.is_none());
+    // A filter that leaves nothing.
+    run(&mut rt, Cmd::PrevTab);
+    until(&mut rt, |s| s.cur().tiles.as_ref().is_some_and(|t| !t.shown.is_empty()));
+    rt.key(KeyEvent { key: Key::Text("zzz".into()), mods: Mods::default() });
+    rt.frame(0.0);
+    assert!(rt.state.cur().visible.is_empty());
+    assert!(rt.state.cur().tiles.is_none(), "no cells, no thumbnails");
+    key(&mut rt, Key::Escape, false);
+    // The preview covering the grid's pane in a split window.
+    let d2 = images("gone-covered", 60);
+    let mut rt = runtime(&d2);
+    icons(&mut rt);
+    until(&mut rt, |s| s.cur().tiles.as_ref().is_some_and(|t| !t.shown.is_empty()));
+    run(&mut rt, Cmd::Split);
+    run(&mut rt, Cmd::TogglePreview);
+    let covered = 1 - rt.state.active;
+    assert!(rt.state.panes[covered].f.tiles.is_none(), "a covered grid keeps no thumbnails");
+    idle(&mut rt);
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&d2);
+}

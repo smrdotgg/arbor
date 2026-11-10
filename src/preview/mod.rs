@@ -331,6 +331,13 @@ impl State {
     /// earlier wake's poll already asked for, so a key handled in that frame would go
     /// unfollowed. Closed, it's one `None` check. True when the panel changed.
     pub(crate) fn sync_preview(&mut self) -> bool {
+        // Thumbnails follow what's on screen from the same places (`tiles.rs`).
+        let tiles = self.sync_tiles();
+        self.sync_panels() | tiles
+    }
+
+    /// The preview and Get Info's panel, for [`sync_preview`](Self::sync_preview).
+    fn sync_panels(&mut self) -> bool {
         // Get Info's panel follows the selection the same way.
         let info = self.sync_info();
         let Some(p) = &mut self.preview else { return info };
