@@ -246,6 +246,10 @@ pub(super) fn preview_panel(s: &State, p: &Preview, l: Look, cx: &mut Cx<State>,
             let (lands, key) = (s.preview_lands, format!("preview-text-{}", s.preview_lands));
             let scrolled = s.preview_scroll.clone();
             let keys = key.clone();
+            let wheel_key = key.clone();
+            // This frame's handlers have run: the next frame's Shift + wheel starts from where
+            // the text is scrolled to then.
+            s.preview_turn.set(None);
             b.child(
                 col()
                     .key(key)
@@ -261,6 +265,9 @@ pub(super) fn preview_panel(s: &State, p: &Preview, l: Look, cx: &mut Cx<State>,
                     .min_h(0.0)
                     .w_full()
                     .scroll_xy()
+                    .on_wheel(move |s: &mut State, ev: rune::WheelEvent, tx: &mut rune::Tx| {
+                        preview_shift_wheel(s, &wheel_key, lands, &ev, tx)
+                    })
                     .on_scroll_offset({
                         let at = s.preview_scroll.clone();
                         move |pos: ScrollPos| at.set((lands, pos.offset))
@@ -270,6 +277,30 @@ pub(super) fn preview_panel(s: &State, p: &Preview, l: Look, cx: &mut Cx<State>,
         }
     };
     panel.child(head).child(hr(l)).child(body)
+}
+
+/// Shift + a mouse wheel over the text preview scrolls it sideways, on every platform. Rune
+/// turns the wheel itself off macOS (so this sees a horizontal delta there and leaves it), and
+/// on macOS leaves it to the system, which turns only a real mouse's events: a wheel event that
+/// a mouse utility, Screen Sharing or an automation tool posts arrives with Shift held and only
+/// a vertical delta (RUNE-GAPS.md). Such a delta (not a trackpad's: AppKit doesn't turn those)
+/// is taken here and scrolls the text sideways instead of down. False leaves it to Rune.
+pub(super) fn preview_shift_wheel(s: &mut State, key: &str, lands: u64, ev: &rune::WheelEvent, tx: &mut rune::Tx) -> bool {
+    if ev.precise || !ev.mods.shift || ev.dx != 0.0 || ev.dy == 0.0 {
+        return false;
+    }
+    tx.instant();
+    let (of, at) = s.preview_scroll.get();
+    let at = if of == lands { at } else { [0.0; 2] };
+    let from = match s.preview_turn.get() {
+        Some((l, x)) if l == lands => x,
+        _ => at[0],
+    };
+    // As Rune turns it: a delta down (content up) moves the text left (the view right).
+    let x = (from - ev.dy).max(0.0);
+    s.preview_turn.set(Some((lands, x)));
+    tx.scroll_to_instant(key, x, at[1]);
+    true
 }
 
 /// The text preview's keys while it has focus: arrows scroll three lines (or columns), Page

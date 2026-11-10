@@ -584,3 +584,102 @@ fn an_os_drag_never_starts_from_a_release() {
         assert_eq!(crate::actions::drag_may_start_on(kind), ok, "NSEventType {kind}");
     }
 }
+
+// ---- Scrolling the text preview sideways -----------------------------------------------------
+
+/// The real app with `name`'s preview open on a file of long lines; the contents' key and the
+/// centre of its box.
+fn long_line_preview(name: &str) -> (PathBuf, Runtime<State>, String, (f32, f32)) {
+    let d = folder(name);
+    let long: String = (0..60).map(|i| format!("{i:03} {}\n", "abcdefghij".repeat(30))).collect();
+    std::fs::write(d.join("notes.txt"), long).unwrap();
+    let mut rt = runtime(&d);
+    rt.update(|s, _| {
+        let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "notes.txt").unwrap();
+        s.cur_mut().select(i);
+    });
+    run(&mut rt, Cmd::TogglePreview);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while rt.state.preview.as_ref().is_some_and(|p| p.is_loading()) && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        rt.frame(0.0);
+    }
+    rt.frame(0.0);
+    rt.frame(0.0);
+    let tree = rt.accessibility_json();
+    let doc = find_by(&tree, &|v| v["role"] == "document").expect("the contents");
+    let key = doc["key"].as_str().unwrap().to_owned();
+    let b: Vec<f32> = doc["bounds"].as_array().expect("bounds").iter().map(|x| x.as_f64().unwrap() as f32).collect();
+    (d, rt, key, (b[0] + b[2] * 0.5, b[1] + b[3] * 0.5))
+}
+
+/// Where the preview's contents are scrolled to, as assistive technology is told.
+fn scrolled(rt: &mut Runtime<State>, key: &str) -> [f64; 2] {
+    let doc = find(&rt.accessibility_json(), key).cloned().unwrap();
+    [doc["scroll"][0].as_f64().unwrap_or(0.0), doc["scroll"][1].as_f64().unwrap_or(0.0)]
+}
+
+/// QA: long lines in the text preview scroll sideways with a horizontal wheel or a trackpad's
+/// two-finger swipe (pixel deltas, with phases), not only with ← →; a mouse wheel's vertical
+/// delta still scrolls it down.
+#[test]
+fn the_text_preview_scrolls_sideways_with_the_wheel_and_trackpad() {
+    use rune::{GesturePhase, WheelEvent};
+    let (d, mut rt, key, (x, y)) = long_line_preview("hscroll");
+    rt.pointer_move(x, y);
+    rt.frame(0.0);
+    assert_eq!(scrolled(&mut rt, &key), [0.0, 0.0]);
+    // A mouse's horizontal wheel (or a tilt): one delta, no phases.
+    rt.wheel_xy(x, y, -120.0, 0.0);
+    rt.frame(0.0);
+    let after = scrolled(&mut rt, &key);
+    assert!(after[0] >= 100.0 && after[1] == 0.0, "the wheel moved it right: {after:?}");
+    // A trackpad swipe back: pixel deltas with phases, mostly sideways.
+    rt.frame(1.0);
+    for (i, dx) in [8.0, 20.0, 30.0, 12.0].into_iter().enumerate() {
+        let phase = if i == 0 { GesturePhase::Began } else { GesturePhase::Moved };
+        rt.wheel_event(WheelEvent::new(dx, 1.0).at(x, y).phase(phase).precise(true));
+        rt.frame(0.016);
+    }
+    rt.wheel_event(WheelEvent::new(0.0, 0.0).at(x, y).phase(GesturePhase::Ended).precise(true));
+    rt.frame(0.016);
+    let back = scrolled(&mut rt, &key);
+    assert!(back[0] < after[0] - 60.0 && back[1] == 0.0, "the swipe moved it back left, not down: {after:?} → {back:?}");
+    // The plain wheel still scrolls it down.
+    rt.frame(1.0);
+    rt.wheel_xy(x, y, 0.0, -80.0);
+    rt.frame(0.0);
+    assert!(scrolled(&mut rt, &key)[1] > 0.0);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Shift + a mouse wheel scrolls the text preview sideways even when the delta arrives
+/// unturned (vertical, Shift held): how macOS delivers a wheel that a mouse utility, Screen
+/// Sharing or an automation tool posts. Two notches in one frame both count; Shift's turn
+/// leaves the vertical position alone, and a trackpad's delta (precise) isn't turned.
+#[test]
+fn shift_and_the_wheel_scroll_the_text_preview_sideways() {
+    use rune::{Mods, WheelEvent};
+    let (d, mut rt, key, (x, y)) = long_line_preview("shift-wheel");
+    rt.pointer_move(x, y);
+    rt.frame(0.0);
+    let shift = Mods { shift: true, ..Mods::default() };
+    rt.wheel_event(WheelEvent::new(0.0, -40.0).at(x, y).mods(shift));
+    rt.wheel_event(WheelEvent::new(0.0, -40.0).at(x, y).mods(shift));
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(scrolled(&mut rt, &key), [80.0, 0.0], "both notches moved it right, not down");
+    rt.frame(1.0);
+    rt.wheel_event(WheelEvent::new(0.0, 30.0).at(x, y).mods(shift));
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(scrolled(&mut rt, &key), [50.0, 0.0], "and back left");
+    // A trackpad with Shift held scrolls as it moves (AppKit doesn't turn it either).
+    rt.frame(1.0);
+    rt.wheel_event(WheelEvent::new(0.0, -30.0).at(x, y).mods(shift).precise(true));
+    rt.frame(0.0);
+    rt.frame(0.0);
+    let at = scrolled(&mut rt, &key);
+    assert!(at[0] == 50.0 && at[1] > 0.0, "{at:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}

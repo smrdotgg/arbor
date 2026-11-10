@@ -348,7 +348,8 @@ clears the filter or cancels a file operation.
 - **Text** (found by its bytes, not its name: few NULs and control characters; UTF-8, UTF-16
   with a byte order mark, or other 8-bit text, which is read as Windows-1252, the superset of
   Latin-1 that Windows writes, and the panel says "Shown as Windows-1252"): the first 256 KB in
-  the system's monospaced font, no wrapping (scroll sideways), lines over 1,000 characters cut.
+  the system's monospaced font, no wrapping (scroll sideways: a trackpad swipe, a horizontal
+wheel, Shift + the wheel, or ← → once it has focus), lines over 1,000 characters cut.
   The panel says when it's showing only the start, and when UTF-8 has a few invalid bytes (they
   show as �). Only the lines in view are laid out.
 - **Images**: PNG, JPEG, GIF (its first frame), WebP and BMP, also found by their bytes. Decoded

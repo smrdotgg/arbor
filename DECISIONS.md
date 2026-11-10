@@ -28,6 +28,12 @@ Format: date · decision · why · how to undo.
   Off macOS, an unsplit in-window row drag let go on nothing now says the same (it said nothing).
   RUNE-GAPS has the entry. Undo: `actions::os_drag_can_start`, the `drag_out` closure in
   `view/list.rs`, the `far && split.is_none()` branch there.
+- **2026-11-10 · Shift + wheel turns sideways in the text preview on macOS too** (Mac QA: the
+  tool's horizontal scroll didn't move the preview). Rune delivers horizontal deltas fine (tests
+  feed a tilt wheel and a trackpad swipe); what it leaves to macOS is turning Shift + wheel, which
+  macOS does only for a real mouse. The preview turns an unturned one itself. Undo:
+  `view::preview_shift_wheel` and its `on_wheel`.
+
 - **2026-11-10 · Linux opens with `xdg-open`, then `gio open`** (Linux QA: with no
   `xdg-open`, Open and Settings said "No such file or directory" though `gio` was there). Open,
   Show in folder and the settings file use the first one found on PATH, as an executable file

@@ -16,6 +16,26 @@ Newest first.
 
 ---
 
+## Wheel: Shift + wheel isn't turned on macOS when the system didn't turn it
+
+- **Feature:** scrolling the text preview's long lines sideways (Quick preview, NORTHSTAR Core).
+- **What Rune is missing:** Shift + a mouse wheel turned into a horizontal scroll on macOS too.
+  Rune turns it only off macOS (`SHIFT_TURNS_WHEEL` in `runtime/scroll/x.rs`), because macOS turns
+  a real mouse's wheel before the app sees it. It doesn't turn a wheel event that something else
+  posted (a mouse utility re-posting the wheel, Screen Sharing, an automation tool such as the
+  QA session's): that arrives as a vertical delta with Shift held, and Rune scrolls down. Rune
+  does deliver horizontal deltas (a tilt wheel, a trackpad swipe, with pixel deltas and phases)
+  to `scroll_xy` viewports correctly; Arbor's tests feed both.
+- **What we did instead:** the preview's text has an `on_wheel` that takes an unturned
+  Shift + wheel delta (not precise, no horizontal part) and scrolls sideways itself with
+  `Tx::scroll_to_instant`, adding up several notches in one frame (`preview_shift_wheel` in
+  `src/view/panels.rs`). Off macOS Rune has already turned it, so the handler leaves it alone.
+- **What users lose:** within one wheel gesture (0.1 s without phases), letting go of Shift while
+  still turning drops those notches instead of scrolling down; and every other `scroll_x`/
+  `scroll_xy` viewport would need the same handler (the preview is Arbor's only one).
+- **Suggested Rune change:** on macOS, turn a non-precise delta with Shift held and no horizontal
+  part as other platforms do (a delta the system turned already has one, so nothing turns twice).
+
 ## Drag out: a release past the threshold starts a system drag that never ends
 
 - **Feature:** dragging rows out of the list (macOS, one pane): to Finder and other apps, and the

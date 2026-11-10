@@ -173,6 +173,10 @@ pub struct State {
     /// Where the text preview is scrolled to, and for which landed preview: its keys scroll
     /// from there (`view::preview_scroll_key`).
     pub preview_scroll: std::rc::Rc<std::cell::Cell<(u64, [f32; 2])>>,
+    /// Where this frame's Shift + wheel deltas have taken the text preview sideways so far (for
+    /// which landed preview): `preview_scroll` only catches up after the frame, so several
+    /// notches in one frame add up from here (`view::preview_shift_wheel`). The view clears it.
+    pub preview_turn: std::cell::Cell<Option<(u64, f32)>>,
     /// The threads searches walk on, from the first search on (kept, idle between searches).
     pub(crate) search_pool: Option<crate::search::Pool>,
     /// A go-to's look at what's at its path (on a worker), and which go-to is waited for.
@@ -329,6 +333,7 @@ impl State {
             preview_reads: 0,
             preview_lands: 0,
             preview_scroll: Default::default(),
+            preview_turn: Default::default(),
             search_pool: None,
             path_check: Latest::default(),
             going_to: None,
