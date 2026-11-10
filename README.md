@@ -413,9 +413,12 @@ Linux) or its attributes (Windows: Read-only, Hidden, System…), and where a li
 "Rename…" starts the list's own rename (undoable). With nothing selected it's the folder on
 screen; with several items, how many files and folders and their total.
 
-**A folder's size and item count** (or the total of several items) are counted on demand,
-following NORTHSTAR's rules for view-triggered work: the panel shows at once with what the
-listing knows (name, kind, size, modified; the key never waits for the rest, which a worker
+**A folder's size and item count** (or the total of several items) are counted on demand.
+A folder's count is what's in it, as Finder and Explorer say ("2,000 items · 8.9 KB", or
+"Empty"); several items say how many are selected apart from what's inside the selected
+folders ("3 selected · 2,014 items inside · 9.1 MB"; just "3 selected · 62 B" with no folder
+among them). The count follows NORTHSTAR's rules for view-triggered work: the panel shows at
+once with what the listing knows (name, kind, size, modified; the key never waits for the rest, which a worker
 reads and which lands in the same rows, "…" until then), and the count streams
 in ("7,041 items · 414 MB so far…") on a thread of its own that wakes the window at most every
 30 ms. Moving the selection or closing the panel stops it at the next entry. It never follows

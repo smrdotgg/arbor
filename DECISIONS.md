@@ -9,6 +9,14 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-10 · Get Info counts what's inside, never the selection itself** (Linux QA: a
+  folder of 2,000 files said "2,001 items", an empty one "1 item"). One folder, or the folder
+  on screen: "2,000 items · 8.9 KB", or "Empty" (not when a folder couldn't be read or a disk
+  inside was left out: then "0 items · 0 B" and the caveat). Several items: "3 selected ·
+  2,014 items inside · 9.1 MB", the selected items apart from the contents of the selected
+  folders (the old count added both into one number), and "3 selected · 62 B" when none is a
+  folder. Undo: `Total::line` and the seed in `info::retarget_info`; the walk counting each
+  root again (`walk_with`).
 - **2026-11-09 · Milestone 15: what malformed input gets.** Each refusal below is "damage, not
   a guess"; each has a regression test with the input a property test found.
   - Go-to tries the typed path exactly first, then without trailing spaces (a name can end in

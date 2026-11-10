@@ -55,7 +55,10 @@ pub struct Meta {
     pub link: Option<String>,
 }
 
-/// A walk's running count: what it has found so far, and whether it's finished.
+/// A walk's running count: what it has found so far, and whether it's finished. `files` and
+/// `folders` are what's inside the folders walked, never the selected items themselves (a
+/// folder of 2,000 files is 2,000 items, as Finder and Explorer say); `bytes` adds the selected
+/// files' own sizes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Total {
     pub bytes: u64,
@@ -65,14 +68,32 @@ pub struct Total {
     pub unreadable: u64,
     /// Other file systems mounted inside, not entered.
     pub mounts: u64,
+    /// How many items are selected when it's several (0 for one folder, or the folder on
+    /// screen), and how many of those are folders that are walked.
+    pub selected: u64,
+    pub selected_dirs: u64,
     pub done: bool,
 }
 
 impl Total {
-    /// "1,234 items · 4.5 GB", with "so far" while it counts.
+    /// One folder: "1,234 items · 4.5 GB", or "Empty". Several items: "3 selected · 2,014 items
+    /// inside · 4.5 GB" ("3 selected · 62 B" when none is a folder). With "so far" while it
+    /// counts.
     pub fn line(&self) -> String {
         let items = self.files + self.folders;
-        let mut s = format!("{} item{} · {}", group(items), if items == 1 { "" } else { "s" }, fs::fmt_size(self.bytes));
+        let n = |k: u64| format!("{} item{}", group(k), if k == 1 { "" } else { "s" });
+        let size = fs::fmt_size(self.bytes);
+        let mut s = if self.selected > 1 {
+            if self.selected_dirs == 0 {
+                format!("{} selected · {size}", group(self.selected))
+            } else {
+                format!("{} selected · {} inside · {size}", group(self.selected), n(items))
+            }
+        } else if items == 0 && self.done && self.unreadable == 0 && self.mounts == 0 {
+            "Empty".into()
+        } else {
+            format!("{} · {size}", n(items))
+        };
         if !self.done {
             s.push_str(" so far…");
         }
@@ -127,9 +148,9 @@ impl Root {
     }
 }
 
-/// Adds up `roots` (folders are walked; anything else counts as itself), never following
+/// Adds up what's inside the folders `roots` (not the folders themselves), never following
 /// links or entering another file system, until done or `stop` is set. `seed` is already
-/// counted (files whose sizes the listing had). Publishes into `out` as it goes, calling `wake`
+/// counted (the selected files' sizes, which the listing had). Publishes into `out` as it goes, calling `wake`
 /// at most every [`WAKE_EVERY`].
 pub fn walk(roots: &[Root], seed: Total, out: &Shared, stop: &AtomicBool, wake: &dyn Fn()) {
     walk_with(roots, seed, out, stop, wake, &Mounts::read());
@@ -140,7 +161,6 @@ fn walk_with(roots: &[Root], seed: Total, out: &Shared, stop: &AtomicBool, wake:
     let mut c = Counting { t: seed, n: 0, last: Instant::now(), out, wake };
     for root in roots {
         let fence = Fence::below(root.path(), mounts);
-        c.t.folders += 1;
         if !walk_tree(root, &fence, &mut c, stop) {
             return;
         }
@@ -622,7 +642,11 @@ impl State {
             [] => Some(Meta { kind: "Folder".into(), is_dir: true, ..Meta::default() }),
             _ => None,
         };
-        let seed = Total { bytes: size, files: files as u64, ..Total::default() };
+        let seed = if paths.len() > 1 {
+            Total { bytes: size, selected: paths.len() as u64, selected_dirs: walk_roots.len() as u64, ..Total::default() }
+        } else {
+            Total::default()
+        };
         let stop = Arc::new(AtomicBool::new(false));
         self.next_info += 1;
         let req = self.next_info;
@@ -708,9 +732,9 @@ mod tests {
         std::os::unix::fs::symlink(&d, d.join("a/loop")).unwrap();
         let t = total_of(std::slice::from_ref(&d));
         let links = u64::from(cfg!(unix));
-        assert_eq!((t.folders, t.files, t.done), (3, 3 + links, true), "{t:?}");
+        assert_eq!((t.folders, t.files, t.done), (2, 3 + links, true), "{t:?}");
         assert!(t.bytes >= 1525 && t.bytes < 1525 + 4096, "a link counts as itself, never followed: {t:?}");
-        assert_eq!(t.line(), format!("{} items · {}", 6 + links, fs::fmt_size(t.bytes)));
+        assert_eq!(t.line(), format!("{} items · {}", 5 + links, fs::fmt_size(t.bytes)));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -728,7 +752,7 @@ mod tests {
         std::fs::set_permissions(d.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
         // Root can read anything (CI containers): then it's counted.
         if t.unreadable == 1 {
-            assert_eq!((t.files, t.folders), (1, 2));
+            assert_eq!((t.files, t.folders), (1, 1));
             assert_eq!(t.caveats().as_deref(), Some("1 folder couldn't be read"));
         } else {
             assert_eq!(t.files, 2);
@@ -755,7 +779,7 @@ mod tests {
             &Mounts::of(&[&canon.join("disk")]),
         );
         let t = out.lock().unwrap().clone();
-        assert_eq!((t.bytes, t.files, t.folders, t.mounts, t.done), (3, 1, 1, 1, true), "{t:?}");
+        assert_eq!((t.bytes, t.files, t.folders, t.mounts, t.done), (3, 1, 0, 1, true), "{t:?}");
         assert_eq!(t.caveats().as_deref(), Some("1 mounted disk inside not counted"));
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -779,7 +803,7 @@ mod tests {
             &Mounts::of(&[&canon, &canon.join("disk")]),
         );
         let t = out.lock().unwrap().clone();
-        assert_eq!((t.folders, t.files, t.bytes, t.mounts), (3, 1, 4, 1), "{t:?}");
+        assert_eq!((t.folders, t.files, t.bytes, t.mounts), (2, 1, 4, 1), "{t:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1073,8 +1097,64 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         let t = total.lock().unwrap().clone();
-        assert_eq!((t.bytes, t.files, t.folders), (500, 2, 1));
+        assert_eq!((t.bytes, t.files, t.folders, t.selected, t.selected_dirs), (500, 1, 0, 2, 1));
+        assert_eq!(t.line(), format!("2 selected · 1 item inside · {}", fs::fmt_size(500)));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The QA run's case: a selected folder of 2,000 files said "2,001 items" and an empty one
+    /// "1 item" (the folder counted itself). One folder shows what's in it, as Finder and
+    /// Explorer do; several items say what's selected and what's inside them, apart.
+    #[test]
+    fn a_folder_counts_its_contents_not_itself() {
+        let d = temp("contents");
+        std::fs::create_dir_all(d.join("big")).unwrap();
+        std::fs::create_dir_all(d.join("empty")).unwrap();
+        for i in 0..2000 {
+            std::fs::write(d.join("big").join(format!("f{i}")), "x").unwrap();
+        }
+        std::fs::write(d.join("loose.txt"), "abc").unwrap();
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        let at = |s: &State, n: &str| s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].os == n).unwrap();
+        let line = |s: &State| {
+            let total = s.info.as_ref().unwrap().total.clone().unwrap();
+            let until = Instant::now() + Duration::from_secs(10);
+            while !total.lock().unwrap().done && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            total.lock().unwrap().line()
+        };
+        let i = at(&s, "big");
+        s.cur_mut().select(i);
+        s.toggle_info();
+        assert_eq!(line(&s), format!("2,000 items · {}", fs::fmt_size(2000)));
+        let i = at(&s, "empty");
+        s.cur_mut().select(i);
+        s.sync_preview();
+        assert_eq!(line(&s), "Empty");
+        s.cur_mut().select_all();
+        s.sync_preview();
+        assert_eq!(line(&s), format!("3 selected · 2,000 items inside · {}", fs::fmt_size(2003)));
+        // Nothing selected (its files are hidden): the folder on screen, its contents.
+        std::fs::create_dir_all(d.join("quiet")).unwrap();
+        std::fs::write(d.join("quiet/.a"), "a").unwrap();
+        std::fs::write(d.join("quiet/.b"), "b").unwrap();
+        let mut s = state_in(&d.join("quiet"));
+        settle_all(&mut s);
+        s.toggle_info();
+        assert_eq!(line(&s), "2 items · 2 B");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn several_files_say_how_many_are_selected() {
+        let t = Total { bytes: 62, selected: 3, done: true, ..Total::default() };
+        assert_eq!(t.line(), "3 selected · 62 B");
+        let t = Total { files: 1, selected: 2, selected_dirs: 1, ..Total::default() };
+        assert_eq!(t.line(), "2 selected · 1 item inside · 0 B so far…");
+        let t = Total { unreadable: 1, done: true, ..Total::default() };
+        assert_eq!(t.line(), "0 items · 0 B", "a folder it couldn't read isn't called empty");
     }
 
     #[test]

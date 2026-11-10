@@ -478,3 +478,46 @@ fn the_completion_card_tree() {
     let filter = find(&tree, "filter").unwrap();
     assert!(filter["name"].as_str().is_some_and(|n| n.starts_with("Go to: ") && n.ends_with("Photographs/")), "{filter}");
 }
+
+/// Get Info's total, a status, reads what it counts: a selected folder's contents ("Empty",
+/// not "1 item", for an empty one), and for several items how many are selected apart from
+/// what's inside them.
+#[test]
+fn get_info_total_says_what_it_counts() {
+    let d = folder("info");
+    std::fs::write(d.join("Photos/a.jpg"), "jpg").unwrap();
+    std::fs::create_dir(d.join("Empty")).unwrap();
+    let mut rt = runtime(&d);
+    let total = |rt: &mut Runtime<State>| {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            rt.frame(0.0);
+            let tree = rt.accessibility_json();
+            let t = find(&tree, "info-total").expect("the total").clone();
+            if !t["name"].as_str().unwrap_or("").ends_with("so far…") || std::time::Instant::now() > until {
+                println!("{}", outline(&t));
+                assert_eq!(t["role"], "status");
+                return t["name"].as_str().unwrap_or("").to_string();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    };
+    let at = |s: &State, n: &str| s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].os == n).unwrap();
+    rt.update(move |s, _| {
+        let i = at(s, "Empty");
+        s.cur_mut().select(i);
+    });
+    run(&mut rt, Cmd::Info);
+    assert!(total(&mut rt).contains("Empty"));
+    rt.update(move |s, _| {
+        let i = at(s, "Photos");
+        s.cur_mut().select(i);
+        s.sync_preview();
+    });
+    assert!(total(&mut rt).contains("1 item · 3 B"));
+    rt.update(|s, _| {
+        s.cur_mut().select_all();
+        s.sync_preview();
+    });
+    assert!(total(&mut rt).contains("4 selected · 1 item inside · 15 B"));
+}
