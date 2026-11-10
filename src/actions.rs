@@ -117,14 +117,20 @@ impl State {
         }
     }
 
-    /// "Empty Trash…", confirmed: the items the dialog's count found (each deleted only while
-    /// it's still that item), or what's there when the worker starts if the count hadn't
-    /// landed, or found nothing it could read (the worker says why).
+    /// "Empty Trash…", confirmed: the items the dialog's count found, each deleted only while
+    /// it's still that item (on Windows the shell empties the Recycle Bin it counted). Never
+    /// without a count: the dialog offers no button before one lands, and nothing here lists
+    /// the Trash afresh.
     pub fn empty_trash(&mut self) {
-        let items = self.trash_count.take().and_then(|mut c| {
-            let problem = c.got.problem.is_some();
-            c.got.items.take().filter(|i| !i.is_empty() || !problem)
-        });
+        let Some(mut c) = self.trash_count.take().filter(|c| c.got.count.is_some()) else {
+            self.note = Some(format!("Empty the {} once it's counted", crate::trash::BIN));
+            return;
+        };
+        let items = c.got.items.take();
+        if items.as_ref().is_some_and(Vec::is_empty) || c.got.count == Some(0) {
+            self.note = Some(format!("Nothing in the {} to empty", crate::trash::BIN));
+            return;
+        }
         self.start(Op::EmptyTrash { items });
     }
 

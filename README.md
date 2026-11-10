@@ -642,9 +642,10 @@ Cancel has the focus, and Esc keeps them.
   Bin: Windows doesn't say where an item went, so Arbor can't undo it.
 
 **Empty the Trash…** (palette, or the sidebar's Trash) deletes what's in the Trash for good, so
-it asks first, in the same dialog, saying it can't be undone. The dialog opens at once; a
-thread of its own counts the items (each with its identity) and then adds up their size, and
-the dialog says "The 12 items in the Trash (1.4 GB) will be deleted permanently" as each lands
+it asks first, in the same dialog, saying it can't be undone. The dialog opens at once, saying
+it's counting, with only Cancel: a thread of its own counts the items (each with its identity)
+and then adds up their size, and the Empty Trash button comes with the count, the dialog saying
+"The 12 items in the Trash (1.4 GB) will be deleted permanently" as each lands
 ("The Trash is already empty", when it is: then the dialog only says so, with Close and no
 Empty Trash button). Closing the dialog stops the count. Emptying runs
 on the worker with progress, and Esc stops it between items: it deletes exactly the items the

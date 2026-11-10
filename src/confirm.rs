@@ -53,6 +53,8 @@ pub struct Ask {
     pub action: Option<&'static str>,
     /// Offers "Open Privacy Settings" (macOS couldn't read the Trash).
     pub settings: bool,
+    /// Empty Trash's count hasn't landed: no action yet, but it still asks.
+    pub counting: bool,
     pub focus: Button,
     /// For a permanent delete, what it deletes (and nothing else).
     pub items: Vec<Doomed>,
@@ -78,6 +80,7 @@ impl Ask {
                     body: String::new(),
                     action: None,
                     settings: false,
+                    counting: false,
                     focus: Button::Cancel,
                     items: Vec::new(),
                 };
@@ -89,13 +92,13 @@ impl Ask {
             // Not permanent: never asked (see `Cmd::permanent`).
             _ => (format!("{}?", cmd.title().trim_end_matches('…')), "This can't be undone.".to_string(), "Continue"),
         };
-        Ask { cmd, title, body, action: Some(action), settings: false, focus: Button::Cancel, items: Vec::new() }
+        Ask { cmd, title, body, action: Some(action), settings: false, counting: false, focus: Button::Cancel, items: Vec::new() }
     }
 
     /// Takes Empty Trash's words. A button that goes away can't keep the focus: it moves to
     /// Cancel (Close).
     fn say(&mut self, w: crate::trash::contents::Words) {
-        (self.title, self.body, self.action, self.settings) = (w.title, w.body, w.action, w.settings);
+        (self.title, self.body, self.action, self.settings, self.counting) = (w.title, w.body, w.action, w.settings, w.counting);
         if !self.buttons().contains(&self.focus) {
             self.focus = Button::Cancel;
         }
@@ -114,9 +117,9 @@ impl Ask {
         v
     }
 
-    /// Cancel's label: "Close" when there's nothing to confirm.
+    /// Cancel's label: "Close" when there's nothing to confirm (not while still counting).
     pub fn cancel_label(&self) -> &'static str {
-        if self.action.is_some() { "Cancel" } else { "Close" }
+        if self.action.is_some() || self.counting { "Cancel" } else { "Close" }
     }
 
     /// Moves the focus to the next button (`back`: the one before), wrapping.
@@ -155,7 +158,16 @@ impl Ask {
                 )
             }
         };
-        Ask { cmd: Cmd::Delete, title, body, action: Some("Delete Permanently"), settings: false, focus: Button::Cancel, items }
+        Ask {
+            cmd: Cmd::Delete,
+            title,
+            body,
+            action: Some("Delete Permanently"),
+            settings: false,
+            counting: false,
+            focus: Button::Cancel,
+            items,
+        }
     }
 }
 
@@ -575,6 +587,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Before the count lands, Empty Trash's dialog says it's counting and offers only Cancel:
+    /// no key, click or stale focus can empty anything yet, and Empty Trash never runs without
+    /// a count (it used to start a fresh listing on the worker if confirmed early). The button
+    /// comes once a count of something to empty lands.
+    #[test]
+    fn nothing_can_be_emptied_before_the_count_lands() {
+        use crate::trash::contents::Counting;
+        let (d, mut s) = folder_of("trash-counting", &[]);
+        let mut tx = Tx::default();
+        s.run(Cmd::EmptyTrash, &mut tx);
+        // The count's thread may have answered already: nothing takes it until `poll`.
+        let a = s.asking.as_ref().expect("it opens at once");
+        assert!(a.body.starts_with("Counting"), "{}", a.body);
+        assert_eq!((a.action, a.buttons()), (None, vec![Button::Cancel]));
+        assert_eq!(a.cancel_label(), "Cancel", "it's still asking");
+        for k in [Key::Tab, Key::Right, Key::Enter] {
+            assert!(s.on_key(&key(k), &mut tx));
+        }
+        assert!(s.job.is_none(), "Enter on Cancel");
+        s.run(Cmd::EmptyTrash, &mut tx);
+        s.answer(true, &mut tx);
+        assert!(s.asking.is_none() && s.job.is_none(), "a forced yes runs nothing before the count");
+        // Even run directly (as the dialog's button would) without a count, it refuses.
+        s.trash_count = None;
+        s.empty_trash();
+        assert!(s.job.is_none() && s.note.is_some(), "{:?}", s.note);
+        // A count that lands: the dialog follows it (an empty Trash informs; a count of
+        // something gets the button, `the_dialog_says_what_the_count_found`).
+        s.run(Cmd::EmptyTrash, &mut tx);
+        s.trash_count = Some(Counting::found(Vec::new(), None));
+        s.poll(&mut Tx::default());
+        assert!(s.asking.as_ref().is_some_and(|a| a.body.contains("already empty")));
+        s.answer(false, &mut tx);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// macOS refused to read the Trash: the dialog explains Full Disk Access, offers "Open
     /// Privacy Settings" and Close, and has no destructive button: no key, click or stale focus
     /// can run Empty Trash from it. Before, it kept a red "Empty Trash" (which re-listed the
@@ -589,7 +637,7 @@ mod tests {
         // The focus was on the button when the count landed: it goes to Close.
         s.run(Cmd::EmptyTrash, &mut tx);
         assert!(s.on_key(&key(Key::Tab), &mut tx));
-        assert_eq!(s.asking.as_ref().unwrap().focus, Button::Action, "before the count lands it asks");
+        assert_eq!(s.asking.as_ref().unwrap().focus, Button::Cancel, "before the count lands there's only Cancel");
         s.trash_count = Some(refused());
         s.poll(&mut Tx::default());
         let a = s.asking.as_ref().unwrap();

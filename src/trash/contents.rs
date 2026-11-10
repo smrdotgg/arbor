@@ -596,10 +596,13 @@ pub struct Words {
     pub action: Option<&'static str>,
     /// macOS refused to read a trash: the dialog offers "Open Privacy Settings".
     pub settings: bool,
+    /// The count hasn't landed: nothing can be emptied yet, but the dialog still asks (its
+    /// Cancel says Cancel).
+    pub counting: bool,
 }
 
-/// The dialog's words for what the count found. Before it lands: everything in the Trash.
-/// Nothing to empty (an empty Trash, or one Arbor can't read): no destructive button. Some
+/// The dialog's words for what the count found. Before it lands: counting, and no destructive
+/// button (only a count says what the button would delete). Nothing to empty (an empty Trash, or one Arbor can't read): no destructive button. Some
 /// trashes unreadable and others not: the count is of what can be emptied, the body names the
 /// trash that can't be read, and only the readable ones are emptied.
 pub fn ask_words(got: Option<&Summary>) -> Words {
@@ -611,10 +614,16 @@ pub fn ask_words(got: Option<&Summary>) -> Words {
     };
     let problem = got.and_then(|g| g.problem.as_ref());
     let settings = matches!(problem, Some(Problem::NeedsAccess(_)));
-    let ask = |body: String| Words { title: format!("Empty the {BIN}?"), body, action: Some(action), settings };
-    let inform = |title: String, body: String| Words { title, body, action: None, settings };
+    let ask = |body: String| Words { title: format!("Empty the {BIN}?"), body, action: Some(action), settings, counting: false };
+    let inform = |title: String, body: String| Words { title, body, action: None, settings, counting: false };
     match (got.and_then(|g| g.count), problem) {
-        (None, _) => ask(format!("Everything in the {BIN} will be deleted permanently. This can't be undone.")),
+        (None, _) => Words {
+            title: format!("Empty the {BIN}?"),
+            body: format!("Counting what's in the {BIN}… Emptying it deletes everything in it permanently. This can't be undone."),
+            action: None,
+            settings: false,
+            counting: true,
+        },
         (Some(0), None) => inform("Nothing to Empty".into(), format!("The {BIN} is already empty.")),
         (Some(0), Some(p)) => inform(format!("Arbor Can't Read the {BIN}"), format!("{}.", p.say())),
         (Some(n), Some(p)) => {
@@ -1129,8 +1138,8 @@ mod tests {
     fn the_dialog_says_what_the_count_found() {
         let w = ask_words(None);
         assert_eq!(w.title, format!("Empty the {BIN}?"));
-        assert_eq!(w.body, format!("Everything in the {BIN} will be deleted permanently. This can't be undone."));
-        assert!(w.action.is_some_and(|a| a.starts_with("Empty")) && !w.settings);
+        assert!(w.body.starts_with("Counting") && w.body.ends_with("This can't be undone."), "{}", w.body);
+        assert!(w.action.is_none() && w.counting && !w.settings, "no button before the count");
         let got = |count, bytes, problem| Summary { items: None, count, bytes, problem };
         let say = |g: Summary| ask_words(Some(&g)).body;
         assert_eq!(
