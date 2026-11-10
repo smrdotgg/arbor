@@ -17,6 +17,10 @@ A change is done only when:
 limited way because Rune lacks something, build the best workaround inside Arbor and add an entry
 to [`RUNE-GAPS.md`](RUNE-GAPS.md).
 
+**On the owner's Mac over ssh:** builds and headless tests only. Never run `osascript`, System
+Events or any other GUI automation, and never trigger Accessibility, Automation or Screen
+Recording permission prompts. GUI checks go through the project manager's Codex QA sessions.
+
 When the owner is away, don't block on questions: pick the recommended option, carry on, and
 record it in [`DECISIONS.md`](DECISIONS.md) so it can be reviewed and undone.
 
