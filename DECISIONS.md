@@ -9,6 +9,21 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-10 · Milestone 16 review fixes: three judgment calls.**
+  - **An emptied Go To field stays open** (real-Mac QA: Backspace held to clear ⌘L's path went
+    on to the parent folder, up to `/`). Once Backspace empties it, the status bar still shows
+    "Go to" with nothing typed, and Backspace and Enter do nothing until Esc closes it or typing
+    carries on (a letter makes it a filter). Enter is swallowed too: in an empty go-to field it
+    used to open the selected item. Undo: `Folder::goto`, its check in `app/dispatch.rs::key`.
+  - **Thumbnails follow "this grid is on screen", checked after every input and landing**
+    (`State::sync_tiles`, from `sync_preview` and `poll`), not at a list of transitions: any way
+    a grid leaves the screen (another tab, the list view, an empty filter, the preview covering
+    its pane, another folder) drops them, including ways added later. A grid whose listing or
+    icon size changed is asked again from the rows Rune last reported. Undo: `sync_tiles`.
+  - **A rectangle alone sets the old selection aside rather than copying it**: Esc puts it back,
+    and a finished rectangle frees it on release, one pass over it (as a plain click that
+    deselects 500,000 items does), never per move. Undo: `Band::cleared`.
+
 - **2026-11-10 · A trash folder whose listing fails partway is left out of Empty Trash whole**
   (review: the dialog said "what's in it stays" of a trash it had partly listed, and the
   partial list was emptied). Of the two ways to make it true (word it as "items Arbor couldn't
