@@ -950,7 +950,8 @@ All three build, pass tests and pass clippy in CI. How much has been run for rea
 - **macOS** (main target, used daily): content sits under a transparent titlebar, with the
   traffic lights in the sidebar. The sidebar's Locations are what's mounted in `/Volumes`.
 - **Linux**: building needs `libxkbcommon-dev libwayland-dev`. Running under X11 also needs
-  `libxkbcommon-x11-0` (desktops have it; minimal installs may not). Opens files with `xdg-open`.
+  `libxkbcommon-x11-0` (desktops have it; minimal installs may not). Opens files (and Show in folder, the settings file) with `xdg-open`, or `gio open` where there's no `xdg-open`;
+  with neither, it says so.
   The sidebar's Locations are the mounts under `/media`, `/run/media` and `/mnt`. Checked at runtime only under Xvfb with Mesa's
   software Vulkan (Ubuntu 24.04): the window opens and lists a folder, and synthetic X key
   presses (XTest) filter, move the selection and drive the command palette and settings reload.

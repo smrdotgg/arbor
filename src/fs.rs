@@ -770,11 +770,11 @@ pub fn open(p: &Path) -> Result<(), String> {
         return Ok(());
     }
     #[cfg(target_os = "macos")]
-    let cmd = Command::new("open").arg(p).spawn();
+    let cmd = Command::new("open").arg(p).spawn().map_err(|e| e.to_string());
     #[cfg(windows)]
-    let cmd = Command::new("explorer").arg(p).spawn();
+    let cmd = Command::new("explorer").arg(p).spawn().map_err(|e| e.to_string());
     #[cfg(all(unix, not(target_os = "macos")))]
-    let cmd = Command::new("xdg-open").arg(p).spawn();
+    let cmd = spawn_opener(p, std::env::var_os("PATH").as_deref());
     reap(cmd)
 }
 
@@ -783,7 +783,7 @@ pub fn open(p: &Path) -> Result<(), String> {
 pub fn open_text(p: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     if rune::tooling::headless_run().is_none() {
-        return reap(Command::new("open").arg("-t").arg(p).spawn());
+        return reap(Command::new("open").arg("-t").arg(p).spawn().map_err(|e| e.to_string()));
     }
     open(p)
 }
@@ -794,7 +794,7 @@ pub fn reveal(p: &Path) -> Result<(), String> {
         return Ok(());
     }
     #[cfg(target_os = "macos")]
-    let cmd = Command::new("open").arg("-R").arg(p).spawn();
+    let cmd = Command::new("open").arg("-R").arg(p).spawn().map_err(|e| e.to_string());
     #[cfg(windows)]
     let cmd = {
         // Explorer wants `/select,"C:\a b\c"`: Rust's quoting of the whole argument breaks it, so
@@ -803,16 +803,56 @@ pub fn reveal(p: &Path) -> Result<(), String> {
         let mut arg = OsString::from("/select,\"");
         arg.push(std::path::absolute(p).as_deref().unwrap_or(p));
         arg.push("\"");
-        Command::new("explorer").raw_arg(arg).spawn()
+        Command::new("explorer").raw_arg(arg).spawn().map_err(|e| e.to_string())
     };
+    // Linux has no common way to select an item in "the" file manager: its folder opens.
     #[cfg(all(unix, not(target_os = "macos")))]
-    let cmd = Command::new("xdg-open").arg(p.parent().unwrap_or(p)).spawn();
+    let cmd = spawn_opener(p.parent().unwrap_or(p), std::env::var_os("PATH").as_deref());
     reap(cmd)
 }
 
+/// Linux's openers, in the order tried, each with what goes before the path: `xdg-open`, then
+/// GLib's `gio open` (desktops and minimal installs without xdg-utils often have it).
+#[cfg(all(unix, not(target_os = "macos")))]
+const OPENERS: [(&str, &[&str]); 2] = [("xdg-open", &[]), ("gio", &["open", "--"])];
+
+/// What opening says when there's no opener at all.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const NO_OPENER: &str = "neither xdg-open nor gio is installed (xdg-utils or GLib provides one)";
+
+/// The openers on `path_var` (PATH's value), in [`OPENERS`]' order: an executable file in an
+/// absolute folder of it (a relative one, `.` say, would run whatever is where Arbor started).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn openers(path_var: Option<&std::ffi::OsStr>) -> Vec<(PathBuf, &'static [&'static str])> {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(path_var) = path_var else { return Vec::new() };
+    let runnable = |p: &Path| p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+    OPENERS
+        .iter()
+        .filter_map(|&(prog, args)| {
+            let found = std::env::split_paths(path_var).filter(|d| d.is_absolute()).map(|d| d.join(prog)).find(|p| runnable(p))?;
+            Some((found, args))
+        })
+        .collect()
+}
+
+/// Starts the first of [`openers`] that starts, on `p`. The path is an argument of its own,
+/// never through a shell. With none, [`NO_OPENER`]; with some that wouldn't start, why each.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn spawn_opener(p: &Path, path_var: Option<&std::ffi::OsStr>) -> Result<std::process::Child, String> {
+    let mut failed = Vec::new();
+    for (prog, args) in openers(path_var) {
+        match Command::new(&prog).args(args).arg(p).spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) => failed.push(format!("{}: {e}", prog.display())),
+        }
+    }
+    Err(if failed.is_empty() { NO_OPENER.into() } else { failed.join("; ") })
+}
+
 /// Waits for the child on a throwaway thread so it never lingers as a zombie.
-fn reap(cmd: std::io::Result<std::process::Child>) -> Result<(), String> {
-    let mut child = cmd.map_err(|e| e.to_string())?;
+fn reap(cmd: Result<std::process::Child, String>) -> Result<(), String> {
+    let mut child = cmd?;
     std::thread::spawn(move || {
         let _ = child.wait();
     });
@@ -877,6 +917,64 @@ mod tests {
         assert_eq!(natural("a", "b"), Ordering::Less);
         assert_eq!(natural("x007", "x7"), Ordering::Equal);
         assert_eq!(natural("img12b", "img12a"), Ordering::Greater);
+    }
+
+    /// The QA run's case: on a Linux without `xdg-open` (but with `gio`), opening a file and the
+    /// settings did nothing ("No such file or directory"). The openers are tried in order on a
+    /// fake PATH: `xdg-open`, then `gio open`, and with neither a message naming both. A
+    /// relative PATH folder and a file that can't run are passed over.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn linux_opens_with_xdg_open_then_gio() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("arbor-openers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (a, b, none) = (d.join("a"), d.join("b"), d.join("none"));
+        for x in [&a, &b, &none] {
+            std::fs::create_dir_all(x).unwrap();
+        }
+        let tool = |at: &Path, name: &str, mode: u32| {
+            std::fs::write(at.join(name), "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > \"$(dirname \"$0\")/argv\"\n").unwrap();
+            std::fs::set_permissions(at.join(name), std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap();
+        let names = |dirs: &[&Path]| -> Vec<(PathBuf, Vec<&str>)> {
+            openers(Some(&path(dirs))).into_iter().map(|(p, args)| (p, args.to_vec())).collect()
+        };
+        tool(&b, "gio", 0o755);
+        assert_eq!(names(&[&none, &b]), [(b.join("gio"), vec!["open", "--"])], "gio when there's no xdg-open");
+        tool(&a, "xdg-open", 0o644);
+        assert_eq!(names(&[&a, &b]), [(b.join("gio"), vec!["open", "--"])], "an xdg-open that can't run is passed over");
+        tool(&a, "xdg-open", 0o755);
+        assert_eq!(names(&[&a, &b]), [(a.join("xdg-open"), vec![]), (b.join("gio"), vec!["open", "--"])], "xdg-open first");
+        assert!(names(&[Path::new("a"), &none]).is_empty(), "a relative PATH folder is never searched");
+        assert_eq!(spawn_opener(Path::new("/x"), Some(&path(&[&none]))).err().as_deref(), Some(NO_OPENER));
+        assert!(NO_OPENER.contains("xdg-open") && NO_OPENER.contains("gio"));
+        assert_eq!(spawn_opener(Path::new("/x"), None).err().as_deref(), Some(NO_OPENER));
+        // The path reaches gio as one argument of its own, untouched by any shell.
+        let odd = d.join("a b; $(touch pwned) 'q'.txt");
+        let ran = |dirs: &[&Path], at: &Path| {
+            let _ = std::fs::remove_file(at.join("argv"));
+            // A file just written can be "busy" for a moment while another test's thread forks.
+            let mut child = (0..50)
+                .find_map(|_| match spawn_opener(&odd, Some(&path(dirs))) {
+                    Err(e) if e.contains("busy") => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        None
+                    }
+                    other => Some(other),
+                })
+                .unwrap()
+                .unwrap();
+            assert!(child.wait().unwrap().success());
+            std::fs::read_to_string(at.join("argv")).unwrap()
+        };
+        let argv = ran(&[&none, &b], &b);
+        assert_eq!(argv, format!("{}\nopen\n--\n{}\n", b.join("gio").display(), odd.display()));
+        assert!(!d.join("pwned").exists() && !b.join("pwned").exists());
+        let argv = ran(&[&a, &b], &a);
+        assert_eq!(argv, format!("{}\n{}\n", a.join("xdg-open").display(), odd.display()));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

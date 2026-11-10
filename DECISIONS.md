@@ -9,6 +9,14 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-10 · Linux opens with `xdg-open`, then `gio open`** (Linux QA: with no
+  `xdg-open`, Open and Settings said "No such file or directory" though `gio` was there). Open,
+  Show in folder and the settings file use the first one found on PATH, as an executable file
+  in an absolute PATH folder (a relative one, `.`, would run whatever is where Arbor started),
+  and fall through to the next if it won't start; with neither: "neither xdg-open nor gio is
+  installed (xdg-utils or GLib provides one)". The path is one argument (`gio open -- PATH`),
+  never through a shell. Only a failure to start falls through: an opener that starts and
+  then fails isn't seen (it's reaped on a thread, never waited for). Undo: `fs::OPENERS`.
 - **2026-11-10 · Get Info counts what's inside, never the selection itself** (Linux QA: a
   folder of 2,000 files said "2,001 items", an empty one "1 item"). One folder, or the folder
   on screen: "2,000 items · 8.9 KB", or "Empty" (not when a folder couldn't be read or a disk
