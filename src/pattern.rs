@@ -225,47 +225,59 @@ impl Glob {
     }
 }
 
-/// `{a,b}` expanded into each alternative (recursively), at most [`MAX_ALTS`].
+/// `{a,b}` expanded into each alternative (nested ones too), at most [`MAX_ALTS`], in order.
+/// A worklist rather than recursion: a pattern can hold a couple of thousand groups.
 fn expand_braces(p: &str) -> Result<Vec<String>, String> {
-    let chars: Vec<char> = p.chars().collect();
     let mut out = Vec::new();
-    expand_into(&chars, &mut out)?;
+    // Patterns still to expand, the next one last.
+    let mut todo: Vec<Vec<char>> = vec![p.chars().collect()];
+    while let Some(p) = todo.pop() {
+        match first_group(&p) {
+            None => {
+                out.push(p.iter().collect());
+                if out.len() > MAX_ALTS {
+                    return Err(format!("More than {MAX_ALTS} alternatives in {{…}}"));
+                }
+            }
+            Some((open, end, commas)) => {
+                let mut from = open + 1;
+                let mut parts = Vec::new();
+                for c in commas.into_iter().chain([end]) {
+                    let mut next: Vec<char> = p[..open].to_vec();
+                    next.extend_from_slice(&p[from..c]);
+                    next.extend_from_slice(&p[end + 1..]);
+                    parts.push(next);
+                    from = c + 1;
+                }
+                // Each one waiting can only add alternatives: past the limit, it's refused.
+                if todo.len() + parts.len() > MAX_ALTS * 4 {
+                    return Err(format!("More than {MAX_ALTS} alternatives in {{…}}"));
+                }
+                todo.extend(parts.into_iter().rev());
+            }
+        }
+    }
     Ok(out)
 }
 
-fn expand_into(p: &[char], out: &mut Vec<String>) -> Result<(), String> {
+/// The first top-level `{` that closes (skipping `[...]` classes): where it opens and closes,
+/// and its top-level commas.
+fn first_group(p: &[char]) -> Option<(usize, usize, Vec<usize>)> {
     let next = closes(p);
-    // The first top-level `{` with its matching `}` (skipping `[...]` classes).
     let mut i = 0;
     while i < p.len() {
         match p[i] {
             '[' => i = class_end(p, &next, i).map_or(i + 1, |e| e + 1),
             '{' => {
                 if let Some((end, commas)) = brace_end(p, &next, i) {
-                    let mut parts = Vec::new();
-                    let mut from = i + 1;
-                    for c in commas.into_iter().chain([end]) {
-                        parts.push(&p[from..c]);
-                        from = c + 1;
-                    }
-                    for part in parts {
-                        let mut next: Vec<char> = p[..i].to_vec();
-                        next.extend_from_slice(part);
-                        next.extend_from_slice(&p[end + 1..]);
-                        expand_into(&next, out)?;
-                        if out.len() > MAX_ALTS {
-                            return Err(format!("More than {MAX_ALTS} alternatives in {{…}}"));
-                        }
-                    }
-                    return Ok(());
+                    return Some((i, end, commas));
                 }
                 i += 1;
             }
             _ => i += 1,
         }
     }
-    out.push(p.iter().collect());
-    Ok(())
+    None
 }
 
 /// The `}` matching the `{` at `open`, and the top-level commas between them.
@@ -469,28 +481,45 @@ fn match_name_ascii(toks: &[Tok], s: &[u8], case: Case) -> bool {
     }
 }
 
-/// A path against tokens, where `*` can't cross a separator and `**` can: memoized, since the
-/// greedy match can't go back past a star that stopped at a separator. Paths are short and
-/// patterns few (checked once per folder visited).
+/// A path against tokens, where `*` can't cross a separator and `**` can. The greedy match
+/// can't go back past a star that stopped at a separator, so this goes token by token over every
+/// position at once: `can[i]` says the tokens so far match the path's first `i` characters. No
+/// recursion (a path can be 32,767 characters on Windows, whose main thread has 1 MB of stack),
+/// two rows of memory, and time tokens × length, stopping early once nothing can match.
 fn match_path(toks: &[Tok], s: &[char], case: Case) -> bool {
-    let w = s.len() + 1;
-    let mut memo = vec![None; (toks.len() + 1) * w];
-    fn go(toks: &[Tok], s: &[char], case: Case, t: usize, i: usize, w: usize, memo: &mut [Option<bool>]) -> bool {
-        if let Some(v) = memo[t * w + i] {
-            return v;
-        }
-        let v = match toks.get(t) {
-            None => i == s.len(),
-            Some(Tok::Star) => {
-                go(toks, s, case, t + 1, i, w, memo) || (i < s.len() && !is_sep(s[i]) && go(toks, s, case, t, i + 1, w, memo))
+    let n = s.len();
+    let mut can = vec![false; n + 1];
+    let mut next = vec![false; n + 1];
+    can[0] = true;
+    for tok in toks {
+        match tok {
+            // Any run within a folder name: from each reachable point, on to the next separator.
+            Tok::Star => {
+                next[0] = can[0];
+                for i in 1..=n {
+                    next[i] = can[i] || (next[i - 1] && !is_sep(s[i - 1]));
+                }
             }
-            Some(Tok::Deep) => go(toks, s, case, t + 1, i, w, memo) || (i < s.len() && go(toks, s, case, t, i + 1, w, memo)),
-            Some(tok) => i < s.len() && one(tok, s[i], case, true) && go(toks, s, case, t + 1, i + 1, w, memo),
-        };
-        memo[t * w + i] = Some(v);
-        v
+            // Any run at all.
+            Tok::Deep => {
+                next[0] = can[0];
+                for i in 1..=n {
+                    next[i] = can[i] || next[i - 1];
+                }
+            }
+            t => {
+                next[0] = false;
+                for i in 1..=n {
+                    next[i] = can[i - 1] && one(t, s[i - 1], case, true);
+                }
+            }
+        }
+        std::mem::swap(&mut can, &mut next);
+        if !can.contains(&true) {
+            return false;
+        }
     }
-    go(toks, s, case, 0, 0, w, &mut memo)
+    can[n]
 }
 
 #[cfg(test)]
@@ -702,6 +731,35 @@ mod tests {
             });
             assert!(t.elapsed() < Duration::from_millis(500), "{what}: {:?}", t.elapsed());
         }
+    }
+
+    /// A reviewer's run of the suite overflowed the test thread's stack in
+    /// `pathological_globs_are_bounded`: a path pattern's matcher recursed once per character a
+    /// star took, so its depth grew with the path. `jump.exclude` is matched on the UI thread
+    /// against every folder visited, and Windows' main thread has 1 MB of stack and long paths
+    /// up to 32,767 characters: a crash. Matching (and brace expansion) now use no recursion
+    /// that grows with the input: these run in a thread with a quarter of that stack.
+    #[test]
+    fn matching_needs_no_stack_that_grows_with_the_input() {
+        let r = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let deep = format!("/{}", vec!["abcd"; 6_500].join("/"));
+                assert!(deep.len() > 32_000);
+                for pat in ["**/node_modules/**", "/**a**a**a**b", "/*/**/x*", "**/abcd"] {
+                    let g = Glob::path(pat, Case::Sensitive).unwrap();
+                    let want = pat == "**/abcd";
+                    assert_eq!(g.matches(&deep), want, "{pat}");
+                }
+                // Braces as deep and as many as a pattern can hold.
+                let nested = format!("{}x{}", "{".repeat(MAX_LEN / 2 - 1), "}".repeat(MAX_LEN / 2 - 1));
+                assert!(Glob::name(&nested, Case::Sensitive).unwrap().matches("x"));
+                let groups = "{a}".repeat(MAX_LEN / 3);
+                assert!(Glob::name(&groups, Case::Sensitive).unwrap().matches(&"a".repeat(MAX_LEN / 3)));
+            })
+            .unwrap()
+            .join();
+        assert!(r.is_ok());
     }
 
     /// Found by `pathological_globs_are_bounded`: an unclosed `{` or `[` made each one look for
