@@ -771,6 +771,13 @@ fn a_rectangle_from_empty_space_selects_the_rows_it_touches() {
     let up = row_box(&mut rt, "f10");
     drag_through(&mut rt, below, &[(below.0, below.1 - 20.0), (below.0 - 50.0, up[1] + 5.0)]);
     assert_eq!(picked(&rt), names(10..=11));
+    // A click on one of the rows it selected moves the cursor there (the rectangle's release
+    // doesn't swallow it), keeping the selection, as a click in a multiple selection does.
+    assert_eq!(rt.state.cur().selected().map(|e| e.name.as_str()), Some("f10.txt"), "the cursor at the pointer's end");
+    let eleven = row_box(&mut rt, "f11");
+    drag_through(&mut rt, (eleven[0] + eleven[2] - 30.0, eleven[1] + eleven[3] * 0.5), &[]);
+    assert_eq!(rt.state.cur().selected().map(|e| e.name.as_str()), Some("f11.txt"));
+    assert_eq!(picked(&rt), names(10..=11));
     // A click below the rows clears a multiple selection (the cursor stays).
     drag_through(&mut rt, below, &[]);
     assert!(rt.state.cur().marked.is_empty());

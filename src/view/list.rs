@@ -415,8 +415,10 @@ pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
         .center_y()
         .radius(4.0)
         .on_press_tx(move |s: &mut State, tx| {
-            // The release of a selection rectangle dragged from this row isn't a click.
-            if std::mem::take(&mut s.band_click) {
+            // The release of a selection rectangle dragged from this row isn't a click. Only a
+            // row that starts rectangles asks: its own press began one (which cleared the flag),
+            // so a flag left by another gesture never swallows a click.
+            if !whole && std::mem::take(&mut s.band_click) {
                 return;
             }
             press_item(s, tx, id, i, version);
