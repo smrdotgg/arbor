@@ -7,7 +7,13 @@ use crate::grid::ViewMode;
 
 impl State {
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        let cmd = crate::draglog::on().then(|| self.keymap.find(|c| c.matches_tx(ev, tx))).flatten();
         let handled = self.key(ev, tx);
+        crate::draglog::log(|| {
+            let m = ev.mods;
+            let ran = cmd.map_or("unhandled".to_string(), |c| format!("{c:?}"));
+            format!("key {:?} cmd={} shift={} alt={} -> {}", ev.key, m.cmd, m.shift, m.alt, if handled { ran } else { "passed on".into() })
+        });
         if handled {
             self.sync_preview();
         }

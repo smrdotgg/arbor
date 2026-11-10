@@ -1054,6 +1054,10 @@ On the Mac, check:
       `~/.Trash` (and a USB stick's `.Trashes`), and Finder's Trash shows empty.
 - [ ] On an Intel Mac (or `arch -x86_64` with Rosetta), the universal `Arbor.app` opens.
 - [ ] Drag a tab along its strip, and onto the other pane of a split window.
+- [ ] Drag a file row onto a folder row (one pane), then press ⌘J at once: Jump opens. Run it
+      with `ARBOR_DRAG_LOG=1` (from a terminal) to log the drag's events: each drag-out asked,
+      started and ended, the run loop's mode as it changes, every key and click AppKit
+      dispatches, and every key that reaches Arbor (`src/draglog.rs`).
 
 ### Test by hand on Windows
 

@@ -143,6 +143,7 @@ impl State {
         if !self.drag_refused.take() {
             return false;
         }
+        crate::draglog::log(|| "note: a refused drag-out ended as nothing taken".into());
         self.note = Some(DRAG_NOT_TAKEN.into());
         true
     }

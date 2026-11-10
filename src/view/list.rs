@@ -93,6 +93,7 @@ pub(super) fn list(f: &Folder, c: Ctx, active: Option<String>) -> El {
         .w_full()
         .on_drop_files(move |s: &mut State, files, tx| {
             tx.instant();
+            crate::draglog::log(|| format!("drop on=list files={}", files.len()));
             if let Some(p) = s.pane(id) {
                 // Results come from many folders: a drop needs a folder row to land on.
                 if p.f.searching() {
@@ -253,6 +254,9 @@ pub(super) fn item_drags(e: El, c: Ctx, i: usize, version: u64) -> El {
     // (which adds the folders). On macOS, unsplit, the row drags out to other apps instead
     // and this never runs (a system drag can't land in its own window: RUNE-GAPS.md).
     let split = c.split;
+    let row_name = move |s: &State| -> String {
+        s.pane(id).and_then(|p| p.f.visible.get(i).map(|&e| p.f.entries[e as usize].name.clone())).unwrap_or_default()
+    };
     let inside = move |s: &mut State, d: &mut Drag, tx: &mut rune::Tx| {
         tx.instant();
         let far = d.dx.hypot(d.dy) > DRAG_START;
@@ -284,23 +288,34 @@ pub(super) fn item_drags(e: El, c: Ctx, i: usize, version: u64) -> El {
     match c.split {
         // Out to other apps (macOS: Rune starts no system drag elsewhere, so there the
         // drag stays in the window).
-        None => e
-            .drag_out(move |s: &State| {
-                if s.pane(id)?.f.version != version {
-                    return None;
-                }
-                // Never from a release: AppKit's session would wait for one forever.
-                if !crate::actions::os_drag_can_start() {
-                    s.drag_refused.set(true);
-                    return None;
-                }
-                s.drag_item(id, i)
-            })
-            .on_drag_end(|s: &mut State, outcome, tx| {
-                tx.instant();
-                s.drag_out_ended(outcome);
-            })
-            .on_drag(inside),
+        None => {
+            let e = e
+                .drag_out(move |s: &State| {
+                    if s.pane(id)?.f.version != version {
+                        return None;
+                    }
+                    // Never from a release: AppKit's session would wait for one forever.
+                    if !crate::actions::os_drag_can_start() {
+                        crate::draglog::log(|| format!("drag-out ask row={:?} {} -> refused", row_name(s), crate::draglog::appkit()));
+                        s.drag_refused.set(true);
+                        return None;
+                    }
+                    crate::draglog::log(|| format!("drag-out ask row={:?} {} -> offered", row_name(s), crate::draglog::appkit()));
+                    s.drag_item(id, i)
+                })
+                .on_drag_end(move |s: &mut State, outcome, tx| {
+                    tx.instant();
+                    crate::draglog::log(|| format!("drag-out end row={:?} outcome={outcome:?} {}", row_name(s), crate::draglog::appkit()));
+                    s.drag_out_ended(outcome);
+                })
+                .on_drag(inside);
+            // Only while logging (`ARBOR_DRAG_LOG`): a handler more per row otherwise.
+            if crate::draglog::on() {
+                e.on_drag_start(move |s: &mut State, _| crate::draglog::log(|| format!("drag-out started row={:?}", row_name(s))))
+            } else {
+                e
+            }
+        }
         // Split: within the window, onto the other pane. A system drag can't land in the
         // window it came from (RUNE-GAPS.md), so this one is Arbor's own.
         Some(_) => e.on_drag(inside),
@@ -317,10 +332,12 @@ pub(super) fn folder_drop(e: El, f: &Folder, c: Ctx, entry: &crate::fs::Entry) -
     let os = entry.os.clone();
     e.on_drop_files(move |s: &mut State, files, tx| {
         tx.instant();
+        crate::draglog::log(|| format!("drop on={:?} files={}", target.display(), files.len()));
         s.drop_files(files, target.clone(), tx);
     })
     .on_drop_hover(move |s: &mut State, over, tx| {
         tx.instant();
+        crate::draglog::log(|| format!("drop-hover on={os:?} over={over}"));
         if let Some(ix) = s.pane_ix(id) {
             s.panes[ix].f.drop_target = over.then(|| os.clone());
         }

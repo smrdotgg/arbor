@@ -58,6 +58,12 @@ Newest first.
 
 ## Drag out: a release past the threshold starts a system drag that never ends
 
+**Under review (2026-11-10):** the cause below is doubtful. Rune's `drag_event` already returns
+no event (so no session) when the current event isn't a drag or press and the button is up, and
+a real-Mac run of 0ca5968 still blocks keys after a drop on a folder row, not on empty space.
+`ARBOR_DRAG_LOG=1` (`src/draglog.rs`) logs the sequence on the Mac; this entry will be corrected
+or removed from what it shows.
+
 - **Feature:** dragging rows out of the list (macOS, one pane): to Finder and other apps, and the
   guidance when nothing takes the drop.
 - **What Rune is missing:** a guarantee that `drag_out` never starts a session once the button is

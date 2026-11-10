@@ -57,7 +57,11 @@ Format: date · decision · why · how to undo.
   can be read, it keeps the button, counts what can be emptied, names the unreadable trash and
   says it can't be undone. Undo: `contents::ask_words`, `Ask::action`/`settings`.
 - **2026-11-10 · A row's OS drag never starts from a release** (Mac QA: after a single-pane drag
-  nothing took, keys did nothing until Esc). Cause: winit sends a release's position as a move
+  nothing took, keys did nothing until Esc). **Under review (later on 2026-11-10):** the next
+  real-Mac QA (0ca5968) still sees keys blocked until Esc after a drop on a folder row (not
+  after one on empty space), and Rune's `drag_out::macos::drag_event` already refuses to start
+  from a release with the button up, so the cause below is doubtful. `ARBOR_DRAG_LOG=1` now
+  logs the sequence for a real-Mac run; this entry and RUNE-GAPS' follow once it's in. Cause: winit sends a release's position as a move
   before the release, and Rune starts a drag-out from that move when it crosses the threshold;
   AppKit's session then waits for a release that already happened, eating keys. Arbor's
   `drag_out` asks AppKit for the current event and offers nothing on a release or plain move; the

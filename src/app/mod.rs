@@ -414,6 +414,7 @@ impl State {
     }
 
     pub fn setup(&mut self, waker: rune::Waker) {
+        crate::draglog::install();
         for p in &self.panes {
             p.f.loader.set_waker(waker.clone());
         }
@@ -581,6 +582,7 @@ impl State {
     /// needs to change.
     pub fn poll(&mut self, tx: &mut Tx) -> bool {
         tx.instant();
+        crate::draglog::poll();
         let mut changed = self.poll_job();
         changed |= self.drag_not_taken();
         if let Some(a) = self.ask_next.take() {

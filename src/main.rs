@@ -21,6 +21,7 @@ mod confirm;
 mod delete;
 #[cfg(unix)]
 mod dirfd;
+mod draglog;
 mod ffi;
 mod folder;
 #[cfg(test)]
