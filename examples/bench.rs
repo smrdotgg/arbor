@@ -2,7 +2,7 @@
 //! Run through `scripts/bench.sh`, which builds first:
 //!
 //! ```text
-//! bench [RUNS] [ROUNDS] [--bin PATH] [--keep] [--tabs N] [--preview N] [--jump N] [--search N] [--rename N]
+//! bench [RUNS] [ROUNDS] [--bin PATH] [--keep] [--tabs N] [--preview N] [--jump N] [--search N] [--rename N] [--grid N]
 //!       [--pace MS] [--gap MS]
 //! ```
 //!
@@ -61,6 +61,14 @@
 //! showing the whole preview for it (worked out on a worker at this size), and closes it. Such
 //! a run counts only with exactly ROUNDS plain and 2 × ROUNDS regex previews of 10,000 items.
 //!
+//! `--grid N` adds N cold starts with `ARBOR_BENCH_GRID=1` in the 10k folder (icons only: few
+//! of its names are real images) and N in a folder of [`GRID_IMAGES`] photo-like JPEGs
+//! (1600 × 1200): each switches to the icon view (As Icons; in the image folder it waits for the
+//! screen's thumbnails, timed from the key to the first and to the last), then ROUNDS times
+//! presses Page Down and ↓, each timed, while thumbnails stream in for the image folder. Such a
+//! run counts only with 2 × ROUNDS keys after As Icons, and in the image folder a first
+//! thumbnail and a screenful.
+//!
 //! `--pace MS` spaces every step of every run at least MS apart (`ARBOR_BENCH_PACE_MS`), as a
 //! person types (120 is brisk typing): the CPU cools between keys, as it does for a real user,
 //! which back-to-back steps hide (on the M4 Pro, 4–5× for Jump keys and regex previews).
@@ -87,6 +95,8 @@ const JUMP_FOLDERS: usize = 5_000;
 /// The `--search` tree: files, in folders two levels deep.
 const SEARCH_FILES: usize = 120_000;
 const SEARCH_DIRS: usize = 2_000;
+/// Photos in the `--grid` image folder.
+const GRID_IMAGES: usize = 1_000;
 
 fn main() {
     let mut nums = Vec::new();
@@ -97,6 +107,7 @@ fn main() {
     let mut jump_runs = 0;
     let mut search_runs = 0;
     let mut rename_runs = 0;
+    let mut grid_runs = 0;
     let (mut pace, mut gap) = (0u64, 0u64);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -108,6 +119,7 @@ fn main() {
             "--jump" => jump_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--jump N"),
             "--search" => search_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--search N"),
             "--rename" => rename_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--rename N"),
+            "--grid" => grid_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--grid N"),
             "--pace" => pace = args.next().and_then(|n| n.parse::<u64>().ok()).expect("--pace MS"),
             "--gap" => gap = args.next().and_then(|n| n.parse::<u64>().ok()).expect("--gap MS"),
             n => nums.push(n.parse::<u32>().unwrap_or_else(|_| panic!("not a number: {n}"))),
@@ -236,6 +248,31 @@ fn main() {
             }
         }
     }
+    let (mut grid_key, mut grid_img_key, mut thumb_first, mut thumb_screen, mut thumbs_per_screen) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    if grid_runs > 0 {
+        let photos = root.join("photos");
+        make_image_folder(&photos);
+        for run in 0..grid_runs * 2 {
+            let images = run % 2 == 1;
+            match run_once(&bin, if images { &photos } else { &big }, rounds, if images { Mode::GridImages } else { Mode::Grid }) {
+                Ok(r) => {
+                    if images {
+                        grid_img_key.extend(r.grid_key);
+                        thumb_first.extend(r.thumb_first);
+                        thumb_screen.extend(r.thumb_screen);
+                        thumbs_per_screen.extend(r.thumbs);
+                    } else {
+                        grid_key.extend(r.grid_key);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("grid run {run}: INVALID: {e}");
+                    invalid.push(runs + tab_runs + preview_runs + jump_runs + search_runs + rename_runs + run);
+                }
+            }
+        }
+    }
     if !keep {
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -247,7 +284,8 @@ fn main() {
     let jumps = jump_runs > 0;
     let searches = search_runs > 0;
     let renames = rename_runs > 0;
-    let rows: [(&str, &mut Vec<f64>, Option<f64>); 19] = [
+    let grids = grid_runs > 0;
+    let rows: [(&str, &mut Vec<f64>, Option<f64>); 23] = [
         ("cold start (spawn → first frame)*", &mut cold, Some(100.0)),
         ("  of which main → first frame", &mut main, None),
         ("listing visible (10k, nav → frame)", &mut nav, Some(50.0)),
@@ -267,13 +305,18 @@ fn main() {
         ("rename 10k: key → preview (plain)", &mut rename_plain, None),
         ("rename 10k: key → preview (regex)", &mut rename_regex, None),
         ("key → frame, typing in rename (10k)", &mut rename_key, Some(8.0)),
+        ("grid 10k: key → frame (PgDn, ↓)", &mut grid_key, Some(8.0)),
+        ("grid photos: key → frame, streaming", &mut grid_img_key, Some(8.0)),
+        ("grid 1k photos: first thumbnail", &mut thumb_first, None),
+        ("grid 1k photos: screen of thumbnails", &mut thumb_screen, None),
     ];
     for (name, v, budget) in rows {
         let off = (name.starts_with("tab") && !tabs)
             || ((name.contains("preview") || name.contains("JPEG")) && !previews)
             || (name.contains("ump") && !jumps)
             || ((name.contains("search") || name.contains("stream") || name.contains("query")) && !searches)
-            || (name.contains("rename") && !renames);
+            || (name.contains("rename") && !renames)
+            || (name.starts_with("grid") && !grids);
         if v.is_empty() && off {
             continue;
         }
@@ -313,6 +356,15 @@ fn main() {
             search_key.len()
         );
     }
+    if grids {
+        thumbs_per_screen.sort_unstable();
+        println!(
+            "grid photos: {} thumbnails on the first screen (median); {} of {} keys while thumbnails were decoding",
+            thumbs_per_screen.get(thumbs_per_screen.len() / 2).copied().unwrap_or(0),
+            grid_img_key.len(),
+            rounds as usize * 2 * grid_runs as usize
+        );
+    }
     if let Some((c, m)) = first {
         println!("* first run left out: {c:.0} ms cold, {m:.0} ms of it from main");
     }
@@ -338,6 +390,8 @@ enum Mode {
     Jump,
     Search,
     Rename,
+    Grid,
+    GridImages,
 }
 
 struct Run {
@@ -371,6 +425,12 @@ struct Run {
     rename_plain: Vec<f64>,
     rename_regex: Vec<f64>,
     rename_key: Vec<f64>,
+    /// The icon view: keys after As Icons (in the image folder, only those while thumbnails
+    /// were decoding), As Icons → first thumbnail and → the screen's last, and how many.
+    grid_key: Vec<f64>,
+    thumb_first: Vec<f64>,
+    thumb_screen: Vec<f64>,
+    thumbs: Vec<usize>,
 }
 
 static PACE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -403,8 +463,11 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         ("ARBOR_BENCH_JUMP", mode == Mode::Jump),
         ("ARBOR_BENCH_SEARCH", mode == Mode::Search),
         ("ARBOR_BENCH_RENAME", mode == Mode::Rename),
+        ("ARBOR_BENCH_GRID", matches!(mode, Mode::Grid | Mode::GridImages)),
     ] {
-        if on {
+        if on && mode == Mode::GridImages {
+            cmd.env(var, "2");
+        } else if on {
             cmd.env(var, "1");
         } else {
             cmd.env_remove(var);
@@ -483,6 +546,10 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         rename_plain: Vec::new(),
         rename_regex: Vec::new(),
         rename_key: Vec::new(),
+        grid_key: Vec::new(),
+        thumb_first: Vec::new(),
+        thumb_screen: Vec::new(),
+        thumbs: Vec::new(),
     };
     let mut keys = 0;
     let mut streaming = false;
@@ -548,6 +615,19 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
                     run.rename_plain.extend(field("ms"));
                 }
             }
+            Some("key") if matches!(mode, Mode::Grid | Mode::GridImages) => {
+                // As Icons, then Page Down and ↓ each round; in the image folder only the keys
+                // handled while thumbnails were decoding count (the rest are icons only).
+                if keys > 0 && (mode == Mode::Grid || field("thumbs").is_some_and(|n| n > 0.0)) {
+                    run.grid_key.extend(field("ms"));
+                }
+                keys += 1;
+            }
+            Some("thumb-first") => run.thumb_first.extend(field("ms")),
+            Some("thumb-screen") => {
+                run.thumb_screen.extend(field("ms"));
+                run.thumbs.push(field("thumbs").unwrap_or(0.0) as usize);
+            }
             Some("search-first") => run.search_first.extend(field("ms")),
             Some("search-done") => {
                 run.search_total.extend(field("ms"));
@@ -567,6 +647,19 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         return Err(format!("no first frame logged:\n{}", lines.join("\n")));
     }
     let want = rounds as usize;
+    if matches!(mode, Mode::Grid | Mode::GridImages) {
+        let thumbs_ok = mode == Mode::Grid || (run.thumb_first.len() == 1 && run.thumb_screen.len() == 1);
+        if keys != want * 2 + 1 || !thumbs_ok {
+            return Err(format!(
+                "expected {} keys (and in the photos a first thumbnail and a screenful), got {keys}, {} and {}:\n{}",
+                want * 2 + 1,
+                run.thumb_first.len(),
+                run.thumb_screen.len(),
+                lines.join("\n")
+            ));
+        }
+        return Ok(run);
+    }
     if mode == Mode::Rename {
         if keys != want * 6 || run.rename_plain.len() != want || run.rename_regex.len() != want * 2 {
             return Err(format!(
@@ -663,6 +756,39 @@ fn make_search_tree(dir: &Path) {
             let i = d * per + f;
             std::fs::write(sub.join(format!("{}-{i}.{}", names[i % names.len()], exts[(i / 7) % exts.len()])), b"x").expect("file");
         }
+    }
+}
+
+/// [`GRID_IMAGES`] photo-like JPEGs of 1600 × 1200 (gradients and noise, a few hundred KB each),
+/// each a little different. Made once per bench.
+fn make_image_folder(dir: &Path) {
+    use image::ImageEncoder;
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).expect("temp dir");
+    let (w, h) = (1600u32, 1200u32);
+    let mut base = Vec::with_capacity((w * h * 3) as usize);
+    let mut seed = 0x9e37_79b9_u32;
+    for y in 0..h {
+        for x in 0..w {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let n = (seed & 31) as i32 - 16;
+            let c = |v: i32| (v + n).clamp(0, 255) as u8;
+            base.extend([c((x * 255 / w) as i32), c((y * 255 / h) as i32), c(128)]);
+        }
+    }
+    for i in 0..GRID_IMAGES {
+        // A different tint per photo, so no two encode the same.
+        let mut px = base.clone();
+        for p in px.as_chunks_mut::<3>().0 {
+            p[2] = p[2].wrapping_add((i * 37 % 256) as u8);
+        }
+        let mut jpg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 85)
+            .write_image(&px, w, h, image::ExtendedColorType::Rgb8)
+            .expect("encode a photo");
+        std::fs::write(dir.join(format!("IMG_{i:04}.jpg")), jpg).expect("write a photo");
     }
 }
 

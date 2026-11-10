@@ -8,6 +8,7 @@ scripts/bench.sh 11 10 --tabs 5                # plus 5 cold starts timing a tab
 scripts/bench.sh 11 10 --jump 5                # plus 5 cold starts opening Jump with a 5k-folder history
 scripts/bench.sh 11 10 --search 5              # plus 5 cold starts searching a 120k-file tree
 scripts/bench.sh 11 10 --rename 5              # plus 5 cold starts typing in Batch Rename over 10k items
+scripts/bench.sh 1 10 --grid 4                 # plus 4 + 4 cold starts paging the icon view (10k, and 1,000 photos)
 scripts/bench.sh 1 12 --jump 5 --pace 120 --gap 1000   # the same, paced as a person types (report both)
 cargo test --release -- --ignored --nocapture search_speed   # walk speed by thread count (vendor/, or ARBOR_SEARCH_TREE)
 xvfb-run -a scripts/bench.sh 11 10             # Linux without a display
@@ -26,6 +27,58 @@ runs two to three frames behind submission (`frame/present_time.rs`). Rune doesn
 frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below means the
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
+
+## 2026-11-10, milestone 16 (drag-select, the icon view and its thumbnails)
+
+What could cost the list view time: each unselected row's name now carries the item's press
+and drag handlers (the row keeps a drag for the selection rectangle), and the view reads the
+list's laid-out rect once. A first version wrapped each name in one more row with a spacer: that
+cost 0.2–0.3 ms per key and about 1 ms per 10k listing on tabot-dev, so the handlers moved onto
+the name text itself (no element more than before). The icon view, its thumbnails and the
+rectangle cost nothing until used. Measured against 0ca5968, the commit before it.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+`target/release/examples/bench 8 10 --bin …`, the two release binaries alternating, two passes
+each (load average about 1.5):
+
+| Measure (median per pass) | 0ca5968 | this |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 135.7, 129.9 ms | 136.0, 132.4 ms |
+| Listing visible (10k, nav → frame) | 39.9, 40.3 ms | 40.0, 40.2 ms |
+| Key → frame (synthetic ↓) | 1.4\*, 6.2 ms | 6.2, 6.2 ms |
+
+\* lavapipe's key times are bimodal (about 1.4 or 6.2 ms); that pass's p95 was 6.5 ms, as the
+others'. The release binary: 39,935,120 bytes before, 40,052,720 after (+0.3%).
+
+The icon view, `bench 1 10 --grid 4` (four cold starts in the 10k folder, icons only, and four in
+a folder of 1,000 photo-like 1600 × 1200 JPEGs; each switches to the icon view, then pages with
+Page Down and ↓):
+
+| Measure | n | median | p95 |
+| --- | --- | --- | --- |
+| Grid, 10k entries: key → frame (Page Down, ↓) | 80 | 6.2 ms | 9.0 ms |
+| Grid, photos: key → frame while thumbnails decode | 68 | 13.3 ms | 17.3 ms |
+| 1,000 photos: As Icons → first thumbnail | 4 | 52.7 ms | 56.3 ms |
+| 1,000 photos: As Icons → the screen's 30 thumbnails | 4 | 364.9 ms | 394.7 ms |
+
+Over budget here, and why it doesn't carry over: with `ARBOR_TIMING`, the keys while thumbnails
+decode split into about 5 ms of update and 6 ms of encode. The encode is lavapipe rasterising the
+frame and uploading the new thumbnails in software; the update is the view and layout competing
+for this machine's 4 vCPUs with two decoding threads and lavapipe's own. The workers now run
+below the window's priority (as the search's walkers), which took the average from 11.8 to
+10.5 ms. On the Mac (below) the same keys take 1.5 ms.
+
+### MacBook Pro, Apple M4 Pro, macOS 27.2 (over ssh, display on)
+
+`target/release/examples/bench 1 10 --grid 3`:
+
+| Measure | n | median | p95 |
+| --- | --- | --- | --- |
+| Grid, 10k entries: key → frame (Page Down, ↓) | 60 | 1.5 ms | 2.5 ms |
+| Grid, photos: key → frame while thumbnails decode | 51 | 1.5 ms | 2.5 ms |
+| 1,000 photos: As Icons → first thumbnail | 3 | 55.0 ms | 68.0 ms |
+| 1,000 photos: As Icons → the screen's 30 thumbnails | 3 | 150.6 ms | 185.7 ms |
 
 ## 2026-11-09, milestone 14 (Empty Trash, Put Back, tab drags and moves, universal Mac build)
 
