@@ -22,7 +22,7 @@
 //! and Arbor never runs a timer (NORTHSTAR: no polling), so a still pointer doesn't scroll
 //! (RUNE-GAPS.md).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::ops::Range;
 
@@ -74,7 +74,6 @@ pub struct Hits {
 }
 
 impl Hits {
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty() || self.cols.is_empty()
     }
@@ -119,6 +118,7 @@ impl Layout {
     }
 
     /// The indices (into the folder's visible items) of `h`, in display order.
+    #[cfg(test)]
     pub fn each(self, h: &Hits, n: usize) -> impl Iterator<Item = usize> + '_ {
         let cols = match self {
             Layout::List { .. } => 1,
@@ -147,11 +147,19 @@ pub struct Band {
     pub moved: bool,
     /// What it touched when last applied.
     pub hits: Hits,
-    /// What ⇧ adds to and ⌘ toggles against: the selection it started with by name (the
-    /// cursor's item when nothing else was marked).
-    pub base: HashSet<OsString>,
-    /// The selection as it was, to put back on Esc: what was marked, the cursor and the anchor.
-    pub before: (HashSet<OsString>, usize, usize),
+    /// It has applied its first selection (`apply`).
+    pub started: bool,
+    /// The items it touches now, by name, each with whether it was selected before the
+    /// rectangle reached it: what an item that leaves the rectangle goes back to, and what ⌘
+    /// flips. Only what it touches: a move costs what it changes, never the whole selection.
+    pub orig: HashMap<OsString, bool>,
+    /// Alone (no ⇧ or ⌘): the selection it started with, moved aside (not copied), for Esc.
+    pub cleared: Option<HashSet<OsString>>,
+    /// ⇧ or ⌘ with only the cursor selected: the cursor's item, put in the selection first (it
+    /// was selected, as the cursor), and taken out again on Esc.
+    pub seeded: Option<OsString>,
+    /// The cursor and the anchor as they were, for Esc.
+    pub before: (usize, usize),
     /// It started below the rows or in a gutter: a click there (no rectangle) clears the
     /// selection.
     pub on_empty: bool,
@@ -184,45 +192,152 @@ impl Band {
         (out * 0.5).abs().clamp(2.0, 48.0).copysign(out)
     }
 
-    /// The selection it gives for what it touches now (`hits` of the folder's `visible` items).
-    /// Returns false when that's what it already gave.
+    /// The selection it gives for what it touches now (`hits` of the folder's `visible` items),
+    /// changing only the items that entered or left the rectangle since the last time. Returns
+    /// false when nothing changed.
     pub fn apply(&mut self, f: &mut Folder) -> bool {
         let n = f.visible.len();
         let r = [self.start[0], self.start[1], self.end[0], self.end[1]];
         let hits = self.layout.hits(r, n);
-        if hits == self.hits {
+        if self.started && hits == self.hits {
             return false;
         }
-        self.hits = hits;
-        let touched: Vec<usize> = self.layout.each(&self.hits, n).collect();
-        let name = |i: usize| f.entries[f.visible[i] as usize].os.clone();
-        let base = &self.base;
-        let marked: HashSet<OsString> = match self.mode {
-            Mode::Replace => touched.iter().map(|&i| name(i)).collect(),
-            Mode::Add => base.iter().cloned().chain(touched.iter().map(|&i| name(i))).collect(),
-            Mode::Toggle => {
-                let mut m = base.clone();
-                for &i in &touched {
-                    let n = name(i);
-                    if !m.remove(&n) {
-                        m.insert(n);
+        if !std::mem::replace(&mut self.started, true) {
+            match self.mode {
+                Mode::Replace => self.cleared = Some(std::mem::take(&mut f.marked)),
+                // The cursor alone counts as selected: ⇧ adds to it, ⌘ toggles against it.
+                _ if f.marked.is_empty() => {
+                    if let Some(c) = f.cursor_name() {
+                        f.marked.insert(c.clone());
+                        self.seeded = Some(c);
                     }
                 }
-                m
+                _ => {}
             }
-        };
+        }
+        let old = std::mem::replace(&mut self.hits, hits);
+        let cols = self.layout.cols();
+        let (mut left, mut entered) = (Vec::new(), Vec::new());
+        minus(cols, &old, &self.hits, n, &mut left);
+        minus(cols, &self.hits, &old, n, &mut entered);
+        for i in left {
+            let name = &f.entries[f.visible[i] as usize].os;
+            if let Some(was) = self.orig.remove(name) {
+                if was {
+                    f.marked.insert(name.clone());
+                } else {
+                    f.marked.remove(name);
+                }
+            }
+        }
+        for i in entered {
+            let name = &f.entries[f.visible[i] as usize].os;
+            let was = f.marked.contains(name);
+            self.orig.insert(name.clone(), was);
+            let on = self.mode != Mode::Toggle || !was;
+            if on {
+                f.marked.insert(name.clone());
+            } else {
+                f.marked.remove(name);
+            }
+        }
         // The cursor follows the pointer's end of the rectangle, the anchor stays at its start,
         // so ⇧-arrows afterwards carry on from there.
-        let down = self.end[1] >= self.start[1];
-        let (near, far) = if down { (touched.first(), touched.last()) } else { (touched.last(), touched.first()) };
-        if let (Some(&a), Some(&b)) = (near, far) {
-            f.anchor = a;
-            f.sel = b;
+        if let Some((first, last)) = ends(cols, &self.hits, n) {
+            let down = self.end[1] >= self.start[1];
+            (f.anchor, f.sel) = if down { (first, last) } else { (last, first) };
         }
         f.picks += 1;
-        f.marked = marked;
         true
     }
+
+    /// Esc: the selection, cursor and anchor as they were before it.
+    pub fn cancel(&mut self, f: &mut Folder) {
+        if let Some(m) = self.cleared.take() {
+            f.marked = m;
+        } else {
+            for (name, was) in self.orig.drain() {
+                if was {
+                    f.marked.insert(name);
+                } else {
+                    f.marked.remove(&name);
+                }
+            }
+            if let Some(c) = self.seeded.take() {
+                f.marked.remove(&c);
+            }
+        }
+        (f.sel, f.anchor) = self.before;
+    }
+}
+
+impl Layout {
+    /// Items per row.
+    fn cols(self) -> usize {
+        match self {
+            Layout::List { .. } => 1,
+            Layout::Grid(g) => g.cols.max(1),
+        }
+    }
+}
+
+/// `x` less `y`, as at most two ranges.
+fn less(x: &Range<usize>, y: &Range<usize>) -> [Range<usize>; 2] {
+    [x.start..x.end.min(y.start).max(x.start), x.start.max(y.end).min(x.end)..x.end]
+}
+
+/// Pushes the items (below `n`) in `a` and not in `b`, a grid of `cols` columns: whole rows of
+/// `a` outside `b`'s rows, and in the rows both share, `a`'s columns outside `b`'s. Work in
+/// proportion to what differs, however large `a` and `b` are.
+fn minus(cols: usize, a: &Hits, b: &Hits, n: usize, out: &mut Vec<usize>) {
+    let mut push = |r: usize, cs: &Range<usize>| {
+        for c in cs.clone() {
+            let i = r * cols + c;
+            if i < n {
+                out.push(i);
+            }
+        }
+    };
+    if a.is_empty() {
+        return;
+    }
+    if b.is_empty() {
+        for r in a.rows.clone() {
+            push(r, &a.cols);
+        }
+        return;
+    }
+    for rows in less(&a.rows, &b.rows) {
+        for r in rows {
+            push(r, &a.cols);
+        }
+    }
+    let side = less(&a.cols, &b.cols);
+    if side.iter().any(|c| !c.is_empty()) {
+        for r in a.rows.start.max(b.rows.start)..a.rows.end.min(b.rows.end) {
+            for cs in &side {
+                push(r, cs);
+            }
+        }
+    }
+}
+
+/// The first and last items (below `n`) of `h`, in display order.
+fn ends(cols: usize, h: &Hits, n: usize) -> Option<(usize, usize)> {
+    if h.is_empty() {
+        return None;
+    }
+    let first = h.rows.start * cols + h.cols.start;
+    if first >= n {
+        return None;
+    }
+    let r = h.rows.end - 1;
+    let mut last = r * cols + h.cols.end - 1;
+    if last >= n {
+        // The last row is short: its last item, if it reaches the columns, else the row above's.
+        last = if n > r * cols + h.cols.start { n - 1 } else { (r - 1) * cols + h.cols.end - 1 };
+    }
+    Some((first, last))
 }
 
 impl crate::app::State {
@@ -237,7 +352,6 @@ impl crate::app::State {
             rune::Phase::Down => {
                 let f = &self.panes[ix].f;
                 let scroll = f.scroll.get();
-                let base = if f.marked.is_empty() { f.cursor_name().into_iter().collect() } else { f.marked.clone() };
                 let mut b = Band {
                     pane: id,
                     version: f.version,
@@ -248,9 +362,12 @@ impl crate::app::State {
                     view,
                     scroll,
                     moved: false,
-                    hits: Hits { rows: usize::MAX..usize::MAX, cols: 0..0 },
-                    base,
-                    before: (f.marked.clone(), f.sel, f.anchor),
+                    hits: Hits::default(),
+                    started: false,
+                    orig: HashMap::new(),
+                    cleared: None,
+                    seeded: None,
+                    before: (f.sel, f.anchor),
                     on_empty,
                 };
                 b.start = b.content(d.window_point(), scroll);
@@ -294,14 +411,14 @@ impl crate::app::State {
                 b.apply(f);
             }
             rune::Phase::Up => {
-                let Some(b) = self.band.take().filter(|b| b.pane == id) else { return };
+                let Some(mut b) = self.band.take().filter(|b| b.pane == id) else { return };
                 let f = &mut self.panes[ix].f;
                 if f.version != b.version {
                     return;
                 }
                 if d.cancelled() {
-                    if b.moved {
-                        (f.marked, f.sel, f.anchor) = b.before;
+                    if b.started {
+                        b.cancel(f);
                     }
                     return;
                 }
@@ -379,7 +496,7 @@ mod tests {
         assert_eq!(b.edge_step([0.0, 5000.0]), 48.0);
     }
 
-    fn band(layout: Layout, mode: Mode, before: &[&str]) -> Band {
+    fn band(layout: Layout, mode: Mode, _before: &[&str]) -> Band {
         Band {
             pane: 0,
             version: 0,
@@ -391,8 +508,11 @@ mod tests {
             scroll: 0.0,
             moved: true,
             hits: Hits::default(),
-            base: before.iter().map(OsString::from).collect(),
-            before: (HashSet::new(), 0, 0),
+            started: false,
+            orig: HashMap::new(),
+            cleared: None,
+            seeded: None,
+            before: (0, 0),
             on_empty: false,
         }
     }
@@ -413,6 +533,7 @@ mod tests {
         let mut f = folder(10);
         // Rows 2..=4.
         let drag = |f: &mut Folder, mode, before: &[&str]| {
+            f.marked = before.iter().map(OsString::from).collect();
             let mut b = band(LIST, mode, before);
             b.start = [5.0, 2.0 * 24.0 + 3.0];
             b.end = [5.0, 4.0 * 24.0 + 3.0];
@@ -439,6 +560,89 @@ mod tests {
         b.end = [5.0, 950.0];
         assert!(b.apply(&mut f));
         assert!(f.marked.is_empty());
+    }
+
+    /// Rows a rectangle leaves go back to what they were: with ⇧ to the selection it started
+    /// with, with ⌘ unflipped; and Esc puts everything back, the cursor's item too when it was
+    /// all that was selected.
+    #[test]
+    fn rows_it_leaves_go_back_and_esc_puts_it_all_back() {
+        let mut f = folder(10);
+        let names = |f: &Folder| selected(f);
+        f.marked = ["f01", "f03"].iter().map(OsString::from).collect();
+        let mut b = band(LIST, Mode::Toggle, &[]);
+        b.start = [5.0, 1.0];
+        b.end = [5.0, 4.0 * 24.0 + 1.0];
+        b.apply(&mut f);
+        assert_eq!(names(&f), [0, 2, 4], "rows 0–4 flipped");
+        b.end = [5.0, 2.0 * 24.0 + 1.0];
+        b.apply(&mut f);
+        assert_eq!(names(&f), [0, 2, 3], "rows 3 and 4 back as they were");
+        b.cancel(&mut f);
+        assert_eq!(names(&f), [1, 3]);
+        // ⇧ with only the cursor selected: it counts, and Esc leaves just the cursor.
+        f.marked.clear();
+        f.select(6);
+        let mut b = band(LIST, Mode::Add, &[]);
+        b.before = (6, 6);
+        b.start = [5.0, 1.0];
+        b.end = [5.0, 1.0 * 24.0 + 1.0];
+        b.apply(&mut f);
+        assert_eq!(names(&f), [0, 1, 6]);
+        b.cancel(&mut f);
+        assert!(f.marked.is_empty() && f.sel == 6);
+        // Alone: the old selection is set aside and comes back whole on Esc.
+        f.marked = ["f08", "f09"].iter().map(OsString::from).collect();
+        let mut b = band(LIST, Mode::Replace, &[]);
+        b.start = [5.0, 1.0];
+        b.end = [5.0, 1.0];
+        b.apply(&mut f);
+        assert_eq!(names(&f), [0]);
+        b.cancel(&mut f);
+        assert_eq!(names(&f), [8, 9]);
+    }
+
+    /// The items between two rectangles, in a grid and a list, are exactly those that differ.
+    #[test]
+    fn the_difference_is_what_entered_or_left() {
+        let h = |rows: Range<usize>, cols: Range<usize>| Hits { rows, cols };
+        let mut out = Vec::new();
+        minus(4, &h(0..3, 1..3), &h(1..3, 2..4), 10, &mut out);
+        out.sort_unstable();
+        assert_eq!(out, [1, 2, 5, 9], "row 0 whole, then column 1 of rows 1 and 2 (10 isn't there)");
+        out.clear();
+        minus(1, &h(0..1_000_000, 0..1), &h(1..1_000_000, 0..1), 2_000_000, &mut out);
+        assert_eq!(out, [0], "a list: one row, not a million looked at");
+        assert_eq!(ends(4, &h(1..3, 1..4), 10), Some((5, 9)), "the short last row's last item");
+        assert_eq!(ends(4, &h(1..3, 2..4), 9), Some((6, 7)), "past the short row: the row above");
+    }
+
+    /// A move costs what it changes, not what's selected: with 100,000 and 500,000 items
+    /// already selected, ⇧ and ⌘ rectangles growing a row at a time take well under a
+    /// millisecond a move (each used to clone the whole selection: 24 and 227 ms in release).
+    #[test]
+    fn a_move_costs_what_it_changes_not_whats_selected() {
+        for n in [100_000, 500_000] {
+            let mut f = folder(n);
+            f.select_all();
+            for mode in [Mode::Add, Mode::Toggle] {
+                let mut b = band(LIST, mode, &[]);
+                b.start = [10.0, 5.0];
+                let mut times = Vec::new();
+                for i in 0..20 {
+                    b.end = [10.0, 100.0 + i as f32 * 24.0];
+                    let at = std::time::Instant::now();
+                    b.apply(&mut f);
+                    times.push(at.elapsed().as_secs_f64() * 1000.0);
+                }
+                times.sort_by(f64::total_cmp);
+                let worst = times[times.len() - 1];
+                println!("{n} selected, {mode:?}: median {:.4} ms, worst {worst:.4} ms", times[times.len() / 2]);
+                assert!(worst < 1.0, "{n} selected, {mode:?}: {worst:.3} ms");
+                b.cancel(&mut f);
+                assert_eq!(f.marked.len(), n, "Esc puts it back");
+            }
+        }
     }
 
     #[test]
