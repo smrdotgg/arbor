@@ -360,12 +360,19 @@ pub(super) fn menu_view(m: &crate::menu::Menu, size: Option<[f32; 2]>, l: Look) 
 
 /// Arbor's one dialog: before something that can't be undone (`confirm.rs`). A title, what it
 /// does ("… This can't be undone."), Cancel and the destructive button; the focused one has a
-/// ring, and Cancel has the focus when it opens. Modal: a click outside cancels.
+/// ring, and Cancel has the focus when it opens. Modal: a click outside cancels. With nothing
+/// to confirm it has no destructive button: Close, and "Open Privacy Settings" when offered.
 pub(super) fn confirm_view(a: &crate::confirm::Ask, l: Look) -> El {
     use crate::confirm::Button;
-    let button = |label: &'static str, key: &'static str, which: Button| {
+    let key_of = |b: Button| match b {
+        Button::Settings => "confirm-settings",
+        Button::Cancel => "confirm-cancel",
+        Button::Action => "confirm-action",
+    };
+    let button = |label: &'static str, which: Button| {
         let focused = a.focus == which;
         let yes = which == Button::Action;
+        let key = key_of(which);
         // The label is a child of a row that centres it: a text element given a height draws
         // its line at the top of it, a few points above the middle.
         let b = row()
@@ -376,7 +383,7 @@ pub(super) fn confirm_view(a: &crate::confirm::Ask, l: Look) -> El {
             .center_y()
             .radius(6.0)
             .cursor(Cursor::Pointer)
-            .on_press_tx(move |s: &mut State, tx| s.answer(yes, tx))
+            .on_press_tx(move |s: &mut State, tx| s.press(which, tx))
             .child(text(label).font(TextStyle::new(13.0, 500.0)).color(if yes { Color::WHITE } else { l.t.text }));
         // Red only for what can't be undone; a system change that can be (the folder default)
         // gets the accent, and its focus ring the text colour so it still shows.
@@ -399,7 +406,7 @@ pub(super) fn confirm_view(a: &crate::confirm::Ask, l: Look) -> El {
         .role("alertdialog")
         .label(a.title.clone())
         .description(a.body.clone())
-        .active_descendant(if a.focus == Button::Action { "confirm-action" } else { "confirm-cancel" })
+        .active_descendant(key_of(a.focus))
         .focusable(true)
         .on_key(|s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx| s.ask_key(ev, tx))
         .no_focus_ring()
@@ -414,9 +421,10 @@ pub(super) fn confirm_view(a: &crate::confirm::Ask, l: Look) -> El {
                 .w_full()
                 .pt(6.0)
                 .gap(8.0)
+                .children(a.settings.then(|| button("Open Privacy Settings", Button::Settings)))
                 .child(el().grow(1.0))
-                .child(button("Cancel", "confirm-cancel", Button::Cancel))
-                .child(button(a.action, "confirm-action", Button::Action)),
+                .child(button(a.cancel_label(), Button::Cancel))
+                .children(a.action.map(|label| button(label, Button::Action))),
         );
     overlay_layer("confirm-layer", panel)
 }

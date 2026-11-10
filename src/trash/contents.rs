@@ -140,8 +140,8 @@ pub struct Item {
 /// Why the Trash couldn't all be read.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Problem {
-    /// macOS refused (`EPERM`): Arbor needs Full Disk Access.
-    NeedsAccess,
+    /// macOS refused (`EPERM`) to read this trash folder: Arbor needs Full Disk Access.
+    NeedsAccess(PathBuf),
     /// Anything else, in words.
     Unreadable(String),
 }
@@ -149,7 +149,7 @@ pub enum Problem {
 impl Problem {
     pub fn say(&self) -> String {
         match self {
-            Problem::NeedsAccess => NEEDS_ACCESS.into(),
+            Problem::NeedsAccess(_) => NEEDS_ACCESS.into(),
             Problem::Unreadable(why) => why.clone(),
         }
     }
@@ -348,7 +348,7 @@ pub fn reopen(pin: &Pin) -> Result<Opened, String> {
 /// needs Full Disk Access.
 pub fn problem_of(dir: &Path, e: &io::Error, mac: bool) -> Problem {
     if mac && e.kind() == io::ErrorKind::PermissionDenied {
-        Problem::NeedsAccess
+        Problem::NeedsAccess(dir.to_path_buf())
     } else {
         Problem::Unreadable(format!("Arbor couldn't read “{}” ({e})", crate::fs::pretty(dir)))
     }
@@ -550,6 +550,14 @@ impl Counting {
         Counting { rx, stop, got: Summary::default() }
     }
 
+    /// A count that found `items` and `problem` (tests: a Trash Arbor can't read anywhere).
+    #[cfg(test)]
+    pub fn found(items: Vec<Item>, problem: Option<Problem>) -> Counting {
+        let (tx, rx) = channel();
+        let _ = tx.send(Counted::Listed(items, problem));
+        Counting { rx, stop: Arc::new(AtomicBool::new(false)), got: Summary::default() }
+    }
+
     /// Takes what the thread found since. True when anything changed.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
@@ -578,31 +586,51 @@ impl Drop for Counting {
     }
 }
 
-/// The dialog's words for what the count found: (title, body, button).
-pub fn ask_words(got: Option<&Summary>) -> (String, String, &'static str) {
-    let title = format!("Empty the {BIN}?");
+/// What Empty Trash's dialog says and offers, for what the count found.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Words {
+    pub title: String,
+    pub body: String,
+    /// The destructive button's label; `None` when there's nothing Arbor can empty (the Trash
+    /// is empty, or it can't be read), so the dialog only informs and has no such button.
+    pub action: Option<&'static str>,
+    /// macOS refused to read a trash: the dialog offers "Open Privacy Settings".
+    pub settings: bool,
+}
+
+/// The dialog's words for what the count found. Before it lands: everything in the Trash.
+/// Nothing to empty (an empty Trash, or one Arbor can't read): no destructive button. Some
+/// trashes unreadable and others not: the count is of what can be emptied, the body names the
+/// trash that can't be read, and only the readable ones are emptied.
+pub fn ask_words(got: Option<&Summary>) -> Words {
     let action = if cfg!(windows) { "Empty Recycle Bin" } else { "Empty Trash" };
     let size = match got.and_then(|g| g.bytes) {
         Some((b, true)) => format!(" ({})", crate::fs::fmt_size(b)),
         Some((b, false)) => format!(" (at least {})", crate::fs::fmt_size(b)),
         None => String::new(),
     };
-    let body = match got {
-        Some(Summary { problem: Some(Problem::NeedsAccess), count: Some(0), .. }) => format!("{NEEDS_ACCESS}."),
-        Some(Summary { problem: Some(p), count: Some(n), .. }) if *n > 0 => format!(
-            "The {} Arbor can read in the {BIN}{size} will be deleted permanently ({}). This can't be undone.",
-            items_word(*n),
-            p.say()
-        ),
-        Some(Summary { problem: Some(p), .. }) => format!("{}.", p.say()),
-        Some(Summary { count: Some(0), .. }) => format!("The {BIN} is already empty."),
-        Some(Summary { count: Some(1), .. }) => format!("The item in the {BIN}{size} will be deleted permanently. This can't be undone."),
-        Some(Summary { count: Some(n), .. }) => {
-            format!("The {} in the {BIN}{size} will be deleted permanently. This can't be undone.", items_word(*n))
+    let problem = got.and_then(|g| g.problem.as_ref());
+    let settings = matches!(problem, Some(Problem::NeedsAccess(_)));
+    let ask = |body: String| Words { title: format!("Empty the {BIN}?"), body, action: Some(action), settings };
+    let inform = |title: String, body: String| Words { title, body, action: None, settings };
+    match (got.and_then(|g| g.count), problem) {
+        (None, _) => ask(format!("Everything in the {BIN} will be deleted permanently. This can't be undone.")),
+        (Some(0), None) => inform("Nothing to Empty".into(), format!("The {BIN} is already empty.")),
+        (Some(0), Some(p)) => inform(format!("Arbor Can't Read the {BIN}"), format!("{}.", p.say())),
+        (Some(n), Some(p)) => {
+            let unread = match p {
+                Problem::NeedsAccess(dir) => format!(
+                    "“{}” can't be read, so what's in it stays: Arbor needs Full Disk Access (System Settings → Privacy & Security → Full Disk Access) to empty it.",
+                    crate::fs::pretty(dir)
+                ),
+                Problem::Unreadable(why) => format!("{why}, so what's in it stays."),
+            };
+            let what = if n == 1 { "The 1 item".to_string() } else { format!("The {}", items_word(n)) };
+            ask(format!("{what} Arbor can read in the {BIN}{size} will be deleted permanently. This can't be undone. {unread}"))
         }
-        _ => format!("Everything in the {BIN} will be deleted permanently. This can't be undone."),
-    };
-    (title, body, action)
+        (Some(1), None) => ask(format!("The item in the {BIN}{size} will be deleted permanently. This can't be undone.")),
+        (Some(n), None) => ask(format!("The {} in the {BIN}{size} will be deleted permanently. This can't be undone.", items_word(n))),
+    }
 }
 
 fn items_word(n: u64) -> String {
@@ -1099,12 +1127,12 @@ mod tests {
     /// to grant Full Disk Access when the Trash can't be read.
     #[test]
     fn the_dialog_says_what_the_count_found() {
-        let (title, body, action) = ask_words(None);
-        assert_eq!(title, format!("Empty the {BIN}?"));
-        assert_eq!(body, format!("Everything in the {BIN} will be deleted permanently. This can't be undone."));
-        assert!(action.starts_with("Empty"));
+        let w = ask_words(None);
+        assert_eq!(w.title, format!("Empty the {BIN}?"));
+        assert_eq!(w.body, format!("Everything in the {BIN} will be deleted permanently. This can't be undone."));
+        assert!(w.action.is_some_and(|a| a.starts_with("Empty")) && !w.settings);
         let got = |count, bytes, problem| Summary { items: None, count, bytes, problem };
-        let say = |g: Summary| ask_words(Some(&g)).1;
+        let say = |g: Summary| ask_words(Some(&g)).body;
         assert_eq!(
             say(got(Some(1234), None, None)),
             format!("The 1,234 items in the {BIN} will be deleted permanently. This can't be undone.")
@@ -1114,16 +1142,43 @@ mod tests {
             format!("The 3 items in the {BIN} (2.0 KB) will be deleted permanently. This can't be undone.")
         );
         assert!(say(got(Some(1), Some((10, false)), None)).starts_with(&format!("The item in the {BIN} (at least")));
-        assert_eq!(say(got(Some(0), None, None)), format!("The {BIN} is already empty."));
-        assert_eq!(say(got(Some(0), None, Some(Problem::NeedsAccess))), format!("{NEEDS_ACCESS}."));
         let partly = say(got(Some(2), None, Some(Problem::Unreadable("Arbor couldn't read “/x” (denied)".into()))));
-        assert!(partly.contains("The 2 items Arbor can read") && partly.ends_with("This can't be undone."), "{partly}");
+        assert!(partly.contains("The 2 items Arbor can read") && partly.contains("This can't be undone."), "{partly}");
+        assert!(partly.contains("“/x”"), "names the trash it can't read: {partly}");
+    }
+
+    /// Nothing to empty (an empty Trash, or one Arbor can't read): the dialog informs and has no
+    /// destructive button. Where macOS refused, it explains Full Disk Access and offers the
+    /// settings; where only some trashes refused, it counts what can be emptied, names the
+    /// trash it can't read, still says it can't be undone, and keeps the button.
+    #[test]
+    fn nothing_to_empty_offers_no_destructive_button() {
+        let got = |count, problem| Summary { items: None, count, bytes: None, problem };
+        let empty = ask_words(Some(&got(Some(0), None)));
+        assert_eq!((empty.body.as_str(), empty.action, empty.settings), (&*format!("The {BIN} is already empty."), None, false));
+        let home = PathBuf::from("/Users/me/.Trash");
+        let refused = ask_words(Some(&got(Some(0), Some(Problem::NeedsAccess(home.clone())))));
+        assert_eq!((refused.body, refused.action, refused.settings), (format!("{NEEDS_ACCESS}."), None, true));
+        assert!(!refused.title.ends_with('?'), "it asks nothing: {}", refused.title);
+        let unreadable = ask_words(Some(&got(Some(0), Some(Problem::Unreadable("Arbor couldn't read “/x” (denied)".into())))));
+        assert_eq!((unreadable.action, unreadable.settings), (None, false));
+        let partly =
+            ask_words(Some(&Summary { items: None, count: Some(4), bytes: Some((2048, true)), problem: Some(Problem::NeedsAccess(home)) }));
+        assert!(partly.action.is_some() && partly.settings);
+        assert!(
+            partly.body.starts_with(&format!(
+                "The 4 items Arbor can read in the {BIN} (2.0 KB) will be deleted permanently. This can't be undone."
+            )),
+            "{}",
+            partly.body
+        );
+        assert!(partly.body.contains("“/Users/me/.Trash” can't be read") && partly.body.contains("Full Disk Access"), "{}", partly.body);
     }
 
     #[test]
     fn a_refusal_on_macos_means_full_disk_access() {
         let eperm = io::Error::from(io::ErrorKind::PermissionDenied);
-        assert_eq!(problem_of(Path::new("/x/.Trash"), &eperm, true), Problem::NeedsAccess);
+        assert_eq!(problem_of(Path::new("/x/.Trash"), &eperm, true), Problem::NeedsAccess("/x/.Trash".into()));
         assert!(matches!(problem_of(Path::new("/x/.Trash"), &eperm, false), Problem::Unreadable(_)));
         let gone = io::Error::from(io::ErrorKind::Other);
         assert!(matches!(problem_of(Path::new("/x"), &gone, true), Problem::Unreadable(_)));

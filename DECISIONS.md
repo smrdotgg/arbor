@@ -9,6 +9,16 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-10 · Empty Trash with nothing to empty only informs** (Mac QA: without Full Disk
+  Access the dialog explained it and still showed a red "Empty Trash"; pressing it re-listed the
+  Trash on the worker and put the same Full Disk Access text in the status bar, deleting nothing).
+  When the count finds nothing Arbor can empty, the same dialog has no destructive button: Close,
+  plus **Open Privacy Settings** (`open x-apple.systempreferences:…Privacy_AllFiles`) when macOS
+  refused. That includes an already-empty Trash ("Nothing to Empty"), which used to keep the red
+  button too. NORTHSTAR calls the confirmation "the only kind of dialog Arbor shows"; this is that
+  dialog in the state where there's nothing to confirm, not a new kind. When only some trashes
+  can be read, it keeps the button, counts what can be emptied, names the unreadable trash and
+  says it can't be undone. Undo: `contents::ask_words`, `Ask::action`/`settings`.
 - **2026-11-10 · A row's OS drag never starts from a release** (Mac QA: after a single-pane drag
   nothing took, keys did nothing until Esc). Cause: winit sends a release's position as a move
   before the release, and Rune starts a drag-out from that move when it crosses the threshold;

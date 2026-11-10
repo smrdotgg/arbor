@@ -16,6 +16,11 @@
 //! a click on the button, confirms. An Enter meant for something else (the palette's Enter that
 //! ran the command a moment ago, pressed twice) or pressed out of habit then can't destroy
 //! anything. Esc, or a click outside, cancels. Nothing animates.
+//!
+//! When there's nothing to confirm (Empty Trash with an empty Trash, or one Arbor can't read),
+//! the same dialog only informs: it has no destructive button ([`Ask::action`] is `None`),
+//! Cancel reads "Close", and where macOS refused to read the Trash it offers "Open Privacy
+//! Settings" ([`Ask::settings`]), which opens Full Disk Access's pane.
 
 use rune::{Key, KeyEvent, Tx};
 
@@ -24,12 +29,17 @@ use crate::commands::Cmd;
 use crate::ops::{Doomed, Op};
 use crate::trash::BIN;
 
-/// The dialog's two buttons.
+/// The dialog's buttons, left to right: "Open Privacy Settings" (only when offered), Cancel
+/// (or Close), and the action (only when there's one).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
+    Settings,
     Cancel,
     Action,
 }
+
+/// Where macOS's Full Disk Access list is, in System Settings.
+pub const PRIVACY_SETTINGS: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
 
 /// An open confirmation: what it asks about, in words, and which button has the focus.
 pub struct Ask {
@@ -38,8 +48,11 @@ pub struct Ask {
     /// One or two sentences: for what can't be undone, ending "This can't be undone."; for a
     /// system change, what changes and how to undo it.
     pub body: String,
-    /// The action button's label.
-    pub action: &'static str,
+    /// The action button's label; `None`: nothing to confirm, so the dialog only informs and
+    /// has no action button (nothing it offers can run the command).
+    pub action: Option<&'static str>,
+    /// Offers "Open Privacy Settings" (macOS couldn't read the Trash).
+    pub settings: bool,
     pub focus: Button,
     /// For a permanent delete, what it deletes (and nothing else).
     pub items: Vec<Doomed>,
@@ -59,15 +72,59 @@ impl Ask {
             }
             Cmd::Delete => return Ask::delete(s.cur().doomed(), None),
             Cmd::EmptyTrash => {
-                let (title, body, action) = crate::trash::contents::ask_words(s.trash_count.as_ref().map(|c| &c.got));
-                (title, body, action)
+                let mut a = Ask {
+                    cmd,
+                    title: String::new(),
+                    body: String::new(),
+                    action: None,
+                    settings: false,
+                    focus: Button::Cancel,
+                    items: Vec::new(),
+                };
+                a.say(crate::trash::contents::ask_words(s.trash_count.as_ref().map(|c| &c.got)));
+                return a;
             }
             Cmd::MakeDefault => ("Make Arbor the Default for Folders?".into(), MAKE_DEFAULT.into(), "Make Default"),
             Cmd::RestoreDefault => ("Restore the System Default for Folders?".into(), RESTORE_DEFAULT.into(), "Restore"),
             // Not permanent: never asked (see `Cmd::permanent`).
             _ => (format!("{}?", cmd.title().trim_end_matches('…')), "This can't be undone.".to_string(), "Continue"),
         };
-        Ask { cmd, title, body, action, focus: Button::Cancel, items: Vec::new() }
+        Ask { cmd, title, body, action: Some(action), settings: false, focus: Button::Cancel, items: Vec::new() }
+    }
+
+    /// Takes Empty Trash's words. A button that goes away can't keep the focus: it moves to
+    /// Cancel (Close).
+    fn say(&mut self, w: crate::trash::contents::Words) {
+        (self.title, self.body, self.action, self.settings) = (w.title, w.body, w.action, w.settings);
+        if !self.buttons().contains(&self.focus) {
+            self.focus = Button::Cancel;
+        }
+    }
+
+    /// The buttons it shows, left to right.
+    pub fn buttons(&self) -> Vec<Button> {
+        let mut v = Vec::with_capacity(3);
+        if self.settings {
+            v.push(Button::Settings);
+        }
+        v.push(Button::Cancel);
+        if self.action.is_some() {
+            v.push(Button::Action);
+        }
+        v
+    }
+
+    /// Cancel's label: "Close" when there's nothing to confirm.
+    pub fn cancel_label(&self) -> &'static str {
+        if self.action.is_some() { "Cancel" } else { "Close" }
+    }
+
+    /// Moves the focus to the next button (`back`: the one before), wrapping.
+    fn step(&mut self, back: bool) {
+        let b = self.buttons();
+        let i = b.iter().position(|&x| x == self.focus).unwrap_or(0);
+        let n = b.len();
+        self.focus = b[if back { (i + n - 1) % n } else { (i + 1) % n }];
     }
 
     /// Deleting `items` permanently: from "Delete Permanently…" (`no_trash` is `None`), or for
@@ -98,7 +155,7 @@ impl Ask {
                 )
             }
         };
-        Ask { cmd: Cmd::Delete, title, body, action: "Delete Permanently", focus: Button::Cancel, items }
+        Ask { cmd: Cmd::Delete, title, body, action: Some("Delete Permanently"), settings: false, focus: Button::Cancel, items }
     }
 }
 
@@ -160,8 +217,7 @@ impl State {
         if !c.poll() {
             return false;
         }
-        let (title, body, action) = crate::trash::contents::ask_words(Some(&c.got));
-        (a.title, a.body, a.action) = (title, body, action);
+        a.say(crate::trash::contents::ask_words(Some(&c.got)));
         true
     }
 
@@ -177,10 +233,12 @@ impl State {
         self.asking = Some(a);
     }
 
-    /// Closes the dialog; with `yes`, runs what it asked about (if it can still run).
+    /// Closes the dialog; with `yes`, runs what it asked about (if it can still run, and the
+    /// dialog had an action button: an informing one runs nothing).
     pub fn answer(&mut self, yes: bool, tx: &mut Tx) {
         tx.instant();
         let Some(a) = self.asking.take() else { return };
+        let yes = yes && a.action.is_some();
         // A delete deletes what the dialog named, whatever is selected now.
         if yes && a.cmd == Cmd::Delete {
             if self.job.is_some() {
@@ -200,6 +258,28 @@ impl State {
         self.trash_count = None;
     }
 
+    /// "Open Privacy Settings": opens Full Disk Access's pane in System Settings and closes the
+    /// dialog (Arbor must be reopened once access is given, as the dialog says).
+    pub fn open_privacy_settings(&mut self, tx: &mut Tx) {
+        tx.instant();
+        if !self.asking.as_ref().is_some_and(|a| a.settings) {
+            return;
+        }
+        if let Err(e) = crate::fs::open_url(PRIVACY_SETTINGS) {
+            self.note = Some(format!("Couldn't open System Settings ({e})"));
+        }
+        self.answer(false, tx);
+    }
+
+    /// Presses the dialog's `b` button.
+    pub fn press(&mut self, b: Button, tx: &mut Tx) {
+        match b {
+            Button::Settings => self.open_privacy_settings(tx),
+            Button::Cancel => self.answer(false, tx),
+            Button::Action => self.answer(true, tx),
+        }
+    }
+
     /// The dialog's keys (it's modal: it takes every key while open).
     pub fn ask_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         tx.instant();
@@ -208,16 +288,15 @@ impl State {
         let plain = !m.cmd && !m.ctrl && !m.alt;
         match &ev.key {
             Key::Escape => self.answer(false, tx),
-            Key::Tab | Key::Left | Key::Right if !m.cmd && !m.ctrl => {
-                a.focus = if a.focus == Button::Cancel { Button::Action } else { Button::Cancel };
-            }
+            Key::Tab if !m.cmd && !m.ctrl => a.step(m.shift),
+            Key::Left | Key::Right if !m.cmd && !m.ctrl => a.step(ev.key == Key::Left),
             Key::Enter if plain => {
-                let yes = a.focus == Button::Action;
-                self.answer(yes, tx);
+                let b = a.focus;
+                self.press(b, tx);
             }
             Key::Text(t) if t == " " && plain => {
-                let yes = a.focus == Button::Action;
-                self.answer(yes, tx);
+                let b = a.focus;
+                self.press(b, tx);
             }
             _ => {}
         }
@@ -311,7 +390,7 @@ mod tests {
         let mut tx = Tx::default();
         s.run(Cmd::MakeDefault, &mut tx);
         let a = s.asking.as_ref().expect("it asks");
-        assert_eq!((a.title.as_str(), a.action, a.focus), ("Make Arbor the Default for Folders?", "Make Default", Button::Cancel));
+        assert_eq!((a.title.as_str(), a.action, a.focus), ("Make Arbor the Default for Folders?", Some("Make Default"), Button::Cancel));
         assert!(
             a.body.contains("To undo it, run \"Restore the System Default for Folders\"") && !a.body.contains("can't be undone"),
             "{}",
@@ -372,7 +451,7 @@ mod tests {
             assert!(a.body.contains(n), "{}", a.body);
         }
         assert!(a.body.contains("folders with everything in them") && a.body.ends_with("This can't be undone."), "{}", a.body);
-        assert_eq!((a.focus, a.action), (Button::Cancel, "Delete Permanently"));
+        assert_eq!((a.focus, a.action), (Button::Cancel, Some("Delete Permanently")));
         assert!(s.on_key(&key(Key::Enter), &mut tx));
         assert!(s.asking.is_none() && d.join("a.txt").exists() && d.join("sub/inside").exists());
         s.run(Cmd::Delete, &mut tx);
@@ -480,18 +559,67 @@ mod tests {
         assert_eq!(std::fs::read_dir(root.join("files")).unwrap().count(), 0);
         assert_eq!(std::fs::read_dir(root.join("info")).unwrap().count(), 0, "their records went too");
         assert_eq!(s.undo.len(), undos, "nothing to undo");
-        // Now empty: the dialog says so, and so does the button.
+        // Now empty: the dialog says so, and has nothing to press but Close.
         s.run(Cmd::EmptyTrash, &mut tx);
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !s.asking.as_ref().is_some_and(|a| a.body.contains("already empty")) && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(2));
             s.poll(&mut Tx::default());
         }
-        assert_eq!(s.asking.as_ref().unwrap().body, format!("The {BIN} is already empty."));
+        let a = s.asking.as_ref().unwrap();
+        assert_eq!((a.body.as_str(), a.action), (&*format!("The {BIN} is already empty."), None));
+        assert_eq!(a.buttons(), [Button::Cancel]);
         s.answer(true, &mut tx);
-        settle_job(&mut s);
-        assert_eq!(s.note.as_deref(), Some(&*format!("The {BIN} is already empty")));
+        assert!(s.asking.is_none() && s.job.is_none());
         FIXTURE.lock().unwrap().clear();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// macOS refused to read the Trash: the dialog explains Full Disk Access, offers "Open
+    /// Privacy Settings" and Close, and has no destructive button: no key, click or stale focus
+    /// can run Empty Trash from it. Before, it kept a red "Empty Trash" (which re-listed the
+    /// Trash on the worker and said the same thing in the status bar).
+    #[test]
+    fn a_trash_that_cant_be_read_informs_and_offers_the_settings() {
+        use crate::trash::contents::{Counting, Problem};
+        let (d, mut s) = folder_of("trash-refused", &[]);
+        let refused = || Counting::found(Vec::new(), Some(Problem::NeedsAccess(d.join(".Trash"))));
+        let mut tx = Tx::default();
+        let _ = crate::fs::opened_urls();
+        // The focus was on the button when the count landed: it goes to Close.
+        s.run(Cmd::EmptyTrash, &mut tx);
+        assert!(s.on_key(&key(Key::Tab), &mut tx));
+        assert_eq!(s.asking.as_ref().unwrap().focus, Button::Action, "before the count lands it asks");
+        s.trash_count = Some(refused());
+        s.poll(&mut Tx::default());
+        let a = s.asking.as_ref().unwrap();
+        assert_eq!((a.action, a.settings, a.focus), (None, true, Button::Cancel));
+        assert_eq!(a.buttons(), [Button::Settings, Button::Cancel]);
+        assert_eq!(a.cancel_label(), "Close");
+        assert!(a.body.contains("Full Disk Access") && !a.body.contains("deleted"), "{}", a.body);
+        // Tab, ← and → only ever reach the two buttons it has.
+        for k in [Key::Tab, Key::Tab, Key::Right, Key::Left, Key::Left] {
+            assert!(s.on_key(&key(k), &mut tx));
+            assert_ne!(s.asking.as_ref().unwrap().focus, Button::Action);
+        }
+        assert_eq!(s.asking.as_ref().unwrap().focus, Button::Settings);
+        // Enter on "Open Privacy Settings" opens Full Disk Access's pane and closes it.
+        assert!(s.on_key(&key(Key::Enter), &mut tx));
+        assert!(s.asking.is_none() && s.job.is_none());
+        assert_eq!(crate::fs::opened_urls(), [PRIVACY_SETTINGS]);
+        // Even a forced "yes" (a stale click on where the button was) runs nothing.
+        s.run(Cmd::EmptyTrash, &mut tx);
+        s.trash_count = Some(refused());
+        s.poll(&mut Tx::default());
+        s.answer(true, &mut tx);
+        assert!(s.asking.is_none() && s.job.is_none(), "nothing runs from an informing dialog");
+        // Close (Enter on it, as it opens) closes it.
+        s.run(Cmd::EmptyTrash, &mut tx);
+        s.trash_count = Some(refused());
+        s.poll(&mut Tx::default());
+        assert!(s.on_key(&key(Key::Enter), &mut tx));
+        assert!(s.asking.is_none() && s.job.is_none());
+        assert!(crate::fs::opened_urls().is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -613,7 +613,8 @@ Cancel has the focus, and Esc keeps them.
 it asks first, in the same dialog, saying it can't be undone. The dialog opens at once; a
 thread of its own counts the items (each with its identity) and then adds up their size, and
 the dialog says "The 12 items in the Trash (1.4 GB) will be deleted permanently" as each lands
-("The Trash is already empty", when it is). Closing the dialog stops the count. Emptying runs
+("The Trash is already empty", when it is: then the dialog only says so, with Close and no
+Empty Trash button). Closing the dialog stops the count. Emptying runs
 on the worker with progress, and Esc stops it between items: it deletes exactly the items the
 count found, each only while it's still that item (one replaced since is left alone and
 named; one put in the Trash after the count stays), the way Delete Permanently deletes (never
@@ -628,10 +629,13 @@ what stopped it. There's no undo.
   from the share itself.
 - **macOS:** `~/.Trash`, and `.Trashes/<your uid>` on each local volume under `/Volumes` (from
   `getmntinfo` without waiting on any file system). Recent macOS lets an app read `~/.Trash`
-  only with Full Disk Access; without it, the dialog and the result say: "Arbor needs Full Disk
-  Access to see what's in the Trash: open System Settings → Privacy & Security → Full Disk
-  Access, turn on Arbor (or the app you started it from), then quit and reopen Arbor". Finder
-  isn't asked (through AppleScript), so nothing outside Arbor's own dialog shows.
+  only with Full Disk Access; without it, the dialog says: "Arbor needs Full Disk Access to see
+  what's in the Trash: open System Settings → Privacy & Security → Full Disk Access, turn on
+  Arbor (or the app you started it from), then quit and reopen Arbor", with **Open Privacy
+  Settings** (Full Disk Access's pane) and Close, and no Empty Trash button. When a volume's
+  trash can be read but `~/.Trash` can't, it counts what can be emptied, names the trash it
+  can't read, still says it can't be undone, and empties only the readable ones. Finder isn't
+  asked (through AppleScript), so nothing outside Arbor's own dialog shows.
 - **Windows:** the Recycle Bin of every drive: `SHQueryRecycleBinW` counts it for the dialog,
   and `SHEmptyRecycleBinW` empties it after Arbor's dialog, with no confirmation of its own,
   no progress window (Arbor's status bar shows it, and a second window would be a second

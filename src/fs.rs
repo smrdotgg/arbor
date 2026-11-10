@@ -778,6 +778,35 @@ pub fn open(p: &Path) -> Result<(), String> {
     reap(cmd)
 }
 
+/// Opens a system URL Rune's `open_url` won't (it opens web and mail links only): macOS's
+/// `x-apple.systempreferences:` panes, with `open`. Tests and headless runs open nothing (tests
+/// keep what they'd have opened: [`opened_urls`]).
+#[cfg(not(test))]
+pub fn open_url(url: &str) -> Result<(), String> {
+    if rune::tooling::headless_run().is_some() {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    return reap(Command::new("open").arg(url).spawn().map_err(|e| e.to_string()));
+    #[cfg(not(target_os = "macos"))]
+    Err(format!("{url} opens only on macOS"))
+}
+
+#[cfg(test)]
+pub fn open_url(url: &str) -> Result<(), String> {
+    OPENED.lock().unwrap_or_else(|e| e.into_inner()).push(url.to_string());
+    Ok(())
+}
+
+#[cfg(test)]
+static OPENED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The URLs [`open_url`] was asked to open in this test process, taken.
+#[cfg(test)]
+pub(crate) fn opened_urls() -> Vec<String> {
+    std::mem::take(&mut *OPENED.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 /// Opens a text file (the settings file) for editing: in the default text editor on macOS,
 /// where a `.toml` file often has no app of its own, else with its default app.
 pub fn open_text(p: &Path) -> Result<(), String> {
