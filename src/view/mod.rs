@@ -247,8 +247,9 @@ fn hr(l: Look) -> El {
 fn status(s: &State, l: Look) -> El {
     let f = s.cur();
     let mut bar = row().key("status").w_full().h(28.0).px(12.0).gap(10.0).center_y();
-    if !f.filter.is_empty() {
-        let label = if f.path_mode() { "Go to" } else { "Filter" };
+    // An open go-to field shows even once emptied (Backspace stays in it).
+    if !f.filter.is_empty() || f.goto {
+        let label = if f.path_mode() || f.goto { "Go to" } else { "Filter" };
         bar = bar.child(text(label).font(SMALL).color(l.accent).a11y_hidden()).child(
             text(format!("{}▏", f.filter))
                 .key("filter")

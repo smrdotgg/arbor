@@ -215,7 +215,9 @@ Typing, outside the palette:
 
 - **Type anything** to filter the folder. The first name starting with what you typed gets
   selected. While the filter has text, typing, ⌫ and ⌥⌫ edit it.
-- **Type `/` or `~`** (or ⌘L) for go-to-path mode. Enter navigates, or opens a file. **Tab**
+- **Type `/` or `~`** (or ⌘L) for go-to-path mode. Enter navigates, or opens a file. Backspace
+  that empties the field leaves it open ("Go to" with nothing typed), so holding it down never
+  goes on to the parent folder; Esc closes it. **Tab**
   completes the last part of the path against what's in its folder: the first Tab as far as
   every match agrees (all of a single match, with a `/` after a folder) and, with several, lists
   them in a small card over the status bar; Tab again cycles through them, ⇧Tab backwards (each

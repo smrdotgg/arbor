@@ -754,3 +754,39 @@ fn rows_take_the_identities_arbors_change_gave_them() {
     assert_eq!((id(&s, "f0"), id(&s, "f1"), id(&s, "f2")), (c, b, c));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Go To (⌘L), cleared with Backspace held down: once the field is empty, more Backspaces
+/// (and Enter) do nothing, and the field stays open saying so, rather than going to the parent
+/// folder as Backspace does with no field (real-Mac QA: it landed on `/`). Esc closes the
+/// field; then Backspace goes up again.
+#[test]
+fn backspace_in_an_empty_go_to_field_stays_in_the_field() {
+    let d = folder("goto-backspace", 2);
+    let mut s = state_in(&d);
+    settle(&mut s);
+    let mut tx = Tx::default();
+    let key = |k: Key| KeyEvent { key: k, mods: rune::Mods::default() };
+    s.run(Cmd::GoTo, &mut tx);
+    let typed = s.cur().filter.chars().count();
+    assert!(typed > 0 && s.cur().path_mode());
+    for _ in 0..typed + 5 {
+        assert!(s.on_key(&key(Key::Backspace), &mut tx), "the field takes it");
+    }
+    assert!(s.on_key(&key(Key::Enter), &mut tx), "Enter in the empty field does nothing");
+    assert_eq!((s.cur().cwd.as_path(), s.pending_path()), (d.as_path(), None), "no navigation");
+    assert!(s.cur().filter.is_empty() && s.cur().goto, "the field is still open");
+    // Typing in it carries on; a letter is a filter, as ever.
+    s.on_key(&key(Key::Text("f".into())), &mut tx);
+    assert_eq!(s.cur().filter, "f");
+    assert!(!s.cur().goto && !s.cur().path_mode());
+    // Esc closes an empty go-to field; after that Backspace goes to the parent folder.
+    s.run(Cmd::GoTo, &mut tx);
+    for _ in 0..typed + 1 {
+        s.on_key(&key(Key::Backspace), &mut tx);
+    }
+    assert!(s.on_key(&key(Key::Escape), &mut tx));
+    assert!(!s.cur().goto);
+    s.on_key(&key(Key::Backspace), &mut tx);
+    assert_eq!(s.pending_path(), d.parent(), "Backspace with no field: the parent folder");
+    let _ = std::fs::remove_dir_all(&d);
+}

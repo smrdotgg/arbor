@@ -785,6 +785,7 @@ impl State {
                 let navigated = matches!(p.nav, Nav::New | Nav::Back | Nav::Forward | Nav::Fresh);
                 if navigated {
                     f.filter.clear();
+                    f.goto = false;
                     // For Jump: one message to the history's writer, no disk I/O here.
                     let here = f.cwd.clone();
                     self.history.record(&here);

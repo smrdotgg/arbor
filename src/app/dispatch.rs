@@ -59,6 +59,12 @@ impl State {
             self.type_in_search(self.active, None, tx);
             return true;
         }
+        // An open go-to field that Backspace emptied keeps Backspace and Enter: held down to
+        // clear the field, Backspace would otherwise go on to the parent folder.
+        let f = self.cur();
+        if f.goto && f.filter.is_empty() && matches!(ev.key, Key::Backspace | Key::Enter) && !m.cmd && !m.ctrl {
+            return true;
+        }
         if self.edit_filter(ev, tx) {
             return true;
         }
@@ -200,7 +206,10 @@ impl State {
             // In a search, Back leaves it.
             Back => when(!searching && f.back.is_empty(), "Nothing to go back to"),
             Forward => when(f.fwd.is_empty(), "Nothing to go forward to"),
-            Clear => when(!busy && !searching && f.filter.is_empty() && self.note.is_none() && f.marked.is_empty(), "Nothing to clear"),
+            Clear => when(
+                !busy && !searching && f.filter.is_empty() && !f.goto && self.note.is_none() && f.marked.is_empty(),
+                "Nothing to clear",
+            ),
             Up | Down | PageUp | PageDown | First | Last | ExtendUp | ExtendDown | ExtendPageUp | ExtendPageDown | ExtendFirst
             | ExtendLast | SelectAll | SelectPattern | InvertSelection => when(empty, "Nothing to select"),
             SelectKind => when(nothing, "Select an item first"),
@@ -306,6 +315,7 @@ impl State {
                     p.push(std::path::MAIN_SEPARATOR);
                 }
                 f.filter = p;
+                f.goto = true;
                 f.refilter(None);
             }
             Reload if self.cur().searching() => {
@@ -356,6 +366,7 @@ impl State {
                     f.marked.clear();
                     let keep = f.cursor_name();
                     f.filter.clear();
+                    f.goto = false;
                     f.refilter(keep.as_deref());
                     f.reveal(tx);
                 }

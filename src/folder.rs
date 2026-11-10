@@ -111,6 +111,10 @@ pub struct Folder {
     pub(crate) anchor: usize,
     /// Typed filter. Starting with `/`, `~` (or a drive on Windows) it's a path to go to instead.
     pub filter: String,
+    /// The go-to field is open (⌘L, or a path typed), even once Backspace has emptied it: then
+    /// more Backspaces stay in it rather than going to the parent folder. Esc, Enter on a path,
+    /// typing a filter or going anywhere closes it.
+    pub goto: bool,
     pub show_hidden: bool,
     pub sort: Sort,
     /// The user chose the sort (a header click or a sort command), even if back to the default,
@@ -176,6 +180,7 @@ impl Folder {
             picks: 0,
             anchor: 0,
             filter: String::new(),
+            goto: false,
             show_hidden,
             sort,
             sort_set: false,
@@ -276,8 +281,10 @@ impl Folder {
 
     /// Asks for a fresh read of `path`; it lands in `State::poll` (a newer request wins).
     pub(crate) fn request(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, rename: bool) {
-        // Going anywhere ends a search (its walk stops), and the thumbnails being decoded.
+        // Going anywhere ends a search (its walk stops), and the thumbnails being decoded, and
+        // closes the go-to field.
         self.search = None;
+        self.goto = false;
         self.tiles = None;
         let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
         let picks = self.picks;
@@ -377,6 +384,7 @@ impl Folder {
         // The tab that was here is hidden now: its read or search, if any, stops.
         self.stop_read();
         self.search = None;
+        self.goto = false;
         self.tiles = None;
         self.grid_rows = None;
         self.tiles_for = None;
@@ -733,6 +741,8 @@ impl Folder {
     pub fn type_filter(&mut self, text: &str) {
         let keep = self.cursor_name();
         self.filter.push_str(text);
+        // A path opens the go-to field; anything else is a filter (and closes it).
+        self.goto = self.path_mode();
         self.marked.clear();
         self.refilter(if self.path_mode() { keep.as_deref() } else { None });
     }
