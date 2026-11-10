@@ -38,7 +38,8 @@ pub(super) fn cells(f: &Folder, c: Ctx, base: El) -> El {
             )
             .virtual_rows_version((f.version, cols))
             // The rows on screen are the only ones thumbnailed; scrolling cancels the rest.
-            .on_visible_rows(move |s: &mut State, rows| s.tiles_visible(id, rows)),
+            .on_visible_rows(move |s: &mut State, rows| s.tiles_visible(id, rows))
+            .on_layout_tx(move |s: &mut State, r: [f32; 4], tx: &mut rune::Tx| band_follows(s, id, r, tx)),
     )
 }
 

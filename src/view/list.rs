@@ -160,8 +160,19 @@ pub(super) fn list(f: &Folder, c: Ctx, active: Option<String>) -> El {
                     None => el(),
                 },
             )
-            .virtual_rows_version(f.version),
+            .virtual_rows_version(f.version)
+            .on_layout_tx(move |s: &mut State, r: [f32; 4], tx: &mut rune::Tx| band_follows(s, id, r, tx)),
     )
+}
+
+/// The rows moved (a scroll): a rectangle being dragged out follows (`State::band_scrolled`);
+/// otherwise nothing changes and no view runs.
+pub(super) fn band_follows(s: &mut State, id: u64, r: [f32; 4], tx: &mut rune::Tx) {
+    if s.band_scrolled(id, r[1]) {
+        tx.instant();
+    } else {
+        tx.live_only();
+    }
 }
 
 /// How pane `c`'s items lie, for drag-select.

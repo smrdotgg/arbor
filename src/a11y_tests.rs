@@ -1205,3 +1205,34 @@ fn thumbnails_come_back_after_a_reload_and_follow_the_icon_size() {
     assert!(rt.state.cur().tiles.as_ref().is_some_and(|t| t.fit() == fit), "at the large size's pixels");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The wheel scrolling the list under a held rectangle: its far corner stays under the pointer
+/// in the content, so it grows over the rows scrolled into it, and they're selected, with no
+/// pointer move and no timer.
+#[test]
+fn the_wheel_under_a_held_rectangle_updates_it() {
+    let d = many("wheel-band", 100);
+    let mut rt = runtime(&d);
+    let a = row_box(&mut rt, "f03");
+    let start = (a[0] + a[2] - 30.0, a[1] + a[3] * 0.5);
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.frame(0.0);
+    rt.pointer_move(start.0 - 20.0, start.1 + a[3] * 2.0);
+    rt.frame(0.0);
+    assert_eq!(picked(&rt), names(3..=5));
+    rt.wheel(start.0, start.1, -240.0);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    let scrolled = rt.state.cur().scroll.get();
+    assert!(scrolled > 200.0, "{scrolled}");
+    let rows = (scrolled / a[3]).round() as usize;
+    assert_eq!(picked(&rt), names(3..=5 + rows), "the rows scrolled into it");
+    let band = rect_of(&rt, "band").expect("drawn");
+    let list = rect_of(&rt, "list-0").unwrap();
+    assert_eq!(band[1], list[1], "its start went up with the content, out of view: clipped at the top");
+    rt.pointer_up(start.0 - 20.0, start.1 + a[3] * 2.0);
+    rt.frame(0.0);
+    assert_eq!(picked(&rt), names(3..=5 + rows));
+    let _ = std::fs::remove_dir_all(&d);
+}

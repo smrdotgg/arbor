@@ -20,7 +20,8 @@
 //! **Past an edge.** Dragged above or below the list, it scrolls, a step on each pointer move,
 //! further the further out the pointer is. Rune sends no events while the pointer holds still,
 //! and Arbor never runs a timer (NORTHSTAR: no polling), so a still pointer doesn't scroll
-//! (RUNE-GAPS.md).
+//! (RUNE-GAPS.md). The wheel scrolling the list under a held rectangle moves it with the
+//! content too (the rows' layout report on each scrolled frame), selecting what scrolls in.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -143,6 +144,9 @@ pub struct Band {
     pub view: [f32; 4],
     /// Where the list was scrolled, as far as the band knows (its own scrolling included).
     pub scroll: f32,
+    /// The pointer in window points, last seen: where the far corner stays when the list
+    /// scrolls under a still pointer (the wheel).
+    pub pointer: [f32; 2],
     /// It has travelled far enough to be a rectangle.
     pub moved: bool,
     /// What it touched when last applied.
@@ -361,6 +365,7 @@ impl crate::app::State {
                     layout,
                     view,
                     scroll,
+                    pointer: d.window_point(),
                     moved: false,
                     hits: Hits::default(),
                     started: false,
@@ -407,6 +412,7 @@ impl crate::app::State {
                     }
                 }
                 b.scroll = scroll;
+                b.pointer = p;
                 b.end = b.content(p, scroll);
                 b.apply(f);
             }
@@ -432,6 +438,27 @@ impl crate::app::State {
                 self.sync_preview();
             }
         }
+    }
+}
+
+impl crate::app::State {
+    /// Pane `id`'s rows are laid out at window y `top` (their element's layout report, which
+    /// comes on every frame a scroll moves them): a rectangle being dragged out follows the
+    /// scroll (the wheel under a still pointer), its far corner staying under the pointer in
+    /// the content, and selects what scrolled into it. False when there's nothing to follow,
+    /// so the report changes nothing (`Tx::live_only`).
+    pub(crate) fn band_scrolled(&mut self, id: u64, top: f32) -> bool {
+        let Some(b) = self.band.as_mut().filter(|b| b.pane == id && b.moved) else { return false };
+        let Some(ix) = self.panes.iter().position(|p| p.id() == id) else { return false };
+        let f = &mut self.panes[ix].f;
+        let scroll = (b.view[1] - top).max(0.0);
+        if (scroll - b.scroll).abs() < 0.5 || f.version != b.version {
+            return false;
+        }
+        b.scroll = scroll;
+        b.end = b.content(b.pointer, scroll);
+        b.apply(f);
+        true
     }
 }
 
@@ -506,6 +533,7 @@ mod tests {
             layout,
             view: [100.0, 50.0, 600.0, 400.0],
             scroll: 0.0,
+            pointer: [0.0; 2],
             moved: true,
             hits: Hits::default(),
             started: false,
