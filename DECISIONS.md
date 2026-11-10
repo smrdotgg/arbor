@@ -9,6 +9,15 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-10 · A trash folder whose listing fails partway is left out of Empty Trash whole**
+  (review: the dialog said "what's in it stays" of a trash it had partly listed, and the
+  partial list was emptied). Of the two ways to make it true (word it as "items Arbor couldn't
+  list in X stay", or leave X out), leaving it out is the safer: nothing from a folder Arbor
+  couldn't read to the end is deleted, so a disk failing midway never loses part of its trash
+  on a half-read list. The count, size and what's emptied are only the trashes read whole;
+  the dialog names the one left out, as for a trash it couldn't open. Undo: `whole` in
+  `trash::contents::list` (both versions).
+
 - **2026-11-10 · Milestone 16: drag-select and the icon view (Review: the start rule and the
   keys).**
   - **Where a rectangle starts (Review).** A press on an item acts on the item: a list row's

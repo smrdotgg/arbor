@@ -354,10 +354,23 @@ pub fn problem_of(dir: &Path, e: &io::Error, mac: bool) -> Problem {
     }
 }
 
+/// Test-only: the listing of this folder fails after this many entries, as a dying disk or a
+/// network share might partway through.
+#[cfg(test)]
+pub(crate) static FAIL_AFTER: std::sync::Mutex<Option<(PathBuf, usize)>> = std::sync::Mutex::new(None);
+
+/// Test-only: whether the listing of `dir` should fail now, after `seen` entries.
+#[cfg(test)]
+fn fail_now(dir: &Path, seen: usize) -> bool {
+    FAIL_AFTER.lock().unwrap().as_ref().is_some_and(|(d, n)| d == dir && seen >= *n)
+}
+
 /// What's in `bins`: each entry of each one's folder, with its identity and record (macOS's
 /// `.DS_Store`, Finder's own, isn't an item). A missing folder is an empty trash; the first
-/// folder that can't be read (or isn't safe to: [`open`]) is the problem. `None` when `stop`
-/// says so. On Unix each trash is read through its opened folders, never by path.
+/// folder that can't be read (or isn't safe to: [`open`]) is the problem. A folder whose
+/// listing fails partway is left out whole: what it had listed isn't emptied either, so "what's
+/// in it stays" is true of all of it. `None` when `stop` says so. On Unix each trash is read
+/// through its opened folders, never by path.
 #[cfg(unix)]
 pub fn list(bins: &[Bin], stop: &dyn Fn() -> bool) -> Option<(Vec<Item>, Option<Problem>)> {
     use std::os::unix::ffi::OsStrExt;
@@ -379,14 +392,19 @@ pub fn list(bins: &[Bin], stop: &dyn Fn() -> bool) -> Option<(Vec<Item>, Option<
                 continue;
             }
         };
+        let mut here = Vec::new();
+        let mut whole = true;
         for n in names {
             if stop() {
                 return None;
             }
+            #[cfg(test)]
+            let n = if fail_now(&b.items, here.len()) { Err(io::Error::other("the disk went away")) } else { n };
             let n = match n {
                 Ok(n) => n,
                 Err(e) => {
                     problem.get_or_insert(problem_of(&b.items, &e, cfg!(target_os = "macos")));
+                    whole = false;
                     break;
                 }
             };
@@ -401,7 +419,10 @@ pub fn list(bins: &[Bin], stop: &dyn Fn() -> bool) -> Option<(Vec<Item>, Option<
             });
             let id = crate::dirfd::ident_at(&o.files, &n).ok();
             let handle = crate::dirfd::handle_at(&o.files, &n);
-            items.push(Item { path: b.items.join(name), id, info, handle, pin: pin.clone() });
+            here.push(Item { path: b.items.join(name), id, info, handle, pin: pin.clone() });
+        }
+        if whole {
+            items.extend(here);
         }
     }
     Some((items, problem))
@@ -422,14 +443,19 @@ pub fn list(bins: &[Bin], stop: &dyn Fn() -> bool) -> Option<(Vec<Item>, Option<
                 continue;
             }
         };
+        let mut here = Vec::new();
+        let mut whole = true;
         for de in rd {
             if stop() {
                 return None;
             }
+            #[cfg(test)]
+            let de = if fail_now(&b.items, here.len()) { Err(io::Error::other("the disk went away")) } else { de };
             let de = match de {
                 Ok(de) => de,
                 Err(e) => {
                     problem.get_or_insert(problem_of(&b.items, &e, false));
+                    whole = false;
                     break;
                 }
             };
@@ -443,7 +469,10 @@ pub fn list(bins: &[Bin], stop: &dyn Fn() -> bool) -> Option<(Vec<Item>, Option<
                 n.push(".trashinfo");
                 i.join(n)
             });
-            items.push(Item { id: crate::fs::ident_at(&path), path, info, handle: None, pin: pin.clone() });
+            here.push(Item { id: crate::fs::ident_at(&path), path, info, handle: None, pin: pin.clone() });
+        }
+        if whole {
+            items.extend(here);
         }
     }
     Some((items, problem))
@@ -1182,6 +1211,35 @@ mod tests {
             partly.body
         );
         assert!(partly.body.contains("“/Users/me/.Trash” can't be read") && partly.body.contains("Full Disk Access"), "{}", partly.body);
+    }
+
+    /// A trash folder whose listing fails partway (after some entries) is left out whole, so
+    /// the dialog's count and what's emptied are only the trashes read to the end, and its
+    /// "… can't be read, so what's in it stays" is true of everything in it.
+    #[test]
+    fn a_trash_whose_listing_fails_partway_is_left_out_whole() {
+        let d = std::env::temp_dir().join(format!("arbor-trash-partway-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        let (good, bad) = (d.join("good/.Trash-1000"), d.join("bad/.Trash-1000"));
+        for (root, names) in [(&good, &["a", "b"][..]), (&bad, &["x", "y", "z"][..])] {
+            fs::create_dir_all(root.join("files")).unwrap();
+            fs::create_dir_all(root.join("info")).unwrap();
+            for n in names {
+                fs::write(root.join("files").join(n), "x").unwrap();
+            }
+        }
+        *FAIL_AFTER.lock().unwrap() = Some((bad.join("files"), 1));
+        let bins = [Bin::freedesktop(&good, me()), Bin::freedesktop(&bad, me())];
+        let (items, problem) = list(&bins, &|| false).unwrap();
+        *FAIL_AFTER.lock().unwrap() = None;
+        let mut names: Vec<String> = items.iter().map(|i| i.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["a", "b"], "nothing from the trash whose listing failed");
+        let p = problem.expect("the failure is the problem");
+        let words = ask_words(Some(&Summary { items: None, count: Some(2), bytes: None, problem: Some(p) }));
+        assert!(words.body.contains("The 2 items Arbor can read") && words.body.contains("so what's in it stays"), "{}", words.body);
+        assert!(words.body.contains("bad"), "names the trash left out: {}", words.body);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
