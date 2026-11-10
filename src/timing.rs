@@ -32,6 +32,9 @@
 //! - `rename`: a key that changed Batch Rename's rule, to the frame showing the preview for it,
 //!   with `items=N`, `same_frame=1` when it was worked out inside the key (small batches) rather
 //!   than on a worker, and `regex=1` in regex mode.
+//! - `thumb-first` and `thumb-screen`: As Icons, to the frame showing the first thumbnail, and to
+//!   the frame showing the last one the screen asked for (`thumbs=N` of them). A `key` line has
+//!   `thumbs=N` when N thumbnails were waiting or decoding as it was handled.
 //! - `first-listing`: only when the first folder was too slow for the first frame (the window
 //!   waits at most `app::FIRST_PAINT_WAIT` for it): from the top of `main` to the frame showing
 //!   it. `ARBOR_SLOW_FIRST_READ_MS=N` (read only when timing is on) slows that read by N ms to
@@ -55,7 +58,10 @@
 //! (in a large tree, so the walk streams for many frames), presses ↓ once a frame while it
 //! streams, and leaves with Esc once it's done. With `ARBOR_BENCH_RENAME=1` each round selects
 //! everything, opens Batch Rename (waiting for the folder's read), types `e`, turns on regex,
-//! types `$` (each waiting for its preview) and closes it with Esc. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
+//! types `$` (each waiting for its preview) and closes it with Esc. With `ARBOR_BENCH_GRID=1` the
+//! first step switches to the icon view (As Icons); then each round presses Page Down and ↓.
+//! `ARBOR_BENCH_GRID=2` (a folder of photos) waits after As Icons for the first screen's
+//! thumbnails, then pages while the next screens' stream in. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
 //! parent folder instead, then does N rounds of "previous tab (the start folder), next tab".
 //! A step starts only once the previous step's frame was drawn: a frame that wasn't (the window
 //! covered or not yet visible, no drawable in time) asks for nothing, and Rune draws again when
@@ -132,6 +138,17 @@ thread_local! {
     static JUMP_LANDED: Cell<Option<(Instant, bool, usize, bool)>> = const { Cell::new(None) };
     /// `ARBOR_BENCH_RENAME`: the bench selects everything, opens Batch Rename and types in it.
     static RENAME: Cell<bool> = const { Cell::new(false) };
+    /// `ARBOR_BENCH_GRID`: the bench switches to the icon view and pages through it; `=2` in a
+    /// folder of photos, whose first screen of thumbnails it waits for.
+    static GRID: Cell<bool> = const { Cell::new(false) };
+    static GRID_PHOTOS: Cell<bool> = const { Cell::new(false) };
+    /// As Icons asked for thumbnails: when, and whether the first one showed yet.
+    static TILE_ASKED: Cell<Option<(Instant, bool)>> = const { Cell::new(None) };
+    /// The first thumbnail, and the screen's last, land in the frame being built.
+    static TILE_FIRST: Cell<Option<Instant>> = const { Cell::new(None) };
+    static TILE_DONE: Cell<Option<(Instant, usize)>> = const { Cell::new(None) };
+    /// Thumbnails waiting or decoding when the handled key came.
+    static KEY_THUMBS: Cell<usize> = const { Cell::new(0) };
     /// A Batch Rename plan being worked out on a worker: the key that changed the rule.
     static RENAME_ASKED: Cell<Option<Instant>> = const { Cell::new(None) };
     /// A Batch Rename plan lands in the frame being built: its key, items, same frame, regex.
@@ -176,6 +193,8 @@ pub fn init() -> bool {
     JUMP.set(set("ARBOR_BENCH_JUMP"));
     SEARCH.set(set("ARBOR_BENCH_SEARCH"));
     RENAME.set(set("ARBOR_BENCH_RENAME"));
+    GRID.set(set("ARBOR_BENCH_GRID"));
+    GRID_PHOTOS.set(std::env::var("ARBOR_BENCH_GRID").is_ok_and(|v| v.trim() == "2"));
     PACE_MS.set(std::env::var("ARBOR_BENCH_PACE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0));
     let steps = if SEARCH.get() {
         rounds
@@ -185,7 +204,7 @@ pub fn init() -> bool {
         rounds * PREVIEW_STEPS
     } else if JUMP.get() {
         rounds * JUMP_STEPS
-    } else if TABS.get() {
+    } else if TABS.get() || GRID.get() {
         rounds * 2 + 1
     } else {
         rounds * 3
@@ -277,6 +296,7 @@ fn measured(s: &mut State, tx: &mut Tx, t: Instant, f: impl FnOnce(&mut State, &
     }
     if handled {
         KEY.set(Some(t));
+        KEY_THUMBS.set(s.cur().tiles.as_ref().map_or(0, crate::tiles::Tiles::waiting));
         KEY_PREVIEW.set(s.preview.is_some());
         KEY_SEARCH.set(searching(s));
         if s.preview_reads != reads {
@@ -318,6 +338,18 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     let jump_loads = s.history.loads;
     let plans = s.batch_plans;
     let mut changed = s.poll(tx);
+    if let Some((t, seen)) = TILE_ASKED.get()
+        && let Some(tiles) = s.cur().tiles.as_ref()
+    {
+        if !seen && !tiles.shown.is_empty() {
+            TILE_FIRST.set(Some(t));
+            TILE_ASKED.set(Some((t, true)));
+        }
+        if tiles.waiting() == 0 && !tiles.shown.is_empty() {
+            TILE_DONE.set(Some((t, tiles.shown.len())));
+            TILE_ASKED.set(None);
+        }
+    }
     if s.batch_plans != plans
         && let Some(b) = s.batch.as_ref().filter(|b| !b.stale())
         && let Some(t) = RENAME_ASKED.take()
@@ -445,6 +477,11 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
     if RENAME.get() && s.batch.as_ref().is_some_and(|b| !b.known() || b.stale()) {
         return false;
     }
+    // The grid bench lets the first screen's thumbnails land before paging (that's the
+    // time to the first thumbnail); later pages stream theirs while the keys go on.
+    if GRID_PHOTOS.get() && n == 1 && TILE_ASKED.get().is_some() {
+        return false;
+    }
     let now = Instant::now();
     if SEARCH.get() {
         let key = |k: Key| KeyEvent { key: k, mods: Mods::default() };
@@ -519,6 +556,22 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
         WAIT_PREVIEW.set(preview_step(s, tx, n, now));
         return true;
     }
+    if GRID.get() {
+        let key = |k: Key| KeyEvent { key: k, mods: Mods::default() };
+        match n {
+            0 => {
+                measured(s, tx, now, |s, tx| run(s, Cmd::AsIcons, tx));
+                TILE_ASKED.set(Some((now, false)));
+            }
+            n if n % 2 == 1 => {
+                keyed(s, &key(Key::PageDown), tx, now);
+            }
+            _ => {
+                keyed(s, &key(Key::Down), tx, now);
+            }
+        }
+        return true;
+    }
     if TABS.get() {
         match n {
             // A second tab on the parent folder.
@@ -569,6 +622,8 @@ struct Marked {
     search_first: Option<(Instant, usize)>,
     search_done: Option<(Instant, usize, u64, bool)>,
     rename: Option<(Instant, usize, bool, bool)>,
+    tile_first: Option<Instant>,
+    tile_done: Option<(Instant, usize)>,
 }
 
 /// What was marked since the last drawn frame, taken only if this frame was `drawn`. Rune runs
@@ -589,6 +644,8 @@ fn take_marked(drawn: bool) -> Option<Marked> {
         search_first: SEARCH_FIRST.take(),
         search_done: SEARCH_DONE.take(),
         rename: RENAME_LANDED.take(),
+        tile_first: TILE_FIRST.take(),
+        tile_done: TILE_DONE.take(),
     })
 }
 
@@ -596,7 +653,7 @@ fn take_marked(drawn: bool) -> Option<Marked> {
 pub fn frame(f: &FrameEncoded) {
     let drawn = f.outcome() == FrameOutcome::Drawn;
     let wake = shown(drawn);
-    let Some(Marked { key, landed, preview, jump, search_first, search_done, rename }) = take_marked(drawn) else {
+    let Some(Marked { key, landed, preview, jump, search_first, search_done, rename, tile_first, tile_done }) = take_marked(drawn) else {
         return;
     };
     let at = f.at();
@@ -623,11 +680,18 @@ pub fn frame(f: &FrameEncoded) {
     } else {
         if let Some(t) = key {
             eprintln!(
-                "arbor-timing key ms={:.2} {split} preview={} search={}",
+                "arbor-timing key ms={:.2} {split} preview={} search={} thumbs={}",
                 ms(t),
                 u8::from(KEY_PREVIEW.get()),
-                u8::from(KEY_SEARCH.get())
+                u8::from(KEY_SEARCH.get()),
+                KEY_THUMBS.get()
             );
+        }
+        if let Some(t) = tile_first {
+            eprintln!("arbor-timing thumb-first ms={:.2} {split}", ms(t));
+        }
+        if let Some((t, n)) = tile_done {
+            eprintln!("arbor-timing thumb-screen ms={:.2} thumbs={n} {split}", ms(t));
         }
         if let Some((t, found)) = search_first {
             eprintln!("arbor-timing search-first ms={:.2} found={found} {split}", ms(t));

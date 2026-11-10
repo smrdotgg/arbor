@@ -44,6 +44,7 @@ use crate::fs::{self, Entry};
 use crate::pattern::{Case, Glob};
 
 mod walk;
+pub(crate) use walk::background;
 
 pub use walk::*;
 
@@ -794,7 +795,8 @@ impl State {
     pub(crate) fn leave_search(&mut self, ix: usize, tx: &mut Tx) {
         let Some(s) = self.panes[ix].f.search.take() else { return };
         let focused = s.edit.focused;
-        let memo = s.memo.clone();
+        // The view it has now, which may have changed during the search.
+        let memo = TabMemo { view: self.panes[ix].f.view, ..s.memo.clone() };
         drop(s);
         if focused && ix == self.active {
             tx.blur();

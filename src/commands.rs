@@ -155,6 +155,10 @@ commands! {
     SortReverse "view.sort_reverse" "Reverse Sort Order", [];
     TogglePreview "view.preview" "Quick Preview (Toggle)", ["space"];
     ClosePreview "view.close_preview" "Close Preview", [];
+    AsList "view.as_list" "As List", ["cmd+alt+1"];
+    AsIcons "view.as_icons" "As Icons", ["cmd+alt+2"];
+    LargerIcons "view.larger_icons" "Larger Icons", ["cmd+plus", "cmd+equal"];
+    SmallerIcons "view.smaller_icons" "Smaller Icons", ["cmd+minus"];
 
     NewTab "tab.new" "New Tab", ["cmd+t"];
     CloseTab "tab.close" "Close Tab", ["cmd+w"];

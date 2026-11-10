@@ -11,6 +11,7 @@
 mod a11y_tests;
 mod actions;
 mod app;
+mod band;
 mod batch;
 mod bounded;
 mod commands;
@@ -25,6 +26,7 @@ mod folder;
 #[cfg(test)]
 mod frame_bench;
 mod fs;
+mod grid;
 mod handler;
 mod incoming;
 mod info;
@@ -48,6 +50,7 @@ mod search;
 mod select;
 mod sidebar;
 mod thumb;
+mod tiles;
 mod timing;
 mod trash;
 mod view;

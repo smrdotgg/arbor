@@ -62,6 +62,8 @@ pub struct TabMemo {
     /// It was showing a search for this: showing the tab again searches again (nothing of
     /// the results is kept).
     pub search: Option<String>,
+    /// List or icons.
+    pub view: crate::grid::ViewMode,
 }
 
 /// A finished read, tagged with the request that asked for it and the sort it was sorted by.
@@ -132,6 +134,17 @@ pub struct Folder {
     /// A search of this folder, while it's on screen (`search.rs`): `entries` are its results,
     /// each `os` a path relative to `cwd`. Dropping it stops its walk.
     pub search: Option<Box<crate::search::Search>>,
+    /// List or icons (this tab's; `TabMemo::view` while it's hidden).
+    pub view: crate::grid::ViewMode,
+    /// The icon view's columns as last laid out, written by the view, for the arrows' 2-D moves
+    /// and for revealing the cursor's row (geometry, not file data).
+    pub(crate) grid_cols: Rc<Cell<usize>>,
+    /// The list's width as last laid out, written by the view: how many columns a new icon
+    /// size or a switch to the icon view gives, before it's drawn.
+    pub(crate) list_w: Rc<Cell<f32>>,
+    /// The icon view's thumbnails for the cells on screen (`tiles.rs`). Dropping it cancels
+    /// what's still being decoded.
+    pub tiles: Option<crate::tiles::Tiles>,
 }
 
 impl Drop for Folder {
@@ -170,6 +183,10 @@ impl Folder {
             scroll: Rc::new(Cell::new(0.0)),
             stop: Arc::default(),
             search: None,
+            view: crate::grid::ViewMode::List,
+            grid_cols: Rc::new(Cell::new(1)),
+            list_w: Rc::new(Cell::new(0.0)),
+            tiles: None,
         }
     }
 
@@ -251,8 +268,9 @@ impl Folder {
 
     /// Asks for a fresh read of `path`; it lands in `State::poll` (a newer request wins).
     pub(crate) fn request(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, rename: bool) {
-        // Going anywhere ends a search (its walk stops).
+        // Going anywhere ends a search (its walk stops), and the thumbnails being decoded.
         self.search = None;
+        self.tiles = None;
         let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
         let picks = self.picks;
         self.pending = Some(Pending { req, path: path.clone(), nav, select, rename, scroll: 0.0, picks });
@@ -272,7 +290,7 @@ impl Folder {
     pub fn memo(&self) -> TabMemo {
         // Searching: the plain listing's state, and the query to search for again.
         if let Some(s) = &self.search {
-            return TabMemo { search: Some(s.edit.text.clone()).filter(|q| !q.trim().is_empty()), ..s.memo.clone() };
+            return TabMemo { search: Some(s.edit.text.clone()).filter(|q| !q.trim().is_empty()), view: self.view, ..s.memo.clone() };
         }
         // On its way somewhere (a folder opened, a request from another app) when it's hidden:
         // keep where it's going and what it was going to select, with the history as landing
@@ -307,6 +325,7 @@ impl Folder {
                 sort: self.sort,
                 sort_set: self.sort_set,
                 search: None,
+                view: self.view,
             };
         }
         // Hidden again before its read landed: keep what it was going to restore.
@@ -321,6 +340,7 @@ impl Folder {
                 sort: self.sort,
                 sort_set: self.sort_set,
                 search: None,
+                view: self.view,
             };
         }
         let cursor = self.cursor_name();
@@ -339,6 +359,7 @@ impl Folder {
             sort: self.sort,
             sort_set: self.sort_set,
             search: None,
+            view: self.view,
         }
     }
 
@@ -348,6 +369,7 @@ impl Folder {
         // The tab that was here is hidden now: its read or search, if any, stops.
         self.stop_read();
         self.search = None;
+        self.tiles = None;
         self.entries = Vec::new();
         self.visible.clear();
         self.marked.clear();
@@ -362,6 +384,7 @@ impl Folder {
         self.filter = m.filter;
         self.sort = m.sort;
         self.sort_set = m.sort_set;
+        self.view = m.view;
         self.scroll.set(m.scroll);
         self.pending = Some(Pending {
             req: next_request(),
@@ -379,6 +402,7 @@ impl Folder {
     pub fn same_as(id: u64, other: &Folder, waker: Option<rune::Waker>) -> Folder {
         let mut f = Folder::new(id, other.cwd.clone(), other.sort, other.show_hidden, waker);
         f.sort_set = other.sort_set;
+        f.view = other.view;
         f.dir_id = other.dir_id;
         // A search's results stay its own: the new pane reads the folder.
         if other.is_loading() || other.searching() {
@@ -542,9 +566,39 @@ impl Folder {
     }
 
     pub fn reveal(&self, tx: &mut Tx) {
+        if self.view == crate::grid::ViewMode::Icons {
+            // The grid's rows are keyed by their first item.
+            let cols = self.grid_cols.get().max(1);
+            if let Some(&e) = self.visible.get(self.sel / cols * cols) {
+                tx.scroll_into_view_in(self.rows_key(), self.entries[e as usize].key.clone());
+            }
+            return;
+        }
         if let Some(e) = self.selected() {
             tx.scroll_into_view_in(self.rows_key(), e.key.clone());
         }
+    }
+
+    /// The icon view at `size` is about to show: its columns from the list's width, so the
+    /// cursor's row can be revealed in this frame.
+    pub(crate) fn regrid(&self, size: crate::grid::IconSize) {
+        if self.list_w.get() > 0.0 {
+            self.grid_cols.set(crate::grid::Geom::new(size, self.list_w.get()).cols);
+        }
+    }
+
+    /// An arrow in the icon view: `dx` items along, or `dy` rows up or down (`grid::step`).
+    pub fn step_grid(&mut self, dx: isize, dy: isize, extend: bool, tx: &mut Tx) {
+        if self.visible.is_empty() {
+            return;
+        }
+        let to = crate::grid::step(self.sel, self.grid_cols.get(), self.visible.len(), dx, dy);
+        if extend {
+            self.extend_to(to);
+        } else {
+            self.select(to);
+        }
+        self.reveal(tx);
     }
 
     /// The item `old` is being renamed `new` on the worker: its row shows the new name at once,

@@ -310,7 +310,7 @@ pub(super) fn work(s: &Shared) {
 /// Puts the calling thread below the window's priority: CPU, and the disk where the platform
 /// has a per-thread setting. A big walk on a small machine then slows its own results, not the
 /// window (or other apps).
-pub(super) fn background() {
+pub(crate) fn background() {
     #[cfg(target_os = "linux")]
     // SAFETY: plain syscalls on the calling thread, with constant arguments.
     unsafe {

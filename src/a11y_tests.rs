@@ -683,3 +683,433 @@ fn shift_and_the_wheel_scroll_the_text_preview_sideways() {
     assert!(at[0] == 50.0 && at[1] > 0.0, "{at:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ---- Drag-select (the real app's runtime) -----------------------------------------------------
+
+/// A folder of `n` files `f00`…, for drag-select.
+fn many(name: &str, n: usize) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("arbor-band-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    for i in 0..n {
+        std::fs::write(d.join(format!("f{i:02}.txt")), "x").unwrap();
+    }
+    d
+}
+
+/// The laid-out rect of the element keyed `key`, if it's there.
+fn rect_of(rt: &Runtime<State>, key: &str) -> Option<[f32; 4]> {
+    rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).map(|e| e.rect)
+}
+
+/// The names selected in the active pane.
+fn picked(rt: &Runtime<State>) -> Vec<String> {
+    let f = rt.state.cur();
+    (0..f.visible.len()).filter(|&i| f.is_selected(i)).map(|i| f.entries[f.visible[i] as usize].name.clone()).collect()
+}
+
+/// The row named `name`'s bounds (x, y, w, h).
+fn row_box(rt: &mut Runtime<State>, name: &str) -> [f32; 4] {
+    let tree = rt.accessibility_json();
+    let row = find_by(&tree, &|v| v["role"] == "list-box-option" && v["name"].as_str().is_some_and(|n| n.starts_with(name)))
+        .unwrap_or_else(|| panic!("a row named {name}"));
+    let b: Vec<f32> = row["bounds"].as_array().expect("bounds").iter().map(|x| x.as_f64().unwrap() as f32).collect();
+    [b[0], b[1], b[2], b[3]]
+}
+
+/// Presses at `from`, moves through `path` (a frame after each), and lets go at the last point.
+fn drag_through(rt: &mut Runtime<State>, from: (f32, f32), path: &[(f32, f32)]) {
+    rt.pointer_move(from.0, from.1);
+    rt.pointer_down(from.0, from.1);
+    rt.frame(0.0);
+    for &(x, y) in path {
+        rt.pointer_move(x, y);
+        rt.frame(0.0);
+    }
+    let end = path.last().copied().unwrap_or(from);
+    rt.pointer_up(end.0, end.1);
+    rt.frame(0.0);
+    rt.frame(0.0);
+}
+
+fn names(r: std::ops::RangeInclusive<usize>) -> Vec<String> {
+    r.map(|i| format!("f{i:02}.txt")).collect()
+}
+
+/// A press on an unselected row's empty part (its Date cell), dragged down over four rows,
+/// selects them live and draws the rectangle; letting go keeps them (the release isn't a click
+/// that selects one row). From the empty space below the rows, dragged up, the same.
+#[test]
+fn a_rectangle_from_empty_space_selects_the_rows_it_touches() {
+    let d = many("list", 12);
+    let mut rt = runtime(&d);
+    let a = row_box(&mut rt, "f03");
+    let start = (a[0] + a[2] - 30.0, a[1] + a[3] * 0.5);
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.frame(0.0);
+    for k in 1..=4 {
+        rt.pointer_move(start.0 - 10.0 * k as f32, start.1 + a[3] * k as f32);
+        rt.frame(0.0);
+    }
+    assert_eq!(picked(&rt), names(3..=7), "live, as it moves");
+    let band = rect_of(&rt, "band").expect("the rectangle is drawn");
+    assert!(band[3] >= a[3] * 4.0 - 1.0 && band[1] <= start.1, "{band:?}");
+    assert_eq!(rt.state.cur().selected().map(|e| e.name.as_str()), Some("f07.txt"), "the cursor at the pointer's end");
+    rt.pointer_up(start.0 - 40.0, start.1 + a[3] * 4.0);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(picked(&rt), names(3..=7), "the release keeps them");
+    assert!(rect_of(&rt, "band").is_none(), "no rectangle after");
+    // A click (no move) on a row's empty part selects that row, as before.
+    let b = row_box(&mut rt, "f09");
+    drag_through(&mut rt, (b[0] + b[2] - 30.0, b[1] + b[3] * 0.5), &[]);
+    assert_eq!(picked(&rt), names(9..=9));
+    // Below the last row, dragged up to f10.
+    let last = row_box(&mut rt, "f11");
+    let below = (last[0] + 200.0, last[1] + last[3] * 3.0);
+    let up = row_box(&mut rt, "f10");
+    drag_through(&mut rt, below, &[(below.0, below.1 - 20.0), (below.0 - 50.0, up[1] + 5.0)]);
+    assert_eq!(picked(&rt), names(10..=11));
+    // A click below the rows clears a multiple selection (the cursor stays).
+    drag_through(&mut rt, below, &[]);
+    assert!(rt.state.cur().marked.is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// ⇧ adds the rows touched to the selection the press started with; ⌘ (Ctrl) toggles them.
+#[test]
+fn shift_adds_and_cmd_toggles() {
+    let d = many("mods", 12);
+    let mut rt = runtime(&d);
+    rt.update(|s, _| {
+        s.cur_mut().select(0);
+        s.cur_mut().toggle_mark(4);
+    });
+    rt.frame(0.0);
+    assert_eq!(picked(&rt), ["f00.txt", "f04.txt"]);
+    let a = row_box(&mut rt, "f05");
+    let start = (a[0] + a[2] - 30.0, a[1] + a[3] * 0.5);
+    let mods = |shift, cmd| rune::PhysicalInput::Modifiers(Mods { shift, cmd, ctrl: cmd && !cfg!(target_os = "macos"), ..Mods::default() });
+    rt.physical_input(mods(true, false));
+    drag_through(&mut rt, start, &[(start.0, start.1 + 10.0), (start.0, start.1 + a[3])]);
+    assert_eq!(picked(&rt), ["f00.txt", "f04.txt", "f05.txt", "f06.txt"]);
+    // ⌘ from f04's row (selected, so its empty part drags files: start just below, in f07)
+    // over f06 and f07: f06 goes, f07 joins.
+    let b = row_box(&mut rt, "f07");
+    let start = (b[0] + b[2] - 30.0, b[1] + b[3] * 0.5);
+    rt.physical_input(mods(false, true));
+    drag_through(&mut rt, start, &[(start.0, start.1 - 10.0), (start.0, start.1 - b[3])]);
+    rt.physical_input(mods(false, false));
+    assert_eq!(picked(&rt), ["f00.txt", "f04.txt", "f05.txt", "f07.txt"]);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Dragged below the list's bottom edge, it scrolls a step on each move and keeps selecting
+/// what scrolls into it (rows that were never built: hits come from geometry).
+#[test]
+fn past_the_edge_it_scrolls_on_each_move() {
+    let d = many("scroll", 80);
+    let mut rt = runtime(&d);
+    let a = row_box(&mut rt, "f02");
+    let start = (a[0] + a[2] - 30.0, a[1] + a[3] * 0.5);
+    let list = rect_of(&rt, "list-0").unwrap();
+    let outside = list[1] + list[3] + 60.0;
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.frame(0.0);
+    let mut path = vec![(start.0, start.1 + 20.0)];
+    // Twenty moves out past the bottom edge (a pixel apart: still the same distance out).
+    path.extend((0..20).map(|k| (start.0 + k as f32, outside)));
+    for &(x, y) in &path {
+        rt.pointer_move(x, y);
+        rt.frame(0.0);
+    }
+    let scrolled = rt.state.cur().scroll.get();
+    assert!(scrolled > 400.0, "20 moves × 30 pt: {scrolled}");
+    let got = picked(&rt);
+    assert_eq!(got.first().map(String::as_str), Some("f02.txt"));
+    let last: usize = got.last().unwrap()[1..3].parse().unwrap();
+    assert!(last > 40 && got.len() == last - 1, "contiguous, down past the rows first built: {got:?}");
+    // Holding still sends nothing, so nothing scrolls (no timer).
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cur().scroll.get(), scrolled);
+    rt.pointer_up(path.last().unwrap().0, outside);
+    rt.frame(0.0);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Pressing on an unselected row's name, or anywhere on a selected row, and dragging, is a file
+/// drag, never a rectangle; and a file drag nothing took still leaves the keys working.
+#[test]
+fn names_and_selected_rows_still_drag_files() {
+    let d = many("files", 12);
+    let mut rt = runtime(&d);
+    let a = row_box(&mut rt, "f04");
+    // The name's text starts about 22 pt in (padding and the glyph).
+    let on_name = (a[0] + 30.0, a[1] + a[3] * 0.5);
+    rt.pointer_move(on_name.0, on_name.1);
+    rt.pointer_down(on_name.0, on_name.1);
+    rt.frame(0.0);
+    rt.pointer_move(on_name.0 + 3.0, on_name.1 + 30.0);
+    rt.frame(0.0);
+    rt.pointer_move(on_name.0 + 5.0, on_name.1 + 60.0);
+    rt.frame(0.0);
+    assert!(rt.state.band.is_none() && rect_of(&rt, "band").is_none(), "a file drag, not a rectangle");
+    rt.pointer_up(on_name.0 + 5.0, on_name.1 + 60.0);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    // Select f06, then drag it from its empty part: still a file drag.
+    let b = row_box(&mut rt, "f06");
+    let empty = (b[0] + b[2] - 30.0, b[1] + b[3] * 0.5);
+    drag_through(&mut rt, empty, &[]);
+    assert_eq!(picked(&rt), names(6..=6));
+    rt.pointer_move(empty.0, empty.1);
+    rt.pointer_down(empty.0, empty.1);
+    rt.frame(0.0);
+    rt.pointer_move(empty.0, empty.1 + 40.0);
+    rt.frame(0.0);
+    assert!(rt.state.band.is_none(), "a selected row drags its files");
+    rt.pointer_move(empty.0, empty.1 + 70.0);
+    rt.pointer_up(empty.0, empty.1 + 70.0);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(picked(&rt), names(6..=6), "the selection is left alone");
+    key(&mut rt, Key::Function(2), false);
+    assert!(rt.state.rename.is_some(), "keys work right after");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ---- The icon view (the real app's runtime) ---------------------------------------------------
+
+/// Switches the active tab to the icon view and lets it lay out.
+fn icons(rt: &mut Runtime<State>) {
+    run(rt, Cmd::AsIcons);
+    rt.frame(0.0);
+    rt.frame(0.0);
+}
+
+/// The grid's cells are options of the list box, named by their names, each with its place in
+/// the folder (rows are virtual, so Rune can't count them), the selected one selected; ↓ moves a
+/// row, → a cell, and the list's active descendant follows.
+#[test]
+fn the_grid_is_a_list_box_of_named_options() {
+    let d = many("grid-tree", 10);
+    let mut rt = runtime(&d);
+    icons(&mut rt);
+    let tree = rt.accessibility_json();
+    let list = find(&tree, "list-0").expect("the list");
+    println!("{}", outline(list));
+    assert_eq!(list["role"], "list-box");
+    let mut opts = Vec::new();
+    all(list, "list-box-option", &mut opts);
+    assert_eq!(opts.len(), 10, "{}", outline(list));
+    assert_eq!(opts[2]["name"], "f02.txt");
+    assert_eq!(opts[2]["position"].as_u64(), Some(3));
+    assert_eq!(find(list, "rows-0").unwrap()["setSize"].as_u64(), Some(10), "the items, not the grid's rows");
+    assert!(states(opts[0]).contains(&"selected") && !states(opts[1]).contains(&"selected"));
+    let cols = rt.state.cur().grid_cols.get();
+    assert!(cols >= 4, "a 980 pt window holds several columns: {cols}");
+    key(&mut rt, Key::Down, false);
+    assert_eq!(rt.state.cur().sel, cols, "↓ moves a row");
+    key(&mut rt, Key::Right, false);
+    assert_eq!(rt.state.cur().sel, cols + 1, "→ moves a cell (not into the folder)");
+    key(&mut rt, Key::Left, true);
+    assert_eq!(picked(&rt), names(cols..=cols + 1), "⇧← extends");
+    key(&mut rt, Key::Up, false);
+    assert_eq!(rt.state.cur().sel, 0);
+    let tree = rt.accessibility_json();
+    assert!(find(&tree, "list-0").unwrap()["activeDescendant"].as_str().is_some_and(|a| a.ends_with("f:f00.txt")));
+    // Typing filters, F2 renames under the icon, Esc leaves the rename.
+    rt.key(KeyEvent { key: Key::Text("f05".into()), mods: Mods::default() });
+    rt.frame(0.0);
+    assert_eq!(rt.state.cur().visible.len(), 1);
+    key(&mut rt, Key::Function(2), false);
+    assert!(rt.state.rename.is_some() && rect_of(&rt, "rename").is_some(), "the rename field is in the cell");
+    for _ in 0..3 {
+        if rt.state.rename.is_some() {
+            key(&mut rt, Key::Escape, false);
+        }
+    }
+    assert!(rt.state.rename.is_none());
+    key(&mut rt, Key::Escape, false);
+    assert_eq!(rt.state.cur().visible.len(), 10, "Esc clears the filter");
+    let tree = rt.accessibility_json();
+    // The view switch in the path bar: radio buttons, the tab's own checked.
+    let icons_button = find(&tree, "view-icons").unwrap();
+    assert_eq!((icons_button["role"].as_str(), icons_button["name"].as_str()), (Some("radio-button"), Some("As Icons")));
+    assert!(states(icons_button).contains(&"checked") && !states(find(&tree, "view-list").unwrap()).contains(&"checked"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The view is the tab's: a new tab gets the default (`view.default`), and showing a tab again
+/// brings its own back. Icon sizes change with ⌘+ and ⌘- and only in the icon view.
+#[test]
+fn the_view_is_remembered_per_tab_and_new_tabs_take_the_default() {
+    use crate::grid::{IconSize, ViewMode};
+    let d = many("grid-tabs", 4);
+    let mut rt = runtime(&d);
+    assert_eq!(rt.state.unavailable(Cmd::LargerIcons), Some("Icon sizes are for the icon view (As Icons)"));
+    icons(&mut rt);
+    run(&mut rt, Cmd::NewTab);
+    assert_eq!(rt.state.cur().view, ViewMode::List, "a new tab takes the default");
+    run(&mut rt, Cmd::PrevTab);
+    assert_eq!(rt.state.cur().view, ViewMode::Icons, "the first tab kept its own");
+    assert_eq!(rt.state.panes[0].tabs[1].as_ref().map(|m| m.view), Some(ViewMode::List), "in the hidden tab's memo");
+    rt.update(|s, _| s.settings.view_default = ViewMode::Icons);
+    run(&mut rt, Cmd::NewTab);
+    assert_eq!(rt.state.cur().view, ViewMode::Icons, "view.default = \"icons\"");
+    // ⌘+ and ⌘-, the columns for the new size known at once (to reveal the cursor's row).
+    assert_eq!(rt.state.icon_size, IconSize::Medium);
+    let medium = rt.state.cur().grid_cols.get();
+    run(&mut rt, Cmd::LargerIcons);
+    assert_eq!(rt.state.icon_size, IconSize::Large);
+    assert!(rt.state.cur().grid_cols.get() < medium, "fewer, larger columns");
+    assert!(rt.state.unavailable(Cmd::LargerIcons).is_some(), "as large as they go");
+    run(&mut rt, Cmd::SmallerIcons);
+    run(&mut rt, Cmd::SmallerIcons);
+    assert_eq!(rt.state.icon_size, IconSize::Small);
+    // A search keeps the view it has when it ends.
+    run(&mut rt, Cmd::AsList);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A rectangle in the grid's gutter selects the cells it touches, from geometry.
+#[test]
+fn a_rectangle_in_the_grid_selects_cells() {
+    let d = many("grid-band", 20);
+    let mut rt = runtime(&d);
+    icons(&mut rt);
+    let cols = rt.state.cur().grid_cols.get();
+    let list = rect_of(&rt, "list-0").unwrap();
+    let g = crate::grid::Geom { cols, cell: crate::grid::IconSize::Medium.cell() };
+    // From the gutter left of cell 1 (row 0) to the middle of cell cols + 2 (row 1).
+    let a = g.item_rect(1);
+    let b = g.item_rect(cols + 2);
+    let from = (list[0] + a[0] - 3.0, list[1] + a[1] + 10.0);
+    let to = (list[0] + b[0] + b[2] * 0.5, list[1] + b[1] + b[3] * 0.5);
+    drag_through(&mut rt, from, &[(from.0 + 4.0, from.1 + 8.0), to]);
+    let want: Vec<String> = [1, 2, cols + 1, cols + 2].iter().map(|i| format!("f{i:02}.txt")).collect();
+    assert_eq!(picked(&rt), want);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ---- Thumbnails --------------------------------------------------------------------------------
+
+/// A folder of `n` "images" decoded by the test stand-in (`tiles::hook`).
+fn images(name: &str, n: usize) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("arbor-tiles-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    for i in 0..n {
+        std::fs::write(d.join(format!("i{i:03}.png")), "px").unwrap();
+    }
+    crate::tiles::hook::FAKE_IN.lock().unwrap().push(d.clone());
+    d
+}
+
+fn seen_in(d: &Path) -> Vec<PathBuf> {
+    crate::tiles::hook::SEEN.lock().unwrap().iter().filter(|p| p.starts_with(d)).cloned().collect()
+}
+
+/// Frames until `done` or 5 s.
+fn until(rt: &mut Runtime<State>, done: impl Fn(&State) -> bool) {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !done(&rt.state) && std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        rt.frame(0.0);
+    }
+}
+
+/// Only the cells on screen are thumbnailed, by at most two workers; cells show their icon
+/// until theirs lands. The list view, and a folder with nothing to thumbnail, start no workers.
+#[test]
+fn only_visible_cells_are_thumbnailed() {
+    let d = images("visible", 300);
+    let mut rt = runtime(&d);
+    rt.frame(0.0);
+    assert!(rt.state.tile_pool.is_none(), "the list view decodes nothing");
+    icons(&mut rt);
+    let items = rt.state.cur().tiles.as_ref().expect("the grid asked").items.clone();
+    assert!(items.start == 0 && items.end > 6 && items.end < 60, "the cells on screen: {items:?}");
+    until(&mut rt, |s| s.cur().tiles.as_ref().is_some_and(|t| t.shown.len() == items.len()));
+    let t = rt.state.cur().tiles.as_ref().unwrap();
+    assert_eq!(t.shown.len(), items.len(), "each visible cell's thumbnail landed");
+    let seen = seen_in(&d);
+    assert_eq!(seen.len(), items.len(), "nothing off screen was decoded");
+    assert!(seen.iter().all(|p| p.file_name().unwrap().to_str().unwrap()[1..4].parse::<usize>().unwrap() < items.end));
+    let (waiting, running, most, _) = rt.state.tile_pool.as_ref().unwrap().stats();
+    assert_eq!((waiting, running), (0, 0), "finished and stopped");
+    assert!(most <= crate::tiles::WORKERS, "at most {} at once: {most}", crate::tiles::WORKERS);
+    // Back to the list: the thumbnails go.
+    run(&mut rt, Cmd::AsList);
+    assert!(rt.state.cur().tiles.is_none());
+    // A folder without images: no requests.
+    let plain = many("no-images", 30);
+    rt.update(move |s, _| s.go(plain, crate::app::Nav::New, None));
+    until(&mut rt, |s| !s.cur().is_loading());
+    icons(&mut rt);
+    assert!(rt.state.cur().tiles.is_none(), "nothing to thumbnail, nothing kept");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Scrolling away cancels what's waiting or being decoded for the cells that left (a decode
+/// held at its start sees its stop flag) and drops the thumbnails they had; scrolling back
+/// decodes them again (nothing kept). Leaving the folder drops everything.
+#[test]
+fn scrolling_cancels_and_drops_what_left_the_screen() {
+    let d = images("scroll", 400);
+    // The first two cells' decodes wait at a gate that's never opened: only a stop ends them.
+    let mut gates = Vec::new();
+    for i in 0..2 {
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        crate::tiles::hook::GATES.lock().unwrap().push((d.join(format!("i{i:03}.png")), wait));
+        gates.push(go);
+    }
+    let mut rt = runtime(&d);
+    icons(&mut rt);
+    let first = rt.state.cur().tiles.as_ref().unwrap().items.clone();
+    // Both workers are held: everything else on screen waits in the queue.
+    until(&mut rt, |s| s.tile_pool.as_ref().is_some_and(|p| p.stats().1 == 2));
+    let (waiting, ..) = rt.state.tile_pool.as_ref().unwrap().stats();
+    assert_eq!(waiting, first.len() - 2);
+    // Scroll far down.
+    let list = rect_of(&rt, "list-0").unwrap();
+    for _ in 0..6 {
+        rt.wheel(list[0] + 100.0, list[1] + 100.0, -1500.0);
+        rt.frame(0.0);
+    }
+    rt.frame(0.0);
+    let now = rt.state.cur().tiles.as_ref().unwrap().items.clone();
+    assert!(now.start > first.end, "{first:?} → {now:?}");
+    until(&mut rt, |s| s.tile_pool.as_ref().is_some_and(|p| p.stats().1 == 0 && p.stats().0 == 0));
+    until(&mut rt, |s| s.cur().tiles.as_ref().is_some_and(|t| t.shown.len() == now.len()));
+    let t = rt.state.cur().tiles.as_ref().unwrap();
+    assert!(t.shown.len() == now.len() && t.waiting() == 0);
+    let seen = seen_in(&d);
+    let idx = |p: &PathBuf| p.file_name().unwrap().to_str().unwrap()[1..4].parse::<usize>().unwrap();
+    // The first screen's queued cells never started: only the two held ones, then the new ones.
+    assert_eq!(seen.iter().filter(|p| idx(p) < first.end).count(), 2, "{seen:?}");
+    assert!(
+        t.shown.keys().all(|k| {
+            let i: usize = k.to_str().unwrap()[1..4].parse().unwrap();
+            now.contains(&i)
+        }),
+        "only what's on screen is kept"
+    );
+    drop(gates);
+    // Back to the top: decoded again.
+    for _ in 0..12 {
+        rt.wheel(list[0] + 100.0, list[1] + 100.0, 1500.0);
+        rt.frame(0.0);
+    }
+    until(&mut rt, |s| s.cur().tiles.as_ref().is_some_and(|t| t.shown.len() == first.len()));
+    let again = seen_in(&d).into_iter().filter(|p| idx(p) >= 2 && idx(p) < first.end).count();
+    assert_eq!(again, first.len() - 2, "scrolling back decodes again");
+    // Leaving the folder drops it all.
+    let parent = d.parent().unwrap().to_path_buf();
+    rt.update(move |s, _| s.go(parent, crate::app::Nav::New, None));
+    assert!(rt.state.cur().tiles.is_none());
+    let _ = std::fs::remove_dir_all(&d);
+}

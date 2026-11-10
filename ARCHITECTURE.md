@@ -38,13 +38,15 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `search/` | Recursive search: the walk and its threads (`walk.rs`), results and rechecks (`mod.rs`) |
 | | `jump/` | Jump to Folder: frecency and ranking, the history and its writer, the box |
 | | `select.rs`, `pattern.rs` | Select by Pattern and other selection commands; globs |
+| | `band.rs` | Drag-select: the selection rectangle, its hits from layout geometry, its edge scrolling |
+| | `grid.rs`, `tiles.rs` | The icon view: view modes, icon sizes and cell geometry; thumbnails for the cells on screen and their workers |
 | | `batch.rs`, `rename.rs` | Batch Rename's dialog; its rules (pure functions) |
 | | `complete.rs` | Tab completion in go-to mode |
 | | `info.rs`, `openwith/` | Get Info (and its streaming total); Open With (per platform, `xdg.rs`) |
 | | `sidebar.rs`, `volumes.rs` | Favorites and their file; Locations and Eject |
 | Platform glue | `handler/` | Making Arbor the default for folders, and restoring (`linux.rs`, `windows.rs`, `mac.rs`) |
 | | `incoming/` | Folders other apps send (`mac.rs` Apple events, `linux.rs` D-Bus, `windows.rs` a pipe) |
-| UI | `view/` | Every element: root and status bar (`mod.rs`), `sidebar`, `pane` (path bar, tabs), `list`, `panels`, `overlays`, `batch` |
+| UI | `view/` | Every element: root and status bar (`mod.rs`), `sidebar`, `pane` (path bar, tabs, view switch), `list` (rows, item presses and drags, the selection rectangle), `grid` (the icon view, type icons), `panels`, `overlays`, `batch` |
 | Shared | `bounded.rs`, `persist.rs`, `mounts.rs`, `dirfd.rs`, `ffi.rs`, `fs.rs` | See [Patterns](#patterns-to-reuse); folder reads, sorting, formatting |
 | Tooling | `timing.rs` | Opt-in speed logs (`ARBOR_TIMING`, the bench) |
 | Tests only | `a11y_tests.rs`, `frame_bench.rs`, `packaging_tests.rs`, `prop.rs` | Accessibility tree, per-key cost, install scripts, seeded property tests (a PRNG and a runner) |
@@ -62,6 +64,11 @@ Nothing runs in the background unless the user did something, and nothing polls.
   lists, eject, launching apps. An older answer never lands over a newer one.
 - **Preview worker** (`arbor-preview`, `preview::Worker`): one thread, started by the first
   preview; one job at a time, at most one waiting; a stop flag checked between reads and rows.
+- **Thumbnail workers** (`arbor-thumb-0`, `-1`, `tiles::Pool`): two threads, started by the
+  first icon view with an image (or, on macOS and Windows, a document) on screen; one decode
+  each from a shared queue. Rune's `on_visible_rows` says which grid rows are on screen; cells
+  that leave have their requests taken out of the queue or stopped (a flag per request, the
+  workers' bells rung for an OS wait). Idle between grids.
 - **Search pool** (`search::Pool`): up to four walker threads, started by the first search,
   below the window's priority, sharing one queue and a stop flag per walk.
 - **Writers**: `arbor-history` (`jump::history`: appends, load, compaction, clear, under a

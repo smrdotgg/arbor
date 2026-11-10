@@ -192,7 +192,9 @@ tab switch to that folder, and `--preview N` adds N runs timing the quick previe
 text file and a 12 MP JPEG from Space to the frame showing it, and keys while it's open, and
 `--search N` adds N runs searching a 120,000-file tree: the key to the first results and to the
 end of the walk, and keys pressed while results stream in, and `--rename N` adds N runs typing
-in Batch Rename over 10,000 items: each key to the frame showing its preview; `--pace MS` spaces
+in Batch Rename over 10,000 items: each key to the frame showing its preview, and `--grid N` adds
+N runs paging the icon view of the 10k folder and N in a folder of 1,000 photos: each key, and
+the time to the first thumbnail and to a screenful; `--pace MS` spaces
 the steps as a person types and `--gap MS` idles between cold starts, since a cooled CPU is
 several times slower than a busy one: report both). It opens and closes windows, so leave the machine alone
 while it runs. `cargo test --release -- --ignored --nocapture list_10k` times reading and
@@ -235,6 +237,35 @@ letter move, Enter or Space runs, Esc or a click outside closes; see `RUNE-GAPS.
 out to Finder or other apps (macOS). A row let go where nothing takes it (a folder row in the same
 window, one pane) says how to move it instead: ⌘X, ⌘V, or split view. Drop files on a folder row
 or on the list: same disk moves, another disk copies, and ⌥ forces a copy.
+
+### Views and drag-select
+
+Each tab shows its folder **as a list** (rows with Kind, Size and Modified columns) or **as
+icons** (a grid of icons with names under them): **⌥⌘1** and **⌥⌘2** (Ctrl+Alt+1 and 2 off
+macOS), "As List" and "As Icons" in the palette, or the two buttons at the right of the path bar.
+The tab remembers its view while it's hidden; new tabs (and the second pane of a split) start
+with `view.default` from the settings. In the icon view **⌘+** and **⌘-** make the icons larger
+or smaller (small, medium, large; one size for the window, starting at `view.icon_size`), the
+arrows move by cell and row (⌘↑ and ⌘↓ still go up and open, ⇧ extends), and everything else is
+the list's: typing filters, F2 renames under the icon, Space previews, ⌘I, the context menu,
+drags and drops. Column headers aren't shown in the icon view; the Sort commands still work.
+
+Images (PNG, JPEG, GIF, WebP, BMP) show **thumbnails** in the icon view, decoded by the quick
+preview's own decoders (with its size limits) and shrunk to the icon; on macOS (Quick Look) and
+Windows (what the shell has cached) documents, video and other formats get the system's
+thumbnail too. Cells show a type icon at once; thumbnails fill in for the cells on screen only,
+two at a time, and scrolling past or leaving cancels the rest. Nothing is kept: a thumbnail goes
+when its cell leaves the screen, and scrolling back decodes it again.
+
+**Drag-select:** press in empty space and drag to draw a selection rectangle; everything it
+touches is selected as it moves. Empty space is the room after an unselected row's name (its
+Kind, Size and Date cells too, and its ▸), the space below the rows, and the gutters between
+icons. A press
+on a name or icon, or anywhere on a row that's already selected, still acts on the item (a drag
+drags files). ⇧ adds what the rectangle touches to the selection; ⌘ (Ctrl) toggles it; Esc puts
+the selection back. Dragged above or below the list it scrolls, a step for each pointer move
+(holding still doesn't scroll: Arbor runs no timers). A click in empty space below the rows
+clears a multiple selection.
 
 ### Tabs and split view
 
@@ -811,6 +842,10 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Reverse Sort Order |  |  | `view.sort_reverse` |
 | Quick Preview (Toggle) | Space | Space | `view.preview` |
 | Close Preview |  |  | `view.close_preview` |
+| As List | ⌥⌘1 | Ctrl+Alt+1 | `view.as_list` |
+| As Icons | ⌥⌘2 | Ctrl+Alt+2 | `view.as_icons` |
+| Larger Icons | ⌘+, ⌘= | Ctrl++, Ctrl+= | `view.larger_icons` |
+| Smaller Icons | ⌘- | Ctrl+- | `view.smaller_icons` |
 | New Tab | ⌘T | Ctrl+T | `tab.new` |
 | Close Tab | ⌘W | Ctrl+W | `tab.close` |
 | Next Tab | ⌃⇥, ⇧⌘] | Ctrl+Tab, Ctrl+Shift+] | `tab.next` |
@@ -927,6 +962,10 @@ case_sensitive = false     # Select by Pattern; default true on Linux, false on 
 
 [search]
 cross_devices = false      # Search in This Folder also walks file systems mounted inside it
+
+[view]
+default = "list"           # how new tabs show their folder: "list" or "icons"
+icon_size = "medium"       # the icon view's icons to start with: "small", "medium" or "large"
 
 [keys]
 "file.trash" = ["cmd+backspace", "delete"]   # replaces the command's default keys
@@ -1053,7 +1092,8 @@ one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine
 File watching (use ⌘R), Open With's "Other…" on macOS and Linux, Put Back on macOS and
 Windows, emptying the trashes of network shares, the
 sidebar's Locations refreshing by themselves on Linux (right-click or ⌘R), changing attributes
-in Get Info, rich previews (PDF, video, documents) on Linux and
+in Get Info, the Tiles and Columns views (BACKLOG.md), rich previews and icon-view thumbnails
+(PDF, video, documents) on Linux and
 new (uncached) thumbnails on Windows (see Quick preview), syntax highlighting in the text
 preview, regular expressions in Select by Pattern, more than one operation
 at a time, dragging a tab out into a window of its own, notarized and signed packages, and

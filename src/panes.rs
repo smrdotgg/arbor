@@ -65,6 +65,7 @@ impl State {
         // A search stays with its tab (as a query to run again); the new one shows the folder.
         self.leave_search(ix, tx);
         let p = &mut self.panes[ix];
+        p.f.view = self.settings.view_default;
         p.f.back.clear();
         p.f.fwd.clear();
         if !p.f.filter.is_empty() {
@@ -197,7 +198,8 @@ impl State {
             return;
         }
         let id = self.new_pane_id();
-        let f = Folder::same_as(id, self.cur(), self.waker.clone());
+        let mut f = Folder::same_as(id, self.cur(), self.waker.clone());
+        f.view = self.settings.view_default;
         self.panes.push(Pane { f, tabs: vec![None], tab: 0 });
         self.activate(1, tx);
     }

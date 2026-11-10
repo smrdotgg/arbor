@@ -31,6 +31,26 @@ pub struct Entry {
     pub pending: Option<String>,
 }
 
+#[cfg(test)]
+impl Entry {
+    /// An entry as a listing would have it, without a disk, for tests.
+    pub fn test(name: &str, is_dir: bool) -> Entry {
+        Entry {
+            os: name.into(),
+            name: name.into(),
+            lower: name.to_lowercase(),
+            key: format!("f:{name}"),
+            is_dir,
+            is_link: false,
+            hidden: name.starts_with('.'),
+            size: 0,
+            mtime_ms: 0,
+            id: None,
+            pending: None,
+        }
+    }
+}
+
 /// Object identity: whether what's at a path is still the item chosen from a listing or a
 /// search, edited or not. It's read for each entry when a folder is listed (or the search walk
 /// finds it), from the metadata read anyway, and compared on the worker right before each item

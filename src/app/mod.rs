@@ -220,6 +220,19 @@ pub struct State {
     pub(crate) trash_count: Option<crate::trash::contents::Counting>,
     /// A tab being dragged: its pane, from where, and where it would land in its own strip.
     pub tab_drag: Option<(u64, usize, usize)>,
+    /// A drag-select rectangle being dragged out (`band.rs`).
+    pub band: Option<crate::band::Band>,
+    /// The last rectangle moved: the press its row gets on release isn't a click.
+    pub(crate) band_click: bool,
+    /// How big the icon view's icons are, for every pane (⌘+ and ⌘-; `view.icon_size`).
+    pub icon_size: crate::grid::IconSize,
+    /// The user chose a view or icon size since the window opened, so settings that land late
+    /// at startup leave them alone.
+    pub(crate) view_chosen: bool,
+    /// The icon view's thumbnail workers, from the first grid with something to thumbnail.
+    pub(crate) tile_pool: Option<crate::tiles::Pool>,
+    /// The icon's side in device pixels, written by the view: what thumbnails decode to.
+    pub(crate) tile_fit: std::cell::Cell<u32>,
 }
 
 /// What's at a typed path.
@@ -281,8 +294,10 @@ impl State {
         side.look_due = true;
         // Headless runs have no `on_ready`: their first frame counts as shown from the start.
         side.shown = rune::tooling::headless_run().is_some();
-        let first = Folder::new(0, cwd, config.settings.sort, config.settings.show_hidden, None);
+        let mut first = Folder::new(0, cwd, config.settings.sort, config.settings.show_hidden, None);
+        first.view = config.settings.view_default;
         // Where the history lives (environment only, no disk): tests keep theirs in memory.
+        let icon_size = config.settings.icon_size;
         let mut history = History::new(if cfg!(test) { None } else { crate::jump::log_path() });
         history.enabled = config.settings.jump_enabled;
         history.exclude = crate::jump::exclude_globs(&config.settings.jump_exclude);
@@ -362,6 +377,12 @@ impl State {
             trash_place: crate::trash::contents::place(),
             trash_count: None,
             tab_drag: None,
+            band: None,
+            band_click: false,
+            icon_size,
+            view_chosen: false,
+            tile_pool: None,
+            tile_fit: std::cell::Cell::new(128),
         };
         let f = &mut s.panes[0].f;
         match listing {
@@ -608,6 +629,7 @@ impl State {
         changed |= self.poll_batch();
         // Select by Pattern's count follows the rows it counts (a listing that landed).
         changed |= self.pick_refresh();
+        changed |= self.poll_tiles();
         // After everything that can move the selection this frame.
         changed |= self.sync_preview();
         changed |= self.land_preview();
@@ -671,6 +693,13 @@ impl State {
             for m in p.tabs.iter_mut().flatten().filter(|m| !m.sort_set) {
                 m.sort = new.sort;
             }
+        }
+        // The view settings, where the user hasn't chosen since the window opened.
+        if !self.view_chosen {
+            for p in &mut self.panes {
+                p.f.view = new.view_default;
+            }
+            self.icon_size = new.icon_size;
         }
         self.places = places;
         self.side.custom = custom;
@@ -914,6 +943,10 @@ impl State {
                 p.f.set_hidden(new.show_hidden);
             }
         }
+        // New tabs take the new default view; a changed icon size applies at once.
+        if new.icon_size != old.icon_size {
+            self.icon_size = new.icon_size;
+        }
         // The settings' places are the default list: the user's own (sidebar.toml) stays.
         if new.places != old.places && !self.side.custom {
             self.places = places_for(new);
@@ -939,6 +972,7 @@ impl State {
     /// Rename's folder read, before the last moment given to the Jump history's writer.
     pub fn stop_background(&mut self) {
         for p in &mut self.panes {
+            p.f.tiles = None;
             if let Some(s) = p.f.search.as_mut() {
                 s.stop_all();
             }

@@ -45,6 +45,10 @@ pub struct Settings {
     pub case_sensitive: Option<bool>,
     /// `[search] cross_devices`: a search walks into other file systems mounted inside it.
     pub search_cross_devices: bool,
+    /// `[view] default`: how new tabs show their folder.
+    pub view_default: crate::grid::ViewMode,
+    /// `[view] icon_size`: how big the icon view's icons start.
+    pub icon_size: crate::grid::IconSize,
 }
 
 impl Default for Settings {
@@ -58,6 +62,8 @@ impl Default for Settings {
             jump_exclude: Vec::new(),
             case_sensitive: None,
             search_cross_devices: false,
+            view_default: crate::grid::ViewMode::List,
+            icon_size: crate::grid::IconSize::Medium,
         }
     }
 }
@@ -125,15 +131,17 @@ impl Config {
                 ("jump", Some(t)) => jump(t, &mut settings, &mut errors, &line),
                 ("select", Some(t)) => select(t, &mut settings, &mut errors, &line),
                 ("search", Some(t)) => search(t, &mut settings, &mut errors, &line),
+                ("view", Some(t)) => view(t, &mut settings, &mut errors, &line),
                 ("keys", Some(t)) => keys = key_table(t, &mut errors, &line),
-                ("general" | "jump" | "search" | "select" | "keys", None) => {
+                ("general" | "jump" | "search" | "select" | "view" | "keys", None) => {
                     errors.push(format!("line {at}: '{name}' should be a section: [{name}]"))
                 }
                 (_, _) if GENERAL.contains(&name) => {
                     errors.push(format!("line {at}: '{name}' belongs under [general]"));
                 }
-                _ => errors
-                    .push(format!("line {at}: unknown section '{name}' (sections are [general], [jump], [search], [select] and [keys])")),
+                _ => errors.push(format!(
+                    "line {at}: unknown section '{name}' (sections are [general], [jump], [search], [select], [view] and [keys])"
+                )),
             }
         }
         let keymap = build_keymap(&keys, platform, &mut errors);
@@ -266,6 +274,23 @@ fn search(t: &dyn TableLike, s: &mut Settings, errors: &mut Vec<String>, line: &
             ("cross_devices", Some(b)) => s.search_cross_devices = b,
             ("cross_devices", None) => errors.push(format!("line {at}: cross_devices should be true or false")),
             _ => errors.push(format!("line {at}: unknown setting '{name}' under [search] (settings are cross_devices)")),
+        }
+    }
+}
+
+fn view(t: &dyn TableLike, s: &mut Settings, errors: &mut Vec<String>, line: &dyn Fn(Option<std::ops::Range<usize>>) -> usize) {
+    for (name, item) in t.iter() {
+        let at = line(t.key(name).and_then(|k| k.span()));
+        match name {
+            "default" => match item.as_str().and_then(crate::grid::ViewMode::named) {
+                Some(v) => s.view_default = v,
+                None => errors.push(format!("line {at}: default should be \"list\" or \"icons\"")),
+            },
+            "icon_size" => match item.as_str().and_then(crate::grid::IconSize::named) {
+                Some(v) => s.icon_size = v,
+                None => errors.push(format!("line {at}: icon_size should be \"small\", \"medium\" or \"large\"")),
+            },
+            _ => errors.push(format!("line {at}: unknown setting '{name}' under [view] (settings are default, icon_size)")),
         }
     }
 }
@@ -430,6 +455,14 @@ pub fn template() -> String {
          # followed, and on Windows neither are junctions or volumes mounted in a folder.)\n\
          # cross_devices = false\n\
          \n\
+         [view]\n\
+         # How new tabs show their folder: \"list\" (rows with columns) or \"icons\" (a grid, with\n\
+         # thumbnails of images; As List and As Icons switch a tab).\n\
+         # default = \"list\"\n\
+         # The icon view's icon size to start with: \"small\", \"medium\" or \"large\" (cmd+plus and\n\
+         # cmd+minus change it).\n\
+         # icon_size = \"medium\"\n\
+         \n\
          [select]\n\
          # Whether Select by Pattern tells capitals apart. Without this line, it does on Linux and\n\
          # doesn't on macOS and Windows, as their usual file systems do.\n\
@@ -486,6 +519,31 @@ mod tests {
 
     fn chords(c: &Config, cmd: Cmd) -> Vec<String> {
         c.keymap.chords(cmd).map(commands::chord_spec).collect()
+    }
+
+    /// `[view]`: the default view for new tabs and the icon size, and what a bad value says.
+    #[test]
+    fn view_settings() {
+        let c = Config::parse("[view]\ndefault = \"icons\"\nicon_size = \"large\"\n", LINUX);
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        assert_eq!((c.settings.view_default, c.settings.icon_size), (crate::grid::ViewMode::Icons, crate::grid::IconSize::Large));
+        let d = Config::parse("", LINUX);
+        assert_eq!((d.settings.view_default, d.settings.icon_size), (crate::grid::ViewMode::List, crate::grid::IconSize::Medium));
+        let bad = Config::parse("[view]\ndefault = \"columns\"\nicon_size = 3\nzoom = 1\n", LINUX);
+        assert_eq!(
+            bad.errors,
+            [
+                "line 2: default should be \"list\" or \"icons\"",
+                "line 3: icon_size should be \"small\", \"medium\" or \"large\"",
+                "line 4: unknown setting 'zoom' under [view] (settings are default, icon_size)",
+            ]
+        );
+        assert_eq!(bad.settings.view_default, crate::grid::ViewMode::List, "a bad value changes nothing");
+        // The template has both, commented out, and parses to the defaults.
+        let t = template();
+        assert!(t.contains("# default = \"list\"") && t.contains("# icon_size = \"medium\""));
+        let parsed = Config::parse(&t, LINUX);
+        assert!(parsed.errors.is_empty() && parsed.settings == Settings::default(), "{:?}", parsed.errors);
     }
 
     #[test]
@@ -635,7 +693,7 @@ mod tests {
             c.errors,
             [
                 "line 1: 'show_hidden' belongs under [general]",
-                "line 2: unknown section 'colors' (sections are [general], [jump], [search], [select] and [keys])"
+                "line 2: unknown section 'colors' (sections are [general], [jump], [search], [select], [view] and [keys])"
             ]
         );
     }

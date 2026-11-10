@@ -16,6 +16,26 @@ Newest first.
 
 ---
 
+## Drag-select: no pointer events while the pointer holds still outside the list
+
+- **Feature:** drag-select (milestone 16): a selection rectangle dragged past the list's top or
+  bottom edge scrolls the list, as Finder's and Explorer's do, for as long as the pointer stays
+  out there.
+- **What Rune is missing:** a way to keep scrolling while a drag holds still past a viewport's
+  edge without a timer: an auto-scroll on drags (as AppKit's `autoscroll:` and Windows'
+  drag-scroll do, driven by the system's own repeating drag events), or `Phase::Move` repeated
+  while a captured press is held outside its element. Rune sends `on_drag` only when the pointer
+  moves, and Arbor runs no timers (NORTHSTAR: no polling).
+- **What we did instead:** each pointer move past the edge scrolls one step, further the further
+  out the pointer is (half the distance, 2 to 48 pt; `Band::edge_step` in `src/band.rs`), with
+  `Tx::scroll_to_instant`, and the rectangle and its hits follow from geometry.
+- **What users lose:** holding the pointer still below the list stops the scrolling; the user
+  wiggles it (or uses the wheel, which scrolls the list under the rectangle) to go on.
+- **Suggested Rune change:** an opt-in edge auto-scroll for `on_drag` inside a scroll viewport
+  (`El::drag_autoscroll(true)`), driven by the platform's drag events where it repeats them
+  (macOS sends periodic `mouseDragged` events during `autoscroll:`), or a repeating
+  `Phase::Move` at the display's rate only while a captured press is outside its viewport.
+
 ## Wheel: Shift + wheel isn't turned on macOS when the system didn't turn it
 
 - **Feature:** scrolling the text preview's long lines sideways (Quick preview, NORTHSTAR Core).

@@ -17,6 +17,7 @@ use crate::preview::{Body, Format, Preview};
 use crate::search::Search;
 
 mod batch;
+mod grid;
 mod list;
 mod overlays;
 mod pane;
@@ -136,6 +137,13 @@ struct Ctx {
     split: Option<Panes>,
     /// The pane's laid-out width (`f32::MAX` before the first layout).
     w: f32,
+    /// The list's viewport as last laid out (window points: x, y, w, h; zero before the first
+    /// layout), for drag-select and the grid's columns.
+    list: [f32; 4],
+    /// How big the icon view's icons are.
+    icons: crate::grid::IconSize,
+    /// Device pixels per point.
+    scale: f32,
 }
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
@@ -147,6 +155,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 
 fn root(s: &State, cx: &mut Cx<State>) -> El {
     let l = look(cx.system_dark());
+    let scale = cx.env().scale.max(1.0);
+    // What the icon view's thumbnails decode to: the icon's side in device pixels.
+    s.tile_fit.set((s.icon_size.icon() * scale).round() as u32);
     // Reads laid-out positions and sizes only; scrolling never re-runs the view.
     // With the preview open in a split window, it takes the other pane's place (as a
     // two-panel commander's quick view does).
@@ -174,7 +185,18 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         // With the other pane covered by the preview, this one draws as if alone (its rows
         // drag out to other apps; there's no pane to drop on).
         let split = split.filter(|_| !panel_open);
-        let c = Ctx { id: p.id(), l, cols: Cols::for_width(w), focused: ix == s.active || split.is_none(), split, w };
+        let list = cx.layout_with(&p.f.list_key(), |r| r).unwrap_or_default();
+        let c = Ctx {
+            id: p.id(),
+            l,
+            cols: Cols::for_width(w),
+            focused: ix == s.active || split.is_none(),
+            split,
+            w,
+            list,
+            icons: s.icon_size,
+            scale,
+        };
         panes = panes.child(pane(s, p, c));
     }
     // One pane: the preview docks on its right, and the list stays usable beside it.
@@ -183,7 +205,7 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         let w = (main * 0.42).clamp(PREVIEW_MIN_W, PREVIEW_MAX_W).min(main - PREVIEW_MIN_W).round();
         panes = panes.child(el().w(1.0).h_full().fill(l.t.separator)).child(side_panel(s, l, cx, Some(w)));
     }
-    let window = row()
+    let mut window = row()
         .w_full()
         .h_full()
         .fill(l.t.bg)
@@ -192,6 +214,9 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         .child(
             col().key("main").grow(1.0).min_w(0.0).h_full().child(panes).child(hr(l)).child(status(s, l)).children(completion_view(s, l)),
         );
+    if let Some(band) = band_mark(s, l) {
+        window = window.child(band);
+    }
     if let Some(a) = &s.asking {
         window.child(confirm_view(a, l))
     } else if let Some(m) = &s.menu {

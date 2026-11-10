@@ -618,6 +618,22 @@ fn file(job: &Job, stop: &AtomicBool, bell: &Arc<Bell>) -> Option<Loaded> {
     }))
 }
 
+/// An image file shrunk to `fit` (device pixels) for the icon view's thumbnail: the preview's
+/// own decoders, with the same caps (a too-large image, and WebP over its 4 MP, gives `None`, as
+/// does anything that isn't an image Arbor decodes, or a stop). Only regular files are opened,
+/// without blocking, and each read checks `stop`.
+pub(crate) fn image_thumbnail(path: &Path, fit: [u32; 2], stop: &AtomicBool) -> Option<thumb::Rgba> {
+    let f = open_regular(path).ok()??;
+    let mut r = Stop { r: f, stop };
+    let head = read_up_to(&mut r, HEAD).ok()?;
+    let format = sniff_image(&head)?;
+    r.seek(SeekFrom::Start(0)).ok()?;
+    match image(format, BufReader::with_capacity(64 * 1024, r), fit, stop) {
+        Ok(Some((_, rgba))) if !stop.load(Relaxed) => Some(rgba),
+        _ => None,
+    }
+}
+
 /// Test-only: holds a preview's worker at a stage for one path, and records what it did.
 #[cfg(test)]
 pub(crate) mod hook {

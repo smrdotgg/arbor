@@ -31,7 +31,11 @@ pub(super) fn pane(s: &State, p: &Pane, c: Ctx) -> El {
     if let Some(search) = &f.search {
         col = col.child(hr(l)).child(search_bar(f, search, c));
     }
-    col = col.child(hr(l)).child(header(f, c)).child(hr(l)).child(list(f, c, active_row(s)));
+    // The icon view has no columns to sort by from headers (the sort commands still work).
+    if f.view == crate::grid::ViewMode::List {
+        col = col.child(hr(l)).child(header(f, c));
+    }
+    col = col.child(hr(l)).child(list(f, c, active_row(s)));
     if c.split.is_some() {
         // The active pane: a thin accent line along its top (its selection is in the accent
         // colour too, the other pane's in grey).
@@ -132,14 +136,56 @@ pub(super) fn pathbar(f: &Folder, l: Look, width: f32) -> El {
         .child(nav("↑", "nav-up", f.cwd.parent().is_some() && !f.searching(), Cmd::Parent))
         .child(el().w(6.0))
         .child(crumbs)
+        .child(el().w(6.0))
+        .child(view_toggle(f, l))
+}
+
+/// The path bar's view switch: As List and As Icons, the tab's own one checked.
+fn view_toggle(f: &Folder, l: Look) -> El {
+    use crate::grid::ViewMode;
+    let id = f.id;
+    let button = |mode: ViewMode, cmd: Cmd, key: &'static str| {
+        let on = f.view == mode;
+        let ink = if on { l.t.text } else { l.t.text_secondary };
+        // Drawn from plain shapes: three bars, or four squares.
+        let glyph = match mode {
+            ViewMode::List => (0..3).fold(col().gap(3.0), |c, _| c.child(el().w(12.0).h(2.0).radius(1.0).fill(ink))),
+            ViewMode::Icons => (0..2).fold(col().gap(2.0), |c, _| {
+                c.child(row().gap(2.0).child(el().w(5.0).h(5.0).radius(1.0).fill(ink)).child(el().w(5.0).h(5.0).radius(1.0).fill(ink)))
+            }),
+        };
+        let b = el()
+            .key(key)
+            .role("radio")
+            .label(cmd.title())
+            .checked(on)
+            .w(24.0)
+            .h(24.0)
+            .center()
+            .radius(5.0)
+            .cursor(Cursor::Pointer)
+            .child(glyph.a11y_hidden())
+            .on_press_tx(move |s: &mut State, tx| {
+                if in_pane(s, id, tx) && s.unavailable(cmd).is_none() {
+                    s.run(cmd, tx);
+                }
+            });
+        if on { b.fill(l.t.control_off) } else { b.hover(l.t.hover) }
+    };
+    row().key("view-mode").role("radiogroup").label("View").gap(2.0).child(button(ViewMode::List, Cmd::AsList, "view-list")).child(button(
+        ViewMode::Icons,
+        Cmd::AsIcons,
+        "view-icons",
+    ))
 }
 
 /// Space between breadcrumbs (and their separators), and each crumb's padding on either side.
 pub(super) const CRUMB_GAP: f32 = 2.0;
 pub(super) const CRUMB_PAD: f32 = 4.0;
 /// What the path bar spends besides the crumbs: its padding, three 24 pt buttons, a 6 pt
-/// spacer, and the gaps between those five.
-pub(super) const PATHBAR_CHROME: f32 = 2.0 * 8.0 + 3.0 * 24.0 + 6.0 + 4.0 * 2.0;
+/// spacer, the gaps between those five, then another spacer and the view switch (two 24 pt
+/// buttons 2 pt apart) and their two gaps.
+pub(super) const PATHBAR_CHROME: f32 = 2.0 * 8.0 + 3.0 * 24.0 + 6.0 + 4.0 * 2.0 + 6.0 + 2.0 * 24.0 + 2.0 + 2.0 * 2.0;
 
 /// One breadcrumb: its label, the folder it opens, and whether a "›" goes before it (not
 /// after the root or a Windows drive).

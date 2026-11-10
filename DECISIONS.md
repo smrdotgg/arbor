@@ -9,6 +9,43 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-10 · Milestone 16: drag-select and the icon view (Review: the start rule and the
+  keys).**
+  - **Where a rectangle starts (Review).** A press on an item acts on the item: a list row's
+    name text (not the room after it), any part of a row that's already selected, or a grid
+    cell's icon and name. Anywhere else in the list it starts a rectangle once it moves 6 pt: an
+    unselected row's ▸, the room after its name and its Kind, Size and Date cells, the space
+    below the rows, a grid's gutters. Finder's list view drags from the name only; Explorer's
+    details view drags a selected row from anywhere; this takes both, so a selection is still
+    dragged from wherever it's grabbed. A click (no move) on a row's empty part still selects
+    the row; a click below the rows clears a multiple selection (a folder always keeps a cursor
+    item, so "nothing selected" is the cursor alone). The rectangle selects every row it
+    touches vertically (rows span the width) or every icon cell it touches (the cell less its
+    6 pt inset). ⇧ adds to the selection the press started with, ⌘ toggles against it (⌘ wins
+    with both, as with clicks); Esc or losing the pointer restores the selection. Undo:
+    `band.rs`, `whole` and the name's handlers in `view/list.rs::file_row`.
+  - **Keys (Review): ⌥⌘1 As List, ⌥⌘2 As Icons, ⌘+ (also ⌘=) larger, ⌘- smaller icons.** ⌘1–⌘9
+    stay the sidebar's places (Finder's ⌘1/⌘2 would have meant moving them). No default-key
+    conflict on any platform (the registry test checks). Off macOS they're Ctrl+Alt+1/2, which
+    on layouts that type characters with AltGr (German AltGr+2 is ², Polish has none on the
+    digits) switches the view instead of typing that character into the filter; rebind in
+    `[keys]` if that matters. Undo: `AsList`, `AsIcons`, `LargerIcons`, `SmallerIcons` in
+    `commands.rs`.
+  - **The icon size is one for the window** (⌘+/⌘- change every grid), starting from
+    `view.icon_size`; the view is per tab (its memo), new tabs and a split's second pane take
+    `view.default`. No per-folder memory (it would be user data, but nothing asked for it yet).
+    Undo: `State::icon_size`, `settings.view_default` in `panes.rs`.
+  - **The icon view hides the column headers** (nothing to click in a grid); the Sort commands
+    and the palette still sort. The path bar gets the two view buttons at its right. Undo:
+    `view/pane.rs`.
+  - **Thumbnails: 2 workers, images by Arbor's decoders everywhere, documents and video through
+    the OS on macOS and Windows (cache only there), nothing on Linux beyond images.** An image
+    the preview would refuse (over its caps, WebP over 4 MP) keeps its type icon. An item that
+    decodes to nothing isn't asked again while it stays on screen. Undo: `tiles.rs`.
+  - **The type icons** are drawn from plain shapes in each kind's colour (folder tab and body,
+    a page with a kind band and its extension from medium size up, an app tile); no icon font.
+    Undo: `view/grid.rs::type_icon`.
+
 - **2026-11-10 · Empty Trash with nothing to empty only informs** (Mac QA: without Full Disk
   Access the dialog explained it and still showed a red "Empty Trash"; pressing it re-listed the
   Trash on the worker and put the same Full Disk Access text in the status bar, deleting nothing).

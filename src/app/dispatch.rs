@@ -3,6 +3,7 @@
 //! (`unavailable` says when one can't run). Both match on `Cmd` exhaustively.
 
 use super::*;
+use crate::grid::ViewMode;
 
 impl State {
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
@@ -53,6 +54,13 @@ impl State {
             return true;
         }
         if self.edit_filter(ev, tx) {
+            return true;
+        }
+        // In the icon view, ← and → move along the grid (⇧ extends); ⌘↑ and ⌘↓ still go up
+        // and open, as Finder's icon view does.
+        if self.cur().view == ViewMode::Icons && matches!(ev.key, Key::Left | Key::Right) && !m.cmd && !m.ctrl && !m.alt {
+            let dx = if ev.key == Key::Left { -1 } else { 1 };
+            self.cur_mut().step_grid(dx, 0, m.shift, tx);
             return true;
         }
         if let Some(mut cmd) = self.keymap.find(|c| c.matches_tx(ev, tx)) {
@@ -206,6 +214,14 @@ impl State {
             // Closing always works; opening needs something to show.
             TogglePreview => when(self.preview.is_none() && nothing, "Select an item first"),
             ClosePreview => when(self.preview.is_none(), "The preview isn't open"),
+            AsList => when(f.view == ViewMode::List, "Already showing as a list"),
+            AsIcons => when(f.view == ViewMode::Icons, "Already showing as icons"),
+            LargerIcons => {
+                when(f.view != ViewMode::Icons, ICONS_ONLY).or(when(self.icon_size.step(1).is_none(), "The icons are as large as they go"))
+            }
+            SmallerIcons => {
+                when(f.view != ViewMode::Icons, ICONS_ONLY).or(when(self.icon_size.step(-1).is_none(), "The icons are as small as they go"))
+            }
             Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
                 when(cmd.place().is_some_and(|i| i >= self.place_count()), "No sidebar place there")
             }
@@ -385,6 +401,21 @@ impl State {
             EmptyTrash => self.empty_trash(),
             CopyToOther => self.send_to_other_pane(false),
             MoveToOther => self.send_to_other_pane(true),
+            Up | Down | PageUp | PageDown | ExtendUp | ExtendDown | ExtendPageUp | ExtendPageDown if self.cur().view == ViewMode::Icons => {
+                // A row at a time, or a page of rows (as many as a list page's height holds).
+                let rows = ((PAGE as f32 * 24.0) / self.icon_size.cell()[1]).floor().max(1.0) as isize;
+                let (dy, extend) = match cmd {
+                    Up => (-1, false),
+                    Down => (1, false),
+                    PageUp => (-rows, false),
+                    PageDown => (rows, false),
+                    ExtendUp => (-1, true),
+                    ExtendDown => (1, true),
+                    ExtendPageUp => (-rows, true),
+                    _ => (rows, true),
+                };
+                self.cur_mut().step_grid(0, dy, extend, tx);
+            }
             Up => self.cur_mut().step(-1, false, tx),
             Down => self.cur_mut().step(1, false, tx),
             PageUp => self.cur_mut().step(-page, false, tx),
@@ -427,6 +458,16 @@ impl State {
             OtherPane => self.activate(1 - self.active, tx),
             TogglePreview => self.toggle_preview(),
             ClosePreview => self.close_preview(),
+            AsList => self.set_view(ViewMode::List, tx),
+            AsIcons => self.set_view(ViewMode::Icons, tx),
+            LargerIcons | SmallerIcons => {
+                if let Some(size) = self.icon_size.step(if cmd == LargerIcons { 1 } else { -1 }) {
+                    self.view_chosen = true;
+                    self.icon_size = size;
+                    self.cur().regrid(size);
+                    self.cur().reveal(tx);
+                }
+            }
             Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
                 if let Some(i) = cmd.place() {
                     self.go_place(i);
@@ -438,6 +479,24 @@ impl State {
     pub(super) fn sort_by(&mut self, key: SortKey, tx: &mut Tx) {
         let f = self.cur_mut();
         f.set_sort(key);
+        f.reveal(tx);
+    }
+}
+
+/// Why the icon size commands can't run in the list view.
+const ICONS_ONLY: &str = "Icon sizes are for the icon view (As Icons)";
+
+impl State {
+    /// As List or As Icons, for the active tab.
+    pub(crate) fn set_view(&mut self, mode: ViewMode, tx: &mut Tx) {
+        self.view_chosen = true;
+        self.band = None;
+        let size = self.icon_size;
+        let f = self.cur_mut();
+        f.view = mode;
+        // Back to the list: no thumbnails are decoded or kept.
+        f.tiles = None;
+        f.regrid(size);
         f.reveal(tx);
     }
 }
