@@ -145,6 +145,12 @@ pub struct Folder {
     /// The icon view's thumbnails for the cells on screen (`tiles.rs`). Dropping it cancels
     /// what's still being decoded.
     pub tiles: Option<crate::tiles::Tiles>,
+    /// The grid rows Rune last said were visible, while the grid is on screen: where thumbnails
+    /// are asked for again when the folder or the icon size changes without Rune reporting new
+    /// rows (a reload keeps every row's key).
+    pub(crate) grid_rows: Option<std::ops::Range<usize>>,
+    /// The listing's version and the icon's pixels thumbnails were last asked for at.
+    pub(crate) tiles_for: Option<(u64, u32)>,
 }
 
 impl Drop for Folder {
@@ -187,6 +193,8 @@ impl Folder {
             grid_cols: Rc::new(Cell::new(1)),
             list_w: Rc::new(Cell::new(0.0)),
             tiles: None,
+            grid_rows: None,
+            tiles_for: None,
         }
     }
 
@@ -370,6 +378,8 @@ impl Folder {
         self.stop_read();
         self.search = None;
         self.tiles = None;
+        self.grid_rows = None;
+        self.tiles_for = None;
         self.entries = Vec::new();
         self.visible.clear();
         self.marked.clear();

@@ -157,7 +157,7 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
     let l = look(cx.system_dark());
     let scale = cx.env().scale.max(1.0);
     // What the icon view's thumbnails decode to: the icon's side in device pixels.
-    s.tile_fit.set((s.icon_size.icon() * scale).round() as u32);
+    s.ui_scale.set(scale);
     // Reads laid-out positions and sizes only; scrolling never re-runs the view.
     // With the preview open in a split window, it takes the other pane's place (as a
     // two-panel commander's quick view does).

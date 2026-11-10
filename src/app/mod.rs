@@ -231,8 +231,9 @@ pub struct State {
     pub(crate) view_chosen: bool,
     /// The icon view's thumbnail workers, from the first grid with something to thumbnail.
     pub(crate) tile_pool: Option<crate::tiles::Pool>,
-    /// The icon's side in device pixels, written by the view: what thumbnails decode to.
-    pub(crate) tile_fit: std::cell::Cell<u32>,
+    /// Device pixels per point, written by the view: thumbnails decode to the icon's side in
+    /// them ([`State::tile_fit`]).
+    pub(crate) ui_scale: std::cell::Cell<f32>,
 }
 
 /// What's at a typed path.
@@ -382,7 +383,7 @@ impl State {
             icon_size,
             view_chosen: false,
             tile_pool: None,
-            tile_fit: std::cell::Cell::new(128),
+            ui_scale: std::cell::Cell::new(1.0),
         };
         let f = &mut s.panes[0].f;
         match listing {
@@ -756,6 +757,10 @@ impl State {
                 let old = std::mem::replace(&mut f.cwd, p.path);
                 f.dir_id = a.listing.dir_id;
                 let moved = old != f.cwd;
+                if moved {
+                    // Another folder: its visible rows are Rune's to say.
+                    f.grid_rows = None;
+                }
                 match p.nav {
                     Nav::New => {
                         f.back.push(old);

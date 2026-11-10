@@ -1177,3 +1177,31 @@ fn thumbnails_go_with_the_grid_whatever_hides_it() {
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&d2);
 }
+
+/// A reload, or a new icon size, keeps the grid's rows (and their keys) as they were, so Rune
+/// reports no change in what's visible: the thumbnails are asked for again anyway, from the
+/// rows last seen. Filtered to one image and reloaded, its thumbnail comes back; on a
+/// one-image grid a new size decodes it again at that size.
+#[test]
+fn thumbnails_come_back_after_a_reload_and_follow_the_icon_size() {
+    let d = images("again", 30);
+    let mut rt = runtime(&d);
+    icons(&mut rt);
+    rt.key(KeyEvent { key: Key::Text("i017".into()), mods: Mods::default() });
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cur().visible.len(), 1);
+    until(&mut rt, |s| s.cur().tiles.as_ref().is_some_and(|t| t.shown.len() == 1));
+    run(&mut rt, Cmd::Reload);
+    until(&mut rt, |s| !s.cur().is_loading() && s.cur().tiles.as_ref().is_some_and(|t| t.shown.len() == 1));
+    assert!(rt.state.cur().tiles.as_ref().is_some_and(|t| t.shown.len() == 1), "the thumbnail is back after the reload");
+    let one = d.join("i017.png");
+    let decoded = |d: &Path| seen_in(d).iter().filter(|p| **p == one).count();
+    let before = decoded(&d);
+    run(&mut rt, Cmd::LargerIcons);
+    until(&mut rt, |s| s.cur().tiles.as_ref().is_some_and(|t| t.shown.len() == 1) && decoded(&d) > before);
+    assert!(decoded(&d) > before, "decoded again for the new size");
+    let fit = (crate::grid::IconSize::Large.icon() * 1.0).round() as u32;
+    assert!(rt.state.cur().tiles.as_ref().is_some_and(|t| t.fit() == fit), "at the large size's pixels");
+    let _ = std::fs::remove_dir_all(&d);
+}

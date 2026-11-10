@@ -82,6 +82,12 @@ impl Drop for Tiles {
 }
 
 impl Tiles {
+    /// The icon's side in device pixels these are decoded for.
+    #[cfg(test)]
+    pub fn fit(&self) -> u32 {
+        self.fit
+    }
+
     /// How many requests are waiting or being decoded (tests and timing).
     pub fn waiting(&self) -> usize {
         self.asked.values().filter(|a| matches!(a, Asked::Waiting(_))).count()
@@ -273,16 +279,35 @@ impl State {
         f.view == crate::grid::ViewMode::Icons && !f.visible.is_empty() && !covered
     }
 
+    /// The icon's side in device pixels: what thumbnails decode to.
+    pub(crate) fn tile_fit(&self) -> u32 {
+        (self.icon_size.icon() * self.ui_scale.get().max(1.0)).round() as u32
+    }
+
     /// Keeps thumbnails to grids on screen: a pane whose grid isn't (another tab shown, the
     /// list view, a filter that leaves nothing, the preview over it, the folder changing)
-    /// drops every thumbnail and stops what's queued or decoding for it. Called after every
-    /// key, command, click and listing (`sync_preview`) and from `poll`, so it never waits for
-    /// a grid that's going away to say so. True when anything went.
+    /// drops every thumbnail and stops what's queued or decoding for it. A grid on screen whose
+    /// listing or icon size changed since its thumbnails were asked for is asked again, for
+    /// the rows last seen: a reload or a new size can leave every row's key as it was, so Rune
+    /// says nothing. Called after every key, command, click and listing (`sync_preview`) and
+    /// from `poll`, never left to a grid's own callbacks. True when anything changed.
     pub(crate) fn sync_tiles(&mut self) -> bool {
         let mut changed = false;
+        let fit = self.tile_fit();
         for ix in 0..self.panes.len() {
             if !self.grid_on_screen(ix) {
-                changed |= self.panes[ix].f.tiles.take().is_some();
+                let f = &mut self.panes[ix].f;
+                changed |= f.tiles.take().is_some();
+                f.grid_rows = None;
+                f.tiles_for = None;
+                continue;
+            }
+            let f = &self.panes[ix].f;
+            if f.tiles_for != Some((f.version, fit))
+                && let Some(rows) = f.grid_rows.clone()
+            {
+                let id = f.id;
+                changed |= self.tiles_visible(id, rows);
             }
         }
         changed
@@ -293,11 +318,13 @@ impl State {
     /// dropped or cancelled. True when the view changed (a thumbnail went).
     pub(crate) fn tiles_visible(&mut self, id: u64, rows: Range<usize>) -> bool {
         let Some(ix) = self.pane_ix(id) else { return false };
-        let fit = self.tile_fit.get().max(1);
+        let fit = self.tile_fit().max(1);
         if !self.grid_on_screen(ix) {
             return self.panes[ix].f.tiles.take().is_some();
         }
         let f = &mut self.panes[ix].f;
+        f.grid_rows = Some(rows.clone());
+        f.tiles_for = Some((f.version, fit));
         let cols = f.grid_cols.get().max(1);
         let n = f.visible.len();
         let items = (rows.start * cols).min(n)..(rows.end.saturating_mul(cols)).min(n);
