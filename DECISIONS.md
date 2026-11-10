@@ -9,6 +9,15 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-10 · A row's OS drag never starts from a release** (Mac QA: after a single-pane drag
+  nothing took, keys did nothing until Esc). Cause: winit sends a release's position as a move
+  before the release, and Rune starts a drag-out from that move when it crosses the threshold;
+  AppKit's session then waits for a release that already happened, eating keys. Arbor's
+  `drag_out` asks AppKit for the current event and offers nothing on a release or plain move; the
+  status bar then says how to move files. Such a flick starts no drag (Finder would drag).
+  Off macOS, an unsplit in-window row drag let go on nothing now says the same (it said nothing).
+  RUNE-GAPS has the entry. Undo: `actions::os_drag_can_start`, the `drag_out` closure in
+  `view/list.rs`, the `far && split.is_none()` branch there.
 - **2026-11-10 · Linux opens with `xdg-open`, then `gio open`** (Linux QA: with no
   `xdg-open`, Open and Settings said "No such file or directory" though `gio` was there). Open,
   Show in folder and the settings file use the first one found on PATH, as an executable file

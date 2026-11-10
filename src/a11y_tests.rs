@@ -521,3 +521,66 @@ fn get_info_total_says_what_it_counts() {
     });
     assert!(total(&mut rt).contains("4 selected · 1 item inside · 15 B"));
 }
+
+// ---- Keys after a drag (the real app's runtime, as above) ----------------------------------
+
+/// The centre of the list row named `name` (its accessibility bounds).
+fn row_centre(rt: &mut Runtime<State>, name: &str) -> (f32, f32) {
+    let tree = rt.accessibility_json();
+    let row = find_by(&tree, &|v| v["role"] == "list-box-option" && v["name"].as_str().is_some_and(|n| n.starts_with(name)))
+        .unwrap_or_else(|| panic!("a row named {name}"));
+    let b: Vec<f32> = row["bounds"].as_array().expect("bounds").iter().map(|x| x.as_f64().unwrap() as f32).collect();
+    (b[0] + b[2] * 0.5, b[1] + b[3] * 0.5)
+}
+
+/// Drags the row `from` onto the row `onto` and lets go there, with nothing taking the drop.
+fn drag_row(rt: &mut Runtime<State>, from: &str, onto: &str) {
+    let (a, b) = (row_centre(rt, from), row_centre(rt, onto));
+    // Selected first, as the QA session did.
+    rt.pointer_move(a.0, a.1);
+    rt.pointer_down(a.0, a.1);
+    rt.pointer_up(a.0, a.1);
+    rt.frame(0.0);
+    rt.frame(1.0);
+    rt.pointer_down(a.0, a.1);
+    rt.frame(0.0);
+    rt.pointer_move(a.0 + 2.0, (a.1 + b.1) * 0.5);
+    rt.frame(0.0);
+    rt.pointer_move(b.0, b.1);
+    rt.pointer_up(b.0, b.1);
+    rt.frame(0.0);
+    rt.frame(0.0);
+}
+
+/// QA (macOS): after a single-pane drag of a file onto a folder row that nothing took, the
+/// next key reaches its command (F2 renames), with no Esc first. Both ways it ends: a drag
+/// that went out and came back with nothing, and one AppKit couldn't start because the button
+/// was already up (winit reports the release's position as a move first): that one is
+/// refused, so no system drag is left waiting for a release that already happened, and it
+/// says how to move files instead.
+#[test]
+fn after_a_drag_nothing_took_the_next_key_reaches_its_command() {
+    let d = folder("drag-keys");
+    for released in [false, true] {
+        let mut rt = runtime(&d);
+        crate::actions::PRETEND_EVENT.with(|c| c.set(released.then_some(2)));
+        drag_row(&mut rt, "notes.txt", "Photos");
+        crate::actions::PRETEND_EVENT.with(|c| c.set(None));
+        if released {
+            assert_eq!(rt.state.note.as_deref(), Some(crate::actions::DRAG_NOT_TAKEN), "it says how to move files");
+        }
+        assert_eq!(rt.state.cur().selected().map(|e| e.name.clone()).as_deref(), Some("notes.txt"));
+        key(&mut rt, Key::Function(2), false);
+        assert!(rt.state.rename.is_some(), "F2 renames right after the drag (released: {released})");
+        assert!(d.join("notes.txt").exists() && !d.join("Photos/notes.txt").exists(), "nothing moved");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The macOS check behind it: an OS drag never starts from a release or a plain move.
+#[test]
+fn an_os_drag_never_starts_from_a_release() {
+    for (kind, ok) in [(6, true), (7, true), (27, true), (2, false), (4, false), (26, false), (5, false)] {
+        assert_eq!(crate::actions::drag_may_start_on(kind), ok, "NSEventType {kind}");
+    }
+}

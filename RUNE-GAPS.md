@@ -16,6 +16,33 @@ Newest first.
 
 ---
 
+## Drag out: a release past the threshold starts a system drag that never ends
+
+- **Feature:** dragging rows out of the list (macOS, one pane): to Finder and other apps, and the
+  guidance when nothing takes the drop.
+- **What Rune is missing:** a guarantee that `drag_out` never starts a session once the button is
+  up. Rune means to (`Runtime::release`: "A release never starts a drag-out"), but winit's
+  `mouseUp:` sends the release's position as a `CursorMoved` before the `MouseInput` release
+  (`view.rs`: `mouse_motion` then `mouse_click`), and that move goes through `pointer_move`, which
+  starts the drag-out when it crosses the threshold (`window/events.rs` then calls
+  `drag_out::begin` with the mouse-up as the current event). AppKit's session then waits for a
+  release that already happened: it eats every key (⌘J, F2, anything) until Esc cancels it, and
+  `on_drag_end` doesn't run until then. It happens when the press moved less than the threshold
+  in its last drag event and the rest arrived with the release: a quick flick, Screen Sharing, or
+  an automation tool's drag (the QA session's "keys blocked after a single-pane drag until Esc").
+- **What we did instead:** the row's `drag_out` closure asks AppKit for the event being handled
+  (`NSApp.currentEvent`) and offers nothing when it's a release or a plain move
+  (`os_drag_can_start` in `src/actions.rs`), marking `State::drag_refused`; the next frame's
+  `poll` (or the next key) says how to move files, as a drag nothing took does. The press then
+  ends as a press that moved off its row: nothing happens.
+- **What users lose:** such a flick starts no drag at all, where Finder would still drag. Arbor
+  calls into AppKit from a view closure, which every Rune app with `drag_out` would need.
+- **Suggested Rune change:** don't start a drag-out from a move that comes with a release: in the
+  winit shell, skip `take_drag_out` (and drop the request as `Cancelled`) when
+  `NSApp.currentEvent` isn't a mouse-dragged event, or have `pointer_move` check that the button
+  is still down (`NSEvent.pressedMouseButtons`). Better still, also pass where a session ended to
+  `on_drag_end` (see "Drag between panes" below).
+
 ## Volumes: no mount or device notifications
 
 - **Feature:** the sidebar's Locations (milestone 12), which should show a USB stick when it's

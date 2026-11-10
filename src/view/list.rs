@@ -265,6 +265,10 @@ pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
                     s.drop_rows_on_sidebar(id, i, version);
                 } else if let Some(to) = over {
                     s.drop_on_pane(id, i, version, to, tx);
+                } else if far && split.is_none() {
+                    // Unsplit, off macOS (where the row's drag is the system's): let go on a
+                    // folder row or nowhere, as macOS's drag nothing took, it says how.
+                    s.note = Some(crate::actions::DRAG_NOT_TAKEN.into());
                 }
             } else if s.pane_drop != over || s.side.drop_hover != side {
                 s.pane_drop = over;
@@ -277,7 +281,17 @@ pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
             // Out to other apps (macOS: Rune starts no system drag elsewhere, so there the
             // drag stays in the window).
             None => r
-                .drag_out(move |s: &State| if s.pane(id)?.f.version == version { s.drag_item(id, i) } else { None })
+                .drag_out(move |s: &State| {
+                    if s.pane(id)?.f.version != version {
+                        return None;
+                    }
+                    // Never from a release: AppKit's session would wait for one forever.
+                    if !crate::actions::os_drag_can_start() {
+                        s.drag_refused.set(true);
+                        return None;
+                    }
+                    s.drag_item(id, i)
+                })
                 .on_drag_end(|s: &mut State, outcome, tx| {
                     tx.instant();
                     s.drag_out_ended(outcome);

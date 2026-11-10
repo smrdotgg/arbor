@@ -232,8 +232,9 @@ leading folders fold into “…”, which opens the deepest hidden one), click 
 (click again to reverse). Right-click opens a context menu: native on macOS and Windows, and on
 Linux, where Rune has none, Arbor's own in the window with the same items (↑↓, Home, End or a
 letter move, Enter or Space runs, Esc or a click outside closes; see `RUNE-GAPS.md`). Drag rows
-out to Finder or other apps (macOS). Drop files on a folder row or on the list: same disk moves,
-another disk copies, and ⌥ forces a copy.
+out to Finder or other apps (macOS). A row let go where nothing takes it (a folder row in the same
+window, one pane) says how to move it instead: ⌘X, ⌘V, or split view. Drop files on a folder row
+or on the list: same disk moves, another disk copies, and ⌥ forces a copy.
 
 ### Tabs and split view
 

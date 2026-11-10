@@ -136,6 +136,17 @@ impl State {
         }
     }
 
+    /// A row's OS drag that [`os_drag_can_start`] refused (the pointer was already let go)
+    /// ended as a drag nothing took: say so, as [`State::drag_out_ended`] does. True when it
+    /// had. Called from `poll` (the frame after the release) and before each key.
+    pub(crate) fn drag_not_taken(&mut self) -> bool {
+        if !self.drag_refused.take() {
+            return false;
+        }
+        self.note = Some(DRAG_NOT_TAKEN.into());
+        true
+    }
+
     /// A drag out of the list ended (macOS: an OS drag session). Moved: what went is gone from
     /// here. Nothing took it: say how to move files into a folder here, since an OS drag can't
     /// land in the window it came from, and Rune doesn't say where it was let go (RUNE-GAPS.md).
@@ -717,6 +728,60 @@ fn deleted_note(out: &ops::Outcome, n: usize, total: usize, place: &str) -> Stri
             format!("{gone}. {first}{more}")
         }
     }
+}
+
+/// Whether an OS drag may start from the event being handled now. AppKit's session needs the
+/// button held: one begun from a release waits for a release that already happened, eating
+/// every key until Esc (the QA session's "keys blocked after a drag"). winit reports a
+/// release's position as a move before the release itself, so Rune, which never starts a
+/// drag-out on a release, starts one from that move when the button came up past the drag
+/// threshold (a quick flick, Screen Sharing, automation tools): RUNE-GAPS.md. Arbor's
+/// `drag_out` asks first and offers nothing then. Off macOS, and off AppKit's main thread
+/// (tests), there's no such event and nothing to refuse.
+pub(crate) fn os_drag_can_start() -> bool {
+    #[cfg(test)]
+    if let Some(kind) = PRETEND_EVENT.with(std::cell::Cell::get) {
+        return drag_may_start_on(kind);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        // SAFETY: class methods and getters of AppKit's application and its current event,
+        // only on the main thread, where AppKit dispatches events (and calls `drag_out`).
+        unsafe {
+            let main: bool = msg_send![class!(NSThread), isMainThread];
+            if !main {
+                return true;
+            }
+            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            if app.is_null() {
+                return true;
+            }
+            let ev: *mut AnyObject = msg_send![app, currentEvent];
+            if ev.is_null() {
+                return true;
+            }
+            let kind: usize = msg_send![ev, type];
+            drag_may_start_on(kind)
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: the AppKit event type [`os_drag_can_start`] pretends is being handled.
+    pub(crate) static PRETEND_EVENT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`os_drag_can_start`] for an AppKit event type (`NSEventType`): not on a release
+/// (left 2, right 4, other 26) or a move with no button held (5).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) fn drag_may_start_on(kind: usize) -> bool {
+    const RELEASE_OR_HOVER: [usize; 4] = [2, 4, 5, 26];
+    !RELEASE_OR_HOVER.contains(&kind)
 }
 
 /// What a drag out of the list that nothing took says.

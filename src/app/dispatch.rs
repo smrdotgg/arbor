@@ -15,6 +15,7 @@ impl State {
 
     pub(super) fn key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         tx.instant();
+        self.drag_not_taken();
         // The confirmation dialog is modal: it has every key.
         if self.asking.is_some() {
             return self.ask_key(ev, tx);
