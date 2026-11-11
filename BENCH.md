@@ -90,12 +90,14 @@ moved listings on screen, to the key's. After review (the numbers before it were
 
 | Measure | n | median | p95 | budget |
 | --- | --- | --- | --- | --- |
-| Tiles, 10k entries: key → frame (Page Down, ↓) | 80 | 10.2 ms | 14.1 ms | 8 ms (over) |
-| Columns: ← and → over 10k, no read (key → frame) | 100 | 6.7 ms | 12.0 ms | 8 ms (p95 over) |
-| Columns: ↓ and ↑ onto a folder, read (key → frame) | 100 | 7.2 ms | 11.8 ms | 50 ms (under) |
+| Tiles, 10k entries: key → frame (Page Down, ↓) | 80 | 10.3 ms | 14.1 ms | 8 ms (over) |
+| Columns: ← and → over 10k, no read (key → frame) | 100 ×3 | 8.8, 7.3, 7.2 ms | 12.8, 11.9, 12.3 ms | 8 ms (p95 over) |
+| Columns: ↓ and ↑ onto a folder, read (key → frame) | 100 ×3 | 8.0, 8.0, 8.3 ms | 12.9, 12.3, 12.8 ms | 50 ms (under) |
 
-The list's ↓ was 8.3 ms (p95 9.6) in the same session: lavapipe's encode is 4–6 ms of every
-frame here, and Arbor's own update for ← and → is 2.2 and 4.1 ms (`ARBOR_TIMING`). Tiles paging
+Three passes after rebasing on 9e4f168 (load 2–3). The list's ↓ was 8.5, 8.3 and 8.9 ms in the
+same passes: lavapipe's encode is 4–6 ms of every frame here, and Arbor's own update for ← and
+→ is 2.2 and 4.1 ms (`ARBOR_TIMING`). `--idle`: list, icons, tiles and columns each 0.00 s of
+CPU in 5 s. Tiles paging
 is in line with the icon view's (milestone 16: 6.2 ms on a quiet machine, when the list's ↓ was
 6.2 too).
 
@@ -103,10 +105,10 @@ is in line with the icon view's (milestone 16: 6.2 ms on a quiet machine, when t
 
 | Measure | 7b3a373 | this |
 | --- | --- | --- |
-| Columns: ← out of 10k (key → committed frame) | 8.40 ms | 1.72 ms |
-| Columns: → into 10k | 8.91 ms | 2.34 ms |
-| Columns: End onto a folder (a read) | — | 2.29 ms |
-| List view: the frame landing the same 10k listing (its read left out) | 10.39 ms | 8.81 ms |
+| Columns: ← out of 10k (key → committed frame) | 8.40 ms | 1.29 ms |
+| Columns: → into 10k | 8.91 ms | 2.32 ms |
+| Columns: End onto a folder (a read) | — | 2.30 ms |
+| List view: the frame landing the same 10k listing (its read left out) | 10.39 ms | 7.67 ms |
 
 What changed: each column is one element, keyed by its number, whether it's the active column
 or another, and a listing moves between a column and the folder with its rows and their
