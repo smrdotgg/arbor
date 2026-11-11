@@ -19,7 +19,8 @@ to [`RUNE-GAPS.md`](RUNE-GAPS.md).
 
 **On the owner's Mac over ssh:** builds and headless tests only. Never run `osascript`, System
 Events or any other GUI automation, and never trigger Accessibility, Automation or Screen
-Recording permission prompts. GUI checks go through the project manager's Codex QA sessions.
+Recording permission prompts. GUI checks go through the project manager's Codex QA sessions. The owner says when they're
+using the Mac; until they do, assume it's free for those sessions.
 
 When the owner is away, don't block on questions: pick the recommended option, carry on, and
 record it in [`DECISIONS.md`](DECISIONS.md) so it can be reviewed and undone.
