@@ -1286,3 +1286,247 @@ fn an_idle_window_draws_nothing() {
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
+// ---- The column view and the tiles view (the real app's runtime) ------------------------------
+
+/// d/{Docs/{Work/{notes.md, plan.txt}, readme.txt}, Photos/, top.txt}.
+fn nested(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("arbor-a11y-cols-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("Docs/Work")).unwrap();
+    std::fs::create_dir_all(d.join("Photos")).unwrap();
+    std::fs::write(d.join("Docs/Work/notes.md"), "# Notes\n").unwrap();
+    std::fs::write(d.join("Docs/Work/plan.txt"), "plan").unwrap();
+    std::fs::write(d.join("Docs/readme.txt"), "read me").unwrap();
+    std::fs::write(d.join("top.txt"), "top").unwrap();
+    d
+}
+
+/// Frames until no column (or the preview) is loading.
+fn settle_columns(rt: &mut Runtime<State>) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let busy = |s: &State| {
+        s.cur().is_loading()
+            || s.preview.as_ref().is_some_and(|p| p.is_loading())
+            || s.cur().cols.as_ref().is_some_and(|c| c.left.iter().chain(c.right.as_ref()).any(|c| c.load == crate::columns::Load::Loading))
+    };
+    while busy(&rt.state) && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        rt.frame(0.0);
+    }
+    rt.frame(0.0);
+    rt.frame(0.0);
+}
+
+/// The column view is a group of list boxes, one per column, each named after its folder; in a
+/// column left of the active one the folder on the way is the selected option; the active
+/// column is the focusable list with the cursor as its active descendant; a file's preview is
+/// the last column. → and ← move between columns, and a click in another column makes it the
+/// active one with the item clicked.
+#[test]
+fn the_columns_are_a_group_of_named_list_boxes() {
+    let d = nested("tree");
+    let top = crate::app::title(&d);
+    let mut rt = runtime(&d);
+    // Narrower columns, so all three and the preview fit the 980 pt window.
+    rt.update(|s, _| s.col_w = 160.0);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    key(&mut rt, Key::Right, false);
+    settle_columns(&mut rt);
+    key(&mut rt, Key::Right, false);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs/Work"));
+    assert_eq!(rt.state.cur().selected().map(|e| e.name.as_str()), Some("notes.md"));
+    let tree = rt.accessibility_json();
+    let group = find(&tree, "columns-0").expect("the columns");
+    println!("{}", outline(group));
+    assert_eq!((group["role"].as_str(), group["name"].as_str()), (Some("group"), Some("Columns, 3 folders")));
+    let mut boxes = Vec::new();
+    all(group, "list-box", &mut boxes);
+    let names: Vec<&str> = boxes.iter().filter_map(|b| b["name"].as_str()).collect();
+    assert_eq!(names, [format!("Files in {top}").as_str(), "Files in Docs", "Files in Work"]);
+    let on_the_way: Vec<String> = boxes[..2]
+        .iter()
+        .map(|b| {
+            let mut opts = Vec::new();
+            all(b, "list-box-option", &mut opts);
+            let sel: Vec<&str> = opts.iter().filter(|o| states(o).contains(&"selected")).filter_map(|o| o["name"].as_str()).collect();
+            sel.join(",")
+        })
+        .collect();
+    assert_eq!(on_the_way, ["Folder Docs", "Folder Work"], "the ▸ reads as Folder, as without the Kind column");
+    assert!(find(group, "columns-back").is_none(), "nothing scrolled off");
+    assert_eq!(boxes[2]["key"], "list-0", "the active column is the pane's list");
+    assert!(boxes[2]["activeDescendant"].as_str().is_some_and(|a| a.ends_with("f:notes.md")));
+    let preview = find(group, "preview").expect("the preview is the last column");
+    assert_eq!(preview["role"], "complementary");
+    // The view switch: As Columns checked.
+    assert!(states(find(&tree, "view-columns").unwrap()).contains(&"checked"));
+    // ← goes back a column; a click on readme.txt in Docs' column makes Docs active with it.
+    key(&mut rt, Key::Left, false);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"));
+    assert_eq!(rt.state.cur().selected().map(|e| e.name.as_str()), Some("Work"));
+    key(&mut rt, Key::Left, false);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cwd, d);
+    let b = row_box(&mut rt, "readme.txt");
+    let at = (b[0] + 20.0, b[1] + b[3] * 0.5);
+    rt.pointer_move(at.0, at.1);
+    rt.pointer_down(at.0, at.1);
+    rt.pointer_up(at.0, at.1);
+    rt.frame(0.0);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"), "the clicked column is active");
+    assert_eq!(rt.state.cur().selected().map(|e| e.name.as_str()), Some("readme.txt"));
+    assert_eq!(rt.state.preview.as_ref().and_then(|p| p.target.as_ref()).map(|t| t.path()), Some(d.join("Docs/readme.txt")));
+    // Keys still work on it: F2 renames in the active column.
+    key(&mut rt, Key::Function(2), false);
+    assert!(rt.state.rename.is_some() && rect_of(&rt, "rename").is_some());
+    key(&mut rt, Key::Escape, false);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The tiles view: a grid of options (icon, name, kind, size) named from their texts, each with
+/// its place in the folder; ↓ moves a row, → a tile. Switching views keeps the selection.
+#[test]
+fn tiles_are_options_and_views_switch_keeping_the_selection() {
+    use crate::grid::ViewMode;
+    let d = many("tiles", 10);
+    let mut rt = runtime(&d);
+    key(&mut rt, Key::Down, false);
+    key(&mut rt, Key::Down, false);
+    run(&mut rt, Cmd::AsTiles);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cur().view, ViewMode::Tiles);
+    assert_eq!(picked(&rt), names(2..=2), "the selection stays across views");
+    let tree = rt.accessibility_json();
+    let list = find(&tree, "list-0").expect("the list");
+    println!("{}", outline(list));
+    let mut opts = Vec::new();
+    all(list, "list-box-option", &mut opts);
+    assert_eq!(opts.len(), 10);
+    assert!(opts[2]["name"].as_str().is_some_and(|n| n.starts_with("f02.txt")), "{}", opts[2]);
+    assert_eq!(opts[2]["position"].as_u64(), Some(3));
+    assert!(states(opts[2]).contains(&"selected"));
+    let cols = rt.state.cur().grid_cols.get();
+    assert!((2..=4).contains(&cols), "wide tiles, a few to a row: {cols}");
+    let tile = rect_of(&rt, "f:f02.txt").expect("the tile");
+    assert!(tile[2] >= crate::grid::TILE_W - 2.0 * crate::grid::INSET - 1.0 && tile[3] < 80.0, "wide and short: {tile:?}");
+    key(&mut rt, Key::Down, false);
+    assert_eq!(rt.state.cur().sel, 2 + cols, "↓ moves a row");
+    key(&mut rt, Key::Right, false);
+    assert_eq!(rt.state.cur().sel, 3 + cols, "→ moves a tile");
+    assert!(states(find(&tree, "view-tiles").unwrap()).contains(&"checked"));
+    assert_eq!(rt.state.unavailable(Cmd::LargerIcons), Some("Icon sizes are for the icon view (As Icons)"));
+    // Through every view and back; the cursor stays on its item.
+    let want = rt.state.cur().cursor_name();
+    for cmd in [Cmd::AsIcons, Cmd::AsColumns, Cmd::AsList, Cmd::AsTiles, Cmd::AsList] {
+        run(&mut rt, cmd);
+        rt.frame(0.0);
+        assert_eq!(rt.state.cur().cursor_name(), want, "{cmd:?}");
+        assert_eq!(
+            rt.state.unavailable(cmd),
+            Some(match cmd {
+                Cmd::AsIcons => "Already showing as icons",
+                Cmd::AsColumns => "Already showing as columns",
+                Cmd::AsTiles => "Already showing as tiles",
+                _ => "Already showing as a list",
+            })
+        );
+    }
+    assert!(rt.state.cur().cols.is_none() && rt.state.cur().tiles.is_none(), "nothing kept from the views left");
+    // view.default = "columns": a new tab opens as columns.
+    rt.update(|s, _| s.settings.view_default = ViewMode::Columns);
+    run(&mut rt, Cmd::NewTab);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().view, ViewMode::Columns);
+    assert!(rt.state.cur().cols.is_some() && find(&rt.accessibility_json(), "columns-0").is_some());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A sideways wheel over a column (each column is its own scroll view, which a wheel handler
+/// outside it never hears) scrolls the columns back by whole columns, reading the one that
+/// comes on screen; a vertical one scrolls the column itself.
+#[test]
+fn a_sideways_wheel_over_a_column_scrolls_the_columns() {
+    use rune::WheelEvent;
+    let d = nested("wheel");
+    let mut rt = runtime(&d);
+    // Room for two: the active column and the preview.
+    rt.update(|s, _| s.col_w = 400.0);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    key(&mut rt, Key::Right, false);
+    settle_columns(&mut rt);
+    key(&mut rt, Key::Right, false);
+    settle_columns(&mut rt);
+    let shown = |rt: &Runtime<State>| rt.state.cur().cols.as_ref().map(|c| c.shown());
+    assert_eq!(shown(&rt), Some(2..4), "Work and notes.md's preview");
+    assert!(rt.state.cur().cols.as_ref().unwrap().holding().is_empty(), "the root and Docs are off screen");
+    let list = rect_of(&rt, "list-0").expect("the active column");
+    let (x, y) = (list[0] + 40.0, list[1] + 30.0);
+    rt.wheel_event(WheelEvent::new(0.0, -30.0).at(x, y));
+    rt.frame(0.0);
+    assert_eq!(shown(&rt), Some(2..4), "a vertical wheel leaves the columns alone");
+    rt.wheel_event(WheelEvent::new(120.0, 0.0).at(x, y));
+    rt.frame(0.0);
+    settle_columns(&mut rt);
+    assert_eq!(shown(&rt), Some(1..3), "back a column, as far as the active one stays on screen");
+    assert_eq!(rt.state.cur().cols.as_ref().unwrap().holding(), [d.join("Docs")], "Docs read again");
+    assert!(find(&rt.accessibility_json(), "columns-back").is_some(), "and the way back to the root");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Idle means idle: once the columns are read and drawn, no frame asks for another (Rune's
+/// `frame` says whether it's still animating), with the root's columns off screen or not, and
+/// with the list focused as it moves into the columns.
+#[test]
+fn the_column_view_at_rest_draws_nothing() {
+    let d = nested("idle");
+    for f in ["a", "b", "c"] {
+        std::fs::create_dir_all(d.join(f)).unwrap();
+    }
+    std::fs::create_dir_all(d.join("Photos/2026/Summer")).unwrap();
+    let mut rt = runtime(&d);
+    // No sidebar place above it: the columns start at the volume's root, as on most disks.
+    rt.update(|s, _| s.places.clear());
+    // The list has keyboard focus (a click or Tab put it there) when it moves into the columns.
+    key(&mut rt, Key::Tab, false);
+    assert_eq!(focused_key(&rt.accessibility_json()).as_deref(), Some("list-0"));
+    run(&mut rt, Cmd::AsColumns);
+    let mut frames = 0;
+    while rt.frame(0.016) && frames < 200 {
+        frames += 1;
+    }
+    assert!(frames < 200, "still drawing after As Columns");
+    settle_columns(&mut rt);
+    let mut busy = Vec::new();
+    let keys =
+        [Key::Right, Key::Down, Key::Down, Key::Right, Key::Left, Key::Left, Key::Down, Key::Down, Key::Down, Key::Right, Key::Right];
+    let n = keys.len();
+    for (step, k) in keys.clone().into_iter().chain(keys).enumerate() {
+        if step == n {
+            // Again with columns scrolled off to the left (and the "‹ N" button).
+            rt.update(|s, _| s.col_w = 330.0);
+            run(&mut rt, Cmd::Parent);
+            run(&mut rt, Cmd::Parent);
+        }
+        key(&mut rt, k, false);
+        settle_columns(&mut rt);
+        // The pointer resting over the columns, as a mouse does.
+        rt.pointer_move(330.0 + 37.0 * step as f32 % 600.0, 400.0);
+        rt.frame(0.016);
+        let mut frames = 0;
+        while rt.frame(0.016) && frames < 200 {
+            frames += 1;
+        }
+        if frames >= 200 {
+            busy.push((step, rt.state.cur().cwd.clone(), rt.state.cur().cursor_name()));
+        }
+    }
+    assert!(busy.is_empty(), "still drawing after: {busy:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}

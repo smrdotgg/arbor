@@ -64,7 +64,7 @@ pub struct TabMemo {
     /// It was showing a search for this: showing the tab again searches again (nothing of
     /// the results is kept).
     pub search: Option<String>,
-    /// List or icons.
+    /// List, icons, columns or tiles.
     pub view: crate::grid::ViewMode,
 }
 
@@ -79,7 +79,7 @@ pub struct Answer {
 /// never matches another folder's version (panes come and go).
 static VERSION: AtomicU64 = AtomicU64::new(1);
 
-fn next_version() -> u64 {
+pub(crate) fn next_version() -> u64 {
     VERSION.fetch_add(1, Relaxed)
 }
 
@@ -140,7 +140,7 @@ pub struct Folder {
     /// A search of this folder, while it's on screen (`search.rs`): `entries` are its results,
     /// each `os` a path relative to `cwd`. Dropping it stops its walk.
     pub search: Option<Box<crate::search::Search>>,
-    /// List or icons (this tab's; `TabMemo::view` while it's hidden).
+    /// List, icons, columns or tiles (this tab's; `TabMemo::view` while it's hidden).
     pub view: crate::grid::ViewMode,
     /// The icon view's columns as last laid out, written by the view, for the arrows' 2-D moves
     /// and for revealing the cursor's row (geometry, not file data).
@@ -157,6 +157,11 @@ pub struct Folder {
     pub(crate) grid_rows: Option<std::ops::Range<usize>>,
     /// The listing's version and the icon's pixels thumbnails were last asked for at.
     pub(crate) tiles_for: Option<(u64, u32)>,
+    /// The column view's other columns, while this tab shows as columns (`columns.rs`); this
+    /// folder is the active column. Dropping it stops their reads.
+    pub cols: Option<Box<crate::columns::Columns>>,
+    /// The width the columns have, as last laid out (geometry, written by the view).
+    pub(crate) cols_w: Rc<Cell<f32>>,
 }
 
 impl Drop for Folder {
@@ -202,6 +207,8 @@ impl Folder {
             tiles: None,
             grid_rows: None,
             tiles_for: None,
+            cols: None,
+            cols_w: Rc::new(Cell::new(0.0)),
         }
     }
 
@@ -392,6 +399,7 @@ impl Folder {
         self.tiles = None;
         self.grid_rows = None;
         self.tiles_for = None;
+        self.cols = None;
         self.entries = Vec::new();
         self.visible.clear();
         self.marked.clear();
@@ -589,7 +597,7 @@ impl Folder {
     }
 
     pub fn reveal(&self, tx: &mut Tx) {
-        if self.view == crate::grid::ViewMode::Icons {
+        if self.view.is_grid() {
             // The grid's rows are keyed by their first item.
             let cols = self.grid_cols.get().max(1);
             if let Some(&e) = self.visible.get(self.sel / cols * cols) {
@@ -602,15 +610,17 @@ impl Folder {
         }
     }
 
-    /// The icon view at `size` is about to show: its columns from the list's width, so the
-    /// cursor's row can be revealed in this frame.
+    /// A grid view (icons at `size`, or tiles) is about to show: its columns from the list's
+    /// width, so the cursor's row can be revealed in this frame.
     pub(crate) fn regrid(&self, size: crate::grid::IconSize) {
-        if self.list_w.get() > 0.0 {
-            self.grid_cols.set(crate::grid::Geom::new(size, self.list_w.get()).cols);
+        if self.list_w.get() > 0.0
+            && let Some(g) = self.view.geom(size, self.list_w.get())
+        {
+            self.grid_cols.set(g.cols);
         }
     }
 
-    /// An arrow in the icon view: `dx` items along, or `dy` rows up or down (`grid::step`).
+    /// An arrow in a grid view: `dx` items along, or `dy` rows up or down (`grid::step`).
     pub fn step_grid(&mut self, dx: isize, dy: isize, extend: bool, tx: &mut Tx) {
         if self.visible.is_empty() {
             return;

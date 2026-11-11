@@ -9,14 +9,15 @@ impl State {
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         let cmd = crate::draglog::on().then(|| self.keymap.find(|c| c.matches_tx(ev, tx))).flatten();
         let handled = self.key(ev, tx);
+        if handled {
+            self.sync_preview();
+            self.flush_columns(tx);
+        }
         crate::draglog::log(|| {
             let m = ev.mods;
             let ran = cmd.map_or("unhandled".to_string(), |c| format!("{c:?}"));
             format!("key {:?} cmd={} shift={} alt={} -> {}", ev.key, m.cmd, m.shift, m.alt, if handled { ran } else { "passed on".into() })
         });
-        if handled {
-            self.sync_preview();
-        }
         handled
     }
 
@@ -67,17 +68,17 @@ impl State {
         if self.edit_filter(ev, tx) {
             return true;
         }
-        // In the icon view, ← and → move along the grid (⇧ extends); ⌘↑ and ⌘↓ still go up
-        // and open, as Finder's icon view does.
-        if self.cur().view == ViewMode::Icons && matches!(ev.key, Key::Left | Key::Right) && !m.cmd && !m.ctrl && !m.alt {
+        // In a grid view (icons, tiles), ← and → move along the grid (⇧ extends); ⌘↑ and ⌘↓
+        // still go up and open, as Finder's icon view does.
+        if self.cur().view.is_grid() && matches!(ev.key, Key::Left | Key::Right) && !m.cmd && !m.ctrl && !m.alt {
             let dx = if ev.key == Key::Left { -1 } else { 1 };
             self.cur_mut().step_grid(dx, 0, m.shift, tx);
             return true;
         }
         if let Some(mut cmd) = self.keymap.find(|c| c.matches_tx(ev, tx)) {
             // Esc closes the preview before it clears anything (the palette and a rename have
-            // had it first, above).
-            if cmd == Cmd::Clear && self.preview.is_some() {
+            // had it first, above); not the column view's, which follows the selection.
+            if cmd == Cmd::Clear && self.preview.is_some() && !self.col_preview {
                 cmd = Cmd::ClosePreview;
             }
             // And Get Info's panel, which takes its place.
@@ -230,6 +231,8 @@ impl State {
             ClosePreview => when(self.preview.is_none(), "The preview isn't open"),
             AsList => when(f.view == ViewMode::List, "Already showing as a list"),
             AsIcons => when(f.view == ViewMode::Icons, "Already showing as icons"),
+            AsColumns => when(f.view == ViewMode::Columns, "Already showing as columns"),
+            AsTiles => when(f.view == ViewMode::Tiles, "Already showing as tiles"),
             LargerIcons => {
                 when(f.view != ViewMode::Icons, ICONS_ONLY).or(when(self.icon_size.step(1).is_none(), "The icons are as large as they go"))
             }
@@ -284,12 +287,14 @@ impl State {
         }
         self.run_cmd(cmd, tx);
         self.sync_preview();
+        self.flush_columns(tx);
     }
 
     /// Runs a permanent command, confirmed in the dialog.
     pub(crate) fn run_permanent(&mut self, cmd: Cmd, tx: &mut Tx) {
         self.run_cmd(cmd, tx);
         self.sync_preview();
+        self.flush_columns(tx);
     }
 
     pub(super) fn run_cmd(&mut self, cmd: Cmd, tx: &mut Tx) {
@@ -322,8 +327,12 @@ impl State {
                 self.restart_search(self.active, tx);
             }
             Reload => {
-                // ⌘R also reads the sidebar's volumes again (one of the explicit refreshes).
+                // ⌘R also reads the sidebar's volumes again (one of the explicit refreshes),
+                // and the column view's columns.
                 self.refresh_volumes();
+                if let Some(cols) = self.cur_mut().cols.as_mut() {
+                    cols.reread(&[], true);
+                }
                 self.reload();
             }
             Reveal => self.reveal_selected(),
@@ -417,9 +426,10 @@ impl State {
             EmptyTrash => self.empty_trash(),
             CopyToOther => self.send_to_other_pane(false),
             MoveToOther => self.send_to_other_pane(true),
-            Up | Down | PageUp | PageDown | ExtendUp | ExtendDown | ExtendPageUp | ExtendPageDown if self.cur().view == ViewMode::Icons => {
+            Up | Down | PageUp | PageDown | ExtendUp | ExtendDown | ExtendPageUp | ExtendPageDown if self.cur().view.is_grid() => {
                 // A row at a time, or a page of rows (as many as a list page's height holds).
-                let rows = ((PAGE as f32 * 24.0) / self.icon_size.cell()[1]).floor().max(1.0) as isize;
+                let cell_h = self.cur().view.geom(self.icon_size, f32::MAX).map_or(24.0, |g| g.cell[1]);
+                let rows = ((PAGE as f32 * 24.0) / cell_h).floor().max(1.0) as isize;
                 let (dy, extend) = match cmd {
                     Up => (-1, false),
                     Down => (1, false),
@@ -476,6 +486,8 @@ impl State {
             ClosePreview => self.close_preview(),
             AsList => self.set_view(ViewMode::List, tx),
             AsIcons => self.set_view(ViewMode::Icons, tx),
+            AsColumns => self.set_view(ViewMode::Columns, tx),
+            AsTiles => self.set_view(ViewMode::Tiles, tx),
             LargerIcons | SmallerIcons => {
                 if let Some(size) = self.icon_size.step(if cmd == LargerIcons { 1 } else { -1 }) {
                     self.view_chosen = true;
@@ -503,17 +515,25 @@ impl State {
 const ICONS_ONLY: &str = "Icon sizes are for the icon view (As Icons)";
 
 impl State {
-    /// As List or As Icons, for the active tab.
+    /// As List, As Icons, As Columns or As Tiles, for the active tab.
     pub(crate) fn set_view(&mut self, mode: ViewMode, tx: &mut Tx) {
         self.view_chosen = true;
         self.band = None;
         let size = self.icon_size;
         let f = self.cur_mut();
         f.view = mode;
-        // Back to the list: no thumbnails are decoded or kept.
+        // Another view: no thumbnails are decoded or kept for the old one (a grid asks again
+        // for the cells it shows), and its rows are built again (the rows' element keeps its
+        // key across views).
         f.tiles = None;
+        f.grid_rows = None;
+        f.tiles_for = None;
+        f.bump();
         f.regrid(size);
         f.reveal(tx);
+        // The columns (or none, leaving them), their reads and the preview column.
+        self.sync_preview();
+        self.flush_columns(tx);
     }
 }
 

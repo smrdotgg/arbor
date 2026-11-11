@@ -157,6 +157,8 @@ commands! {
     ClosePreview "view.close_preview" "Close Preview", [];
     AsList "view.as_list" "As List", ["cmd+alt+1"];
     AsIcons "view.as_icons" "As Icons", ["cmd+alt+2"];
+    AsColumns "view.as_columns" "As Columns", ["cmd+alt+3"];
+    AsTiles "view.as_tiles" "As Tiles", ["cmd+alt+4"];
     LargerIcons "view.larger_icons" "Larger Icons", ["cmd+plus", "cmd+equal"];
     SmallerIcons "view.smaller_icons" "Smaller Icons", ["cmd+minus"];
 

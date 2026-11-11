@@ -9,6 +9,8 @@ scripts/bench.sh 11 10 --jump 5                # plus 5 cold starts opening Jump
 scripts/bench.sh 11 10 --search 5              # plus 5 cold starts searching a 120k-file tree
 scripts/bench.sh 11 10 --rename 5              # plus 5 cold starts typing in Batch Rename over 10k items
 scripts/bench.sh 1 10 --grid 4                 # plus 4 + 4 cold starts paging the icon view (10k, and 1,000 photos)
+scripts/bench.sh 1 10 --columns 5 --tiles 4    # plus 5 cold starts moving in and out of the 10k folder as columns, 4 paging tiles
+cargo test --release -- --ignored --nocapture column_cost   # the column view's ← and → over 10k, CPU only, beside the list's own landing
 scripts/bench.sh 1 12 --jump 5 --pace 120 --gap 1000   # the same, paced as a person types (report both)
 scripts/bench.sh 1 2 --idle 3                  # 3 + 3 starts left idle (list, icons): CPU over 5 s, fails above 0.05 s
 cargo test --release -- --ignored --nocapture search_speed   # walk speed by thread count (vendor/, or ARBOR_SEARCH_TREE)
@@ -56,6 +58,58 @@ builds on the M4 (macOS, 60 Hz display):
 
 The icon view was spared while thumbnails were on screen: they're live sources, and latching
 them clears the flag that kept the list view drawing.
+## 2026-11-11, `feature/views` (As Columns and As Tiles)
+
+What could cost the list view time: a check per key and per `poll` for panes showing columns
+(`State::sync_columns`, one comparison when none does), one flag per row (`Ctx::narrow`), and
+the `preview` sync's one more call. The column and tiles views cost nothing until used.
+Measured against c3433d3 (main, the commit before the branch), on tabot-dev under load from
+other builds (load average 4–7), so every number below is noisier than usual.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+`bench 8 10 --bin …`, the two release binaries alternating, two passes each:
+
+| Measure (median per pass) | c3433d3 | this |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 153.7, 154.1 ms | 159.7, 151.6 ms |
+| Listing visible (10k, nav → frame) | 50.7, 52.4 ms | 53.1, 48.9 ms |
+| Key → frame (synthetic ↓) | 8.4, 8.5 ms | 8.7, 8.6 ms |
+
+`frame_cost` (Arbor's own work per key, no GPU), the two test binaries alternating: medians
+1.944, 1.968, 1.948 ms before and 1.980, 1.956, 1.949 ms after. No difference beyond noise.
+The release binary: 40,091,344 bytes before, 40,190,136 after (+0.25%).
+
+The new views, `bench 1 10 --columns 5 --tiles 4` (five cold starts in the 10k folder as
+columns, each round ← to its parent, where the 10k folder becomes the column on the right,
+then → back into it; four paging the tiles view with Page Down and ↓):
+
+| Measure | n | median | p95 | budget |
+| --- | --- | --- | --- | --- |
+| Tiles, 10k entries: key → frame (Page Down, ↓) | 80 | 10.8 ms | 15.1 ms | 8 ms (over) |
+| Columns: → into the 10k folder (key → frame) | 50 | 15.7 ms | 22.6 ms | 50 ms (under) |
+| Columns: ← out of the 10k folder (key → frame) | 50 | 15.0 ms | 21.8 ms | 50 ms (under) |
+
+The list's ↓ was 9.0 ms in the same session, so tiles paging is in line with the icon view's
+(milestone 16: 6.2 ms on a quiet machine, when the list's ↓ was 6.2 too). A column move opens a
+folder, so it's held to the listing budget, as a navigation in the list view is; it lands in
+the key's own frame, without a read (the 10k listing on screen moves between the active column
+and the one beside it, `State::adopt_column`). The first version of the bench put the 10k
+folder's columns under the disk's root, through `/tmp`, which holds 60,594 entries on this
+machine: ← then also read a 60k column (26.9 ms median); the columns runs now have the bench's
+folder as their sidebar place.
+
+`column_cost` (CPU only, headless, the 10k folder of `frame_cost`), one pass:
+
+| Measure | median | p95 |
+| --- | --- | --- |
+| Columns: ← out of 10k (key → committed frame) | 8.4 ms | 10.6 ms |
+| Columns: → into 10k | 9.0 ms | 11.0 ms |
+| List view: the frame landing the same 10k listing (its read left out) | 12.4 ms | 20.4 ms |
+
+Most of a column move is Rune keying the 10k rows that move between columns (0.5 ms per 1,000
+entries on top of about 4 ms: 3.8 ms for a folder of 250, 22.9 ms for one of 30,000); the list
+view pays the same, and more, when a 10k listing lands.
 
 ## 2026-11-10, milestone 16 (drag-select, the icon view and its thumbnails)
 

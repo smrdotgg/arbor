@@ -33,7 +33,8 @@ These come after the Mac QA round's real bugs (and any bad performance spots) ar
   ⌘/⇧ to add to the selection, like Finder and Explorer. Not built today (only click, ⇧-click,
   ⌘-click, keyboard).
 - **More views**, switchable per tab (and remembered per folder only if that's user data, not a
-  cache):
+  cache). Built: list and icons in milestone 16, columns and tiles on `feature/views`
+  (DECISIONS.md, 2026-11-11):
   - **List** (today's view).
   - **Thumbnails / icons:** a grid with image and document thumbnails, generated on demand for
     the visible cells only, cancelled on scroll, nothing stored by Arbor (NORTHSTAR's

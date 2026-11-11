@@ -17,6 +17,7 @@ use crate::preview::{Body, Format, Preview};
 use crate::search::Search;
 
 mod batch;
+mod columns;
 mod grid;
 mod list;
 mod overlays;
@@ -147,6 +148,8 @@ struct Ctx {
     /// A selection rectangle is being dragged out in this pane, so its rows report where
     /// they're laid out (`list::follow_band`).
     banding: bool,
+    /// A column of the column view: rows show the name alone.
+    narrow: bool,
 }
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
@@ -165,7 +168,7 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
     // With the preview open in a split window, it takes the other pane's place (as a
     // two-panel commander's quick view does).
     // Get Info's panel goes where the preview does (only one is open).
-    let panel_open = s.preview.is_some() || s.info.is_some();
+    let panel_open = s.panel_docked();
     let hidden = |ix: usize| panel_open && ix != s.active;
     let split = match s.panes.as_slice() {
         [a, b] => {
@@ -200,8 +203,9 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
             icons: s.icon_size,
             scale,
             banding: s.band.as_ref().is_some_and(|b| b.pane == p.id()),
+            narrow: false,
         };
-        panes = panes.child(pane(s, p, c));
+        panes = panes.child(pane(s, p, c, cx));
     }
     // One pane: the preview docks on its right, and the list stays usable beside it.
     if panel_open && split.is_none() {

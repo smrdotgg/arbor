@@ -408,6 +408,10 @@ impl State {
                 f.recheck_results(&changed, &landed);
                 continue;
             }
+            // The column view's other columns showing a changed folder read it again too.
+            if let Some(cols) = f.cols.as_mut() {
+                cols.reread(folders, false);
+            }
             let going = f.pending.as_ref().is_some_and(|p| matches!(p.nav, Nav::New | Nav::Back | Nav::Forward));
             let (at, at_id) = match &f.pending {
                 // Not listed yet: its identity isn't known.

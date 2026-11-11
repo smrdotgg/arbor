@@ -41,6 +41,39 @@ Newest first.
   drag. A future live-only handler outside a drag would bring the loop back.
 - **Suggested Rune change:** clear `live_dirty` in `latch_live` when there are no live
   subscriptions (or don't set it in `skip_view` then): nothing is left to latch.
+## Column view: a horizontal scroll can't tell the app which children are on screen
+
+- **Feature:** the column view (As Columns): only the columns on screen may hold their folder's
+  listing (NORTHSTAR: no caching), so a column scrolled off drops its entries and one scrolled
+  back is read again.
+- **What Rune is missing:** for a `scroll_x` viewport, a handler with state access when the set
+  of children on screen changes (as `on_visible_rows` gives a virtual list, rows of children
+  laid out along x). Its offset reaches the app only through `on_scroll_offset`, which runs
+  with no state and no commit, so scrolling can't start or stop anything.
+- **What we did instead:** the columns scroll by whole columns under Arbor's control
+  (`Columns::first`, `src/columns.rs`): as many as fit the pane at the column width, the deepest
+  after every move, the horizontal wheel (and Shift + wheel) taken by an `on_wheel` on the strip
+  and turned into a column at a time (`State::columns_wheel`), and a "‹ N" button at the left
+  edge (`src/view/columns.rs`).
+- **What users lose:** smooth sideways scrolling of the column strip (a trackpad swipe moves it
+  a column at a time, not with the fingers), and partly visible columns at either edge.
+- **Suggested Rune change:** `on_visible_children(|s, range|)` on a `scroll_x` viewport (or
+  horizontal `virtual_rows`), called when the range of children intersecting it changes.
+
+## Column view: a new scroll viewport can't open scrolled to a row
+
+- **Feature:** the column view: a column that comes on screen (moving left or right, scrolling
+  back) shows its highlighted folder, which may be far down a long folder.
+- **What Rune is missing:** a declarative initial scroll target for a viewport (`El::scroll_to_key`
+  on its first frame), or a way to queue `Tx::scroll_into_view_in` outside a handler. Columns
+  come and go in `State::sync_columns`, which runs from places with no `Tx` (after a listing
+  lands in a column's read, in the middle of the preview's sync).
+- **What we did instead:** `State::col_reveals` queues them, and `State::flush_columns` sends
+  them with the next `Tx`: every key, command and press handler calls it, and `poll` does for
+  reads that land later.
+- **What users lose:** nothing seen so far; a column that lands in a frame no handler or `poll`
+  runs in would show its top until the next one (no case found).
+- **Suggested Rune change:** `El::initial_scroll_to(row_key)` for a viewport's first frame.
 
 ## Drag-select: no pointer events while the pointer holds still outside the list
 

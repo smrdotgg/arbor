@@ -231,6 +231,22 @@ pub struct State {
     /// Device pixels per point, written by the view: thumbnails decode to the icon's side in
     /// them ([`State::tile_fit`]).
     pub(crate) ui_scale: std::cell::Cell<f32>,
+    /// The column view's column width, for every pane (its dividers drag it; this session).
+    pub col_w: f32,
+    /// The width when a divider drag started, while one is dragged.
+    pub(crate) col_resize: Option<f32>,
+    /// How long a change waits for the columns it needs to be read (`columns::WAIT`).
+    pub(crate) column_wait: std::time::Duration,
+    /// A column made the active folder, its listing in hand, waiting for a `Tx` to land
+    /// ([`State::flush_columns`]): the pane, and the answer.
+    pub(crate) col_ready: Option<(u64, Answer)>,
+    /// Columns to scroll to their highlighted item (rows key, row key), with the next `Tx`.
+    pub(crate) col_reveals: Vec<(String, String)>,
+    /// The open preview is the column view's own (drawn as its last column, opened and closed
+    /// with the selection), not the docked panel Space opens.
+    pub col_preview: bool,
+    /// Space (or Close Preview) turned the column view's preview off, this session.
+    pub col_preview_off: bool,
 }
 
 /// What's at a typed path.
@@ -380,6 +396,13 @@ impl State {
             view_chosen: false,
             tile_pool: None,
             ui_scale: std::cell::Cell::new(1.0),
+            col_w: crate::columns::COL_W,
+            col_resize: None,
+            column_wait: crate::columns::WAIT,
+            col_ready: None,
+            col_reveals: Vec::new(),
+            col_preview: false,
+            col_preview_off: false,
         };
         let f = &mut s.panes[0].f;
         match listing {
@@ -432,6 +455,8 @@ impl State {
             *w = Some(waker.clone());
         }
         self.waker = Some(waker);
+        // A window opening as columns (`view.default`) gets them from its first frame.
+        self.sync_columns();
     }
 
     /// The active pane's folder.
@@ -495,6 +520,11 @@ impl State {
 
     pub(crate) fn go_full(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, rename: bool) {
         self.rename = None;
+        // In the column view, a folder on screen as a column becomes the active one from its
+        // listing (no read).
+        if !rename && matches!(nav, Nav::New | Nav::Back | Nav::Forward) && self.adopt_column(&path, nav, &select) {
+            return;
+        }
         self.cur_mut().request(path, nav, select, rename);
     }
 
@@ -627,11 +657,16 @@ impl State {
         changed |= self.poll_batch();
         // Select by Pattern's count follows the rows it counts (a listing that landed).
         changed |= self.pick_refresh();
+        changed |= self.poll_columns();
         changed |= self.sync_tiles();
         changed |= self.poll_tiles();
         // After everything that can move the selection this frame.
         changed |= self.sync_preview();
         changed |= self.land_preview();
+        if self.col_ready.is_some() || !self.col_reveals.is_empty() {
+            self.flush_columns(tx);
+            changed = true;
+        }
         changed
     }
 
@@ -750,8 +785,9 @@ impl State {
                     fs::sort_entries(&mut entries, f.sort);
                 }
                 let old = std::mem::replace(&mut f.cwd, p.path);
-                f.dir_id = a.listing.dir_id;
+                let old_id = std::mem::replace(&mut f.dir_id, a.listing.dir_id);
                 let moved = old != f.cwd;
+                let left_from = (moved && f.cols.is_some()).then(|| old.clone());
                 if moved {
                     // Another folder: its visible rows are Rune's to say.
                     f.grid_rows = None;
@@ -775,7 +811,16 @@ impl State {
                     }
                     Nav::Reload | Nav::Show => {}
                 }
-                f.entries = entries;
+                let old_entries = std::mem::replace(&mut f.entries, entries);
+                // The column view: the folder just left can be a column in the same frame (on
+                // the right after going up, on the left after going in), from this listing.
+                if let Some(old) = left_from
+                    && let Some(cols) = f.cols.as_mut()
+                    && !old_entries.is_empty()
+                {
+                    let col = crate::columns::Column::ready(old, old_entries, old_id, f.sort, f.show_hidden, self.waker.as_ref());
+                    cols.spare.push(col);
+                }
                 f.now = crate::folder::now();
                 let navigated = matches!(p.nav, Nav::New | Nav::Back | Nav::Forward | Nav::Fresh);
                 if navigated {

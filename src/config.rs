@@ -284,7 +284,7 @@ fn view(t: &dyn TableLike, s: &mut Settings, errors: &mut Vec<String>, line: &dy
         match name {
             "default" => match item.as_str().and_then(crate::grid::ViewMode::named) {
                 Some(v) => s.view_default = v,
-                None => errors.push(format!("line {at}: default should be \"list\" or \"icons\"")),
+                None => errors.push(format!("line {at}: default should be \"list\", \"icons\", \"columns\" or \"tiles\"")),
             },
             "icon_size" => match item.as_str().and_then(crate::grid::IconSize::named) {
                 Some(v) => s.icon_size = v,
@@ -456,8 +456,10 @@ pub fn template() -> String {
          # cross_devices = false\n\
          \n\
          [view]\n\
-         # How new tabs show their folder: \"list\" (rows with columns) or \"icons\" (a grid, with\n\
-         # thumbnails of images; As List and As Icons switch a tab).\n\
+         # How new tabs show their folder: \"list\" (rows with columns), \"icons\" (a grid, with\n\
+         # thumbnails of images), \"columns\" (a column per folder, the preview in the last),\n\
+         # or \"tiles\" (larger icons with kind and size). As List, As Icons, As Columns and\n\
+         # As Tiles switch a tab.\n\
          # default = \"list\"\n\
          # The icon view's icon size to start with: \"small\", \"medium\" or \"large\" (cmd+plus and\n\
          # cmd+minus change it).\n\
@@ -529,11 +531,16 @@ mod tests {
         assert_eq!((c.settings.view_default, c.settings.icon_size), (crate::grid::ViewMode::Icons, crate::grid::IconSize::Large));
         let d = Config::parse("", LINUX);
         assert_eq!((d.settings.view_default, d.settings.icon_size), (crate::grid::ViewMode::List, crate::grid::IconSize::Medium));
-        let bad = Config::parse("[view]\ndefault = \"columns\"\nicon_size = 3\nzoom = 1\n", LINUX);
+        for (name, mode) in [("columns", crate::grid::ViewMode::Columns), ("tiles", crate::grid::ViewMode::Tiles)] {
+            let c = Config::parse(&format!("[view]\ndefault = \"{name}\"\n"), LINUX);
+            assert!(c.errors.is_empty(), "{:?}", c.errors);
+            assert_eq!(c.settings.view_default, mode);
+        }
+        let bad = Config::parse("[view]\ndefault = \"gallery\"\nicon_size = 3\nzoom = 1\n", LINUX);
         assert_eq!(
             bad.errors,
             [
-                "line 2: default should be \"list\" or \"icons\"",
+                "line 2: default should be \"list\", \"icons\", \"columns\" or \"tiles\"",
                 "line 3: icon_size should be \"small\", \"medium\" or \"large\"",
                 "line 4: unknown setting 'zoom' under [view] (settings are default, icon_size)",
             ]

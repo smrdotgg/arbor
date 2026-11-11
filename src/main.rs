@@ -14,6 +14,7 @@ mod app;
 mod band;
 mod batch;
 mod bounded;
+mod columns;
 mod commands;
 mod complete;
 mod config;

@@ -61,7 +61,10 @@
 //! types `$` (each waiting for its preview) and closes it with Esc. With `ARBOR_BENCH_GRID=1` the
 //! first step switches to the icon view (As Icons); then each round presses Page Down and ↓.
 //! `ARBOR_BENCH_GRID=2` (a folder of photos) waits after As Icons for the first screen's
-//! thumbnails, then pages while the next screens' stream in. With `ARBOR_BENCH_TABS=1` it opens a second tab on the
+//! thumbnails, then pages while the next screens' stream in; `ARBOR_BENCH_GRID=3` does the
+//! same in the tiles view (As Tiles). With `ARBOR_BENCH_COLUMNS=1` the first step switches to
+//! the column view (As Columns) in the 10k folder; then each round presses ← (to its parent,
+//! the 10k folder becoming the column on the right) and → (back into it). With `ARBOR_BENCH_TABS=1` it opens a second tab on the
 //! parent folder instead, then does N rounds of "previous tab (the start folder), next tab".
 //! A step starts only once the previous step's frame was drawn: a frame that wasn't (the window
 //! covered or not yet visible, no drawable in time) asks for nothing, and Rune draws again when
@@ -149,6 +152,10 @@ thread_local! {
     /// `ARBOR_BENCH_IDLE`: the view the bench leaves the window idle in, and whether it has.
     static IDLE: Cell<Option<crate::grid::ViewMode>> = const { Cell::new(None) };
     static IDLE_READY: Cell<bool> = const { Cell::new(false) };
+    /// `ARBOR_BENCH_GRID=3`: the grid bench in the tiles view.
+    static GRID_TILES: Cell<bool> = const { Cell::new(false) };
+    /// `ARBOR_BENCH_COLUMNS`: the bench moves in and out of the 10k folder in the column view.
+    static COLUMNS: Cell<bool> = const { Cell::new(false) };
     /// As Icons asked for thumbnails: when, and whether the first one showed yet.
     static TILE_ASKED: Cell<Option<(Instant, bool)>> = const { Cell::new(None) };
     /// The first thumbnail, and the screen's last, land in the frame being built.
@@ -203,6 +210,8 @@ pub fn init() -> bool {
     GRID.set(set("ARBOR_BENCH_GRID"));
     GRID_PHOTOS.set(std::env::var("ARBOR_BENCH_GRID").is_ok_and(|v| v.trim() == "2"));
     IDLE.set(std::env::var("ARBOR_BENCH_IDLE").ok().and_then(|v| crate::grid::ViewMode::named(v.trim())));
+    GRID_TILES.set(std::env::var("ARBOR_BENCH_GRID").is_ok_and(|v| v.trim() == "3"));
+    COLUMNS.set(set("ARBOR_BENCH_COLUMNS"));
     PACE_MS.set(std::env::var("ARBOR_BENCH_PACE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0));
     let steps = if let Some(view) = IDLE.get() {
         if view == crate::grid::ViewMode::Icons { 1 } else { 2 }
@@ -214,7 +223,7 @@ pub fn init() -> bool {
         rounds * PREVIEW_STEPS
     } else if JUMP.get() {
         rounds * JUMP_STEPS
-    } else if TABS.get() || GRID.get() {
+    } else if TABS.get() || GRID.get() || COLUMNS.get() {
         rounds * 2 + 1
     } else {
         rounds * 3
@@ -576,11 +585,27 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
         measured(s, tx, now, |s, tx| run(s, cmd, tx));
         return true;
     }
+    if COLUMNS.get() {
+        let key = |k: Key| KeyEvent { key: k, mods: Mods::default() };
+        match n {
+            0 => {
+                measured(s, tx, now, |s, tx| run(s, Cmd::AsColumns, tx));
+            }
+            n if n % 2 == 1 => {
+                keyed(s, &key(Key::Left), tx, now);
+            }
+            _ => {
+                keyed(s, &key(Key::Right), tx, now);
+            }
+        }
+        return true;
+    }
     if GRID.get() {
         let key = |k: Key| KeyEvent { key: k, mods: Mods::default() };
         match n {
             0 => {
-                measured(s, tx, now, |s, tx| run(s, Cmd::AsIcons, tx));
+                let view = if GRID_TILES.get() { Cmd::AsTiles } else { Cmd::AsIcons };
+                measured(s, tx, now, |s, tx| run(s, view, tx));
                 TILE_ASKED.set(Some((now, false)));
             }
             n if n % 2 == 1 => {
