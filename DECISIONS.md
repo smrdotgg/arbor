@@ -9,6 +9,104 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-11 · Compress and Extract Here (`feature/archives`; Review: Open, the folder made,
+  the bomb limits, the level).**
+  - **No zip crate: Arbor's own ZIP reader and writer and tar reader** (`src/archive/`, about
+    1,900 lines without tests: the two formats about 1,000, the safety rules and the writer the
+    rest), over `flate2` and `crc32fast`, which the lock file already had through `png` with the
+    same features: the lock file gains two edges and no crate, and nothing in the shared `vendor/`
+    changed. The `zip` crate brings its own dependency tree (`indexmap`, `memchr`, `thiserror`,
+    `displaydoc` even with deflate alone) and features Arbor refuses anyway (encryption, other
+    methods); the checks that matter (paths, links, bombs, overlap) would have been Arbor's code
+    either way. The subset: stored and deflate, ZIP64, UTF-8 and code page 437 names, data
+    descriptors on read, Unix modes and links, extended and NTFS times; tar: ustar, pax, GNU long
+    names, gzipped. Undo: swap `zip.rs` for the crate.
+  - **Open (Enter, double-click) still hands an archive to the system's app (Review)**; Extract
+    Here is its own command (palette, context menu on archives), so Enter means the same for
+    every file, and macOS users keep Archive Utility one double-click away. Neither command has a
+    default key (none is conventional). Compress's title names what it acts on ("Compress
+    “Photos”", "Compress 3 Items"), as Finder's does. Undo: `Cmd::Compress`, `Cmd::Extract`.
+  - **The folder made (Review): named after the archive, unless everything in it is inside one
+    folder; then that folder is what's made** (Archive Utility's rule), so Arbor's own
+    "Photos.zip" round-trips to "Photos", not "Photos/Photos". A lone file still gets a folder
+    named after the archive. Undo: `single` in `archive::plan`.
+  - **Bomb limits (changed after review): no ratio rule.** Refused before writing anything above
+    1,000,000 entries, 256 folders deep, 1 TB, or when the contents wouldn't leave the disk 1 GB
+    or 5% of its free space (`archive::room`); overlapping entries always (their names counted,
+    after review). Each entry is cut off at its declared size and must reach it with its CRC, a
+    `.tar.gz`'s gzip stream is read to its end so its CRC and length are checked, and Esc works
+    inside a big entry (a plain tar seeks past data; a gzipped one asks every MB). The first
+    version refused contents over 256 MB at more than 200× the archive, which refused real
+    archives (logs at 294×, zeros at 1,029×, Arbor's own archive of a sparse image). Undo or
+    tighten: `archive::limits`.
+  - **An entry whose path leads out refuses the whole archive** (an absolute path, `..`, a drive
+    letter, a UNC path, a NUL): a crafted archive isn't partly trusted. `\` separates parts
+    everywhere (archives from Windows tools), so `a\..\..\x` is refused on every OS. Damage (CRC,
+    truncation) and cancel remove everything made, identity-checked (`ops::unmake`). An empty
+    archive says so and makes nothing. Undo: `archive::parts`.
+  - **Links (Review; rewritten after review): judged by the target alone, and links that fail
+    are left out with a note naming them (up to three), the rest extracted.** The first version
+    compared the target's path with other entries' names, which a link renamed when made ("Y 2")
+    or a disk's Unicode normalization slips past: the review's archive reached four folders above
+    the destination. Now a target must be relative, its `..` parts only first and no more than
+    the link's depth (`archive::link_target`), which keeps it inside by itself: its `..`s climb
+    real folders Arbor made, and the names after go down, through other links only if those keep
+    to the same rule. **Deviation from the review's suggestion:** a target that goes down through
+    another link the archive made is allowed, not refused, because that is safe by the rule above
+    and refusing it would break macOS frameworks in zipped apps (`Headers → Versions/Current/Headers`
+    with `Versions/Current → A`). Making each link, its target's path is walked from the link's
+    folder without following anything, and a link this extraction didn't make on the way (another
+    app's, put there while it ran) refuses the extraction (`out::walk_target`). Undo:
+    `unsafe_links`, `link_target`.
+  - **Names without the UTF-8 flag stay code page 437** (the ZIP spec's), unless they're valid
+    UTF-8 (which many tools write without the flag). Keeping raw bytes on Unix would give names
+    no other app shows the same way, and Windows can't; a review nit, left as is. Undo:
+    `archive::decode_cp437`.
+  - **A ZIP of 1,000,000 entries is listed whole in memory** (about 200 bytes an entry, so
+    ~200 MB at the cap): the plan needs every entry before writing anything (the one-folder rule,
+    the duplicate-free names, the total). Streaming the directory is for later if it matters; a
+    review nit, left as is. Undo: lower `limits::ENTRIES`.
+  - **Deflate level 3** for Compress. A 1 GB folder of mixed files on tabot-dev (BENCH.md),
+    in CPU time on the worker's thread (the box's load was 6–11, which made wall-clock times
+    swing 2–3×): level 1 compresses at 171 MB/s to 70% of its size, level 3 at 84–100 MB/s to
+    66%, level 6 at 72 MB/s to 65%. Level 6 saves 1% more for a quarter more time; level 1 is
+    twice as fast and its deflated text a fifth bigger. Files already compressed are stored by
+    extension, and a big file whose first 256 KB don't deflate below 97% is stored without
+    deflating the rest. Compressing files on several threads would be the next step if it's
+    wanted. Undo: `LEVEL` in `ops/archive/mod.rs`.
+  - **Links: stored as links on macOS and Linux, left out on Windows both ways** (making one
+    needs Developer Mode or an administrator), with a note. **Permissions: a file keeps its
+    owner's read, write and run bits from the archive (read always), the rest from the umask;
+    never setuid, setgid or sticky; folders get the default mode.** Undo: `out::file_mode`,
+    `plan`'s Windows branch.
+  - **Undo trashes the archive or folder only while it's unchanged, and redo takes it back out of
+    the Trash** (the task said "recreates": taking it back is the same result, and is what an
+    undone copy's redo does). Undo: `What::Compress`, `What::Extract` in `Undo::in_trash`.
+  - **Compress stops on a file it can't read** (Finder does too; an archive quietly missing a
+    file is worse) but leaves out, with a note, what it never archives: another disk mounted
+    inside, devices, sockets, FIFOs, links on Windows. Its temporary file is
+    `.<name>.arbor-<pid>-<n>.part` beside the items (shown on Windows while it runs). Undo:
+    `ops/archive/mod.rs`.
+  - **A `.tar.gz`'s gzip stream (after the re-review):** read member by member, each member's
+    CRC and length checked; it ends with the member holding the tar's end (nothing after it is
+    decompressed or looked at, so trailing zero padding, which gzip, tar and Python accept, and
+    even a damaged extra member, don't refuse it); zero bytes after the last member while the
+    tar still goes on end the stream, and data after zero padding is damage. A tar's running
+    total is held to the disk's room while it's listed. Undo: `archive::tar::Gz`, `list_from`'s
+    `free`.
+  - **With multiple windows (main's aeeed9e):** Compress and Extract Here start through the
+    app's one operation slot like every operation, and their outcome refreshes every window
+    showing the folder, by identity. What they make is registered for the leftovers record the
+    moment it's made (the extracted folder and each item in it, Compress's temporary file), so
+    quitting mid-way names what cleanup couldn't remove; a finished one is cleared. Undo and redo
+    say "Moved “Photos.zip” to the Trash", "Put back “Photos” from the Trash".
+  - **Tar: read twice** (once for the list, so it's checked whole before anything is written,
+    then to write it, each entry matched against the list; a gzipped tar is decompressed twice),
+    hard links, devices and sparse files left out with a note, names that aren't UTF-8 shown with
+    replacement characters (noted). **`__MACOSX/` is left out silently** (macOS's resource forks,
+    which Archive Utility folds back into the files). Undo: `archive::tar`, the `__MACOSX` check
+    in `plan`.
+
 - **2026-11-11 · Some reviews go to an Opus reviewer instead of GPT-6.1 Sol (Review).** OpenAI's
   safety filter refused two re-reviews of the Make Link undo fix (checks that a symlink wasn't
   swapped just before removal), even reworded in plain terms. Rather than reword further to get

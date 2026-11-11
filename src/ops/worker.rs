@@ -123,7 +123,7 @@ impl<'a> Worker<'a> {
 
     /// `dst` was just created, with creation mark `mark`: confirmed in `Progress::created`
     /// at once, before anything is written to it (one it can't mark isn't).
-    fn created(p: &Progress, dst: &Path, mark: Option<&String>) {
+    pub(super) fn created(p: &Progress, dst: &Path, mark: Option<&String>) {
         if let Some(mark) = mark
             && let Ok(mut c) = p.created.lock()
         {
@@ -239,7 +239,9 @@ impl<'a> Worker<'a> {
         | Op::Move { sources, .. }
         | Op::Trash { sources }
         | Op::PutBack { items: sources }
-        | Op::MakeLinks { items: sources } = &op
+        | Op::MakeLinks { items: sources }
+        | Op::Compress { sources, .. }
+        | Op::Extract { archives: sources } = &op
         {
             for src in sources {
                 if !self.seen.contains_key(src)
@@ -420,6 +422,8 @@ impl<'a> Worker<'a> {
             }
             Op::MakeLinks { items } => self.make_links(items, &mut out),
             Op::Rename { items } => self.batch_rename(items, &mut out),
+            Op::Compress { sources, dir } => self.compress(sources, dir, &mut out),
+            Op::Extract { archives } => self.extract(archives, &mut out),
             Op::Undo(undo) => {
                 out.undid = Some((undo.what, undo.redo));
                 match undo.what {
@@ -439,9 +443,10 @@ impl<'a> Worker<'a> {
     pub(super) fn run_checked(&mut self, expect: &Checks, op: Op) -> Outcome {
         let mut why = Vec::new();
         let mut left_out = std::collections::HashSet::new();
-        // A copy leaves its sources where they are: one that couldn't be identified is copied
-        // as it is now. Anything that moves or removes it can't tell it from a replacement.
-        let copies = matches!(op, Op::Copy { .. });
+        // A copy (and Compress, and Extract) leaves its sources where they are: one that couldn't
+        // be identified is read as it is now. Anything that moves or removes it can't tell it
+        // from a replacement.
+        let copies = matches!(op, Op::Copy { .. } | Op::Compress { .. } | Op::Extract { .. });
         for (path, id) in &expect.items {
             let problem = match (path.symlink_metadata(), id) {
                 (_, None) if copies => continue,

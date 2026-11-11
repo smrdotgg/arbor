@@ -112,6 +112,25 @@ impl State {
         }
     }
 
+    /// Compress: the selection into one `.zip` beside it ("Photos.zip", or "Archive.zip" for
+    /// several). In a search the items are in their own folder (`unavailable` makes sure there's
+    /// one).
+    pub fn compress_selected(&mut self) {
+        let sources = self.target_paths();
+        let Some(dir) = sources.first().and_then(|p| p.parent()).map(Path::to_path_buf) else { return };
+        if sources.iter().all(|p| p.parent() == Some(dir.as_path())) {
+            self.start(checked(Op::Compress { sources, dir }, self.cur().target_checks()));
+        }
+    }
+
+    /// Extract Here: each selected archive into a folder beside it.
+    pub fn extract_selected(&mut self) {
+        let archives = self.target_paths();
+        if !archives.is_empty() {
+            self.start(checked(Op::Extract { archives }, self.cur().target_checks()));
+        }
+    }
+
     pub fn trash_selected(&mut self) {
         let sources = self.target_paths();
         if !sources.is_empty() {
@@ -855,6 +874,8 @@ impl State {
                     | Cmd::Rename
                     | Cmd::Duplicate
                     | Cmd::MakeLink
+                    | Cmd::Compress
+                    | Cmd::Extract
                     | Cmd::Trash
                     | Cmd::Copy
                     | Cmd::Cut
@@ -886,7 +907,12 @@ impl State {
         if on_row && self.unavailable(Cmd::PutBack).is_none() {
             v.insert(0, item(Cmd::PutBack));
         }
-        v.extend([item(Cmd::Info), item(Cmd::Rename), item(Cmd::Duplicate), item(Cmd::MakeLink), item(Cmd::Trash), None]);
+        v.extend([item(Cmd::Info), item(Cmd::Rename), item(Cmd::Duplicate), item(Cmd::MakeLink), item(Cmd::Compress)]);
+        // Extract Here only where the selection is archives.
+        if has && self.unavailable(Cmd::Extract).is_none() {
+            v.push(item(Cmd::Extract));
+        }
+        v.extend([item(Cmd::Trash), None]);
         v.extend([item(Cmd::Copy), item(Cmd::Cut), item(Cmd::Paste), item(Cmd::CopyPath), None]);
         // The commander commands only when there's another pane to send to.
         if self.split() {

@@ -125,6 +125,8 @@ commands! {
     BatchRename "file.batch_rename" "Batch Rename…", [];
     NewFolder "file.new_folder" "New Folder", ["cmd+shift+n"];
     NewFile "file.new_file" "New File", ["cmd+alt+n"];
+    Compress "file.compress" "Compress", [];
+    Extract "file.extract" "Extract Here", [];
     Trash "file.trash" "Move to Trash", ["cmd+backspace", "delete"];
     Delete "file.delete" "Delete Permanently…", ["mac:cmd+alt+backspace", "pc:shift+delete"];
     PutBack "file.put_back" "Put Back", [];

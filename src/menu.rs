@@ -245,6 +245,7 @@ mod tests {
                 "Rename…",
                 "Duplicate",
                 "Make Symbolic Link",
+                "Compress “a.txt”",
                 "Move to Trash",
                 "—",
                 "Copy",
@@ -281,7 +282,7 @@ mod tests {
         assert!(s.on_key(&key(Key::Down), &mut tx));
         assert_eq!(sel(&s), Some(0), "Open");
         assert!(s.on_key(&key(Key::Up), &mut tx));
-        assert_eq!(sel(&s), Some(17), "wrapped to New File, past the disabled Undo");
+        assert_eq!(sel(&s), Some(18), "wrapped to New File, past the disabled Undo");
         assert!(s.on_key(&key(Key::Down), &mut tx));
         assert_eq!(sel(&s), Some(0));
         for _ in 0..3 {
@@ -289,13 +290,15 @@ mod tests {
         }
         assert_eq!(sel(&s), Some(4), "past the separator to Get Info");
         assert!(s.on_key(&key(Key::Text("c".into())), &mut tx));
-        assert_eq!(sel(&s), Some(10), "Copy");
+        assert_eq!(sel(&s), Some(8), "Compress");
         assert!(s.on_key(&key(Key::Text("c".into())), &mut tx));
-        assert_eq!(sel(&s), Some(11), "then Cut");
+        assert_eq!(sel(&s), Some(11), "then Copy");
+        assert!(s.on_key(&key(Key::Text("c".into())), &mut tx));
+        assert_eq!(sel(&s), Some(12), "then Cut");
         assert!(s.on_key(&key(Key::Text("C".into())), &mut tx));
-        assert_eq!(sel(&s), Some(13), "then Copy Path, case aside");
+        assert_eq!(sel(&s), Some(14), "then Copy Path, case aside");
         assert!(s.on_key(&key(Key::End), &mut tx));
-        assert_eq!(sel(&s), Some(17));
+        assert_eq!(sel(&s), Some(18));
         let picked = s.cur().sel;
         assert!(s.on_key(&key(Key::PageDown), &mut tx), "other keys stay in the menu");
         assert_eq!(s.cur().sel, picked);
@@ -321,7 +324,7 @@ mod tests {
         let (d, mut s) = folder("off");
         let mut tx = Tx::default();
         s.open_menu(s.menu_items(true), press(), &mut tx);
-        s.menu_pick(18, &mut tx);
+        s.menu_pick(19, &mut tx);
         assert!(s.menu.is_none() && !s.owns_job() && s.note.is_none());
         let _ = std::fs::remove_dir_all(&d);
     }

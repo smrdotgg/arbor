@@ -32,6 +32,39 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-11, `feature/archives` (Compress and Extract Here)
+
+Compress and Extract Here of a 1 GB folder of mixed files (21,620 files: 300 MB of Rust source
+in 1,500 files, 200 MB of it in 20,000 small files, 300 MB of photos stored as they are, 200 MB
+of incompressible binaries under unknown names; `ARBOR_BENCH_TREE=… cargo test --release
+archive_throughput -- --ignored --nocapture`), release build on tabot-dev (Xeon 8375C, 4 vCPU,
+NVMe), folder and archive in the page cache. The load average was 6–11 from other work, so
+wall-clock times swung 2–3× between identical runs; CPU time on the worker's thread is the
+steadier figure.
+
+| Deflate level | Archive | Compress, CPU | Compress, wall | Extract, CPU | Extract, wall |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 699 MB (70%) | 5.9 s (171 MB/s) | 5.6–16.8 s | 4.2 s (239 MB/s) | 3.9–9.3 s |
+| **3 (chosen)** | 656 MB (66%) | 10.0–11.9 s (84–100 MB/s) | 7.5–26.5 s | 3.7–3.9 s (254–274 MB/s) | 2.7–12.6 s |
+| 6 | 651 MB (65%) | 13.9 s (72 MB/s) | 17.9–31.4 s | 2.5 s (395 MB/s) | 2.5–7.5 s |
+
+A file over 4 GB (ZIP64; 4 GB with 40 MB of noise in it) went through Compress and Extract in
+47 s (`a_file_over_4_gb_goes_through_zip64`, ignored by default).
+
+No regression elsewhere: the binary is 330 KB bigger (40.25 → 40.59 MB, release, unstripped).
+The bench under Xvfb (software rendering, not representative; 5 cold starts × 10 rounds,
+`--idle 0`, the same harness with `--bin`), main (ffb96d0) and this branch run alternately:
+
+| Run | Cold start, median | Listing (10k), median | Key → frame, median |
+| --- | --- | --- | --- |
+| main | 434.9 ms | 139.8 ms | 11.1 ms |
+| branch | 466.2 ms | 143.7 ms | 10.9 ms |
+| main | 152.9 ms | 53.2 ms | 8.4 ms |
+| branch | 145.6 ms | 50.5 ms | 8.8 ms |
+
+The first pair ran while the box was busiest. Nothing on these paths changed: the context menu
+gains a row, and the palette's check for Extract Here reads the selected names' extensions
+without allocating.
 ## 2026-11-11, multiple windows (`feature/new-window`)
 
 tabot-dev (Xeon 8375C, 4 vCPU, Xvfb with lavapipe: software rendering, so frame and window

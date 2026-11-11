@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::noclobber;
 use crate::trash::TrashError;
 
+mod archive;
 mod batch;
 mod links;
 mod print;
@@ -93,6 +94,15 @@ pub enum Op {
     MakeLinks {
         items: Vec<PathBuf>,
     },
+    /// Compress: `sources` (all in `dir`) into one new `.zip` in `dir` (see `archive.rs`).
+    Compress {
+        sources: Vec<PathBuf>,
+        dir: PathBuf,
+    },
+    /// Extract Here: each archive into a new folder beside it (see `archive.rs`).
+    Extract {
+        archives: Vec<PathBuf>,
+    },
     /// Reverse an earlier operation, if the disk still looks the way it left it.
     Undo(Undo),
     /// `op` on items chosen from a listing or search results: each item in `expect` must still
@@ -163,6 +173,8 @@ impl Op {
             Op::RenameOne { from, .. } => from.parent().map(Path::to_path_buf).into_iter().collect(),
             Op::NewFolder { dir } | Op::NewFile { dir } => vec![dir.clone()],
             Op::MakeLinks { items } => parents(items),
+            Op::Compress { dir, .. } => vec![dir.clone()],
+            Op::Extract { archives } => parents(archives),
             Op::Checked { op, .. } => return op.folders(),
             Op::Undo(u) => u
                 .steps
@@ -190,6 +202,8 @@ impl Op {
             Op::NewFile { .. } => NEW_FILE,
             Op::MakeLinks { .. } => MAKING_LINKS,
             Op::Rename { .. } => "Renaming",
+            Op::Compress { .. } => "Compressing",
+            Op::Extract { .. } => "Extracting",
             Op::Undo(u) if u.redo => "Redoing",
             Op::Undo(_) => "Undoing",
             Op::Checked { op, .. } => op.verb(),
@@ -238,6 +252,16 @@ impl Op {
                 items.retain(|r| !left_out.contains(r.from.as_path()));
                 let any = !items.is_empty();
                 (Op::Rename { items }, any)
+            }
+            Op::Compress { mut sources, dir } => {
+                keep(&mut sources);
+                let any = !sources.is_empty();
+                (Op::Compress { sources, dir }, any)
+            }
+            Op::Extract { mut archives } => {
+                keep(&mut archives);
+                let any = !archives.is_empty();
+                (Op::Extract { archives }, any)
             }
             op => (op, true),
         }
@@ -288,6 +312,10 @@ pub enum What {
     Trash,
     /// Put Back from the Trash: undone by trashing the items again.
     PutBack,
+    /// A `.zip` Compress made: undone by trashing it.
+    Compress,
+    /// A folder Extract Here made: undone by trashing it.
+    Extract,
 }
 
 impl What {
@@ -303,6 +331,8 @@ impl What {
             What::Link => "link",
             What::Trash => "move to Trash",
             What::PutBack => "put back",
+            What::Compress => "compression",
+            What::Extract => "extraction",
         }
     }
 }
@@ -406,6 +436,10 @@ pub fn undone_note(what: What, redo: bool, results: &[PathBuf]) -> String {
         (What::Trash, true) => format!("Moved {} to the {bin} again", items()),
         (What::PutBack, false) => format!("Moved {} back to the {bin}", items()),
         (What::PutBack, true) => format!("Put back {} again", items()),
+        (What::Compress, false) => format!("Moved {} to the {bin}", named("archive", "archives")),
+        (What::Compress, true) => format!("Made {} again", named("archive", "archives")),
+        (What::Extract, false) => format!("Moved {} to the {bin}", named("extracted folder", "extracted folders")),
+        (What::Extract, true) => format!("Put back {} from the {bin}", named("extracted folder", "extracted folders")),
     }
 }
 

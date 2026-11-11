@@ -27,6 +27,16 @@ pub fn stat_at(dir: &OwnedFd, name: &CStr) -> io::Result<libc::stat> {
     Ok(st)
 }
 
+/// [`stat_at`] relative to a raw descriptor.
+pub fn stat_at_raw(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
+    // SAFETY: a zeroed stat is a valid out-buffer; `name` is NUL-terminated.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dir, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(st)
+}
+
 pub fn fstat(fd: &OwnedFd) -> io::Result<libc::stat> {
     // SAFETY: a zeroed stat is a valid out-buffer for an open descriptor.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
