@@ -1400,18 +1400,21 @@ fn free_space_is_read_off_the_window_thread_and_not_while_idle() {
         s.poll(&mut Tx::default());
     }
     assert_eq!(reads().len(), after_read.len(), "nothing read while idle");
-    // A file operation reads it again (here with the folder's reload).
+    // A file operation asks again (here with the folder's reload): a fresh answer comes. (It
+    // may be another folder's read on the same disk that answers, so this folder's own reads
+    // aren't counted for it.)
+    s.cur_mut().free = None;
     s.new_folder();
     finish_job(&mut s);
-    let n = after_read.len();
-    until(&mut s, &|_| crate::fs::free_reads::of(&d).len() > n);
+    until(&mut s, &|s| s.cur().free().is_some());
+    assert!(s.cur().free().is_some(), "answered again after the operation");
     let after_op = reads();
-    assert!(after_op.len() > after_read.len() && !after_op.contains(&me), "{after_op:?}");
+    assert!(!after_op.contains(&me), "{after_op:?}");
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(2));
         s.poll(&mut Tx::default());
     }
-    assert_eq!(reads().len(), after_op.len());
+    assert_eq!(reads().len(), after_op.len(), "nothing read while idle");
 }
 
 /// Free-space reads never take the listings' workers: a `statvfs` on a dead network volume
