@@ -541,7 +541,7 @@ mod tests {
 
     fn folder(n: usize) -> Folder {
         let mut f = Folder::new(9, std::env::temp_dir(), crate::fs::Sort::new(crate::fs::SortKey::Name, false), false, None);
-        f.entries = (0..n).map(|i| crate::fs::Entry::test(&format!("f{i:02}"), false)).collect();
+        f.entries = (0..n).map(|i| crate::fs::Entry::test(&format!("f{i:02}"), false)).collect::<Vec<_>>().into();
         f.refilter(None);
         f
     }
@@ -627,7 +627,7 @@ mod tests {
     /// A folder of `n` files, file i `(i + 1) × 100` bytes, folder rows every tenth.
     fn sized(n: usize) -> Folder {
         let mut f = folder(n);
-        for (i, e) in f.entries.iter_mut().enumerate() {
+        for (i, e) in std::sync::Arc::make_mut(&mut f.entries).iter_mut().enumerate() {
             e.size = (i as u64 + 1) * 100;
             e.is_dir = i % 10 == 9;
         }
@@ -646,7 +646,7 @@ mod tests {
         f.toggle_mark(1);
         let p = f.picked_size().unwrap();
         assert_eq!(p, crate::marked::Picked { count: 2, bytes: 300, folders: 0 });
-        for e in &mut f.entries {
+        for e in std::sync::Arc::make_mut(&mut f.entries).iter_mut() {
             e.size *= 1000;
         }
         // Row 5: 600 bytes when the rows were made (600,000 now, unseen).
@@ -674,8 +674,10 @@ mod tests {
     fn every_selection_change_is_quick_at_500k() {
         let n = 500_000;
         let mut f = folder(0);
-        f.entries =
-            (0..n).map(|i| crate::fs::Entry { size: i as u64, ..crate::fs::Entry::test(&format!("f{i:06}"), i % 50 == 0) }).collect();
+        f.entries = (0..n)
+            .map(|i| crate::fs::Entry { size: i as u64, ..crate::fs::Entry::test(&format!("f{i:06}"), i % 50 == 0) })
+            .collect::<Vec<_>>()
+            .into();
         f.refilter(None);
         let entries = std::mem::take(&mut f.entries);
         let mut worst = Vec::new();
@@ -745,7 +747,7 @@ mod tests {
     #[test]
     fn hidden_items_leave_the_selection_and_its_total() {
         let mut f = sized(10);
-        f.entries[3].hidden = true;
+        std::sync::Arc::make_mut(&mut f.entries)[3].hidden = true;
         f.set_hidden(true);
         f.select(2);
         f.toggle_mark(3);

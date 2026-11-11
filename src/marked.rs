@@ -77,10 +77,6 @@ impl Rows {
         }
     }
 
-    pub fn clear(&mut self) {
-        *self = Rows::default();
-    }
-
     /// Row `r`'s size (0 for a folder) and whether it's a folder.
     fn row(&self, r: usize) -> (u64, bool) {
         (self.bytes[r + 1] - self.bytes[r], self.dirs[r + 1] > self.dirs[r])
@@ -232,6 +228,49 @@ impl Marked {
 impl PartialEq for Marked {
     fn eq(&self, o: &Marked) -> bool {
         self.count == o.count && self.iter().eq(o.iter())
+    }
+}
+
+/// A plain set of indices into a listing's entries: the selection carried by identity while
+/// the rows are made again (a filter, a sort, which moves it with the entries, a reload, whose
+/// worker marks it on the new listing).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Bits(Vec<u64>);
+
+impl Bits {
+    pub fn get(&self, i: usize) -> bool {
+        self.0.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0)
+    }
+
+    pub fn set(&mut self, i: usize) {
+        if self.0.len() <= i / 64 {
+            self.0.resize(i / 64 + 1, 0);
+        }
+        self.0[i / 64] |= 1 << (i % 64);
+    }
+
+    pub fn count(&self) -> usize {
+        self.0.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// The highest index in it.
+    pub fn last(&self) -> Option<usize> {
+        self.0.iter().rposition(|&w| w != 0).map(|i| i * 64 + 63 - self.0[i].leading_zeros() as usize)
+    }
+
+    /// The same items after their entries moved: `perm[j]` is where entry `j` came from.
+    pub fn permuted(&self, perm: &[u32]) -> Bits {
+        let mut b = Bits::default();
+        for (j, &from) in perm.iter().enumerate() {
+            if self.get(from as usize) {
+                b.set(j);
+            }
+        }
+        b
     }
 }
 

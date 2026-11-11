@@ -901,9 +901,10 @@ impl Folder {
             }
             Nav::Reload | Nav::Show | Nav::Fresh => {}
         }
-        let entries = std::mem::take(&mut self.entries);
+        // Its own unless a reload's worker still holds it (then a copy).
+        let entries = std::sync::Arc::try_unwrap(std::mem::take(&mut self.entries)).unwrap_or_else(|a| (*a).clone());
         let old_id = std::mem::replace(&mut self.dir_id, dir_id);
-        self.visible.clear();
+        self.visible = std::sync::Arc::default();
         self.marked.clear();
         self.sel = 0;
         self.anchor = 0;

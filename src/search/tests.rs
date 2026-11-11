@@ -697,13 +697,12 @@ fn the_list_grows_only_so_far_while_the_walk_goes_on() {
         size: 1,
         mtime_ms: 1,
         mode: 0,
-        sel: false,
         id: None,
         pending: None,
     };
     // As poll_search appends batches while the walk is still going.
     for batch in 0..3 {
-        f.entries.extend((0..700).map(|i| fake(batch * 700 + i)));
+        std::sync::Arc::make_mut(&mut f.entries).extend((0..700).map(|i| fake(batch * 700 + i)));
         f.take_in();
     }
     assert_eq!((f.entries.len(), f.visible.len()), (2100, LIVE_ROWS));
@@ -1286,7 +1285,7 @@ fn target_names(f: &Folder) -> Vec<String> {
 #[test]
 fn a_sort_keeps_the_selection_on_results_not_yet_shown() {
     let mut f = Folder::new(0, PathBuf::from("/"), crate::fs::Sort::new(crate::fs::SortKey::Name, false), true, None);
-    f.entries = (0..1500).map(|i| Entry { size: i as u64 + 1, ..Entry::test(&format!("{i:08}.txt"), false) }).collect();
+    f.entries = (0..1500).map(|i| Entry { size: i as u64 + 1, ..Entry::test(&format!("{i:08}.txt"), false) }).collect::<Vec<_>>().into();
     let mut s = Search::new(f.memo(), "txt", None);
     s.upto = 1000;
     f.search = Some(Box::new(s));
@@ -1313,7 +1312,7 @@ fn a_sort_keeps_the_selection_on_results_not_yet_shown() {
 #[test]
 fn a_selection_that_goes_isnt_replaced_by_another_row() {
     let mut f = Folder::new(0, PathBuf::from("/"), crate::fs::Sort::new(crate::fs::SortKey::Name, false), true, None);
-    f.entries = [".a", "b", "c"].iter().map(|n| Entry::test(n, false)).collect();
+    f.entries = [".a", "b", "c"].iter().map(|n| Entry::test(n, false)).collect::<Vec<_>>().into();
     f.refilter(None);
     f.select(0);
     assert_eq!(target_names(&f), [".a"]);

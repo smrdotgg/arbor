@@ -17,7 +17,7 @@ use rune::{Latest, Tx};
 
 use crate::fs::{self, Entry, Listing, Sort, SortKey};
 pub use crate::marked::Picked;
-use crate::marked::{Marked, Rows};
+use crate::marked::{Bits, Marked, Rows};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Nav {
@@ -60,7 +60,11 @@ impl Pending {
     /// Whether it lands with items marked (two or more, or one the cursor isn't on), rather
     /// than the cursor alone selected.
     pub fn marks(&self) -> bool {
-        self.select.len() > 1 || (self.select.len() == 1 && self.cursor.as_ref().is_some_and(|c| *c != self.select[0]))
+        Pending::marks_for(&self.select, self.cursor.as_ref())
+    }
+
+    pub(crate) fn marks_for(select: &[OsString], cursor: Option<&OsString>) -> bool {
+        select.len() > 1 || (select.len() == 1 && cursor.is_some_and(|c| *c != select[0]))
     }
 }
 
@@ -94,40 +98,98 @@ pub struct Answer {
     pub req: u64,
     pub sort: Sort,
     pub listing: Listing,
-    /// The names it was asked to mark (`Pending::marks`): those it lists are marked on their
-    /// entries (`Entry::sel`) on the worker, so landing a reload of a big folder with a big
-    /// selection doesn't look through it on the window's thread.
-    pub picked: Option<Vec<OsString>>,
+    /// Its entries that are to be selected (`Pending::marks`), found on the worker, so landing
+    /// a reload of a big folder with a big selection doesn't look through it on the window's
+    /// thread.
+    pub marks: Option<Bits>,
+    /// The selection it was asked to keep ([`Kept`]), worked out by name on the worker:
+    /// the names, and the cursor's (`Pending::select`, `Pending::cursor`).
+    pub chosen: Option<(Vec<OsString>, Option<OsString>)>,
+}
+
+/// What a read is to select once it lands, worked out on its worker.
+pub(crate) enum Pick {
+    Nothing,
+    /// These names (to mark: two or more, or one the cursor isn't on).
+    Names(Vec<OsString>),
+    /// The selection on screen when it was asked for, as it was.
+    Kept(Kept),
+}
+
+/// The selection on screen, handed to a worker as it is, without copying a name: the listing
+/// and its rows (shared), and the selected rows (a word per 64). The worker reads the names.
+pub(crate) struct Kept {
+    entries: Arc<Vec<Entry>>,
+    rows: Arc<Rows>,
+    marked: Marked,
+    sel: usize,
+    none: bool,
+}
+
+impl Kept {
+    /// As [`Folder::selection_names`] says it.
+    fn names(&self) -> (Vec<OsString>, Option<OsString>) {
+        let name = |r: usize| self.rows.get(r).map(|&i| self.entries[i as usize].os.clone());
+        let cursor = name(self.sel);
+        let items = if self.marked.is_empty() {
+            cursor.clone().into_iter().filter(|_| !self.none).collect()
+        } else {
+            self.marked.iter().filter_map(name).collect()
+        };
+        (items, cursor)
+    }
 }
 
 impl Answer {
     pub fn new(req: u64, sort: Sort, listing: Listing) -> Answer {
-        Answer { req, sort, listing, picked: None }
+        Answer { req, sort, listing, marks: None, chosen: None }
     }
 
-    /// The listing's read of `path`, selecting `select` once it lands (on the worker).
-    fn read(req: u64, sort: Sort, path: PathBuf, select: Vec<OsString>, stop: &AtomicBool) -> Option<Answer> {
-        let mut listing = fs::list_until(path, sort, stop)?;
-        let picked = match (&mut listing.result, !select.is_empty()) {
-            (Ok(entries), true) => {
-                mark_named(entries, &select);
-                Some(select)
+    /// The listing's read of `path`, selecting what `pick` says once it lands (on the worker).
+    fn read(req: u64, sort: Sort, path: PathBuf, pick: Pick, stop: &AtomicBool) -> Option<Answer> {
+        let mut a = Answer::new(req, sort, fs::list_until(path, sort, stop)?);
+        a.pick(pick);
+        Some(a)
+    }
+
+    /// Works out `pick` on this listing: its names, and the entries to mark. On a worker.
+    pub(crate) fn pick(&mut self, pick: Pick) {
+        let Ok(entries) = &self.listing.result else { return };
+        match pick {
+            Pick::Nothing => {}
+            Pick::Names(v) => self.marks = Some(mark_named(entries, &v)),
+            Pick::Kept(k) => {
+                let (select, cursor) = k.names();
+                if Pending::marks_for(&select, cursor.as_ref()) {
+                    self.marks = Some(mark_named(entries, &select));
+                }
+                self.chosen = Some((select, cursor));
             }
-            _ => None,
-        };
-        Some(Answer { req, sort, listing, picked })
+        }
     }
 }
 
-/// Marks the items of `entries` named in `select` selected (`Entry::sel`; what's gone isn't).
-/// Looks through the whole listing: done on the listing's worker after a reload.
-pub(crate) fn mark_named(entries: &mut [Entry], select: &[OsString]) {
+/// Sorts `entries` by `sort`, `bits` (indices into them: a selection) moving with them.
+pub(crate) fn sort_carrying(entries: &mut Vec<Entry>, bits: &mut Bits, sort: Sort) {
+    let perm = fs::sort_perm(entries, sort);
+    let mut slots: Vec<Option<Entry>> = std::mem::take(entries).into_iter().map(Some).collect();
+    *entries = perm.iter().map(|&i| slots[i as usize].take().expect("a permutation")).collect();
+    *bits = bits.permuted(&perm);
+}
+
+/// The entries of `entries` named in `select` (what's gone isn't). Looks through the whole
+/// listing: done on the listing's worker.
+pub(crate) fn mark_named(entries: &[Entry], select: &[OsString]) -> Bits {
     #[cfg(test)]
     marked_on::note();
     let want: HashSet<&OsString> = select.iter().collect();
-    for e in entries {
-        e.sel = want.contains(&e.os);
+    let mut b = Bits::default();
+    for (i, e) in entries.iter().enumerate() {
+        if want.contains(&e.os) {
+            b.set(i);
+        }
     }
+    b
 }
 
 /// Every folder's `version` comes from one counter, so a row handler from one folder's frame
@@ -155,10 +217,12 @@ pub struct Folder {
     /// by different paths compare equal by it (`shows`).
     pub dir_id: Option<crate::noclobber::DirId>,
     /// The whole folder, sorted.
-    pub entries: Vec<Entry>,
+    /// Shared (read-only) with a worker finding the selection in a reload ([`Kept`]): changed
+    /// through `Arc::make_mut`, which copies it only while a worker still holds it.
+    pub entries: Arc<Vec<Entry>>,
     /// Indices into `entries` that pass the hidden-file and filter rules, in display order,
     /// with running sums of their sizes (`marked.rs`).
-    pub visible: Rows,
+    pub visible: Arc<Rows>,
     /// The cursor: index into `visible`.
     pub sel: usize,
     /// Extra selection (⇧-arrows, ⌘-click, ⌘A): rows of `visible`, with their totals
@@ -168,6 +232,9 @@ pub struct Folder {
     /// filtered out, gone from the folder) and no other row is chosen in its place. A click,
     /// an arrow or any other choice selects again.
     pub none: bool,
+    /// The selection carried by entry while the rows are made again (`marked.rs`): empty
+    /// otherwise.
+    pub(crate) carry: Bits,
     /// How many times the user has picked a selection (a click, an arrow, ⌘A, Select by
     /// Pattern…): a reload asked for before the latest pick keeps it ([`Pending::picks`]).
     pub picks: u64,
@@ -267,11 +334,12 @@ impl Folder {
             id,
             cwd,
             dir_id: None,
-            entries: Vec::new(),
-            visible: Rows::default(),
+            entries: Arc::default(),
+            visible: Arc::default(),
             sel: 0,
             marked: Marked::default(),
             none: false,
+            carry: Bits::default(),
             picks: 0,
             anchor: 0,
             filter: String::new(),
@@ -412,6 +480,24 @@ impl Folder {
     /// [`Folder::request`] with the cursor's item apart from the selection
     /// ([`Pending::cursor`]).
     pub(crate) fn request_chosen(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, cursor: Option<OsString>, rename: bool) {
+        let pick = if Pending::marks_for(&select, cursor.as_ref()) { Pick::Names(select.clone()) } else { Pick::Nothing };
+        self.request_pick(path, nav, select, cursor, rename, pick);
+    }
+
+    /// A read of the folder again keeping the selection on screen as it is: handed to the
+    /// worker without copying a name ([`Kept`]), which finds it in the new listing.
+    pub(crate) fn request_kept(&mut self, nav: Nav, rename: bool) {
+        let kept = self.kept();
+        self.request_pick(self.cwd.clone(), nav, Vec::new(), None, rename, Pick::Kept(kept));
+    }
+
+    /// The selection on screen, for a worker ([`Kept`]): two shared pointers and the selected
+    /// rows' bits.
+    pub(crate) fn kept(&self) -> Kept {
+        Kept { entries: self.entries.clone(), rows: self.visible.clone(), marked: self.marked.clone(), sel: self.sel, none: self.none }
+    }
+
+    fn request_pick(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, cursor: Option<OsString>, rename: bool, pick: Pick) {
         // Going anywhere ends a search (its walk stops), and the thumbnails being decoded. The
         // go-to field stays as it is (a reload keeps it; a navigation that lands clears its text
         // and closes it together).
@@ -425,8 +511,7 @@ impl Folder {
         // An answer about the folder's volume asked before isn't wanted: the new listing asks
         // again when it lands (`State::land`), with the volume its identity names.
         self.free_inbox.forget();
-        let select = self.pending.as_ref().filter(|p| p.marks()).map(|p| p.select.clone()).unwrap_or_default();
-        self.loader.request_opt(path, move |p| Answer::read(req, sort, p, select, &stop));
+        self.loader.request_opt(path, move |p| Answer::read(req, sort, p, pick, &stop));
     }
 
     /// Asks for a fresh read of the folder as it is ([`Nav::Show`]), waiting here at most `wait`
@@ -435,8 +520,11 @@ impl Folder {
     pub(crate) fn request_now(&mut self, wait: std::time::Duration) -> Option<Answer> {
         let req = self.pending.as_ref()?.req;
         let (path, sort, stop) = (self.cwd.clone(), self.sort, self.stop_read());
-        let select = self.pending.as_ref().filter(|p| p.marks()).map(|p| p.select.clone()).unwrap_or_default();
-        crate::bounded::read_waiting(&self.loader, wait, move || Answer::read(req, sort, path, select, &stop))
+        let pick = match self.pending.as_ref().filter(|p| p.marks()) {
+            Some(p) => Pick::Names(p.select.clone()),
+            None => Pick::Nothing,
+        };
+        crate::bounded::read_waiting(&self.loader, wait, move || Answer::read(req, sort, path, pick, &stop))
     }
 
     /// This tab's lightweight state, to keep while it's hidden.
@@ -533,8 +621,8 @@ impl Folder {
         self.cols = None;
         self.col_uid = None;
         self.adopted = None;
-        self.entries = Vec::new();
-        self.visible.clear();
+        self.entries = Arc::default();
+        self.visible = Arc::default();
         self.marked.clear();
         self.sel = 0;
         self.anchor = 0;
@@ -598,7 +686,7 @@ impl Folder {
     pub(crate) fn carry_marks(&mut self) {
         for r in self.marked.iter() {
             if let Some(&i) = self.visible.get(r) {
-                self.entries[i as usize].sel = true;
+                self.carry.set(i as usize);
             }
         }
         // The cursor alone selected rides the same way: it's as much a selection.
@@ -606,19 +694,20 @@ impl Folder {
             && !self.none
             && let Some(&i) = self.visible.get(self.sel)
         {
-            self.entries[i as usize].sel = true;
+            self.carry.set(i as usize);
         }
         self.marked.clear();
     }
 
-    /// Takes the selection back off its entries onto the same rows ([`Folder::carry_marks`]
-    /// with the rows unchanged).
+    /// Takes the carried selection back onto the same rows ([`Folder::carry_marks`] with the
+    /// rows unchanged).
     pub(crate) fn restore_marks(&mut self) {
         for r in 0..self.visible.len() {
-            if std::mem::take(&mut self.entries[self.visible[r] as usize].sel) {
+            if self.carry.get(self.visible[r] as usize) {
                 self.marked.set(r, true, &self.visible);
             }
         }
+        self.carry.clear();
     }
 
     /// [`Folder::refilter`] with the selection already on the entries ([`Folder::carry_marks`],
@@ -630,18 +719,15 @@ impl Folder {
         let hidden = self.show_hidden;
         // A search's list holds only the results it has taken in so far (`search.rs`).
         let n = self.search.as_ref().map_or(self.entries.len(), |s| s.upto.min(self.entries.len()));
-        self.visible = Rows::of(&self.entries, 0..n, |e| (hidden || !e.hidden) && (q.is_empty() || e.lower.contains(&q)));
+        self.visible = Arc::new(Rows::of(&self.entries, 0..n, |e| (hidden || !e.hidden) && (q.is_empty() || e.lower.contains(&q))));
         self.marked.clear();
         for r in 0..self.visible.len() {
-            let e = &mut self.entries[self.visible[r] as usize];
-            if e.sel {
+            if self.carry.get(self.visible[r] as usize) {
                 self.marked.set(r, true, &self.visible);
             }
         }
-        let mut carried = 0;
-        for e in &mut self.entries {
-            carried += usize::from(std::mem::take(&mut e.sel));
-        }
+        let carried = self.carry.count();
+        self.carry.clear();
         // Items deselected because they aren't shown any more: the selection changed, so a
         // reload asked for before (with the old selection) doesn't bring them back.
         if self.marked.len() < carried {
@@ -771,14 +857,16 @@ impl Folder {
     /// Sorts the listing by `self.sort` again, keeping the cursor.
     pub fn resort(&mut self) {
         let keep = self.cursor_name();
-        // The selection rides on its entries through the sort.
+        // The selection moves with its entries through the sort.
         self.carry_marks();
-        fs::sort_entries(&mut self.entries, self.sort);
+        let sort = self.sort;
+        sort_carrying(Arc::make_mut(&mut self.entries), &mut self.carry, sort);
         // A search shows only the results it has taken in so far: whatever is selected (and the
         // cursor's item) is taken in too, wherever the sort put it, so nothing selected is lost
         // past the end and no other row takes its place.
         if let Some(s) = self.search.as_mut() {
-            let last = self.entries.iter().rposition(|e| e.sel || keep.as_ref().is_some_and(|k| e.os == *k));
+            let cursor = keep.as_ref().and_then(|k| self.entries.iter().rposition(|e| e.os == *k));
+            let last = self.carry.last().max(cursor);
             s.upto = s.upto.max(last.map_or(0, |l| l + 1)).min(self.entries.len());
         }
         self.refilter_carried(keep.as_deref());
@@ -896,8 +984,8 @@ impl Folder {
     /// but it's still `old` (what actions act on) until the outcome lands: a rename that fails
     /// (the name was taken) never points the row at the other item.
     pub fn rename_pending(&mut self, old: &OsStr, new: &str) {
-        if let Some(e) = self.entries.iter_mut().find(|e| e.os == old) {
-            e.pending = Some(new.to_string());
+        if let Some(i) = self.entries.iter().position(|e| e.os == old) {
+            Arc::make_mut(&mut self.entries)[i].pending = Some(new.to_string());
         }
     }
 
@@ -905,8 +993,10 @@ impl Folder {
     /// the item's old and new paths) takes it, through whichever path this pane reached the
     /// folder by; any other goes back to its own name.
     pub fn land_pending(&mut self, moved: &[(PathBuf, PathBuf)]) {
-        let done: Vec<(OsString, OsString)> = self
-            .entries
+        if !self.entries.iter().any(|e| e.pending.is_some()) {
+            return;
+        }
+        let done: Vec<(OsString, OsString)> = Arc::make_mut(&mut self.entries)
             .iter_mut()
             .filter_map(|e| {
                 let new = e.pending.take()?;
@@ -926,7 +1016,7 @@ impl Folder {
     fn renamed(&mut self, old: &OsStr, new: &OsStr) {
         let Some(ix) = self.entries.iter().position(|e| e.os == old) else { return };
         let keep = self.visible.get(self.sel) == Some(&(ix as u32));
-        let e = &mut self.entries[ix];
+        let e = &mut Arc::make_mut(&mut self.entries)[ix];
         e.os = new.to_os_string();
         e.name = new.to_string_lossy().into_owned();
         e.lower = e.name.to_lowercase();
@@ -971,7 +1061,7 @@ impl Folder {
         };
         let cursor = self.cursor_name();
         let keep = cursor.as_ref().map(|c| moved(Path::new(c)).map_or_else(|| c.clone(), |(n, _)| n.into_os_string()));
-        for e in &mut self.entries {
+        for e in Arc::make_mut(&mut self.entries).iter_mut() {
             let Some((new, own)) = moved(Path::new(&e.os)) else { continue };
             if own {
                 let old = std::mem::take(&mut e.name);
@@ -996,7 +1086,10 @@ impl Folder {
         if pairs.is_empty() {
             return;
         }
-        for e in &mut self.entries {
+        if !self.entries.iter().any(|e| e.id.is_some_and(|id| crate::ops::reidentified(id, pairs) != id)) {
+            return;
+        }
+        for e in Arc::make_mut(&mut self.entries).iter_mut() {
             if let Some(id) = e.id.as_mut() {
                 *id = crate::ops::reidentified(*id, pairs);
             }

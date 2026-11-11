@@ -410,7 +410,7 @@ impl State {
         match listing {
             Some(first) => match first.result {
                 Ok(v) => {
-                    f.entries = v;
+                    f.entries = std::sync::Arc::new(v);
                     f.dir_id = first.dir_id;
                 }
                 Err(e) => s.note = Some(s.note.take().map_or(e.clone(), |n| format!("{e} · {n}"))),
@@ -1022,7 +1022,7 @@ impl State {
 
     /// Shows a finished listing in pane `ix` if it's the one being waited for (a newer request
     /// wins).
-    pub(crate) fn land(&mut self, ix: usize, a: Answer, tx: &mut Tx) -> bool {
+    pub(crate) fn land(&mut self, ix: usize, mut a: Answer, tx: &mut Tx) -> bool {
         let active = ix == self.active;
         let f = &mut self.panes[ix].f;
         let Some(mut p) = f.pending.take_if(|p| p.req == a.req && p.path == a.listing.path) else { return false };
@@ -1033,32 +1033,34 @@ impl State {
         // made; if the user picked something else meanwhile, their choice stands, so a ⌘C right
         // after a click copies what was clicked.
         if p.nav == Nav::Reload && f.picks != p.picks {
-            (p.select, p.cursor) = f.selection_names();
             p.rename = false;
             p.picks = f.picks;
-            // Marked on the new listing's entries on a worker (when there are marks; or none,
-            // where the worker marked the old selection): looking through a big folder here
-            // would hold up the window. Then it lands, unless the user picks again meanwhile.
-            if (p.marks() || a.picked.is_some()) && a.listing.result.is_ok() {
-                let select = if p.marks() { p.select.clone() } else { Vec::new() };
-                let mut a = a;
+            (p.select, p.cursor) = (Vec::new(), None);
+            // The selection on screen now, found in the new listing on a worker (handed over as
+            // it is: looking through a big folder, or even copying its names, here would hold
+            // up the window). Then it lands, unless the user picks again meanwhile.
+            if a.listing.result.is_ok() {
+                let kept = f.kept();
                 f.pending = Some(p);
                 f.loader.request_opt((), move |()| {
-                    if let Ok(entries) = &mut a.listing.result {
-                        crate::folder::mark_named(entries, &select);
-                    }
-                    a.picked = Some(select).filter(|s| !s.is_empty());
+                    (a.marks, a.chosen) = (None, None);
+                    a.pick(crate::folder::Pick::Kept(kept));
                     Some(a)
                 });
                 return false;
             }
         }
+        // What a worker worked out from the selection kept on screen: the names, the cursor's.
+        if let Some((select, cursor)) = a.chosen.take() {
+            (p.select, p.cursor) = (select, cursor);
+        }
+        let mut marks = a.marks.take();
         // The folder on screen couldn't be read again (a reload, a tab shown): what it listed
         // before isn't shown or acted on any more, only why it can't be read. (A navigation
         // elsewhere that fails leaves the folder it was in, as it was.)
         if a.listing.result.is_err() && p.path == f.cwd {
-            f.entries = Vec::new();
-            f.visible.clear();
+            f.entries = std::sync::Arc::default();
+            f.visible = std::sync::Arc::default();
             f.marked.clear();
             f.sel = 0;
             f.anchor = 0;
@@ -1090,7 +1092,11 @@ impl State {
                 self.lands += 1;
                 // The sort changed while it was being read.
                 if a.sort != f.sort {
-                    fs::sort_entries(&mut entries, f.sort);
+                    match marks.as_mut() {
+                        // What's to be selected moves with its entries.
+                        Some(m) => crate::folder::sort_carrying(&mut entries, m, f.sort),
+                        None => fs::sort_entries(&mut entries, f.sort),
+                    }
                 }
                 let old = std::mem::replace(&mut f.cwd, p.path.clone());
                 let old_id = std::mem::replace(&mut f.dir_id, a.listing.dir_id);
@@ -1123,8 +1129,11 @@ impl State {
                 }
                 // The rows the folder showed, for the column it becomes (when they're its whole
                 // listing, no filter): kept with their version rather than worked out again.
-                let old_rows = (left_from.is_some() && f.filter.is_empty()).then(|| (std::mem::take(&mut f.visible), f.version));
-                let old_entries = std::mem::replace(&mut f.entries, entries);
+                let own = |r: std::sync::Arc<crate::marked::Rows>| std::sync::Arc::try_unwrap(r).unwrap_or_else(|r| (*r).clone());
+                let old_rows = (left_from.is_some() && f.filter.is_empty()).then(|| (own(std::mem::take(&mut f.visible)), f.version));
+                let old_entries = std::mem::replace(&mut f.entries, std::sync::Arc::new(entries));
+                // Its own unless a reload's worker still holds it (then a copy).
+                let old_entries = std::sync::Arc::try_unwrap(old_entries).unwrap_or_else(|a| (*a).clone());
                 // The column view: the folder just left can be a column in the same frame (on
                 // the right after going up, on the left after going in), from this listing.
                 if let Some(old) = left_from
@@ -1164,14 +1173,15 @@ impl State {
                 // to select (a column made active, the only other way with two or more, is
                 // marked here).
                 let several = p.marks();
-                if several && a.picked.as_ref() != Some(&p.select) {
-                    crate::folder::mark_named(&mut f.entries, &p.select);
+                if several && marks.is_none() {
+                    marks = Some(crate::folder::mark_named(&f.entries, &p.select));
                 }
+                f.carry = if several { marks.unwrap_or_default() } else { Default::default() };
                 match adopt_rows {
                     // A column's rows, as it showed them (same sort, no filter, the hidden-file
                     // rule it was shown with): kept, under their version.
                     Some((visible, version)) if a.sort == f.sort && f.filter.is_empty() && !several => {
-                        f.visible = visible;
+                        f.visible = std::sync::Arc::new(visible);
                         f.version = version;
                         let pick = p.cursor_name();
                         f.sel = pick.and_then(|n| f.visible.iter().position(|&e| f.entries[e as usize].os == *n)).unwrap_or(0);
@@ -1504,8 +1514,13 @@ pub(crate) fn reload_folder(f: &mut Folder, names: Vec<OsString>, rename: bool) 
         }
         return;
     }
-    let (keep, cursor) = if names.is_empty() { f.selection_names() } else { (names, None) };
-    f.request_chosen(f.cwd.clone(), Nav::Reload, keep, cursor, rename);
+    // The selection as it is on screen, handed to the worker without copying a name; or the
+    // items named (what an operation made).
+    if names.is_empty() {
+        f.request_kept(Nav::Reload, rename);
+    } else {
+        f.request(f.cwd.clone(), Nav::Reload, names, rename);
+    }
 }
 
 pub fn is_path_like(s: &str) -> bool {

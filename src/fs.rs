@@ -28,10 +28,6 @@ pub struct Entry {
     /// attributes from the directory record. 0 when unknown. (It sits in the padding beside the
     /// flags: an entry is no bigger for it.)
     pub mode: u32,
-    /// Selected, while the folder's rows are being made again (`marked.rs`): the selection
-    /// rides on its entries through a sort or a reload, and is false otherwise. (In padding
-    /// too.)
-    pub sel: bool,
     /// What tells this item from another put at its path since it was read ([`ident`]).
     pub id: Option<Ident>,
     /// The name an inline rename is giving it, shown until the worker says how it went: only a
@@ -64,7 +60,6 @@ impl Entry {
             size: 0,
             mtime_ms: 0,
             mode: 0,
-            sel: false,
             id: None,
             pending: None,
         }
@@ -522,7 +517,7 @@ fn read_std(path: &Path, stop: &AtomicBool) -> Option<Result<Vec<Entry>, String>
         // identity's birth time).
         let mode = meta.as_ref().map_or(0, mode_of);
         let size = if is_dir { 0 } else { size };
-        out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode, sel: false, id, pending: None });
+        out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode, id, pending: None });
     }
     #[cfg(test)]
     read_hook::done(path);
@@ -644,7 +639,7 @@ pub(crate) mod win_dir {
         let lower = name.to_lowercase();
         let key = format!("f:{name}");
         let size = if is_dir { 0 } else { size };
-        Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode: attrs, sel: false, id: Some(id), pending: None }
+        Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode: attrs, id: Some(id), pending: None }
     }
 
     /// A FILETIME as ms since the Unix epoch, 0 before it (as [`mtime`] gives it).
@@ -870,7 +865,20 @@ pub(crate) fn is_hidden(name: &str, meta: Option<&std::fs::Metadata>) -> bool {
 }
 
 pub fn sort_entries(v: &mut [Entry], sort: Sort) {
-    v.sort_unstable_by(|a, b| {
+    v.sort_unstable_by(|a, b| compare(a, b, sort));
+}
+
+/// Where `sort` puts `entries`: each place's index into them ([`sort_entries`]'s order),
+/// for moving something kept beside the entries (a selection) with them.
+pub fn sort_perm(entries: &[Entry], sort: Sort) -> Vec<u32> {
+    let mut idx: Vec<u32> = (0..entries.len() as u32).collect();
+    idx.sort_unstable_by(|&a, &b| compare(&entries[a as usize], &entries[b as usize], sort));
+    idx
+}
+
+/// How `sort` orders two entries.
+pub fn compare(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
+    {
         // Folders first (whichever way the rest goes), unless that's turned off.
         if sort.dirs_first {
             let dirs = b.is_dir.cmp(&a.is_dir);
@@ -890,7 +898,7 @@ pub fn sort_entries(v: &mut [Entry], sort: Sort) {
         .then_with(|| natural(&a.lower, &b.lower))
         .then_with(|| a.name.cmp(&b.name));
         if sort.desc { ord.reverse() } else { ord }
-    });
+    }
 }
 
 /// What a Kind sort compares when folders mix with files: a folder's kind is "folder", among

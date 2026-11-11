@@ -99,6 +99,13 @@ Format: date · decision · why · how to undo.
     starts with its first row selected. A sort during a search takes in the results the
     selection (and the cursor) landed on past the shown ones, rather than losing them. Undo:
     `Folder::none`.
+  - **A reload hands its selection to the worker as it is (third review)**: the listing is
+    shared (`Arc`, copied only if changed while a worker holds it) and the selection goes as its
+    rows' bits; the worker reads the names and finds them in the new listing. Asking for a
+    reload of 300,000 selected items, and landing one that raced a new pick, take under 0.1 ms
+    on the window's thread (they copied every name: 70 ms at 500,000). The selection carried
+    through a filter or sort is a set of entry indices beside the listing, so carrying it never
+    writes to a listing a worker holds. Undo: `folder::{Kept, Pick}`.
   - **Narrow panes (after review):** once every other column is gone, Size narrows to its
     least and then goes, so Name keeps its 180 pt; a search's Folder column gets only what's
     past Name's least. Only on screen: the widths kept are the user's. Undo: `ListCols::fit`.

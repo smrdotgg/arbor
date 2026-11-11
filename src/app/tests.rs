@@ -1516,3 +1516,39 @@ fn a_hidden_tab_keeps_its_selection_exactly() {
     assert_eq!(s.cur().target_paths(), want, "the selection");
     assert_eq!(s.cur().cursor_name().as_deref(), Some(std::ffi::OsStr::new("b")), "the cursor, apart");
 }
+
+/// A reload of a big folder with a big selection hands the selection to its worker as it is
+/// (shared pointers and a word per 64 rows), never copying its names on the window's thread:
+/// asking for it, and landing one that raced a new pick, took 70 ms at 500,000 items. In a
+/// release build each is held to 5 ms here at 300,000; the selection that lands is the new
+/// pick, whole.
+#[test]
+fn a_big_reload_hands_its_selection_over_without_copying_names() {
+    let d = folder("reload-big", 0);
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let n = 300_000;
+    let f = s.cur_mut();
+    f.entries = (0..n).map(|i| Entry::test(&format!("{i:08}.txt"), false)).collect::<Vec<_>>().into();
+    f.refilter(None);
+    f.select_all();
+    let t = Instant::now();
+    s.reload();
+    let ask = t.elapsed();
+    // A listing of the same items lands after the user picked again (⌘A once more).
+    let f = s.cur_mut();
+    let req = f.pending_for(d.clone(), Nav::Reload, Vec::new());
+    f.select_all();
+    let listing = fs::Listing { path: d.clone(), result: Ok(f.entries.to_vec()), dir_id: None, missing: false };
+    let a = Answer::new(req, f.sort, listing);
+    let t = Instant::now();
+    assert!(!s.land(0, a, &mut Tx::default()), "it goes to a worker first");
+    let land = t.elapsed();
+    settle_all(&mut s);
+    assert_eq!(s.cur().targets().len(), n, "the new pick, whole");
+    assert!(!crate::folder::marked_on::here(), "names looked through on the window's thread");
+    eprintln!("reload asked: {ask:?}; racing land: {land:?}");
+    if !cfg!(debug_assertions) {
+        assert!(ask < Duration::from_millis(5) && land < Duration::from_millis(5), "asked {ask:?}, landed {land:?}");
+    }
+}

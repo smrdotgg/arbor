@@ -319,8 +319,8 @@ impl Folder {
         if let Some(s) = self.search.as_mut() {
             s.upto = 0;
         }
-        self.entries.clear();
-        self.visible.clear();
+        self.entries = Arc::default();
+        self.visible = Arc::default();
         self.marked.clear();
         self.sel = 0;
         self.anchor = 0;
@@ -366,7 +366,7 @@ impl Folder {
             .collect();
         let verify = !late.is_empty();
         s.pending.verify.extend(late);
-        self.entries.extend(d.batch);
+        Arc::make_mut(&mut self.entries).extend(d.batch);
         self.take_in();
         if verify {
             self.request_recheck();
@@ -390,7 +390,7 @@ impl Folder {
         }
         let hidden = self.show_hidden;
         let from = std::mem::replace(&mut s.upto, to);
-        self.visible.extend(&self.entries, from..to, |e| hidden || !e.hidden);
+        Arc::make_mut(&mut self.visible).extend(&self.entries, from..to, |e| hidden || !e.hidden);
         true
     }
 
@@ -413,7 +413,7 @@ impl Folder {
         if !r.moved.is_empty() {
             let mut have: HashSet<OsString> = self.entries.iter().map(|e| e.os.clone()).collect();
             let moved: HashMap<String, OsString> = r.moved.drain(..).collect();
-            for e in &mut self.entries {
+            for e in Arc::make_mut(&mut self.entries).iter_mut() {
                 let Some(to) = moved.get(&e.key) else { continue };
                 if !have.insert(to.clone()) {
                     r.gone.insert(e.key.clone());
@@ -430,12 +430,18 @@ impl Folder {
         let before = self.entries.len();
         let mut touched = !r.added.is_empty();
         let upto = self.search.as_ref().map_or(0, |s| s.upto);
-        let (mut i, mut kept_shown) = (0, 0);
-        self.entries.retain_mut(|e| {
+        let (mut i, mut kept_shown, mut kept) = (0, 0, 0);
+        // The carried selection moves down with the entries kept.
+        let (old, mut carry) = (std::mem::take(&mut self.carry), crate::marked::Bits::default());
+        Arc::make_mut(&mut self.entries).retain_mut(|e| {
             i += 1;
             if r.gone.contains(&e.key) {
                 return false;
             }
+            if old.get(i - 1) {
+                carry.set(kept);
+            }
+            kept += 1;
             kept_shown += usize::from(i <= upto);
             if let Some(&(is_dir, size, mtime, id)) = changed.get(e.key.as_str()) {
                 if (e.is_dir, e.size, e.mtime_ms) != (is_dir, size, mtime) {
@@ -446,6 +452,7 @@ impl Folder {
             }
             true
         });
+        self.carry = carry;
         touched |= self.entries.len() != before;
         if !touched {
             // Nothing moved: the rows are as they were.
@@ -454,7 +461,7 @@ impl Folder {
         }
         let names: HashSet<&OsStr> = self.entries.iter().map(|e| e.os.as_os_str()).collect();
         let added: Vec<Entry> = r.added.into_iter().filter(|e| !names.contains(e.os.as_os_str())).collect();
-        self.entries.extend(added);
+        Arc::make_mut(&mut self.entries).extend(added);
         if let Some(s) = self.search.as_mut() {
             // Added results join the list when it has taken in everything (else at the end).
             s.upto = if s.walking() { kept_shown } else { self.entries.len() };
@@ -487,7 +494,7 @@ impl Folder {
         // Where a change moved `abs` to, if it did.
         let alt = |abs: &Path| s.changes.iter().rev().find_map(|(from, to)| Some(to.as_ref()?.join(abs.strip_prefix(from).ok()?)));
         let mut look: Vec<Look> = Vec::new();
-        for e in &self.entries {
+        for e in self.entries.iter() {
             let abs = root.join(Path::new(&e.os));
             if p.verify.contains(&e.key) {
                 look.push(Look::Own { key: e.key.clone(), alt: alt(&abs), path: abs, id: e.id });
@@ -669,7 +676,6 @@ fn entry_at(root: &Path, path: &Path, show_hidden: bool) -> Option<Entry> {
         size: if is_dir { 0 } else { t.len() },
         mtime_ms: fs::mtime(t),
         mode: fs::mode_of(&m),
-        sel: false,
         id: fs::ident_of(path, &m),
         pending: None,
     })

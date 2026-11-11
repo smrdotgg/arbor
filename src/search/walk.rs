@@ -438,7 +438,6 @@ pub(super) fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
             size: if is_dir { 0 } else { size },
             mtime_ms,
             mode: meta.as_ref().map_or(0, fs::mode_of),
-            sel: false,
             // The item the walk saw: actions check it's still the one at this path.
             id: meta.as_ref().and_then(fs::ident),
             pending: None,
