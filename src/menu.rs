@@ -28,6 +28,7 @@ pub enum Act {
 pub enum PlaceAct {
     Open,
     NewTab,
+    NewWindow,
     Remove,
     Up,
     Down,
@@ -35,9 +36,10 @@ pub enum PlaceAct {
     AddToSidebar,
 }
 
-const PLACE_ACTS: [(PlaceAct, &str); 7] = [
+const PLACE_ACTS: [(PlaceAct, &str); 8] = [
     (PlaceAct::Open, "open"),
     (PlaceAct::NewTab, "tab"),
+    (PlaceAct::NewWindow, "window"),
     (PlaceAct::Remove, "remove"),
     (PlaceAct::Up, "up"),
     (PlaceAct::Down, "down"),
@@ -303,9 +305,9 @@ mod tests {
         s.open_menu(s.menu_items(true), press(), &mut tx);
         s.menu.as_mut().unwrap().sel = Some(6);
         assert!(s.on_key(&key(Key::Enter), &mut tx));
-        assert!(s.menu.is_none() && s.job.is_some(), "Duplicate started");
+        assert!(s.menu.is_none() && s.owns_job(), "Duplicate started");
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while s.job.is_some() && std::time::Instant::now() < until {
+        while s.owns_job() && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(2));
             s.poll(&mut Tx::default());
         }
@@ -320,7 +322,7 @@ mod tests {
         let mut tx = Tx::default();
         s.open_menu(s.menu_items(true), press(), &mut tx);
         s.menu_pick(18, &mut tx);
-        assert!(s.menu.is_none() && s.job.is_none() && s.note.is_none());
+        assert!(s.menu.is_none() && !s.owns_job() && s.note.is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -333,7 +335,7 @@ mod tests {
         assert_eq!(Act::from_id("openwith:x"), None);
     }
 
-    /// A favorite's menu: open, open in a new tab, remove and move (the ends can't move past
+    /// A favorite's menu: open, open in a new tab or window, remove and move (the ends can't move past
     /// themselves); picking runs it.
     #[test]
     fn a_favorites_menu_edits_the_sidebar() {
@@ -341,11 +343,14 @@ mod tests {
         let mut tx = Tx::default();
         s.places = crate::sidebar::named(vec![d.join("x"), d.clone(), d.join("y")]);
         s.open_menu(s.sidebar_menu_items(0), press(), &mut tx);
-        assert_eq!(titles(s.menu.as_ref().unwrap()), ["Open", "Open in New Tab", "—", "Remove from Sidebar", "Move Up (off)", "Move Down"]);
-        s.menu_pick(5, &mut tx);
+        assert_eq!(
+            titles(s.menu.as_ref().unwrap()),
+            ["Open", "Open in New Tab", "Open in New Window", "—", "Remove from Sidebar", "Move Up (off)", "Move Down"]
+        );
+        s.menu_pick(6, &mut tx);
         assert_eq!(s.places[1].1, d.join("x"), "moved down");
         s.open_menu(s.sidebar_menu_items(1), press(), &mut tx);
-        s.menu_pick(3, &mut tx);
+        s.menu_pick(4, &mut tx);
         assert_eq!(s.places.iter().map(|p| p.1.clone()).collect::<Vec<_>>(), [d.clone(), d.join("y")]);
         let _ = std::fs::remove_dir_all(&d);
     }

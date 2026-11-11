@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! bench [RUNS] [ROUNDS] [--bin PATH] [--keep] [--tabs N] [--preview N] [--jump N] [--search N] [--rename N] [--grid N]
-//!       [--tiles N] [--columns N] [--idle N] [--pace MS] [--gap MS]
+//!       [--tiles N] [--columns N] [--window N] [--idle N] [--pace MS] [--gap MS]
 //! ```
 //!
 //! Makes a folder of 10,000 entries in the temp dir, then cold-starts Arbor on it RUNS times
@@ -84,9 +84,14 @@
 //! disk's root, through a temp folder of any size). Such a run counts only with 4 × ROUNDS keys
 //! after As Columns, 2 × ROUNDS of them reading.
 //!
+//! `--window N` adds N cold starts with `ARBOR_BENCH_WINDOW=1` in the 10k folder: each round
+//! opens a new window on it (⌘N), timed from the step to the new window's first frame showing
+//! the 10,000 entries, and closes it. Such a run counts only with exactly ROUNDS of them.
+//!
 //! `--idle N` (default 1; 0 skips it) checks NORTHSTAR's "idle means idle": N starts in a folder
 //! of a few JPEGs, PNGs and text files with each of `ARBOR_BENCH_IDLE=list`, `=icons`, `=tiles`
-//! and `=columns` (see `src/timing.rs`). Once a run says it's idle, the bench lets it settle for [`IDLE_SETTLE`],
+//! and `=columns`, and N with `=list` and a second window open
+//! (`ARBOR_BENCH_IDLE_WINDOWS=2`; see `src/timing.rs`). Once a run says it's idle, the bench lets it settle for [`IDLE_SETTLE`],
 //! measures the CPU time Arbor uses over [`IDLE_WINDOW`] (from outside: `/proc` on Linux, `ps`
 //! on macOS, `GetProcessTimes` on Windows) and kills it. More than [`IDLE_MAX_CPU`] fails the
 //! bench (exit status 1): an idle window draws nothing, so it should be zero.
@@ -135,6 +140,7 @@ fn main() {
     let mut search_runs = 0;
     let mut rename_runs = 0;
     let mut grid_runs = 0;
+    let mut window_runs = 0;
     let mut idle_runs = 1;
     let mut tile_runs = 0;
     let mut column_runs = 0;
@@ -150,6 +156,7 @@ fn main() {
             "--search" => search_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--search N"),
             "--rename" => rename_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--rename N"),
             "--grid" => grid_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--grid N"),
+            "--window" => window_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--window N"),
             "--idle" => idle_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--idle N"),
             "--tiles" => tile_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--tiles N"),
             "--columns" => column_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--columns N"),
@@ -306,14 +313,27 @@ fn main() {
             }
         }
     }
+    let (mut window, mut window_same) = (Vec::new(), 0);
+    for run in 0..window_runs {
+        match run_once(&bin, &big, rounds, Mode::Window) {
+            Ok(r) => {
+                window.extend(r.window);
+                window_same += r.same_frame;
+            }
+            Err(e) => {
+                eprintln!("window run {run}: INVALID: {e}");
+                invalid.push(runs + tab_runs + preview_runs + jump_runs + search_runs + rename_runs + grid_runs * 2 + run);
+            }
+        }
+    }
     // (view, CPU seconds over IDLE_WINDOW) per idle run.
     let mut idle = Vec::new();
     let mut idle_failed = Vec::new();
     if idle_runs > 0 {
         let dir = root.join("idle");
         make_idle_folder(&dir);
-        for run in 0..idle_runs * 4 {
-            let view = ["list", "icons", "tiles", "columns"][run as usize % 4];
+        for run in 0..idle_runs * 5 {
+            let view = ["list", "icons", "tiles", "columns", "list, 2 windows"][run as usize % 5];
             match idle_once(&bin, &dir, view) {
                 Ok(cpu) => {
                     if cpu > IDLE_MAX_CPU {
@@ -377,7 +397,8 @@ fn main() {
     let searches = search_runs > 0;
     let renames = rename_runs > 0;
     let grids = grid_runs > 0;
-    let rows: [(&str, &mut Vec<f64>, Option<f64>); 26] = [
+    let windows = window_runs > 0;
+    let rows: [(&str, &mut Vec<f64>, Option<f64>); 27] = [
         ("cold start (spawn → first frame)*", &mut cold, Some(100.0)),
         ("  of which main → first frame", &mut main, None),
         ("listing visible (10k, nav → frame)", &mut nav, Some(50.0)),
@@ -405,6 +426,7 @@ fn main() {
         // Moving listings already on screen is a key; reading a folder, a listing.
         ("columns: ←/→ over 10k, no read", &mut col_moves, Some(8.0)),
         ("columns: ↓/↑ onto a folder (reads)", &mut col_reads, Some(50.0)),
+        ("new window on 10k (⌘N → frame)", &mut window, Some(50.0)),
     ];
     for (name, v, budget) in rows {
         let off = (name.starts_with("tab") && !tabs)
@@ -414,7 +436,8 @@ fn main() {
             || (name.contains("rename") && !renames)
             || (name.starts_with("grid") && !grids)
             || (name.starts_with("tiles") && tile_runs == 0)
-            || (name.starts_with("columns") && column_runs == 0);
+            || (name.starts_with("columns") && column_runs == 0)
+            || (name.starts_with("new window") && !windows);
         if v.is_empty() && off {
             continue;
         }
@@ -463,6 +486,9 @@ fn main() {
             rounds as usize * 2 * grid_runs as usize
         );
     }
+    if windows {
+        println!("new windows whose listing was in their first frame: {window_same} of {}", window.len());
+    }
     if let Some((c, m)) = first {
         println!("* first run left out: {c:.0} ms cold, {m:.0} ms of it from main");
     }
@@ -477,7 +503,7 @@ fn main() {
     if idle_runs > 0 {
         let each: Vec<String> = idle.iter().map(|(v, cpu)| format!("{v} {cpu:.2} s")).collect();
         println!(
-            "idle CPU over {} s, after As Icons (and As List for list), As Tiles, As Columns and ↓: {} (at most {IDLE_MAX_CPU} s){}",
+            "idle CPU over {} s, after As Icons (and As List for list), As Tiles, As Columns and ↓ (and with a second window open for the last): {} (at most {IDLE_MAX_CPU} s){}",
             IDLE_WINDOW.as_secs(),
             each.join(", "),
             if idle_failed.is_empty() { String::new() } else { format!("  OVER: {}", idle_failed.join(", ")) }
@@ -493,9 +519,14 @@ fn main() {
     }
 }
 
-/// One `--idle` run: starts Arbor in `dir` with `ARBOR_BENCH_IDLE=view`, waits for it to say
-/// it's idle, lets it settle, and returns the CPU seconds it used over [`IDLE_WINDOW`].
+/// One `--idle` run: starts Arbor in `dir` with `ARBOR_BENCH_IDLE=view` (`list, 2 windows`:
+/// the list, with a second window open), waits for it to say it's idle, lets it settle, and
+/// returns the CPU seconds it used over [`IDLE_WINDOW`].
 fn idle_once(bin: &Path, dir: &Path, view: &str) -> Result<f64, String> {
+    let (view, two) = match view.strip_suffix(", 2 windows") {
+        Some(v) => (v, true),
+        None => (view, false),
+    };
     let mut cmd = Command::new(bin);
     for var in [
         "ARBOR_BENCH_TABS",
@@ -504,10 +535,16 @@ fn idle_once(bin: &Path, dir: &Path, view: &str) -> Result<f64, String> {
         "ARBOR_BENCH_SEARCH",
         "ARBOR_BENCH_RENAME",
         "ARBOR_BENCH_GRID",
+        "ARBOR_BENCH_WINDOW",
         "ARBOR_BENCH_PACE_MS",
         "ARBOR_TIMING",
     ] {
         cmd.env_remove(var);
+    }
+    if two {
+        cmd.env("ARBOR_BENCH_IDLE_WINDOWS", "2");
+    } else {
+        cmd.env_remove("ARBOR_BENCH_IDLE_WINDOWS");
     }
     let mut child = cmd
         .arg(dir)
@@ -606,6 +643,7 @@ enum Mode {
     GridImages,
     Tiles,
     Columns,
+    Window,
 }
 
 struct Run {
@@ -648,6 +686,8 @@ struct Run {
     /// The column view: keys that only moved listings on screen, and keys that read a folder.
     col_moves: Vec<f64>,
     col_reads: Vec<f64>,
+    /// ⌘N → the new window's first frame showing the 10k folder.
+    window: Vec<f64>,
 }
 
 static PACE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -687,6 +727,7 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         ("ARBOR_BENCH_RENAME", mode == Mode::Rename),
         ("ARBOR_BENCH_GRID", matches!(mode, Mode::Grid | Mode::GridImages | Mode::Tiles)),
         ("ARBOR_BENCH_COLUMNS", mode == Mode::Columns),
+        ("ARBOR_BENCH_WINDOW", mode == Mode::Window),
     ] {
         if on && mode == Mode::GridImages {
             cmd.env(var, "2");
@@ -777,6 +818,7 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         thumbs: Vec::new(),
         col_moves: Vec::new(),
         col_reads: Vec::new(),
+        window: Vec::new(),
     };
     let mut keys = 0;
     let mut streaming = false;
@@ -874,6 +916,10 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
             Some("key") => run.key.extend(field("ms")),
             Some("preview") if rest.contains("from=open") && rest.contains("kind=text") => run.preview_text.extend(field("ms")),
             Some("preview") if rest.contains("from=open") && rest.contains("kind=image") => run.preview_photo.extend(field("ms")),
+            Some("window") if field("entries").is_some_and(|n| n as usize >= ENTRIES) => {
+                run.window.extend(field("ms"));
+                run.same_frame += usize::from(field("same_frame") == Some(1.0));
+            }
             Some("tab") if field("entries").is_some_and(|n| n as usize >= ENTRIES) => {
                 run.tab.extend(field("ms"));
                 run.same_frame += usize::from(field("same_frame") == Some(1.0));
@@ -955,6 +1001,12 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
                 run.preview_photo.len(),
                 lines.join("\n")
             ));
+        }
+        return Ok(run);
+    }
+    if mode == Mode::Window {
+        if run.window.len() != want {
+            return Err(format!("expected {want} new windows on {ENTRIES} entries, got {}:\n{}", run.window.len(), lines.join("\n")));
         }
         return Ok(run);
     }

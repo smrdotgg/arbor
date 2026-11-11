@@ -68,6 +68,7 @@ impl Default for Settings {
     }
 }
 
+#[derive(Clone)]
 pub struct Config {
     pub settings: Settings,
     pub keymap: Keymap,

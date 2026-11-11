@@ -333,7 +333,6 @@ pub struct Side {
     pub custom: bool,
     /// Where the list is saved (`None`: nowhere, as in tests).
     pub file: Option<PathBuf>,
-    writer: Option<Writer>,
     /// What each favorite's one look found (true: it's gone). Kept for the launch, so each is
     /// looked at once.
     pub missing: HashMap<PathBuf, bool>,
@@ -344,8 +343,11 @@ pub struct Side {
     pub drag: Option<(usize, usize)>,
     /// The navigation a sidebar click asked for, so a folder that turns out gone is marked.
     pub(crate) going: Option<(u64, PathBuf)>,
-    /// Edits sent to the writer, numbered.
-    sent: u64,
+    /// The favorites' revision this window shows (`Shared::side_rev`).
+    rev: u64,
+    /// A newer list (and its revision) that came while a favorite was being dragged here: shown
+    /// when the drag ends, with the drag's move made on it (`State::drag_favorite_by`).
+    held: Option<(u64, Vec<(String, PathBuf)>)>,
     /// Folders dropped on the sidebar from another app, checked on a worker.
     pub(crate) dropped: rune::Latest<Vec<PathBuf>>,
     /// Looks started, for tests.
@@ -365,19 +367,22 @@ impl Side {
         Side { file, ..Side::default() }
     }
 
+    /// Another window's sidebar: the same file and what was found looking at each favorite
+    /// (so nothing is looked at again), at the revision it shows. Every window's edits go to
+    /// the one writer in `Shared`.
+    pub fn for_new_window(&self) -> Side {
+        Side {
+            custom: self.custom,
+            missing: self.missing.clone(),
+            looked: self.looked.clone(),
+            rev: self.rev,
+            ..Side::new(self.file.clone())
+        }
+    }
+
     /// Whether the favorite at `p` is known to be gone.
     pub fn is_missing(&self, p: &Path) -> bool {
         self.missing.get(p).copied().unwrap_or(false)
-    }
-
-    pub(crate) fn writer(&mut self, waker: Option<rune::Waker>) -> Option<&Writer> {
-        let path = self.file.clone()?;
-        Some(self.writer.get_or_insert_with(|| Writer::spawn(path, waker)))
-    }
-
-    #[cfg(test)]
-    pub fn writer_ref(&self) -> Option<&Writer> {
-        self.writer.as_ref()
     }
 }
 
@@ -441,6 +446,8 @@ impl State {
     /// The window's first frame is on screen (`App::on_ready`): the favorites' looks may start.
     pub fn first_frame_shown(&mut self) {
         self.side.shown = true;
+        // The first frame, with what the last quit left in its status bar, is on screen.
+        self.forget_leftovers();
         if self.side.look_due && !self.booting() {
             self.side.look_due = false;
             self.look_at_favorites();
@@ -456,22 +463,26 @@ impl State {
                 changed |= self.side.missing.insert(p, gone) != Some(gone);
             }
         }
-        if let Some(e) = self.side.writer.as_ref().and_then(|w| w.errors.try_recv().ok()) {
+        let (error, merged) = match self.shared.side_writer.borrow().as_ref() {
+            Some(w) => (w.errors.try_recv().ok(), w.merged.try_iter().last()),
+            None => (None, None),
+        };
+        if let Some(e) = error {
             self.note = Some(e);
             self.alert = self.note.clone();
             changed = true;
         }
         // What the writer wrote, with any other Arbor's changes: shown once it has every edit
-        // made here (not mid-drag), and new favorites get their one look.
-        let merged = self.side.writer.as_ref().and_then(|w| w.merged.try_iter().last());
-        if let Some((seq, list)) = merged
-            && seq == self.side.sent
-            && self.side.drag.is_none()
-            && self.places.iter().map(|(_, p)| p).ne(list.iter())
+        // any window made (an answer to an older edit is dropped: a newer list is on its way),
+        // in every window (here unless a favorite is being dragged), and new favorites get
+        // their one look.
+        if let Some((rev, list)) = merged
+            && rev == self.shared.side_rev.get()
         {
-            self.places = named(list);
-            self.side.look_due = true;
-            changed = true;
+            let list = named(list);
+            changed |= self.take_favorites(rev, &list);
+            // The list written, at its own revision (not this window's, which may be mid-drag).
+            self.tell_favorites(rev, &list);
         }
         if let Some(dirs) = self.side.dropped.take() {
             if dirs.is_empty() {
@@ -493,11 +504,63 @@ impl State {
             return;
         }
         self.side.custom = true;
-        self.side.sent += 1;
-        let (seq, waker) = (self.side.sent, self.waker.clone());
-        if let Some(w) = self.side.writer(waker) {
-            w.send(seq, edit, paths);
+        let rev = self.shared.side_rev.get() + 1;
+        self.shared.side_rev.set(rev);
+        self.side.rev = rev;
+        if let Some(path) = self.side.file.clone() {
+            // The writer wakes the window focused last, whichever is open when it answers.
+            let waker = self.waker.as_ref().map(|_| self.shared.live_waker());
+            let mut w = self.shared.side_writer.borrow_mut();
+            w.get_or_insert_with(|| Writer::spawn(path, waker)).send(rev, edit, paths);
         }
+        self.tell_favorites(rev, &self.places);
+    }
+
+    /// The other windows show `list`, the favorites as of revision `rev`.
+    fn tell_favorites(&self, rev: u64, list: &[(String, PathBuf)]) {
+        let list: std::rc::Rc<Vec<(String, PathBuf)>> = std::rc::Rc::new(list.to_vec());
+        self.shared.tell_others(self.win, || {
+            let list = list.clone();
+            Box::new(move |s, _| {
+                s.take_favorites(rev, &list);
+            })
+        });
+    }
+
+    /// The favorites as of revision `rev` (another window's edit, or what the writer wrote): this
+    /// window shows them, unless it has a newer revision already. While a favorite is being
+    /// dragged here they're held, and shown when the drag ends (the drag's rows stay as they
+    /// were under the pointer until then). True when they changed here.
+    pub(crate) fn take_favorites(&mut self, rev: u64, list: &[(String, PathBuf)]) -> bool {
+        let newest = self.side.held.as_ref().map_or(self.side.rev, |(r, _)| self.side.rev.max(*r));
+        if rev < newest {
+            return false;
+        }
+        if self.side.drag.is_some() {
+            self.side.held = Some((rev, list.to_vec()));
+            return false;
+        }
+        self.side.rev = rev;
+        if self.places.as_slice() == list {
+            return false;
+        }
+        self.places = list.to_vec();
+        self.side.custom = true;
+        // Each new favorite gets its one look, later in this `poll`.
+        self.side.look_due = true;
+        true
+    }
+
+    /// Waits up to `wait` for the favorites' writer to write what's queued (tests).
+    #[cfg(test)]
+    pub(crate) fn flush_favorites(&self, wait: std::time::Duration) -> bool {
+        self.shared.side_writer.borrow().as_ref().expect("a writer").flush(wait)
+    }
+
+    /// Whether the favorites' writer has started (tests).
+    #[cfg(test)]
+    pub(crate) fn favorites_writer(&self) -> bool {
+        self.shared.side_writer.borrow().is_some()
     }
 
     /// Adds `dirs` (folders, known to be there) to the favorites, at `at` or the end; those
@@ -552,15 +615,31 @@ impl State {
 
     /// Moves favorite `from` to `to`.
     pub fn move_favorite(&mut self, from: usize, to: usize) {
+        if let Some(edit) = self.move_edit(from, to) {
+            self.make_move(edit);
+        }
+    }
+
+    /// Moving favorite `from` to place `to`, as an operation (the favorite, and the one it goes
+    /// before), so it can be made on a list that changed since.
+    fn move_edit(&self, from: usize, to: usize) -> Option<Edit> {
         let n = self.places.len();
         if from >= n || to >= n || from == to {
-            return;
+            return None;
         }
-        let item = self.places.remove(from);
-        let path = item.1.clone();
-        self.places.insert(to, item);
-        let before = self.places.get(to + 1).map(|(_, p)| p.clone());
-        self.save_favorites(Edit::Move { path, before });
+        let mut order: Vec<&PathBuf> = self.places.iter().map(|(_, p)| p).collect();
+        let path = order.remove(from);
+        order.insert(to, path);
+        Some(Edit::Move { path: path.clone(), before: order.get(to + 1).map(|p| (*p).clone()) })
+    }
+
+    /// Makes `edit` (a move) on the favorites as they are now, and saves it.
+    fn make_move(&mut self, edit: Edit) {
+        let mut paths: Vec<PathBuf> = self.places.iter().map(|(_, p)| p.clone()).collect();
+        edit.apply(&mut paths);
+        let mut old = std::mem::take(&mut self.places);
+        self.places = paths.into_iter().filter_map(|p| old.iter().position(|(_, q)| *q == p).map(|i| old.swap_remove(i))).collect();
+        self.save_favorites(edit);
     }
 
     /// A drag of favorite `i`: the place it would land shows while it moves (one place per
@@ -579,9 +658,15 @@ impl State {
         }
         let to = (i as f32 + (dy / ROW_STEP).round()).clamp(0.0, (n - 1) as f32) as usize;
         if phase == Phase::Up {
+            // The move, worked out on the rows the drag was over; then whatever newer list came
+            // meanwhile, and the move made on it (never the old list over the new one).
+            let edit = if cancelled { None } else { self.move_edit(i, to) };
             self.side.drag = None;
-            if !cancelled && to != i {
-                self.move_favorite(i, to);
+            if let Some((rev, list)) = self.side.held.take() {
+                self.take_favorites(rev, &list);
+            }
+            if let Some(edit) = edit {
+                self.make_move(edit);
             }
         } else if self.side.drag != Some((i, to)) {
             self.side.drag = Some((i, to));
@@ -735,7 +820,7 @@ mod tests {
     }
 
     fn saved(s: &State, file: &Path) -> Vec<PathBuf> {
-        assert!(s.side.writer_ref().unwrap().flush(Duration::from_secs(5)));
+        assert!(s.flush_favorites(Duration::from_secs(5)));
         parse(&std::fs::read_to_string(file).unwrap()).unwrap()
     }
 
@@ -760,6 +845,77 @@ mod tests {
         // A remove and a move from the first window apply to the file as it is now.
         first.remove_favorite(0);
         assert_eq!(saved(&first, &file), [b.clone(), a.clone()]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Two windows of one Arbor share one writer and one revision: the writer's answer to the
+    /// first window's older edit never puts back a list without the second window's newer
+    /// favorite (review: each window had its own writer, and that answer erased the newer
+    /// favorite from both windows while the file kept it).
+    #[test]
+    fn an_older_answer_never_overwrites_another_windows_newer_favorites() {
+        let d = temp("stale-ack");
+        let file = d.join(FILE);
+        let (x, y) = (d.join("x"), d.join("y"));
+        for p in [&x, &y] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let mut a = state_with(&d, &file, &[]);
+        let mut b = a.new_window(d.clone());
+        settle_all(&mut b);
+        b.poll(&mut Tx::default());
+        a.add_favorites(vec![x.clone()], None);
+        assert!(a.flush_favorites(Duration::from_secs(5)));
+        b.poll(&mut Tx::default());
+        b.add_favorites(vec![y.clone()], None);
+        assert!(b.flush_favorites(Duration::from_secs(5)));
+        // Each window polls, in either order, with the writer's answers and the other's news.
+        a.poll(&mut Tx::default());
+        b.poll(&mut Tx::default());
+        a.poll(&mut Tx::default());
+        let has = |s: &State, p: &PathBuf| s.places.iter().any(|(_, q)| q == p);
+        assert!(parse(&std::fs::read_to_string(&file).unwrap()).unwrap().contains(&y));
+        assert!(has(&a, &y) && has(&b, &y), "the newer favorite stays in both windows");
+        assert!(has(&a, &x) && has(&b, &x));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A window dragging a favorite while another window adds one: the newer list is held, not
+    /// overwritten and not sent on under the wrong revision; when the drag ends, its move is
+    /// made on that list (review: the dragging window sent its old list at the new revision, and
+    /// the other window lost its favorite, though the file kept it).
+    #[test]
+    fn a_drag_in_one_window_keeps_a_favorite_another_window_added() {
+        let d = temp("drag-held");
+        let file = d.join(FILE);
+        let (x, w, y) = (d.join("x"), d.join("w"), d.join("y"));
+        for p in [&x, &w, &y] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let mut a = state_with(&d, &file, &[x.clone(), w.clone()]);
+        let mut b = a.new_window(d.clone());
+        settle_all(&mut b);
+        b.poll(&mut Tx::default());
+        let mut tx = Tx::default();
+        a.drag_favorite_by(0, Phase::Move, ROW_STEP, false, &mut tx);
+        assert_eq!(a.side.drag, Some((0, 1)));
+        b.add_favorites(vec![y.clone()], None);
+        assert!(b.flush_favorites(Duration::from_secs(5)));
+        a.poll(&mut Tx::default());
+        b.poll(&mut Tx::default());
+        let has = |s: &State, p: &PathBuf| s.places.iter().any(|(_, q)| q == p);
+        assert!(has(&b, &y), "the other window keeps its new favorite");
+        assert!(!has(&a, &y), "held while the drag goes on");
+        // Letting go: x goes to the end (where the drag put it), in the list with y.
+        a.drag_favorite_by(0, Phase::Up, ROW_STEP, false, &mut tx);
+        let order = |s: &State| s.places.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>();
+        assert_eq!(order(&a), [w.clone(), y.clone(), x.clone()]);
+        assert!(a.flush_favorites(Duration::from_secs(5)));
+        b.poll(&mut Tx::default());
+        a.poll(&mut Tx::default());
+        b.poll(&mut Tx::default());
+        assert_eq!(order(&b), order(&a));
+        assert_eq!(parse(&std::fs::read_to_string(&file).unwrap()).unwrap(), order(&a));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -791,7 +947,7 @@ mod tests {
         std::fs::write(d.join("f.txt"), "x").unwrap();
         let file = root.join("cfg").join(FILE);
         let mut s = state_with(&d, &file, std::slice::from_ref(&a));
-        assert!(s.side.writer_ref().is_none(), "nothing written until a change");
+        assert!(!s.favorites_writer(), "nothing written until a change");
         // The folder on screen (a file is selected).
         s.add_to_sidebar();
         assert_eq!(saved(&s, &file), vec![a.clone(), d.clone()]);
@@ -884,7 +1040,7 @@ mod tests {
         s.places = named(many);
         s.side.look_due = true;
         assert_eq!(s.side.looks.load(Relaxed), 0);
-        assert!(s.side.writer_ref().is_none());
+        assert!(!s.favorites_writer());
         s.poll(&mut Tx::default());
         assert_eq!(s.side.looks.load(Relaxed), 0, "not before the first frame is on screen");
         s.first_frame_shown();
@@ -964,7 +1120,7 @@ mod tests {
         let file = d.join("blocker").join(FILE);
         let mut s = state_with(&d, &file, &[]);
         s.add_to_sidebar();
-        assert!(s.side.writer_ref().unwrap().flush(Duration::from_secs(5)));
+        assert!(s.flush_favorites(Duration::from_secs(5)));
         let until = std::time::Instant::now() + Duration::from_secs(5);
         while !s.note.as_deref().is_some_and(|n| n.starts_with("Couldn't save the sidebar")) && std::time::Instant::now() < until {
             std::thread::sleep(Duration::from_millis(2));

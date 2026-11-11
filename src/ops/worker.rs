@@ -52,6 +52,9 @@ pub(super) struct Made {
     /// `dst` right after the copy made it, so cleaning up a failed or cancelled copy removes it
     /// only while it's still that (see [`unmake`]). `None` if it couldn't be read back.
     pub(super) made: Option<Print>,
+    /// Its creation mark (`print::creation_mark`), taken as it was created: what the leftovers
+    /// record names it by.
+    pub(super) mark: Option<String>,
 }
 
 impl<'a> Worker<'a> {
@@ -118,8 +121,26 @@ impl<'a> Worker<'a> {
     #[inline(always)]
     pub(super) fn cancel_hook(&self, _: &Path) {}
 
+    /// `dst` was just created, with creation mark `mark`: confirmed in `Progress::created`
+    /// at once, before anything is written to it (one it can't mark isn't).
+    fn created(p: &Progress, dst: &Path, mark: Option<&String>) {
+        if let Some(mark) = mark
+            && let Ok(mut c) = p.created.lock()
+        {
+            c.push((dst.to_path_buf(), mark.clone()));
+        }
+    }
+
+    /// The copy in progress finished: what it made is its result now, not a leftover.
+    pub(super) fn made_whole(&self) {
+        if let Ok(mut c) = self.p.created.lock() {
+            c.clear();
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn after_made(&mut self, dst: &Path) {
+        super::gate::made(dst);
         if let Some(h) = &mut self.hooks.after_made {
             h(dst);
         }
@@ -608,7 +629,8 @@ impl<'a> Worker<'a> {
             self.before_act(&to);
             let mut tree = Some(Tree::default());
             let mut made = Vec::new();
-            match self.copy_tree(src, &to, Path::new(""), &mut tree, &mut made, false) {
+            let copied = self.copy_tree(src, &to, Path::new(""), &mut tree, &mut made, false);
+            match copied {
                 Ok(()) => {
                     // The record undo checks against: a file as the copy knew it (by its handle,
                     // never by its name, which another app may have taken over while the copy
@@ -621,19 +643,20 @@ impl<'a> Worker<'a> {
                             let mut print = Print::of(&to, &to.symlink_metadata().map_err(|e| e.to_string())?);
                             if made_dir.is_none_or(|d| d.id.is_none() || d.id != print.id) {
                                 let why = format!("something else took the place of “{}” during the copy", name_of(&to));
-                                return Err(with_kept(why, unmake(&made)));
+                                return Err(with_kept(why, unmake(self.p, &made)));
                             }
                             print.tree = tree;
                             print
                         }
                     };
+                    self.made_whole();
                     return Ok((to, print));
                 }
                 // Taken since `free_name` looked: try the next free name.
                 Err(CopyError::Taken) => {}
                 Err(CopyError::Failed(e)) => {
-                    // Don't leave a half-made copy behind.
-                    return Err(with_kept(e, unmake(&made)));
+                    // Don't leave a half-made copy behind (what can't go is in `Progress::kept`).
+                    return Err(with_kept(e, unmake(self.p, &made)));
                 }
             }
         }
@@ -665,14 +688,20 @@ impl<'a> Worker<'a> {
         let ft = meta.file_type();
         let was = (for_move && !ft.is_dir()).then(|| Print::of(src, &meta));
         let print = |dst: &Path| dst.symlink_metadata().ok().map(|m| Print::of(dst, &m));
+        // A folder or link just made, read by name at once (there's no handle on it).
+        let marked = |dst: &Path| dst.symlink_metadata().ok().and_then(|m| super::print::creation_mark(&m, noclobber::file_id(dst, &m)));
         if ft.is_symlink() {
             let target = std::fs::read_link(src).map_err(fail)?;
             make_symlink(&target, dst, src.is_dir()).map_err(fail)?;
-            made.push(Made { src: src.into(), dst: dst.into(), dir: false, was, made: print(dst) });
+            let mark = marked(dst);
+            Self::created(self.p, dst, mark.as_ref());
+            made.push(Made { src: src.into(), dst: dst.into(), dir: false, was, made: print(dst), mark });
         } else if ft.is_dir() {
             std::fs::create_dir(dst).map_err(fail)?;
+            let mark = marked(dst);
+            Self::created(self.p, dst, mark.as_ref());
             let _ = std::fs::set_permissions(dst, meta.permissions());
-            made.push(Made { src: src.into(), dst: dst.into(), dir: true, was, made: print(dst) });
+            made.push(Made { src: src.into(), dst: dst.into(), dir: true, was, made: print(dst), mark });
             self.after_made(dst);
             for de in std::fs::read_dir(src).map_err(fail)? {
                 let de = de.map_err(fail)?;
@@ -684,9 +713,15 @@ impl<'a> Worker<'a> {
             // Fingerprinted from the handle that made it, not by name: the copy may have stalled
             // on a slow source while another app put a file of its own at `dst`, which cleanup
             // must then leave alone.
-            let file = noclobber::copy_file(src, dst).map_err(fail)?;
+            let mut mark = None;
+            let p = self.p;
+            let file = noclobber::copy_file(src, dst, &mut |new: &noclobber::Made| {
+                mark = super::print::creation_mark(&new.meta, new.id);
+                Self::created(p, dst, mark.as_ref());
+            })
+            .map_err(fail)?;
             self.copied(dst);
-            made.push(Made { src: src.into(), dst: dst.into(), dir: false, was, made: Some(Print::with_id(&file.meta, file.id)) });
+            made.push(Made { src: src.into(), dst: dst.into(), dir: false, was, made: Some(Print::with_id(&file.meta, file.id)), mark });
             self.tick(meta.len());
             self.after_made(dst);
         }
@@ -741,11 +776,16 @@ impl<'a> Worker<'a> {
         self.p.bytes_total.fetch_add(tree_size(from), Relaxed);
         let mut tree = Some(Tree::default());
         let mut made = Vec::new();
-        match self.copy_tree(from, to, Path::new(""), &mut tree, &mut made, true) {
-            Ok(()) => {}
-            Err(CopyError::Taken) => return Err(MoveError::Taken),
-            Err(CopyError::Failed(e)) => return Err(MoveError::Failed(with_kept(e, unmake(&made)))),
-        }
+        let copied = self.copy_tree(from, to, Path::new(""), &mut tree, &mut made, true);
+        let result = match copied {
+            Ok(()) => {
+                self.made_whole();
+                Ok(())
+            }
+            Err(CopyError::Taken) => Err(MoveError::Taken),
+            Err(CopyError::Failed(e)) => Err(MoveError::Failed(with_kept(e, unmake(self.p, &made)))),
+        };
+        result?;
         let Err(why) = self.remove_sources(&made) else { return Ok(()) };
         let copy = match to.symlink_metadata() {
             Ok(m) => Print { tree: tree.filter(|_| m.is_dir()), ..Print::of(to, &m) },

@@ -101,22 +101,25 @@ pub fn file_uri_path(uri: &str) -> Option<PathBuf> {
     }
 }
 
-/// Where requests go: the window, through Rune's handle (any thread), with the activation
-/// token the asking app passed, if any.
+/// Where requests go: the window focused last (`window::route`, from any thread), with the
+/// activation token the asking app passed, if any.
 pub type Sink = std::sync::Arc<dyn Fn(Vec<Show>, Option<String>) + Send + Sync>;
 
 /// Starts listening for requests to the running app (see the module docs). On Windows a thread
 /// blocked on the pipe, a handler on macOS, and on Linux a thread that checks one file and ends
 /// unless Arbor is the default for folders.
-pub fn listen(handle: rune::AppHandle<State>) {
+pub fn listen() {
     let sink: Sink = std::sync::Arc::new(move |shows: Vec<Show>, token: Option<String>| {
         if shows.is_empty() {
             return;
         }
-        handle.update(move |s, tx| {
+        // No window open: Arbor is quitting, and the request goes with it.
+        let Some(handle) = crate::window::route(move |s, tx| {
             tx.instant();
             s.show_external(shows, tx);
-        });
+        }) else {
+            return;
+        };
         match token.filter(|t| !t.is_empty()) {
             Some(t) => handle.activate(t),
             None => handle.open(),

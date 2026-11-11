@@ -15,22 +15,27 @@ pub use crate::folder::Nav;
 use crate::folder::{Answer, Folder, TabMemo};
 use crate::fs::{self, Entry, Listing, Sort, SortKey};
 use crate::jump::{History, JumpBox};
-use crate::ops;
 use crate::palette::Palette;
 use crate::preview::{self, Preview};
 use crate::select::PickBox;
 
 mod boot;
 mod dispatch;
+mod shared;
 
 use boot::*;
 pub use boot::{FIRST_PAINT_WAIT, SLOW_FIRST_READ_MS, read_first_folder};
+pub(crate) use shared::Job;
+pub use shared::Shared;
 
 /// Rows a Page Up / Page Down moves.
 const PAGE: usize = 20;
 
 /// Why a command that starts a file operation can't run while another one does.
 pub(crate) const BUSY: &str = "Another file operation is running";
+
+/// [`BUSY`], when the operation is another window's (only that window shows and cancels it).
+pub(crate) const BUSY_ELSEWHERE: &str = "Another file operation is running in another window";
 
 /// An inline rename in progress (always in the active pane).
 pub struct Rename {
@@ -82,6 +87,11 @@ impl Pane {
 }
 
 pub struct State {
+    /// Which window this is (`window::FIRST` for the one Arbor opens with).
+    pub win: u64,
+    /// What every window shares: the file-operation slot, undo and redo, the clipboard's
+    /// files, the Jump history (`app/shared.rs`).
+    pub shared: std::rc::Rc<Shared>,
     /// One pane, or two side by side (left first).
     pub panes: Vec<Pane>,
     /// The pane that gets keys, commands and the status bar.
@@ -106,19 +116,26 @@ pub struct State {
     /// that can't be read): assistive technology announces it at once, not when idle. Only
     /// while `note` still says it.
     pub alert: Option<String>,
+    /// The file operation's outcome `note` says, by number, while it may still say it: an undo
+    /// of that outcome (from any window) takes the note away (`State::outcome_undone`).
+    pub(crate) note_of: Option<(u64, String)>,
+    /// What the last quit left partly done (`leftovers.rs`), while the note saying so shows:
+    /// its Show button reveals it.
+    pub leftover: Option<(PathBuf, String)>,
+    /// The leftovers record as the startup read found it, until the note saying it has been
+    /// shown: then what was read is removed from it (`State::forget_leftovers`).
+    pub(crate) leftovers_seen: Option<crate::leftovers::Seen>,
+    /// Where closing the last window records what a cut-short operation left, and how long its
+    /// cleanup gets (`leftovers.rs`).
+    pub(crate) quit_record: Option<PathBuf>,
+    pub(crate) quit_wait: std::time::Duration,
     pub rename: Option<Rename>,
     /// The item New File or New Folder just made, and its identity when it could be read: its
     /// rename starts once a reload lists it selected, and only on it (`State::rename_made`).
     pub(crate) made: Option<(PathBuf, Option<fs::Ident>)>,
-    /// The running file operation, if any.
-    pub job: Option<ops::Running>,
-    pub(crate) clip: Option<Clip>,
     /// Pastes asked for whose clipboard reads haven't come back yet, oldest first.
     pub(crate) paste_reqs: Vec<PasteReq>,
     next_paste: u64,
-    pub(crate) undo: Vec<ops::Undo>,
-    /// Undone operations that can be redone, newest last. A new operation clears it.
-    pub(crate) redo: Vec<ops::Undo>,
     /// Which keys run which command (defaults plus the settings file).
     pub keymap: Keymap,
     /// The settings as last read, so "Reload Settings" applies only what changed.
@@ -134,8 +151,6 @@ pub struct State {
     pub(crate) batch_rule: crate::rename::Rule,
     /// Plans Batch Rename has put on screen, for tests and timing.
     pub batch_plans: u64,
-    /// The folders visited, for Jump: nothing is read until it first opens.
-    pub history: History,
     /// The read a Jump asked for, so a folder that's gone is dropped from the history.
     pub(crate) jump_req: Option<u64>,
     /// The confirmation dialog, while it asks about a command that can't be undone
@@ -152,7 +167,6 @@ pub struct State {
     /// Where the rename field's late writes go after the rename has ended (the runtime
     /// clears the field's focus through its binding a frame after a commit).
     rename_sink: TextEdit,
-    pub(crate) job_seen: (u64, usize),
     pub(crate) waker: Option<rune::Waker>,
     /// "Reload Settings", reading the file on a worker.
     settings_loader: Latest<Config>,
@@ -360,23 +374,74 @@ impl State {
         }
         // Without the settings yet: the defaults, in the folder Arbor was started in, until
         // they land (`land_start`).
-        let (config, cwd, places, note, custom) = match start {
-            Some(s) => (s.config, s.start, s.places, s.note, s.custom),
-            None => (Config::default(), std::env::current_dir().unwrap_or_else(|_| fs::home()), Vec::new(), None, false),
+        let (config, cwd, places, note, custom, leftover) = match start {
+            Some(mut s) => {
+                let seen = s.leftovers.take();
+                (s.config, s.start, s.places, s.note, s.custom, seen)
+            }
+            None => (Config::default(), std::env::current_dir().unwrap_or_else(|_| fs::home()), Vec::new(), None, false, None),
         };
         let mut side = crate::sidebar::Side::new(if cfg!(test) { None } else { crate::sidebar::file_path() });
         side.custom = custom;
         side.look_due = true;
         // Headless runs have no `on_ready`: their first frame counts as shown from the start.
         side.shown = rune::tooling::headless_run().is_some();
-        let mut first = Folder::new(0, cwd, config.settings.sort, config.settings.show_hidden, None);
-        first.view = config.settings.view_default;
         // Where the history lives (environment only, no disk): tests keep theirs in memory.
-        let icon_size = config.settings.icon_size;
         let mut history = History::new(if cfg!(test) { None } else { crate::jump::log_path() });
         history.enabled = config.settings.jump_enabled;
         history.exclude = crate::jump::exclude_globs(&config.settings.jump_exclude);
-        let mut s = State {
+        let shared = std::rc::Rc::new(Shared::new(history));
+        let note = config.summary().or(note);
+        let mut s = State::assemble(crate::window::FIRST, shared, config.settings, config.keymap, cwd, places, side);
+        s.note = note;
+        s.take_leftovers(leftover);
+        let f = &mut s.panes[0].f;
+        match listing {
+            Some(first) => match first.result {
+                Ok(v) => {
+                    f.entries = v;
+                    f.dir_id = first.dir_id;
+                }
+                Err(e) => s.note = Some(s.note.take().map_or(e.clone(), |n| format!("{e} · {n}"))),
+            },
+            // The folder is slow: open on an empty list showing "Loading…", like any navigation.
+            None => {
+                let req = crate::folder::next_request();
+                f.pending = Some(crate::folder::Pending {
+                    req,
+                    path: f.cwd.clone(),
+                    nav: Nav::Reload,
+                    select: Vec::new(),
+                    rename: false,
+                    scroll: 0.0,
+                    picks: 0,
+                });
+                s.boot = Some(boot);
+                s.boot_req = Some(req);
+            }
+        }
+        s.panes[0].f.refilter(None);
+        s
+    }
+
+    /// A window's state around its first folder (not read yet), with the settings, keys and
+    /// favorites it starts with, sharing `shared` with the other windows.
+    fn assemble(
+        win: u64,
+        shared: std::rc::Rc<Shared>,
+        settings: Settings,
+        keymap: Keymap,
+        cwd: PathBuf,
+        places: Vec<(String, PathBuf)>,
+        side: crate::sidebar::Side,
+    ) -> State {
+        let mut first = Folder::new(0, cwd, settings.sort, settings.show_hidden, None);
+        first.view = settings.view_default;
+        let icon_size = settings.icon_size;
+        shared.join(win);
+        State {
+            win,
+            shared,
             panes: vec![Pane { f: first, tabs: vec![None], tab: 0 }],
             active: 0,
             closed: Vec::new(),
@@ -384,35 +449,34 @@ impl State {
             show_wait: FIRST_PAINT_WAIT,
             lands: 0,
             pane_drop: None,
-            show_hidden: config.settings.show_hidden,
+            show_hidden: settings.show_hidden,
             hidden_set: false,
             places,
-            note: config.summary().or(note),
+            note: None,
             alert: None,
+            note_of: None,
+            leftover: None,
+            leftovers_seen: None,
+            quit_record: if cfg!(test) { None } else { crate::leftovers::file() },
+            quit_wait: crate::leftovers::QUIT_WAIT,
             rename: None,
             made: None,
-            job: None,
-            clip: None,
             paste_reqs: Vec::new(),
             next_paste: 0,
-            undo: Vec::new(),
-            redo: Vec::new(),
-            keymap: config.keymap,
-            settings: config.settings,
+            keymap,
+            settings,
             palette: None,
             jump: None,
             pick: None,
             batch: None,
             batch_rule: crate::rename::Rule::default(),
             batch_plans: 0,
-            history,
             jump_req: None,
             asking: None,
             ask_next: None,
             menu: None,
             palette_sink: TextEdit::new(""),
             rename_sink: TextEdit::new(""),
-            job_seen: (0, 0),
             waker: None,
             settings_loader: Latest::default(),
             boot: None,
@@ -467,43 +531,130 @@ impl State {
             col_preview_off: false,
             col_reads: 0,
             col_lands: 0,
-        };
-        let f = &mut s.panes[0].f;
-        match listing {
-            Some(first) => match first.result {
-                Ok(v) => {
-                    f.entries = v;
-                    f.dir_id = first.dir_id;
-                }
-                Err(e) => s.note = Some(s.note.take().map_or(e.clone(), |n| format!("{e} · {n}"))),
-            },
-            // The folder is slow: open on an empty list showing "Loading…", like any navigation.
-            None => {
-                let req = crate::folder::next_request();
-                f.pending = Some(crate::folder::Pending {
-                    req,
-                    path: f.cwd.clone(),
-                    nav: Nav::Reload,
-                    select: Vec::new(),
-                    rename: false,
-                    scroll: 0.0,
-                    picks: 0,
-                });
-                s.boot = Some(boot);
-                s.boot_req = Some(req);
-            }
         }
-        s.panes[0].f.refilter(None);
+    }
+
+    /// Another window's state, sharing this one's (`app/shared.rs`), on `path` with one tab:
+    /// this window's settings, keys, favorites and volumes, and nothing read from the disk but
+    /// the folder. Its read starts here and isn't waited for: creating the native window takes
+    /// longer than a frame anyway (50–80 ms under Xvfb), so the listing lands in the new window's
+    /// `setup` when it's in by then, else in its `poll`, usually before its first frame. Hidden
+    /// files and the icon size follow this window; the view starts as the settings say, as a
+    /// new tab's does.
+    pub fn new_window(&self, path: PathBuf) -> State {
+        let side = self.side.for_new_window();
+        let mut s = State::assemble(
+            crate::window::next_id(),
+            self.shared.clone(),
+            self.settings.clone(),
+            self.keymap.clone(),
+            path.clone(),
+            self.places.clone(),
+            side,
+        );
+        s.show_hidden = self.show_hidden;
+        s.hidden_set = self.hidden_set;
+        s.icon_size = self.icon_size;
+        s.view_chosen = self.view_chosen;
+        s.volumes = self.volumes.clone();
+        s.volumes_asked = true;
+        s.show_wait = self.show_wait;
+        s.quit_record.clone_from(&self.quit_record);
+        s.quit_wait = self.quit_wait;
+        s.panes[0].f.set_hidden(self.show_hidden);
+        let f = &mut s.panes[0].f;
+        f.pending = Some(crate::folder::Pending {
+            req: crate::folder::next_request(),
+            path,
+            nav: Nav::Fresh,
+            select: Vec::new(),
+            rename: false,
+            scroll: 0.0,
+            picks: 0,
+        });
+        // Tests and headless runs wait, so what they check is there.
+        let wait = if cfg!(test) || rune::tooling::headless_run().is_some() { s.show_wait } else { std::time::Duration::ZERO };
+        if let Some(a) = s.panes[0].f.request_now(wait) {
+            s.land(0, a, &mut Tx::default());
+        }
+        // Its title, from its first `poll` (the read that landed here had no window to name).
+        s.shared.send(s.win, Box::new(|s, tx| tx.set_title(title(&s.cur().cwd))));
         s
+    }
+
+    /// What the startup read found in the leftovers record: what's still there is said first
+    /// (over the settings' own note), and the record is kept until that's been shown.
+    fn take_leftovers(&mut self, seen: Option<crate::leftovers::Seen>) {
+        let Some(seen) = seen else { return };
+        if let Some(said) = crate::leftovers::note(&seen.offered) {
+            self.leftover = seen.offered.first().map(|l| (l.path.clone(), said.clone()));
+            self.note = Some(said);
+        }
+        self.leftovers_seen = Some(seen);
+    }
+
+    /// The leftover note has been shown (its frame presented, or the user typed or started an
+    /// operation since): what the startup read found leaves the record, off the UI thread.
+    pub(crate) fn forget_leftovers(&mut self) {
+        if let Some(seen) = self.leftovers_seen.take() {
+            drop(crate::leftovers::forget(seen));
+        }
+    }
+
+    /// The leftover note's Show button: the item, selected in its folder.
+    pub fn show_leftover(&mut self) {
+        self.forget_leftovers();
+        let Some((p, _)) = self.leftover.take() else { return };
+        self.note = None;
+        if let (Some(dir), Some(name)) = (p.parent(), p.file_name()) {
+            self.go_full(dir.to_path_buf(), Nav::New, vec![name.to_os_string()], false);
+        }
+    }
+
+    /// ⌘N and "Open in New Window": another window on `path` (`window::open`).
+    pub fn open_window(&mut self, path: PathBuf) {
+        let s = self.new_window(path);
+        crate::window::open(s, self.win);
+    }
+
+    /// The folder "Open in New Window" opens: the one item selected, when it's a folder.
+    pub(crate) fn folder_to_open(&self) -> Option<PathBuf> {
+        let f = self.cur();
+        match f.targets().as_slice() {
+            [e] if e.is_dir && e.pending.is_none() => Some(f.cwd.join(&e.os)),
+            _ => None,
+        }
     }
 
     pub fn setup(&mut self, waker: rune::Waker) {
         crate::draglog::install();
+        // A new window's folder, read while the native window was being made: shown in its first
+        // frame when it's in (`new_window`).
+        if self.win != crate::window::FIRST
+            && let Some(a) = self.panes[0].f.loader.take()
+        {
+            self.land(0, a, &mut Tx::default());
+        }
         for p in &self.panes {
             p.f.loader.set_waker(waker.clone());
         }
         self.settings_loader.set_waker(waker.clone());
-        self.history.waker = Some(waker.clone());
+        self.shared.set_waker(self.win, waker.clone());
+        // Made the operation's owner before it was set up (its opener closed first): the
+        // worker wakes it from now on.
+        if self.owns_job()
+            && let Ok(mut w) = self.shared.op_waker.lock()
+        {
+            *w = Some(waker.clone());
+        }
+        {
+            // The Jump history's writer is every window's: it wakes the open window focused
+            // last when a write failed or a clear finished, never one that has closed.
+            let mut h = self.shared.history.borrow_mut();
+            if h.waker.is_none() {
+                h.waker = Some(self.shared.live_waker());
+            }
+        }
         self.path_check.set_waker(waker.clone());
         self.completer.set_waker(waker.clone());
         self.handler_job.set_waker(waker.clone());
@@ -674,7 +825,10 @@ impl State {
     pub fn poll(&mut self, tx: &mut Tx) -> bool {
         tx.instant();
         crate::draglog::poll();
-        let mut changed = self.poll_job();
+        // What other windows sent (a refresh after their operation, new settings or favorites)
+        // first: a file operation handed over by a window that closed lands just below.
+        let mut changed = self.poll_inbox(tx);
+        changed |= self.poll_job();
         if let Some(a) = self.ask_next.take() {
             self.ask_with(a, tx);
             changed = true;
@@ -686,7 +840,13 @@ impl State {
             }
         }
         if let Some(c) = self.settings_loader.take() {
-            self.apply_settings(c, tx);
+            // Every window takes them; this one says so.
+            let shared = std::rc::Rc::new(c.clone());
+            self.shared.tell_others(self.win, || {
+                let c = shared.clone();
+                Box::new(move |s, tx| s.apply_settings((*c).clone(), false, tx))
+            });
+            self.apply_settings(c, true, tx);
             changed = true;
         }
         if let Some(a) = self.path_check.take() {
@@ -768,7 +928,12 @@ impl State {
     /// it since the window opened on the defaults (even back to the default: a flag says so,
     /// not a comparison).
     fn land_start(&mut self, start: Start) {
-        let Start { config, start, places, note, custom } = start;
+        let Start { config, start, places, note, custom, leftovers } = start;
+        if leftovers.is_some() {
+            self.land_start(Start { config, start, places, note, custom, leftovers: None });
+            self.take_leftovers(leftovers);
+            return;
+        }
         if let Some(req) = self.boot_req
             && let Some(f) = self.panes.iter_mut().map(|p| &mut p.f).find(|f| f.pending.as_ref().is_some_and(|p| p.req == req))
             && f.entries.is_empty()
@@ -925,7 +1090,7 @@ impl State {
                     f.goto = false;
                     // For Jump: one message to the history's writer, no disk I/O here.
                     let here = f.cwd.clone();
-                    self.history.record(&here);
+                    self.shared.history.borrow_mut().record(&here);
                 }
                 let f = &mut self.panes[ix].f;
                 f.marked.clear();
@@ -954,6 +1119,15 @@ impl State {
                         tx.scroll_to_instant(f.list_key(), 0.0, 0.0);
                     }
                     f.reveal(tx);
+                }
+                // An inline rename of an item that's gone (removed from another window, or by
+                // another app before a reload) ends: its field went with the row, and would
+                // otherwise keep every key.
+                if active
+                    && let Some(r) = &self.rename
+                    && !self.panes[ix].f.entries.iter().any(|e| e.os == r.os)
+                {
+                    self.rename = None;
                 }
                 if active {
                     if navigated {
@@ -1128,14 +1302,15 @@ impl State {
         self.reload_settings_from(config::path());
     }
 
-    fn reload_settings_from(&mut self, path: Option<PathBuf>) {
+    pub(crate) fn reload_settings_from(&mut self, path: Option<PathBuf>) {
         self.settings_loader.request(path, |p| p.map_or_else(Config::default, |p| Config::read(&p)));
     }
 
     /// A reloaded settings file. Keys apply at once; a preference applies only if the file
     /// changed it, so reloading doesn't undo ⌘. or a header click made since. A new sort
     /// applies to every tab.
-    fn apply_settings(&mut self, c: Config, tx: &mut Tx) {
+    /// `say`: this is the window that reloaded them, which says so in its status bar.
+    fn apply_settings(&mut self, c: Config, say: bool, tx: &mut Tx) {
         let (old, new) = (&self.settings, &c.settings);
         if new.sort != old.sort {
             for p in &mut self.panes {
@@ -1163,7 +1338,9 @@ impl State {
         let new = c.settings.clone();
         self.apply_history_settings(&new);
         self.reveal(tx);
-        self.note = Some(c.summary().unwrap_or_else(|| "Settings reloaded".into()));
+        if say {
+            self.note = Some(c.summary().unwrap_or_else(|| "Settings reloaded".into()));
+        }
         self.keymap = c.keymap;
         self.settings = c.settings;
     }
@@ -1172,8 +1349,9 @@ impl State {
 impl State {
     /// `jump.enabled` and `jump.exclude`, as the settings say.
     fn apply_history_settings(&mut self, s: &Settings) {
-        self.history.enabled = s.jump_enabled;
-        self.history.exclude = crate::jump::exclude_globs(&s.jump_exclude);
+        let mut h = self.shared.history.borrow_mut();
+        h.enabled = s.jump_enabled;
+        h.exclude = crate::jump::exclude_globs(&s.jump_exclude);
     }
 
     /// The window is closing: every search walk and recheck stops where it is, and Batch

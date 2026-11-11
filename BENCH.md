@@ -12,7 +12,8 @@ scripts/bench.sh 1 10 --grid 4                 # plus 4 + 4 cold starts paging t
 scripts/bench.sh 1 10 --columns 5 --tiles 4    # plus 5 cold starts moving in and out of the 10k folder as columns, 4 paging tiles
 cargo test --release -- --ignored --nocapture column_cost   # the column view's ← and → over 10k, CPU only, beside the list's own landing
 scripts/bench.sh 1 12 --jump 5 --pace 120 --gap 1000   # the same, paced as a person types (report both)
-scripts/bench.sh 1 2 --idle 3                  # 3 + 3 starts left idle (list, icons): CPU over 5 s, fails above 0.05 s
+scripts/bench.sh 1 10 --window 4               # plus 4 cold starts opening a new window on the 10k folder 10 times each
+scripts/bench.sh 1 2 --idle 3                  # 3 starts left idle in each view, and 3 with two windows: CPU over 5 s, fails above 0.05 s
 cargo test --release -- --ignored --nocapture search_speed   # walk speed by thread count (vendor/, or ARBOR_SEARCH_TREE)
 xvfb-run -a scripts/bench.sh 11 10             # Linux without a display
 cargo test --release -- --ignored --nocapture list_10k   # read + sort only, no window
@@ -30,6 +31,38 @@ runs two to three frames behind submission (`frame/present_time.rs`). Rune doesn
 frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below means the
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
+
+## 2026-11-11, multiple windows (`feature/new-window`)
+
+tabot-dev (Xeon 8375C, 4 vCPU, Xvfb with lavapipe: software rendering, so frame and window
+costs are inflated; load average 1.7–3.8), release builds, main at 9e4f168 ("base") against the
+branch ("new"), `bench 11 10 --idle 0`, alternating:
+
+| Measure | base | new | new | base |
+| --- | --- | --- | --- | --- |
+| cold start, median / p95 | 141.4 / 266.0 ms | 140.6 / 144.6 ms | 141.7 / 152.8 ms | 140.1 / 182.2 ms |
+| 10k listing, nav → frame | 46.6 / 85.3 ms | 43.1 / 48.3 ms | 43.8 / 49.4 ms | 44.2 / 48.3 ms |
+| key → frame | 6.9 / 11.2 ms | 6.8 / 7.9 ms | 6.8 / 7.8 ms | 6.8 / 7.4 ms |
+
+A second pair, busier (load 3.4–3.8): base 149.6 ms cold, 53.3 ms listing, 8.6 ms key; new
+144.8, 51.0, 8.4. Cold start and keys are unchanged: the first window does nothing new but
+register its handle.
+
+`bench 2 10 --window 4 --idle 1` (⌘N on the 10k folder to the new window's first frame showing
+it, 40 windows): **90.7 ms median, 111.9 ms p95: over the 50 ms listing budget here**, with the
+listing in the window's first frame 40 of 40 times. The time is the native window, not Arbor:
+`ARBOR_TIMING`'s `window-up` line splits it, and over 10 windows each ⌘N's handler took
+0.08–0.40 ms (`made_ms`; it was 8.2 ms while it waited a frame for the read, which a 10k folder
+misses, so it no longer waits), Rune ran the window's `setup` 13–22 ms after ⌘N, and the first
+frame (with the list built, `update_ms` 10–19) came at 78–156 ms. A window on a folder of two
+files takes 59–83 ms the same way: about 60 ms is creating an X11 window and a lavapipe surface
+in Rune, and the first window's own creation is about 115 ms of its 140 ms cold start. It
+couldn't be measured on the Mac or Windows (no GUI over ssh, AGENTS.md); `bench --window` there
+is the check.
+
+Idle (`--idle 1`), CPU over 5 s: list 0.00 s, icons 0.00 s, **list with a second window open
+0.00 s**. Live under Xvfb after opening, navigating, a new folder and an undo across two windows:
+0 ticks of CPU over 5 s.
 
 ## 2026-11-11, idle CPU (the list view drew every frame while idle)
 

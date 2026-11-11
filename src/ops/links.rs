@@ -85,28 +85,48 @@ fn free_link(dir: &Path, name: &std::ffi::OsStr, is_dir: bool, shortcut: bool) -
     (1..).map(|n| dir.join(link_name(name, is_dir, n, shortcut))).find(|p| p.symlink_metadata().is_err()).expect("a free name")
 }
 
-/// Makes `link` at `at`, failing if anything is there.
-pub(super) fn make_link_at(at: &Path, link: &Link) -> io::Result<()> {
-    if link.shortcut { shortcut(&link.target, at) } else { make_symlink(&link.target, at, link.dir) }
+/// What a link's making tells of a file it made on its way and may leave if cut short (a
+/// shortcut's staging file): `true` once it exists, `false` once it's gone or renamed into place.
+pub(super) type Staged<'a> = &'a mut dyn FnMut(&Path, bool);
+
+/// Makes `link` at `at`, failing if anything is there. A symbolic link is made whole in one
+/// call; a shortcut goes through a staging file `staged` hears of.
+pub(super) fn make_link_at(at: &Path, link: &Link, staged: Staged<'_>) -> io::Result<()> {
+    if link.shortcut { shortcut(&link.target, at, staged) } else { make_symlink(&link.target, at, link.dir) }
 }
 
 /// A Windows shortcut at `at` to `target`, never over anything: the shell's `IPersistFile::Save`
 /// replaces what's at its path, so it saves to a fresh name beside `at` (made with `create_new`
 /// first), which then takes `at`'s name with the no-replace rename.
 #[cfg(windows)]
-fn shortcut(target: &Path, at: &Path) -> io::Result<()> {
+fn shortcut(target: &Path, at: &Path, staged: Staged<'_>) -> io::Result<()> {
     let tmp = noclobber::temp_sibling(at)?;
     std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    staged(&tmp, true);
     let made = lnk::write(target, &tmp).and_then(|()| noclobber::rename(&tmp, at));
     if made.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
+    staged(&tmp, false);
     made
 }
 
 #[cfg(not(windows))]
-fn shortcut(_: &Path, _: &Path) -> io::Result<()> {
+fn shortcut(_: &Path, _: &Path, _: Staged<'_>) -> io::Result<()> {
     Err(io::Error::new(ErrorKind::Unsupported, "shortcuts are Windows' own"))
+}
+
+/// A shortcut's staging file, in `Progress::created` while it exists (with its creation mark):
+/// what quitting mid-write leaves for the leftovers record (`leftovers.rs`).
+fn staged(p: &super::Progress, tmp: &Path, there: bool) {
+    let Ok(mut c) = p.created.lock() else { return };
+    if there {
+        if let Some(mark) = tmp.symlink_metadata().ok().and_then(|m| super::print::creation_mark(&m, noclobber::file_id(tmp, &m))) {
+            c.push((tmp.to_path_buf(), mark));
+        }
+    } else {
+        c.retain(|(q, _)| q != tmp);
+    }
 }
 
 impl Worker<'_> {
@@ -178,7 +198,8 @@ impl Worker<'_> {
         for _ in 0..TRIES {
             let at = free_link(dir, name, is_dir, link.shortcut);
             self.before_act(&at);
-            match make_link_at(&at, &link) {
+            let p = self.p;
+            match make_link_at(&at, &link, &mut |tmp, there| staged(p, tmp, there)) {
                 Ok(()) => return Ok((at, link, why)),
                 // Taken since `free_link` looked: the next free name.
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
@@ -231,7 +252,12 @@ impl Worker<'_> {
             };
             self.before_act(&step.at);
             let name = name_of(&step.at);
-            let done = if making { make_link_at(&step.at, &link) } else { self.remove_link(&step, &link) };
+            let p = self.p;
+            let done = if making {
+                make_link_at(&step.at, &link, &mut |tmp, there| staged(p, tmp, there))
+            } else {
+                self.remove_link(&step, &link)
+            };
             match done {
                 Ok(()) if making => {
                     match made_step(&step.at, link) {

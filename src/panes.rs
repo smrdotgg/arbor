@@ -387,11 +387,11 @@ mod tests {
     /// Polls as frames would until the file operation is done and no pane is loading.
     fn finish(s: &mut State) {
         let until = Instant::now() + Duration::from_secs(10);
-        while s.job.is_some() && Instant::now() < until {
+        while s.owns_job() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(2));
             s.poll(&mut Tx::default());
         }
-        assert!(s.job.is_none(), "the operation never finished");
+        assert!(!s.owns_job(), "the operation never finished");
         settle(s);
     }
 
@@ -580,14 +580,14 @@ mod tests {
         assert_eq!(s.panes[1].f.cwd, b, "each pane has its own folder");
         run(&mut s, Cmd::CopyToOther);
         let until = Instant::now() + Duration::from_secs(10);
-        while s.job.is_some() && Instant::now() < until {
+        while s.owns_job() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(5));
             s.poll(&mut Tx::default());
         }
         settle(&mut s);
         assert!(b.join("f1").exists() && a.join("f1").exists());
         assert_eq!(s.panes[1].f.entries.len(), 1, "the other pane re-reads and shows it");
-        assert_eq!(s.undo.len(), 1, "undoable");
+        assert_eq!(s.shared.undo.borrow().len(), 1, "undoable");
         // Closing the split keeps the active pane; the other's tab can be reopened.
         run(&mut s, Cmd::Split);
         assert_eq!((s.panes.len(), s.active, s.cur().cwd.clone()), (1, 0, a.clone()));
@@ -670,7 +670,7 @@ mod tests {
         let id = s.paste_reqs[0].id;
         s.paste_reply(id, &rune::ClipboardContent::new("").with_files(vec![src.join("f0")]));
         let until = Instant::now() + Duration::from_secs(10);
-        while s.job.is_some() && Instant::now() < until {
+        while s.owns_job() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(2));
             s.poll(&mut Tx::default());
         }
@@ -694,7 +694,7 @@ mod tests {
         while !s.poll_job() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(2));
         }
-        assert!(s.job.is_none());
+        assert!(!s.owns_job());
         assert_eq!(s.pending_path(), Some(c.as_path()), "still on its way to C");
         assert!(s.panes[0].f.pending.is_none(), "A didn't change, so it isn't read again");
         settle(&mut s);
@@ -867,7 +867,7 @@ mod tests {
         assert!(s.pane_ix(gone).is_none());
         assert!(!s.activate_id(gone, &mut Tx::default()));
         s.drop_on_pane(gone, 0, 0, s.panes[0].id(), &mut Tx::default());
-        assert!(s.job.is_none());
+        assert!(!s.owns_job());
     }
 
     fn tab_paths(s: &State, ix: usize) -> Vec<PathBuf> {

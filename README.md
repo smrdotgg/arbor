@@ -197,8 +197,10 @@ N runs paging the icon view of the 10k folder and N in a folder of 1,000 photos:
 the time to the first thumbnail and to a screenful, and `--tiles N` the same paging in the
 tiles view, and `--columns N` adds N runs moving out of and back into the 10k folder in the
 column view (← and →), each key to its frame (`column_cost` times the same without a GPU),
-and every bench ends with `--idle N` (default 1, 0
-skips it): N starts left idle in each view (list, icons, tiles, columns), after switching to it, each
+and `--window N` adds N runs opening a new window on the 10k folder: ⌘N to the new window's
+first frame showing it, and every bench ends with `--idle N` (default 1, 0
+skips it): N starts left idle in each view (list, icons, tiles, columns), after switching to it,
+and N in the list with a second window open, each
 failing the bench if it uses more than 0.05 s of CPU in 5 s; `--pace MS` spaces
 the steps as a person types and `--gap MS` idles between cold starts, since a cooled CPU is
 several times slower than a busy one: report both). It opens and closes windows, so leave the machine alone
@@ -322,10 +324,10 @@ clipboard. **F5** copies and **F6** moves the selection into the other pane's fo
 worker, never over anything, undoable), and rows can be dragged from one pane onto the other
 (same disk moves, another copies, ⌥ copies).
 
-Closing a split pane's last tab closes that pane. On the last tab of the last pane, ⌘W does
-nothing, on every platform: closing the window would quit Arbor and lose every tab's history,
-which a habit of pressing ⌘W to tidy tabs shouldn't do. The window's close button still closes
-it.
+Closing a split pane's last tab closes that pane. On the last tab of a window's last pane, ⌘W
+closes the window when other Arbor windows are open; in the only window it does nothing, on every
+platform: closing it would quit Arbor and lose every tab's history, which a habit of pressing ⌘W
+to tidy tabs shouldn't do. The window's close button still closes it.
 
 No caching: only the visible tab of each pane has a listing. A hidden tab keeps its path,
 history, selected names, scroll offset, filter and sort, and does no work at all (no reads, no
@@ -334,6 +336,37 @@ the same frame; a slower one shows the tab's path and an empty list until it arr
 selection comes back by name and the list scrolls to where it was. ⌘T and ⌘\ show the folder
 already on screen, so they need no read. Closed tabs (up to 20, lightweight state only) are kept
 in memory for ⇧⌘T, never on disk.
+
+### Windows
+
+**⌘N** (Ctrl+N) opens a **new window** on the folder on screen, and **Open in New Window** (in
+the context menu of a folder, a favorite or a volume, and in the palette) on that folder. Each
+window is independent: its own panes, tabs, selection, back and forward history, view (list,
+icons, tiles or columns, with its own thumbnails and columns) and preview. Every window is a real one of the system's, in the same Arbor (one process).
+
+What there's one of is shared: the settings and keys (Reload Settings in any window applies in
+all), the Jump history, the sidebar's favorites and Locations (a change in one window shows in
+every window), the clipboard, and **file operations: one at a time for the whole app, and one
+undo stack**, as in Finder. The window that started an operation shows its progress and cancels
+it with Esc; the others say "Another file operation is running in another window" until it
+lands. ⌘Z in any window undoes the last operation, wherever it was done. Closing the last window
+(or quitting) while an operation runs cancels it at once; its cleanup (a cancelled copy removing
+what it made) gets up to 2 s after the window has gone, and anything it couldn't remove is named
+in the status bar at the next launch, with a Show button. When an operation
+lands, every window showing a folder it changed reads it again (by the folder's identity, as
+panes do, in any of its columns too; a hidden tab reads when it's shown). A window closed while its operation runs hands
+it to another window, which lands it. Folders other apps ask Arbor to show (Open With, "Show in
+folder", a second `arbor.exe <folder>` on Windows) open as a tab in the window used last.
+Arbor's own drags (rows between panes and columns, tabs) stay inside their window. Rows drag from
+one window to another where they drag out to other apps (macOS), arriving as a drop from outside
+that goes only into the folder as it was listed there; elsewhere ⌘X in one window and ⌘V in the
+other moves them.
+
+A second window costs nothing until it's used: an idle window does no work and draws nothing,
+and a window only does what it shows. It reads its folder for itself while the system makes
+the window (⌘N itself takes well under a millisecond), so a local folder is in its first frame;
+a slow one shows "Loading…" until it lands, as a navigation does.
+Windows aren't remembered: Arbor starts with one window, as before (BACKLOG.md).
 
 ### The sidebar: favorites and Locations
 
@@ -906,6 +939,8 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | As Tiles | ⌥⌘4 | Ctrl+Alt+4 | `view.as_tiles` |
 | Larger Icons | ⌘+, ⌘= | Ctrl++, Ctrl+= | `view.larger_icons` |
 | Smaller Icons | ⌘- | Ctrl+- | `view.smaller_icons` |
+| New Window | ⌘N | Ctrl+N | `window.new` |
+| Open in New Window |  |  | `window.open_folder` |
 | New Tab | ⌘T | Ctrl+T | `tab.new` |
 | Close Tab | ⌘W | Ctrl+W | `tab.close` |
 | Next Tab | ⌃⇥, ⇧⌘] | Ctrl+Tab, Ctrl+Shift+] | `tab.next` |
@@ -1174,6 +1209,6 @@ in Get Info, rich previews and icon-view thumbnails
 (PDF, video, documents) on Linux and
 new (uncached) thumbnails on Windows (see Quick preview), syntax highlighting in the text
 preview, regular expressions in Select by Pattern, more than one operation
-at a time, dragging a tab out into a window of its own, notarized and signed packages, and
-dragging rows out to Finder while the window is split or in the column view on macOS (see
-`RUNE-GAPS.md`).
+at a time, dragging a tab out into a window of its own, windows remembered across launches,
+notarized and signed packages, and dragging rows out to Finder while the window is split or in
+the column view on macOS (see `RUNE-GAPS.md`).

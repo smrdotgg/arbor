@@ -276,6 +276,17 @@ fn status(s: &State, l: Look) -> El {
     } else if let Some(n) = &s.note {
         let role = if s.alert.as_ref() == Some(n) { "alert" } else { "status" };
         bar = bar.child(text(n.clone()).key("note").role(role).font(SMALL).color(l.t.text_secondary).truncate().min_w(0.0).shrink());
+        // What the last quit left partly done: a way to see it.
+        if s.leftover.as_ref().is_some_and(|(_, said)| said == n) {
+            bar = bar.child(
+                text("Show").key("note-show").role("button").label("Show what was left").font(SMALL).color(l.accent).on_press_tx(
+                    |s: &mut State, tx| {
+                        tx.instant();
+                        s.show_leftover();
+                    },
+                ),
+            );
+        }
     }
     bar = bar.child(el().grow(1.0));
     if f.is_loading() {

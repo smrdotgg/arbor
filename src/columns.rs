@@ -669,7 +669,7 @@ impl State {
             }
             // The folder is drawn as the column's element now, scrolled as that was.
             f.scroll.set(col.scroll.get());
-            self.history.record(path);
+            self.shared.history.borrow_mut().record(path);
             self.note = None;
             self.col_reads += 1;
             return true;
@@ -1086,6 +1086,30 @@ mod tests {
 
     /// A column's answer lands only for the read it's waiting for: an older read of it, one for
     /// another folder, or one after it went off screen is dropped.
+    /// Another window's file operation reaches this window's columns: a column showing the
+    /// folder it changed (here the one on the right, not the active one) reads it again, by
+    /// identity. The other window's view and columns are its own.
+    #[test]
+    fn another_windows_operation_rereads_a_column_on_its_folder() {
+        let d = tree("other-window");
+        let mut s = columns_in(&d);
+        select(&mut s, "a");
+        settle(&mut s);
+        let mut b = s.new_window(d.join("a"));
+        crate::app::tests::settle_all(&mut b);
+        assert_eq!(b.cur().view, ViewMode::List, "the new window's view is its own");
+        assert!(b.cur().cols.is_none());
+        b.new_folder();
+        crate::app::tests::finish_job(&mut b);
+        assert!(s.poll(&mut Tx::default()), "told");
+        settle(&mut s);
+        let right = cols(&s).right.as_ref().expect("a on the right");
+        assert_eq!(right.path, d.join("a"));
+        assert!(right.entries.iter().any(|e| e.name == "untitled folder"), "read again");
+        assert_eq!(s.cur().view, ViewMode::Columns);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_stale_listing_never_lands_in_a_column() {
         let d = tree("stale");

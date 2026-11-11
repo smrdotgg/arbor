@@ -165,6 +165,8 @@ commands! {
     LargerIcons "view.larger_icons" "Larger Icons", ["cmd+plus", "cmd+equal"];
     SmallerIcons "view.smaller_icons" "Smaller Icons", ["cmd+minus"];
 
+    NewWindow "window.new" "New Window", ["cmd+n"];
+    OpenInNewWindow "window.open_folder" "Open in New Window", [];
     NewTab "tab.new" "New Tab", ["cmd+t"];
     CloseTab "tab.close" "Close Tab", ["cmd+w"];
     NextTab "tab.next" "Next Tab", ["ctrl+tab", "cmd+shift+]"];
@@ -485,9 +487,9 @@ mod tests {
             v.into_iter().map(|(_, t)| t).collect::<Vec<_>>()
         };
         assert_eq!(rank("ren")[0], "Rename…");
-        let mut top = rank("new")[..3].to_vec();
+        let mut top = rank("new")[..4].to_vec();
         top.sort();
-        assert_eq!(top, ["New File", "New Folder", "New Tab"]);
+        assert_eq!(top, ["New File", "New Folder", "New Tab", "New Window"]);
         assert_eq!(rank("folder")[0], "New Folder", "a word start beats a scatter");
         let mut top = rank("nf")[..2].to_vec();
         top.sort();

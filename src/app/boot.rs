@@ -24,6 +24,9 @@ pub(super) struct Start {
     pub(super) note: Option<String>,
     /// `places` are the user's own list, from `sidebar.toml`.
     pub(super) custom: bool,
+    /// What a file operation cut short by the last quit left (`leftovers.rs`), as read from
+    /// its record, which stays until the note saying so has been shown.
+    pub(super) leftovers: Option<crate::leftovers::Seen>,
 }
 
 /// What the startup read sends, in this order.
@@ -54,7 +57,9 @@ impl Booting {
                 (Some(a), Some(b)) => Some(format!("{a} · {b}")),
                 (a, b) => a.or(b),
             };
-            Start { config, start, places, note, custom }
+            // Tests never read (or remove) the user's record.
+            let leftovers = if cfg!(test) { None } else { crate::leftovers::file().and_then(|f| crate::leftovers::look(&f)) };
+            Start { config, start, places, note, custom, leftovers }
         })
     }
 

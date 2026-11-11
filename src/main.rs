@@ -33,6 +33,7 @@ mod handler;
 mod incoming;
 mod info;
 mod jump;
+mod leftovers;
 mod menu;
 mod mounts;
 mod noclobber;
@@ -57,10 +58,9 @@ mod timing;
 mod trash;
 mod view;
 mod volumes;
+mod window;
 
-use rune::{App, AppSpec, Chrome};
-
-use app::State;
+use rune::App;
 
 fn main() {
     // `arbor --version`: what's installed, without a window (CI runs the Mac package's Intel
@@ -94,44 +94,32 @@ fn main() {
     app::read_first_folder();
     // Linux: the window's app id (Wayland) and WM_CLASS (X11), matching arbor.desktop.
     rune::set_app_id("arbor");
-    let mut spec = AppSpec::<State> {
-        min_size: Some((520.0, 320.0)),
-        setup: Some(|s, waker| s.setup(waker)),
-        poll: Some(|s, _, tx| s.poll(tx)),
-        on_key: Some(|s, ev, tx| s.on_key(ev, tx)),
-        ..AppSpec::new("Arbor", (980.0, 620.0), State::new, view::view)
-    };
+    // Every window has the same callbacks (`window.rs`); the first is timed when timing is on.
+    let mut spec = window::spec();
     if timed {
         spec.init = timing::init_state;
         spec.setup = Some(timing::setup);
         spec.poll = Some(timing::poll);
         spec.on_key = Some(timing::on_key);
     }
-    // macOS: content runs under a transparent titlebar; the traffic lights sit in the sidebar's
-    // top band and the path bar is the drag region. Other platforms keep their native frame.
-    let chrome = Chrome { full_size_content: true, traffic_lights: Some((14.0, view::BAR_H / 2.0 - 7.0)), drag_regions: true };
-    // Searches stop first; then what's still queued for the user-data writers (the Jump
-    // history, the sidebar) gets a moment to land.
-    let mut app = App::new(spec).chrome(chrome).on_close(|s, _| {
-        s.stop_background();
-        persist::drain_at_exit();
-    });
-    // Work the window doesn't need for its first frame waits until that frame is on screen
-    // (the sidebar's look at each favorite).
-    let shown = app.handle();
-    app = app.on_ready(move |_| shown.update(|s, _| s.first_frame_shown()));
+    let mut app = window::configure(App::new(spec), window::FIRST);
+    window::register(window::FIRST, app.handle());
     if timing::benching() {
         app = app.open_inactive(); // the bench never takes focus from what the user is doing
     } else if rune::tooling::headless_run().is_none() {
-        // Folders other apps ask for while Arbor runs (or that launched it).
-        incoming::listen(app.handle());
-        // Volumes coming and going, where the OS says so without polling.
-        volumes::watch(app.handle());
+        // Folders other apps ask for while Arbor runs (or that launched it): the window
+        // focused last opens them.
+        incoming::listen();
+        // Volumes coming and going, where the OS says so without polling: every window.
+        volumes::watch();
     }
     if timed {
         app.on_frame_encoded(timing::frame).run()
     } else {
         app.run()
     }
+    // No window is on screen now: a file operation the last window's close cut short gets its
+    // bounded cleanup, and what it left is recorded (`leftovers.rs`).
+    leftovers::finish();
     persist::drain_at_exit();
 }

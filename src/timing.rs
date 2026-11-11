@@ -78,6 +78,12 @@
 //! switch once left Rune drawing every frame until the next key; `tiles` switches to the tiles
 //! view, `columns` to the column view and then presses ↓), then it logs `arbor-timing idle-ready` and does
 //! nothing more, never quitting: the bench measures its CPU time from outside, then kills it.
+//! With `ARBOR_BENCH_WINDOW=1` each round opens a new window (⌘N, on the folder on screen) and
+//! closes it once its first frame showing the folder is drawn: `window` is from the step to that
+//! frame, with `entries=N` and `same_frame=1` when that was the window's first drawn frame.
+//! `window-up` is the window's first drawn frame, with when ⌘N's handler had made it
+//! (`made_ms`) and when Rune ran its `setup` (`setup_ms`, before the native window exists). `ARBOR_BENCH_IDLE_WINDOWS=2` with
+//! `ARBOR_BENCH_IDLE` first opens a second window and waits for its frame, then idles both.
 //! `ARBOR_BENCH_PACE_MS=N` spaces the steps at least N ms apart, as a person types (a thread
 //! sleeps and wakes the window; nothing polls), so the CPU cools between keys as it does for a
 //! real user. The ↓ is synthetic, so its `key` time starts when the handler
@@ -193,6 +199,20 @@ thread_local! {
     static LAST_STEP: Cell<Option<Instant>> = const { Cell::new(None) };
     /// A pacing thread is asleep and will wake the window.
     static PACE_ARMED: Cell<bool> = const { Cell::new(false) };
+    /// `ARBOR_BENCH_WINDOW`: the bench opens and closes windows; `ARBOR_BENCH_IDLE_WINDOWS=2`:
+    /// the idle bench idles two.
+    static WINDOW: Cell<bool> = const { Cell::new(false) };
+    static IDLE_TWO: Cell<bool> = const { Cell::new(false) };
+    /// A new window asked for whose first frame with its folder isn't drawn yet: when.
+    static WINDOW_ASKED: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// The new window's folder, once listed: its entries.
+    static WINDOW_LISTED: Cell<Option<usize>> = const { Cell::new(None) };
+    /// The new window's first frame was drawn (logged as `window-up`).
+    static WINDOW_UP: Cell<bool> = const { Cell::new(false) };
+    /// When the new window's state was made and queued (⌘N's handler done), and when Rune ran
+    /// its `setup` (before the native window is created).
+    static WINDOW_MADE: Cell<Option<Instant>> = const { Cell::new(None) };
+    static WINDOW_SETUP: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 /// Whether `ARBOR_BENCH` is driving the app (after `init`).
@@ -218,12 +238,17 @@ pub fn init() -> bool {
     IDLE.set(std::env::var("ARBOR_BENCH_IDLE").ok().and_then(|v| crate::grid::ViewMode::named(v.trim())));
     GRID_TILES.set(std::env::var("ARBOR_BENCH_GRID").is_ok_and(|v| v.trim() == "3"));
     COLUMNS.set(set("ARBOR_BENCH_COLUMNS"));
+    WINDOW.set(set("ARBOR_BENCH_WINDOW"));
+    IDLE_TWO.set(std::env::var("ARBOR_BENCH_IDLE_WINDOWS").is_ok_and(|v| v.trim() == "2"));
     PACE_MS.set(std::env::var("ARBOR_BENCH_PACE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0));
     let steps = if let Some(view) = IDLE.get() {
-        match view {
-            crate::grid::ViewMode::Icons | crate::grid::ViewMode::Tiles => 1,
-            crate::grid::ViewMode::List | crate::grid::ViewMode::Columns => 2,
-        }
+        u32::from(IDLE_TWO.get())
+            + match view {
+                crate::grid::ViewMode::Icons | crate::grid::ViewMode::Tiles => 1,
+                crate::grid::ViewMode::List | crate::grid::ViewMode::Columns => 2,
+            }
+    } else if WINDOW.get() {
+        rounds * 2
     } else if SEARCH.get() {
         rounds
     } else if RENAME.get() {
@@ -276,7 +301,74 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// A key that reached a focused element owning its keys (the file list), going where the
 /// window's own `on_key` sends it: timed when timing is on.
 pub fn key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    if MAIN.get().is_some() { on_key(s, ev, tx) } else { s.on_key(ev, tx) }
+    // Only the first window is timed (its frames are the ones `frame` reports).
+    if MAIN.get().is_some() && s.win == crate::window::FIRST { on_key(s, ev, tx) } else { s.on_key(ev, tx) }
+}
+
+/// Whether timing is on (`init`).
+#[cfg_attr(test, allow(dead_code))] // `window::open` opens no window in tests
+pub fn on() -> bool {
+    MAIN.get().is_some()
+}
+
+/// A window `window::open` is about to open while timing is on: whether its folder is listed.
+#[cfg_attr(test, allow(dead_code))] // `window::open` opens no window in tests
+pub fn window_opening(s: &State) {
+    WINDOW_LISTED.set((!s.is_loading()).then(|| s.cur().entries.len()));
+    WINDOW_MADE.set(Some(Instant::now()));
+}
+
+/// A timed window's `setup` (other than the first's).
+#[cfg_attr(test, allow(dead_code))] // `window::open` opens no window in tests
+pub fn window_setup(s: &mut State, waker: rune::Waker) {
+    WINDOW_SETUP.set(Some(Instant::now()));
+    s.setup(waker);
+}
+
+/// A timed window's `poll` (other than the first's): notes when its folder is listed.
+#[cfg_attr(test, allow(dead_code))] // `window::open` opens no window in tests
+pub fn window_poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
+    let changed = s.poll(tx);
+    if WINDOW_LISTED.get().is_none() && !s.is_loading() {
+        WINDOW_LISTED.set(Some(s.cur().entries.len()));
+    }
+    changed
+}
+
+/// A timed window's frames (other than the first's): the first drawn one showing its folder
+/// ends the `window` measure, and the bench goes on.
+#[cfg_attr(test, allow(dead_code))] // `window::open` opens no window in tests
+pub fn window_frame(f: &FrameEncoded) {
+    if f.outcome() != FrameOutcome::Drawn {
+        return;
+    }
+    let first = !WINDOW_UP.replace(true);
+    if let Some(t) = WINDOW_ASKED.get()
+        && first
+    {
+        let since = |at: Option<Instant>| at.map_or(f64::NAN, |at| at.saturating_duration_since(t).as_secs_f64() * 1000.0);
+        eprintln!(
+            "arbor-timing window-up ms={:.2} made_ms={:.2} setup_ms={:.2} update_ms={:.2} encode_ms={:.2}",
+            since(Some(f.at())),
+            since(WINDOW_MADE.get()),
+            since(WINDOW_SETUP.get()),
+            f.update_ms().unwrap_or(0.0),
+            f.encode_ms().unwrap_or(0.0)
+        );
+    }
+    let (Some(t), Some(n)) = (WINDOW_ASKED.get(), WINDOW_LISTED.get()) else { return };
+    let inside = first;
+    WINDOW_ASKED.set(None);
+    eprintln!(
+        "arbor-timing window ms={:.2} entries={n} same_frame={} update_ms={:.2} encode_ms={:.2}",
+        f.at().saturating_duration_since(t).as_secs_f64() * 1000.0,
+        u8::from(inside),
+        f.update_ms().unwrap_or(0.0),
+        f.encode_ms().unwrap_or(0.0)
+    );
+    if let Some(w) = WAKER.get() {
+        w();
+    }
 }
 
 fn keyed(s: &mut State, ev: &KeyEvent, tx: &mut Tx, t: Instant) -> bool {
@@ -296,7 +388,7 @@ fn measured(s: &mut State, tx: &mut Tx, t: Instant, f: impl FnOnce(&mut State, &
     let asked = s.pending_path().map(Path::to_path_buf);
     let (lands, tab) = (s.lands, tab_of(s));
     let (reads, closed) = (s.preview_reads, s.preview.is_none());
-    let (no_jump, cold) = (s.jump.is_none(), s.history.loads == 0);
+    let (no_jump, cold) = (s.jump.is_none(), s.shared.history.borrow().loads == 0);
     let generation = search_generation(s);
     let (had_batch, plans) = (s.batch.is_some(), s.batch_plans);
     let col_reads = s.col_reads;
@@ -318,7 +410,7 @@ fn measured(s: &mut State, tx: &mut Tx, t: Instant, f: impl FnOnce(&mut State, &
         && no_jump
         && let Some(j) = &s.jump
     {
-        let folders = s.history.agg.as_ref().map_or(0, |a| a.len());
+        let folders = s.shared.history.borrow().agg.as_ref().map_or(0, |a| a.len());
         if j.loading {
             JUMP_ASKED.set(Some((t, cold)));
         } else {
@@ -367,7 +459,7 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         NAV.set(Some((rune::last_input().unwrap_or_else(Instant::now), Kind::Nav)));
     }
     let previews = s.preview_lands;
-    let jump_loads = s.history.loads;
+    let jump_loads = s.shared.history.borrow().loads;
     let plans = s.batch_plans;
     let col_lands = s.col_lands;
     let mut changed = s.poll(tx);
@@ -403,10 +495,10 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             SEARCH_ASKED.set(None);
         }
     }
-    if s.history.loads != jump_loads
+    if s.shared.history.borrow().loads != jump_loads
         && let Some((t, cold)) = JUMP_ASKED.take()
     {
-        JUMP_LANDED.set(Some((t, cold, s.history.agg.as_ref().map_or(0, |a| a.len()), false)));
+        JUMP_LANDED.set(Some((t, cold, s.shared.history.borrow().agg.as_ref().map_or(0, |a| a.len()), false)));
     }
     if loading && !s.is_loading() {
         LANDED.set(NAV.take().map(|(t, kind)| (t, s.cur().entries.len(), kind, false)));
@@ -421,7 +513,7 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     if !loading
         && !FIRST.get()
         && s.preview_lands == previews
-        && s.history.loads == jump_loads
+        && s.shared.history.borrow().loads == jump_loads
         && s.col_lands == col_lands
         && STEP_SHOWN.get()
         && paced()
@@ -499,6 +591,10 @@ fn preview_step(s: &mut State, tx: &mut Tx, n: u32, now: Instant) -> bool {
 /// The next bench step, once the last one's frame is up.
 fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
     let (left, n) = BENCH.get();
+    // A new window's first frame comes before the next step.
+    if WINDOW_ASKED.get().is_some() {
+        return false;
+    }
     // The preview bench waits for a preview to land before its next step.
     if PREVIEW.get() && WAIT_PREVIEW.get() && s.preview.as_ref().is_some_and(|p| p.is_loading()) {
         return false;
@@ -609,6 +705,11 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
     }
     if let Some(view) = IDLE.get() {
         use crate::grid::ViewMode;
+        if IDLE_TWO.get() && n == 0 {
+            open_window(s, now);
+            return true;
+        }
+        let n = n - u32::from(IDLE_TWO.get());
         match (view, n) {
             (ViewMode::Columns, 0) => measured(s, tx, now, |s, tx| run(s, Cmd::AsColumns, tx)),
             (ViewMode::Columns, _) => keyed(s, &KeyEvent { key: Key::Down, mods: Mods::default() }, tx, now),
@@ -628,6 +729,14 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
                 let k = [Key::Right, Key::Left, Key::Down, Key::Up][n as usize % 4].clone();
                 keyed(s, &key(k), tx, now);
             }
+        }
+        return true;
+    }
+    if WINDOW.get() {
+        if n % 2 == 0 {
+            open_window(s, now);
+        } else {
+            crate::window::close_all_but(s.win);
         }
         return true;
     }
@@ -681,6 +790,14 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
         }
     }
     true
+}
+
+/// ⌘N, timed from `now` to the new window's first frame showing its folder (`window_frame`).
+fn open_window(s: &mut State, now: Instant) {
+    WINDOW_ASKED.set(Some(now));
+    WINDOW_LISTED.set(None);
+    WINDOW_UP.set(false);
+    s.run(Cmd::NewWindow, &mut Tx::default());
 }
 
 /// The folder the bench started in.

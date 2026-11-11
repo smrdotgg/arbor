@@ -65,7 +65,7 @@ impl Ask {
     fn for_cmd(s: &State, cmd: Cmd) -> Ask {
         let (title, body, action) = match cmd {
             Cmd::ClearJump => {
-                let what = match s.history.agg.as_ref().map(|a| a.len()) {
+                let what = match s.shared.history.borrow().agg.as_ref().map(|a| a.len()) {
                     Some(1) => "the folder you've been to".to_string(),
                     Some(n) => format!("the {} folders you've been to", crate::search::count(n as u64)),
                     None => "every folder you've been to".to_string(),
@@ -253,8 +253,8 @@ impl State {
         let yes = yes && a.action.is_some();
         // A delete deletes what the dialog named, whatever is selected now.
         if yes && a.cmd == Cmd::Delete {
-            if self.job.is_some() {
-                self.note = Some(crate::app::BUSY.into());
+            if self.busy() {
+                self.note = Some(self.busy_why().into());
             } else if !a.items.is_empty() {
                 self.start(Op::Delete { items: a.items });
             }
@@ -338,8 +338,8 @@ mod tests {
         s.close_jump(&mut tx);
         // Opening Jump waits a few ms for the history; on a loaded machine it lands later,
         // through a frame's poll (asserting at once failed under a busy parallel run).
-        assert!(s.history.load(std::time::Duration::from_secs(10), None), "the history loaded");
-        assert_eq!(s.history.agg.as_ref().unwrap().len(), 1);
+        assert!(s.shared.history.borrow_mut().load(std::time::Duration::from_secs(10), None), "the history loaded");
+        assert_eq!(s.shared.history.borrow().agg.as_ref().unwrap().len(), 1);
         s
     }
 
@@ -358,16 +358,16 @@ mod tests {
             assert_eq!(a.title, "Clear Jump History?");
             assert!(a.body.contains("the folder you've been to") && a.body.ends_with("This can't be undone."), "{}", a.body);
             assert_eq!(a.focus, Button::Cancel, "Cancel has the focus");
-            assert_eq!(s.history.agg.as_ref().unwrap().len(), 1, "nothing cleared by asking");
+            assert_eq!(s.shared.history.borrow().agg.as_ref().unwrap().len(), 1, "nothing cleared by asking");
         }
         // Enter on Cancel cancels; so does Esc.
         assert!(s.on_key(&key(Key::Enter), &mut tx));
         assert!(s.asking.is_none());
-        assert_eq!(s.history.agg.as_ref().unwrap().len(), 1);
+        assert_eq!(s.shared.history.borrow().agg.as_ref().unwrap().len(), 1);
         s.run(Cmd::ClearJump, &mut tx);
         assert!(s.on_key(&key(Key::Escape), &mut tx));
         assert!(s.asking.is_none());
-        assert_eq!(s.history.agg.as_ref().unwrap().len(), 1);
+        assert_eq!(s.shared.history.borrow().agg.as_ref().unwrap().len(), 1);
         // Other keys don't leak to the window while it's open.
         s.run(Cmd::ClearJump, &mut tx);
         let sel = s.cur().sel;
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(s.asking.as_ref().unwrap().focus, Button::Action);
         assert!(s.on_key(&key(Key::Enter), &mut tx));
         assert!(s.asking.is_none());
-        assert!(s.history.agg.as_ref().unwrap().is_empty());
+        assert!(s.shared.history.borrow().agg.as_ref().unwrap().is_empty());
     }
 
     #[test]
@@ -388,7 +388,7 @@ mod tests {
         let mut tx = Tx::default();
         s.run(Cmd::ClearJump, &mut tx);
         s.answer(true, &mut tx);
-        assert!(s.history.agg.as_ref().unwrap().is_empty());
+        assert!(s.shared.history.borrow().agg.as_ref().unwrap().is_empty());
         let permanent: Vec<Cmd> = Cmd::ALL.iter().copied().filter(|c| c.permanent()).collect();
         assert_eq!(permanent, [Cmd::ClearJump, Cmd::Delete, Cmd::EmptyTrash]);
         let asking: Vec<Cmd> = Cmd::ALL.iter().copied().filter(|c| c.asks()).collect();
@@ -428,11 +428,11 @@ mod tests {
 
     fn settle_job(s: &mut State) {
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while (s.job.is_some() || s.ask_next.is_some()) && std::time::Instant::now() < until {
+        while (s.owns_job() || s.ask_next.is_some()) && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(2));
             s.poll(&mut Tx::default());
         }
-        assert!(s.job.is_none(), "the operation never finished");
+        assert!(!s.owns_job(), "the operation never finished");
         settle_all(s);
     }
 
@@ -458,7 +458,7 @@ mod tests {
         let (d, mut s) = folder_of("delete", &["a.txt", "b.txt", "sub/"]);
         let mut tx = Tx::default();
         s.run(Cmd::SelectAll, &mut tx);
-        let undos = s.undo.len();
+        let undos = s.shared.undo.borrow().len();
         s.run(Cmd::Delete, &mut tx);
         let a = s.asking.as_ref().expect("it asks");
         assert_eq!(a.title, "Delete 3 Items Permanently?");
@@ -475,7 +475,7 @@ mod tests {
         settle_job(&mut s);
         assert!(!d.join("a.txt").exists() && !d.join("b.txt").exists() && !d.join("sub").exists());
         assert_eq!(s.note.as_deref(), Some("Deleted 3 items permanently"));
-        assert_eq!(s.undo.len(), undos, "nothing to undo");
+        assert_eq!(s.shared.undo.borrow().len(), undos, "nothing to undo");
         assert!(s.cur().marked.is_empty(), "what's gone isn't selected: {:?}", s.cur().marked);
         // One item: named in the title.
         std::fs::write(d.join("c.txt"), "c").unwrap();
@@ -545,7 +545,7 @@ mod tests {
         std::fs::write(root.join("files/sub/c"), vec![b'x'; 1024]).unwrap();
         *FIXTURE.lock().unwrap() = vec![Bin::freedesktop(&root, crate::trash::contents::me())];
         let mut tx = Tx::default();
-        let undos = s.undo.len();
+        let undos = s.shared.undo.borrow().len();
         let counted = |s: &mut State| {
             let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while !s.asking.as_ref().is_some_and(|a| a.body.contains("KB")) && std::time::Instant::now() < until {
@@ -573,7 +573,7 @@ mod tests {
         assert_eq!(s.note.as_deref(), Some(&*format!("Emptied the {BIN}: deleted 3 items permanently")));
         assert_eq!(std::fs::read_dir(root.join("files")).unwrap().count(), 0);
         assert_eq!(std::fs::read_dir(root.join("info")).unwrap().count(), 0, "their records went too");
-        assert_eq!(s.undo.len(), undos, "nothing to undo");
+        assert_eq!(s.shared.undo.borrow().len(), undos, "nothing to undo");
         // Now empty: the dialog says so, and has nothing to press but Close.
         s.run(Cmd::EmptyTrash, &mut tx);
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -585,7 +585,7 @@ mod tests {
         assert_eq!((a.body.as_str(), a.action), (&*format!("The {BIN} is already empty."), None));
         assert_eq!(a.buttons(), [Button::Cancel]);
         s.answer(true, &mut tx);
-        assert!(s.asking.is_none() && s.job.is_none());
+        assert!(s.asking.is_none() && !s.owns_job());
         FIXTURE.lock().unwrap().clear();
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -608,14 +608,14 @@ mod tests {
         for k in [Key::Tab, Key::Right, Key::Enter] {
             assert!(s.on_key(&key(k), &mut tx));
         }
-        assert!(s.job.is_none(), "Enter on Cancel");
+        assert!(!s.owns_job(), "Enter on Cancel");
         s.run(Cmd::EmptyTrash, &mut tx);
         s.answer(true, &mut tx);
-        assert!(s.asking.is_none() && s.job.is_none(), "a forced yes runs nothing before the count");
+        assert!(s.asking.is_none() && !s.owns_job(), "a forced yes runs nothing before the count");
         // Even run directly (as the dialog's button would) without a count, it refuses.
         s.trash_count = None;
         s.empty_trash();
-        assert!(s.job.is_none() && s.note.is_some(), "{:?}", s.note);
+        assert!(!s.owns_job() && s.note.is_some(), "{:?}", s.note);
         // A count that lands: the dialog follows it (an empty Trash informs; a count of
         // something gets the button, `the_dialog_says_what_the_count_found`).
         s.run(Cmd::EmptyTrash, &mut tx);
@@ -656,20 +656,20 @@ mod tests {
         assert_eq!(s.asking.as_ref().unwrap().focus, Button::Settings);
         // Enter on "Open Privacy Settings" opens Full Disk Access's pane and closes it.
         assert!(s.on_key(&key(Key::Enter), &mut tx));
-        assert!(s.asking.is_none() && s.job.is_none());
+        assert!(s.asking.is_none() && !s.owns_job());
         assert_eq!(crate::fs::opened_urls(), [PRIVACY_SETTINGS]);
         // Even a forced "yes" (a stale click on where the button was) runs nothing.
         s.run(Cmd::EmptyTrash, &mut tx);
         s.trash_count = Some(refused());
         s.poll(&mut Tx::default());
         s.answer(true, &mut tx);
-        assert!(s.asking.is_none() && s.job.is_none(), "nothing runs from an informing dialog");
+        assert!(s.asking.is_none() && !s.owns_job(), "nothing runs from an informing dialog");
         // Close (Enter on it, as it opens) closes it.
         s.run(Cmd::EmptyTrash, &mut tx);
         s.trash_count = Some(refused());
         s.poll(&mut Tx::default());
         assert!(s.on_key(&key(Key::Enter), &mut tx));
-        assert!(s.asking.is_none() && s.job.is_none());
+        assert!(s.asking.is_none() && !s.owns_job());
         assert!(crate::fs::opened_urls().is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }

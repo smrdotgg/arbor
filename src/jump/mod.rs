@@ -109,8 +109,11 @@ impl JumpBox {
 impl State {
     pub fn open_jump(&mut self, tx: &mut Tx) {
         self.close_overlays(tx);
-        let loaded = self.history.load(OPEN_WAIT, self.waker.clone());
-        if let Some(e) = self.history.error.take() {
+        // A load that lands late wakes the open window focused last (this one, unless it
+        // closed meanwhile), which tells every window's Jump (`poll_history`).
+        let waker = self.waker.as_ref().map(|_| self.shared.live_waker());
+        let loaded = self.shared.history.borrow_mut().load(OPEN_WAIT, waker);
+        if let Some(e) = self.shared.history.borrow_mut().error.take() {
             self.note = Some(e);
         }
         let mut edit = TextEdit::new("");
@@ -137,7 +140,7 @@ impl State {
     /// Ranks again if the query changed or the history landed since.
     pub fn jump_refresh(&mut self) {
         let Some(j) = &mut self.jump else { return };
-        j.loading = self.history.agg.is_none();
+        j.loading = self.shared.history.borrow_mut().agg.is_none();
         if j.hits_for.as_deref() == Some(j.edit.text.as_str()) {
             return;
         }
@@ -148,11 +151,11 @@ impl State {
             j.matched = None;
             let typed = fs::expand(&q);
             let mut v = vec![Hit { path: typed.as_path().into(), shown: q.as_str().into(), low: None, score: f64::INFINITY }];
-            if let Some(a) = &self.history.agg {
+            if let Some(a) = &self.shared.history.borrow_mut().agg {
                 v.extend(a.under(&typed, now, LIMIT).into_iter().filter(|h| *h.path != *typed));
             }
             v
-        } else if let Some(a) = &self.history.agg {
+        } else if let Some(a) = &self.shared.history.borrow_mut().agg {
             // Typing on narrows what matched before: only those can match now.
             let among = j.matched.as_ref().filter(|(old, g, _)| *g == a.generation() && narrows(old, &q)).map(|(_, _, ix)| ix.as_slice());
             let (hits, matched) = a.rank_in(&q, now, LIMIT, among);
@@ -262,7 +265,7 @@ impl State {
 
     /// A Jump to a folder that isn't there any more: say so and forget it.
     pub(crate) fn jump_missed(&mut self, path: &Path) {
-        self.history.forget(path);
+        self.shared.history.borrow_mut().forget(path);
         self.note = Some(format!("{} no longer exists, so it was removed from Jump", fs::pretty(path)));
     }
 
@@ -270,34 +273,41 @@ impl State {
     /// when the view changes.
     pub(crate) fn poll_history(&mut self) -> bool {
         let mut said = false;
-        if let Some(r) = self.history.cleared() {
+        if let Some(r) = self.shared.history.borrow_mut().cleared() {
             self.note = Some(match r {
                 Ok(()) => "Jump history cleared".into(),
                 Err(e) => format!("Couldn't clear the Jump history, so it's still there: {e}"),
             });
             said = true;
         }
-        if let Some(e) = self.history.write_error() {
+        if let Some(e) = self.shared.history.borrow_mut().write_error() {
             self.note = Some(e);
             said = true;
         }
-        if !self.history.poll() {
+        if !self.shared.history.borrow_mut().poll() {
             return said;
         }
-        if let Some(e) = self.history.error.take() {
+        if let Some(e) = self.shared.history.borrow_mut().error.take() {
             self.note = Some(e);
         }
+        self.history_landed();
+        // A window's Jump waits for the load whichever window took it.
+        self.shared.tell_others(self.win, || Box::new(|s, _| s.history_landed()));
+        true
+    }
+
+    /// The history's aggregate landed: an open Jump ranks with it.
+    pub(crate) fn history_landed(&mut self) {
         if let Some(j) = &mut self.jump {
             j.hits_for = None;
         }
         self.jump_refresh();
-        true
     }
 
     /// Forgets the whole history: run only from the confirmation dialog (`Cmd::permanent`). It
     /// says "cleared" only once the writer has removed it from the disk (`poll_history`).
     pub(crate) fn clear_jump_history(&mut self) {
-        self.history.clear();
+        self.shared.history.borrow_mut().clear();
         self.note = Some("Clearing Jump history…".into());
     }
 }
