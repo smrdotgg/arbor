@@ -2271,9 +2271,15 @@ mod links {
         fs::remove_file(d.join("b link.txt")).unwrap();
         std::os::unix::fs::symlink(d.join("a.txt"), d.join("b link.txt")).unwrap();
         let why = undo_refused(u.clone());
-        // "edited" where the new link took the freed inode (ext4) and a fingerprint has no
-        // birth time: its time differs all the same.
-        assert!(why.starts_with("Can't undo the link: “b link.txt” was replaced") || why.contains("“b link.txt” was edited"), "{why}");
+        // Which check sees it depends on the disk: "replaced" (another inode, or the same one
+        // with its own birth time), "edited" (the freed inode back, another time), or, made in
+        // the same tick of ext4's clock at the freed inode with a target as long, only its
+        // target ("points somewhere else"). Always refused.
+        assert!(
+            why.starts_with("Can't undo the link: “b link.txt” ")
+                && ["was replaced", "was edited", "points somewhere else"].iter().any(|w| why.contains(w)),
+            "{why}"
+        );
         assert!(d.join("a link.txt").symlink_metadata().is_ok(), "all or nothing: the other link stays");
         fs::remove_file(d.join("b link.txt")).unwrap();
         fs::write(d.join("b link.txt"), "a file now").unwrap();
@@ -2345,6 +2351,9 @@ mod links {
         let d = tmp("links-swap");
         fs::write(d.join("a.txt"), "a").unwrap();
         let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+        // Past the clock tick it was made in (ext4: a few ms), so the newcomer's birth time is
+        // its own: one made in the same tick at the freed inode is the documented limit.
+        std::thread::sleep(Duration::from_millis(20));
         let target = d.join("a.txt");
         let swap: PathHook = Box::new(move |at: &Path| {
             fs::remove_file(at).unwrap();
@@ -2463,6 +2472,8 @@ fn new_file_undo_never_trashes_a_replacement() {
     let d = tmp("nfile-replaced");
     let u = take(run_now(Op::NewFile { dir: d.clone() }));
     let at = d.join("untitled.txt");
+    // Past the clock tick it was made in, so the newcomer's birth time is its own.
+    std::thread::sleep(Duration::from_millis(20));
     let swap: PathHook = Box::new(|at: &Path| {
         fs::remove_file(at).unwrap();
         fs::write(at, "").unwrap();

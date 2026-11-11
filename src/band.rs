@@ -664,9 +664,12 @@ mod tests {
                     times.push(at.elapsed().as_secs_f64() * 1000.0);
                 }
                 times.sort_by(f64::total_cmp);
-                let worst = times[times.len() - 1];
-                println!("{n} selected, {mode:?}: median {:.4} ms, worst {worst:.4} ms", times[times.len() / 2]);
-                assert!(worst < 1.0, "{n} selected, {mode:?}: {worst:.3} ms");
+                let (median, worst) = (times[times.len() / 2], times[times.len() - 1]);
+                println!("{n} selected, {mode:?}: median {median:.4} ms, worst {worst:.4} ms");
+                // The median: one move the scheduler preempted on a busy machine (a parallel
+                // test run) took over a millisecond and failed the worst-case bound, while
+                // cloning the selection costs every move tens of milliseconds.
+                assert!(median < 1.0, "{n} selected, {mode:?}: median {median:.3} ms (worst {worst:.3})");
                 b.cancel(&mut f);
                 assert_eq!(f.marked.len(), n, "Esc puts it back");
             }
