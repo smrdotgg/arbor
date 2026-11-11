@@ -34,8 +34,11 @@ Newest first.
 - **What we did instead:** the rows have an `on_layout_tx` only while a selection rectangle is
   held in their pane (`list::follow_band` in `src/view/list.rs`, `Ctx::banding`), and it never
   says `live_only`: a report that changed nothing commits a cheap view instead, and the press
-  and release around it commit anyway. No other `live_only` in Arbor is unbounded: each is in a
-  drag's `Move`, and the drag's release commits. Guarded by `an_idle_window_draws_nothing`
+  and release around it commit anyway. The column view's sideways wheel said it too when a delta
+  scrolled nothing (too small, or at an end): 3.46 s of CPU per 5 s after one such wheel, until
+  the next key; it now lets Rune commit instead. No other `live_only` in Arbor is unbounded: each
+  is in a drag's `Move` (rows, tabs, favorites, the rectangle), and the drag's release commits.
+  Guarded by `an_idle_window_draws_nothing`, `the_views_are_idle_after_each_kind_of_input`
   (`src/a11y_tests.rs`) and `bench --idle`.
 - **What users lose:** nothing now. The rows no longer hear their layout outside a rectangle
   drag. A future live-only handler outside a drag would bring the loop back.

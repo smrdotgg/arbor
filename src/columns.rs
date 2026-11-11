@@ -728,15 +728,17 @@ impl State {
         let acc = cols.wheel.get() + d;
         let steps = (acc / WHEEL_STEP).trunc();
         cols.wheel.set(acc - steps * WHEEL_STEP);
+        // A delta that scrolls nothing (too small yet, or past an end) takes the wheel and lets
+        // Rune commit a view that changes nothing. Never `Tx::live_only`: outside a drag that a
+        // release ends, it leaves a window with no live values drawing every frame
+        // (RUNE-GAPS.md).
         if steps == 0.0 {
-            tx.live_only();
             return true;
         }
         // Content moving right (a positive delta) shows the columns to the left.
         let (lo, hi) = cols.bounds();
         let to = (cols.first as isize - steps as isize).clamp(lo as isize, hi as isize) as usize;
         if to == cols.first {
-            tx.live_only();
             return true;
         }
         tx.instant();

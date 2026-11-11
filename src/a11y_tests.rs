@@ -1243,6 +1243,30 @@ fn the_wheel_under_a_held_rectangle_updates_it() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Once what an input asked for has landed (listings, thumbnails, scrolls, the column view's
+/// reads), the window is idle: `poll` reports no change, no frame animates or asks for another,
+/// and nothing commits.
+fn assert_idle(rt: &mut Runtime<State>, what: &str) {
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        rt.frame(1.0 / 60.0);
+    }
+    // One read can be a large folder: the temp folder's parent is a column there.
+    until(rt, |s| !s.cur().is_loading() && !s.cur().cols.as_ref().is_some_and(|c| c.loading()));
+    for _ in 0..5 {
+        rt.frame(1.0 / 60.0);
+    }
+    // Before anything else runs (a poll's commit would hide it): nothing asks for a frame.
+    assert!(!rt.live_pending(), "{what}: asks for another frame");
+    let commits = rune::commit_generation();
+    for i in 0..20 {
+        assert!(!rt.update_if(|s, tx| s.poll(tx)), "{what}: idle poll {i} reported a change");
+        assert!(!rt.frame(1.0 / 60.0), "{what}: idle frame {i} is animating");
+        assert!(!rt.live_pending(), "{what}: idle frame {i} asks for another frame");
+    }
+    assert_eq!(rune::commit_generation(), commits, "{what}: idle frames committed");
+}
+
 /// Idle means idle (NORTHSTAR): once a switch of view, a resize (the window taking its saved
 /// size after the first frame) or a scroll has landed, the window asks for no frame, commits
 /// nothing and `poll` reports no change, in the list and the icon view, with or without
@@ -1251,25 +1275,7 @@ fn the_wheel_under_a_held_rectangle_updates_it() {
 /// which is the list view (RUNE-GAPS.md).
 #[test]
 fn an_idle_window_draws_nothing() {
-    let quiet = |rt: &mut Runtime<State>, what: &str| {
-        // Let what was asked land: listings, thumbnails, scrolls, and the column view's reads
-        // (one can be a large folder: the temp folder's parent is a column there).
-        for _ in 0..30 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            rt.frame(1.0 / 60.0);
-        }
-        until(rt, |s| !s.cur().is_loading() && !s.cur().cols.as_ref().is_some_and(|c| c.loading()));
-        for _ in 0..5 {
-            rt.frame(1.0 / 60.0);
-        }
-        let commits = rune::commit_generation();
-        for i in 0..20 {
-            assert!(!rt.update_if(|s, tx| s.poll(tx)), "{what}: idle poll {i} reported a change");
-            assert!(!rt.frame(1.0 / 60.0), "{what}: idle frame {i} is animating");
-            assert!(!rt.live_pending(), "{what}: idle frame {i} asks for another frame");
-        }
-        assert_eq!(rune::commit_generation(), commits, "{what}: idle frames committed");
-    };
+    let quiet = |rt: &mut Runtime<State>, what: &str| assert_idle(rt, what);
     let shake = |rt: &mut Runtime<State>, what: &str| {
         quiet(rt, what);
         rt.set_viewport((1100.0, 700.0), 1.0);
@@ -1753,5 +1759,91 @@ fn a_rectangle_starts_in_another_columns_blank_space() {
     rt.frame(0.0);
     assert!(rt.state.band.is_none());
     assert_eq!(picked(&rt), ["Work".to_string(), "readme.txt".to_string()], "kept on release");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Idle after each kind of input in the column and tiles views, not only at rest: sideways
+/// wheels of every size, at both ends of the columns (where they scroll nothing) and between,
+/// Shift + wheel, a vertical wheel over a column, column moves by key and by click, a row
+/// dragged and let go, a rectangle, a divider drag and view switches. A wheel that scrolled
+/// nothing said `Tx::live_only`, which left Rune drawing every frame (RUNE-GAPS.md: 0.00 s →
+/// 3.46 s of CPU per 5 s).
+#[test]
+fn the_views_are_idle_after_each_kind_of_input() {
+    use rune::WheelEvent;
+    // Straight after As Columns, every column on screen: a sideways wheel scrolls nothing.
+    for dx in [1.0, 120.0, -120.0] {
+        let d = nested("idle-wheel-first");
+        let mut rt = runtime(&d);
+        run(&mut rt, Cmd::AsColumns);
+        settle_columns(&mut rt);
+        for _ in 0..10 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(!rt.live_pending());
+        let list = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
+        rt.wheel_event(WheelEvent::new(dx, 0.0).at(list[0] + 40.0, list[1] + 80.0));
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(!rt.live_pending(), "a sideways wheel ({dx}) that scrolled nothing leaves the window drawing");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    let d = nested("idle-inputs");
+    let mut rt = runtime(&d);
+    // Wide columns, so some scroll off: the wheel has somewhere to go, and ends to stop at.
+    rt.update(|s, _| s.col_w = 330.0);
+    run(&mut rt, Cmd::AsColumns);
+    assert_idle(&mut rt, "As Columns");
+    key(&mut rt, Key::Right, false);
+    assert_idle(&mut rt, "→");
+    key(&mut rt, Key::Right, false);
+    assert_idle(&mut rt, "→ again");
+    let list = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
+    let (x, y) = (list[0] + 40.0, list[1] + 60.0);
+    for (dx, what) in [
+        (1.0, "a sideways wheel too small to scroll"),
+        (-120.0, "a sideways wheel at the right end"),
+        (120.0, "a sideways wheel back"),
+        (120.0, "a sideways wheel at the left end"),
+        (500.0, "a big sideways wheel at the left end"),
+        (-500.0, "a big sideways wheel back"),
+    ] {
+        rt.wheel_event(WheelEvent::new(dx, 0.0).at(x, y));
+        assert_idle(&mut rt, what);
+    }
+    rt.wheel_event(WheelEvent::new(0.0, 40.0).at(x, y).mods(Mods { shift: true, ..Mods::default() }));
+    assert_idle(&mut rt, "Shift + wheel");
+    rt.wheel_event(WheelEvent::new(0.0, -40.0).at(x, y));
+    assert_idle(&mut rt, "a vertical wheel over a column");
+    key(&mut rt, Key::Left, false);
+    assert_idle(&mut rt, "←");
+    key(&mut rt, Key::Down, false);
+    assert_idle(&mut rt, "↓");
+    // A click in another column (the root's), then a row dragged a little and let go.
+    key(&mut rt, Key::Right, false);
+    assert_idle(&mut rt, "→ into Work");
+    let b = row_box(&mut rt, "readme.txt");
+    let at = (b[0] + 30.0, b[1] + b[3] * 0.5);
+    rt.pointer_move(at.0, at.1);
+    rt.pointer_down(at.0, at.1);
+    rt.pointer_up(at.0, at.1);
+    assert_idle(&mut rt, "a click in another column");
+    drag_through(&mut rt, at, &[(at.0 + 20.0, at.1 + 10.0), (at.0 + 40.0, at.1 + 30.0)]);
+    assert_idle(&mut rt, "a row dragged and let go");
+    let col = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
+    let blank = (col[0] + col[2] - 20.0, col[1] + col[3] - 30.0);
+    drag_through(&mut rt, blank, &[(blank.0 - 10.0, blank.1 - 20.0), (blank.0 - 30.0, col[1] + 10.0)]);
+    assert_idle(&mut rt, "a rectangle");
+    let divider = (col[0] + col[2] + 2.0, col[1] + 100.0);
+    drag_through(&mut rt, divider, &[(divider.0 + 20.0, divider.1), (divider.0 + 40.0, divider.1)]);
+    assert_idle(&mut rt, "a divider drag");
+    for cmd in [Cmd::AsTiles, Cmd::AsColumns, Cmd::AsIcons, Cmd::AsList, Cmd::AsColumns] {
+        run(&mut rt, cmd);
+        assert_idle(&mut rt, &format!("{cmd:?}"));
+    }
+    run(&mut rt, Cmd::AsTiles);
+    rt.wheel_event(WheelEvent::new(0.0, -200.0).at(x, y));
+    assert_idle(&mut rt, "tiles, scrolled");
     let _ = std::fs::remove_dir_all(&d);
 }
