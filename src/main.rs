@@ -11,6 +11,7 @@
 mod a11y_tests;
 mod actions;
 mod app;
+mod archive;
 mod band;
 mod batch;
 mod bounded;

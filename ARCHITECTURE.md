@@ -35,8 +35,9 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `config.rs` | `config.toml`: settings and key bindings, the template |
 | | `palette.rs`, `menu.rs`, `confirm.rs` | Palette, Linux's in-window context menu, the one dialog |
 | File ops | `actions.rs` | UI side of file operations: clipboard, paste, rename, drag and drop, context menu |
-| | `ops/` | The operation worker (`worker.rs`), undo and redo (`undo.rs`), batch rename (`batch.rs`), fingerprints (`print.rs`), Empty Trash and Put Back (`trashed.rs`), New File and Make Symbolic Link with their undo and Windows' shortcut fallback (`links.rs`) |
+| | `ops/` | The operation worker (`worker.rs`), undo and redo (`undo.rs`), batch rename (`batch.rs`), fingerprints (`print.rs`), Empty Trash and Put Back (`trashed.rs`), New File and Make Symbolic Link with their undo and Windows' shortcut fallback (`links.rs`), Compress and Extract Here (`archive/`) |
 | | `leftovers.rs` | What an operation cut short by quitting left: the record, its writer, the next launch's note |
+| | `archive/` | The archive formats Compress writes and Extract Here reads (`zip.rs`, `tar.rs`), what an archive's entries may become on disk (`mod.rs`: refusing paths and links out of the folder, renaming invalid names, the bounds against bombs), and writing them without following links (`out.rs`) |
 | | `noclobber.rs` | Renames, copies and file ids that never replace anything |
 | | `trash/` | Each platform's trash, and telling a disk with none (`win.rs`: the Recycle Bin); what's in the trashes, their count for Empty Trash's dialog, `.trashinfo` records (`contents.rs`) |
 | | `delete.rs` | Permanent delete without following links |
@@ -145,7 +146,7 @@ Nothing runs in the background unless the user did something, and nothing polls.
 - **Mount boundaries** (`mounts.rs`). `Mounts` (Linux's mount table, read once per operation)
   and `volume` (macOS's volume per folder) decide what's "another disk"; `Fence` bundles them
   for a walk. Used by permanent delete, cleanup of cancelled copies, cross-disk
-  moves and Get Info's total. `local_points` lists the local disks (Empty Trash's per-disk
+  moves, Get Info's total and Compress's walk. `local_points` lists the local disks (Empty Trash's per-disk
   trashes). Search uses device numbers alone (`search::devices_for`).
 - **User data on disk** (`persist.rs`). `replace` rewrites a file atomically (`Durable` also
   flushes it first, for the handler backup); `locked` holds a file's lock file around a
@@ -153,8 +154,10 @@ Nothing runs in the background unless the user did something, and nothing polls.
   failures once (`Failures`) and registers its flush for exit.
 - **Walking without following links** (`dirfd.rs`, Unix): folders opened with `O_NOFOLLOW`,
   checked against the identity they were listed with, entries `lstat`ed through the
-  descriptor. Permanent delete, Get Info's total, and Empty Trash (each trash folder opened
-  that way and pinned at the count, items and records removed with `unlinkat` relative to it).
+  descriptor. Permanent delete, Get Info's total, Empty Trash (each trash folder opened
+  that way and pinned at the count, items and records removed with `unlinkat` relative to it),
+  Compress's walk, and Extract Here's writes (`archive/out.rs`: files created `O_EXCL |
+  O_NOFOLLOW` relative to their folder).
 - **OS strings** (`ffi.rs`): `cstr` (Unix) and `wide` (Windows) for every path passed to the OS.
 - **Stop flags.** Every background read has an `Arc<AtomicBool>` set when its result stops
   mattering (navigated away, tab hidden, dropped); work checks it between entries.

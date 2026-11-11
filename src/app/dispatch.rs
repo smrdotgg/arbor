@@ -202,6 +202,15 @@ impl State {
                 searching && f.target_paths().iter().map(|p| p.parent()).collect::<std::collections::HashSet<_>>().len() > 1,
                 "Duplicate items from one folder at a time",
             )),
+            // The archive goes beside the items, so all of them must be in one folder.
+            Compress => when(busy, BUSY).or(when(nothing, "Select an item first")).or(renaming).or(when(
+                searching && f.target_paths().iter().map(|p| p.parent()).collect::<std::collections::HashSet<_>>().len() > 1,
+                "Compress items from one folder at a time",
+            )),
+            Extract => when(busy, BUSY).or(when(nothing, "Select an archive first")).or(renaming).or(when(
+                !f.targets().iter().all(|e| !e.is_dir && crate::archive::is_archive(&e.name)),
+                "Select .zip, .tar or .tar.gz archives",
+            )),
             CopyToOther | MoveToOther => when(!self.split(), NOT_SPLIT)
                 .or(when(busy, busy_why))
                 .or(when(nothing, "Select an item first"))
@@ -285,6 +294,11 @@ impl State {
             Cmd::TogglePreview if self.preview.is_some() => "Close Preview".into(),
             Cmd::TogglePreview => "Quick Preview".into(),
             Cmd::Rename if self.cur().marked.len() > 1 => Cmd::BatchRename.title().into(),
+            Cmd::Compress => match self.cur().targets().as_slice() {
+                [] => cmd.title().into(),
+                [one] => format!("Compress “{}”", one.name).into(),
+                v => format!("Compress {} Items", v.len()).into(),
+            },
             Cmd::Info if self.info.is_some() => "Close Get Info".into(),
             Cmd::Eject => match self.volume_here().and_then(|v| self.volumes.get(v)) {
                 Some(v) => format!("Eject “{}”", v.name).into(),
@@ -425,6 +439,8 @@ impl State {
             NewFile => self.new_file(),
             MakeLink => self.make_links(),
             ShowOriginal => self.show_original(),
+            Compress => self.compress_selected(),
+            Extract => self.extract_selected(),
             Trash => self.trash_selected(),
             // Runs from the dialog (`State::answer`), with the items it named.
             Delete => {}

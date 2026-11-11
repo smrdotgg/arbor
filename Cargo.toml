@@ -36,6 +36,12 @@ image-webp = { version = "0.2", default-features = false }
 # are ASCII only.
 regex-lite = "0.1"
 
+# Compress and Extract Here (src/archive/): deflate and the CRC for ZIP and gzip. Both are already
+# in the lock file through png, with these features; Arbor's own ZIP and tar code is on top
+# (no zip crate: DECISIONS.md, 2026-11-11).
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+crc32fast = { version = "1", default-features = false, features = ["std"] }
+
 # Trash: NSFileManager on macOS, the shell's Recycle Bin on Windows through IFileOperation (COM, hence
 # Win32_System_Com), and Linux follows the XDG spec.
 # windows-sys also lists the drive letters, and does no-replace moves and copies and reads file ids.

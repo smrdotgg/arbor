@@ -74,7 +74,7 @@ impl Undo {
     pub(super) fn in_trash(&self) -> bool {
         match self.what {
             What::Trash => !self.redo,
-            What::Copy | What::Duplicate | What::NewFolder | What::NewFile | What::PutBack => self.redo,
+            What::Copy | What::Duplicate | What::NewFolder | What::NewFile | What::PutBack | What::Compress | What::Extract => self.redo,
             // Links are removed and made again, never trashed (`Worker::undo_links`).
             What::Rename | What::BatchRename | What::Move | What::Link => false,
         }

@@ -797,6 +797,57 @@ points at: in place when it's in the same folder, else in its folder in the same
 back), clearing a filter that would hide it and showing hidden files when it's hidden. A link
 to nothing says the original isn't there. Not for Windows shortcuts.
 
+### Compress and Extract Here
+
+**Compress** (palette, or the context menu; no default key) puts the selection into one `.zip`
+beside it: "Photos.zip" for one item ("notes.txt.zip" for a file, as Finder names it),
+"Archive.zip" for several, and "Photos 2.zip" when the name is taken. **Extract Here** (palette,
+or the context menu on `.zip`, `.tar`, `.tar.gz` and `.tgz` files) unpacks each selected archive
+into a new folder beside it, named after the archive, or after the one folder it holds when
+everything in it is inside one ("Photos.zip" holding "Photos/…" makes "Photos", never
+"Photos/Photos"), again with a free name ("Photos 2"). Opening an archive (Enter, double-click)
+still hands it to the system's app for it, as it does any file. Both run on the worker with
+progress in bytes, and Esc cancels; neither ever replaces anything. ⌘Z sends the archive or the
+folder to the Trash, only while it's exactly as it was made (a file added inside, or the archive
+edited, and the undo refuses and says so), and ⇧⌘Z takes it back out.
+
+- **Compress** writes the archive under a hidden temporary name and renames it into place with the
+  no-replace rename, so a half-written `.zip` never has the real name. Folders are walked without
+  following links: on macOS and Linux a link is stored as a link (Unix mode in the archive, as
+  `zip -y` and Finder do), on Windows links are left out with a note. Another disk mounted inside
+  a folder is left out and said, and so are devices, sockets and FIFOs. Files are compressed with
+  deflate (level 3), except formats that already are (JPEG, PNG, MP4, ZIP, DOCX…), which are
+  stored, as is a big file whose first 256 KB don't compress. Archives over 4 GB, or files over
+  4 GB, use ZIP64; names are UTF-8 (flagged so); times are kept to the second. A cancelled or
+  failed archive's temporary file is removed, only while it's still the file Arbor wrote.
+- **Extract Here reads the whole list first** and refuses the archive, writing nothing, when any
+  entry would land outside its folder: an absolute path, `..`, a drive letter, a UNC path, a NUL
+  in a name, or a link whose target leaves the folder or goes through another link in the
+  archive. Names that aren't valid on this system (`a:b.txt` or `CON` on Windows, a name over 255
+  bytes) are changed to valid ones (`a_b.txt`, `_CON`) with a note, and a name the archive has
+  twice (or twice to a disk that ignores case) gets a free one. Every file, folder and link is
+  created relative to its open folder without following a link (`O_NOFOLLOW`, `O_EXCL`), and
+  links are made last, so nothing is ever written through a link, one the archive made or any
+  other. Files keep their modification time and their owner's read, write and run permissions,
+  never setuid or setgid; links are left out on Windows (they need Developer Mode there).
+  Hard links, devices and FIFOs in a tar, and macOS's `__MACOSX` folder, are left out.
+- **Against decompression bombs:** an archive is refused before anything is written when it has
+  more than 1,000,000 entries, folders more than 256 deep, entries whose data overlap (one
+  compressed stream counted many times), contents over 1 TB, or contents over 256 MB that are
+  more than 200 times the archive's size; or when it unpacks to more than the disk has free
+  ("too large to extract", saying the sizes). While writing, each entry is cut off at the size it
+  declared, and must reach it with a matching CRC.
+- **A damaged archive leaves nothing behind:** a bad CRC, a cut-off file or a broken stream stops
+  the extraction, and everything it made is removed again, each item only while it's still what
+  Arbor made (anything another app put there stays, and the status bar says so). A cancel does
+  the same. Encrypted entries and compression methods other than deflate (bzip2, LZMA,
+  Zstandard, AES…) are refused by name, as are archives split across files.
+- **Formats:** ZIP (stored and deflate, ZIP64, data descriptors, UTF-8 and code page 437 names,
+  Unix modes and links, extended and NTFS times), tar (ustar, pax and GNU long names), gzipped
+  tar. A gzipped tar is decompressed twice (the list, then the files), so its progress counts
+  the compressed bytes while the list is read. Browsing inside an archive is for later
+  (NORTHSTAR).
+
 ### Search in This Folder
 
 **⌘F** turns the active tab into a search of its folder and everything inside it: a query field
@@ -902,6 +953,9 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Batch Rename… |  |  | `file.batch_rename` |
 | New Folder | ⇧⌘N | Ctrl+Shift+N | `file.new_folder` |
 | New File | ⌥⌘N | Ctrl+Alt+N | `file.new_file` |
+
+| Compress |  |  | `file.compress` |
+| Extract Here |  |  | `file.extract` |
 | Move to Trash | ⌘⌫, ⌦ | Ctrl+Backspace, Delete | `file.trash` |
 | Delete Permanently… | ⌥⌘⌫ | Shift+Delete | `file.delete` |
 | Put Back |  |  | `file.put_back` |
