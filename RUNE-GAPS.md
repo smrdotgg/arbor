@@ -16,6 +16,32 @@ Newest first.
 
 ---
 
+## Idle: a `Tx::live_only` that no commit follows keeps a window without live values drawing
+
+- **Feature:** drag-select following the wheel (7cd20cb): the rows' `on_layout_tx` handler said
+  `Tx::live_only` whenever no rectangle was held, so an idle scroll or resize wouldn't re-run
+  the view.
+- **What Rune is missing:** `Runtime::skip_view` (`runtime/motion/live_check.rs`) sets
+  `live_dirty`, and only `latch_live` (`runtime/motion/live_latch.rs`) or a commit's
+  `subscribe_live` clears it. `latch_live` returns early, leaving it set, when the window has no
+  live subscriptions, so `live_pending()` stays true, and the window draws a frame every refresh
+  (`window/presented.rs`, with `poll` each frame) until something commits. In Arbor that's the
+  list view (no `Pixels`, live text or bound values) after the first layout report with no
+  commit after it: the Mac window taking its size after the first frame, As List, a scroll, a
+  folder opened. On the M4, 0.8–1.1 s of CPU per 10 s while idle; on Linux (lavapipe), 8.9 s
+  per 5 s, until the next key. The icon view with thumbnails on screen was spared: their
+  `Pixels` are live sources.
+- **What we did instead:** the rows have an `on_layout_tx` only while a selection rectangle is
+  held in their pane (`list::follow_band` in `src/view/list.rs`, `Ctx::banding`), and it never
+  says `live_only`: a report that changed nothing commits a cheap view instead, and the press
+  and release around it commit anyway. No other `live_only` in Arbor is unbounded: each is in a
+  drag's `Move`, and the drag's release commits. Guarded by `an_idle_window_draws_nothing`
+  (`src/a11y_tests.rs`) and `bench --idle`.
+- **What users lose:** nothing now. The rows no longer hear their layout outside a rectangle
+  drag. A future live-only handler outside a drag would bring the loop back.
+- **Suggested Rune change:** clear `live_dirty` in `latch_live` when there are no live
+  subscriptions (or don't set it in `skip_view` then): nothing is left to latch.
+
 ## Drag-select: no pointer events while the pointer holds still outside the list
 
 - **Feature:** drag-select (milestone 16): a selection rectangle dragged past the list's top or

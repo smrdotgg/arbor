@@ -1242,3 +1242,47 @@ fn the_wheel_under_a_held_rectangle_updates_it() {
     assert_eq!(picked(&rt), names(3..=5 + rows));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Idle means idle (NORTHSTAR): once a switch of view, a resize (the window taking its saved
+/// size after the first frame) or a scroll has landed, the window asks for no frame, commits
+/// nothing and `poll` reports no change, in the list and the icon view, with or without
+/// thumbnails. A layout report whose handler said `Tx::live_only` and changed nothing left Rune
+/// drawing every frame (at 60 or 120 Hz, until the next key) in a window with no live values,
+/// which is the list view (RUNE-GAPS.md).
+#[test]
+fn an_idle_window_draws_nothing() {
+    let quiet = |rt: &mut Runtime<State>, what: &str| {
+        // Let what was asked land: listings, thumbnails, scrolls.
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            rt.frame(1.0 / 60.0);
+        }
+        let commits = rune::commit_generation();
+        for i in 0..20 {
+            assert!(!rt.update_if(|s, tx| s.poll(tx)), "{what}: idle poll {i} reported a change");
+            assert!(!rt.frame(1.0 / 60.0), "{what}: idle frame {i} is animating");
+            assert!(!rt.live_pending(), "{what}: idle frame {i} asks for another frame");
+        }
+        assert_eq!(rune::commit_generation(), commits, "{what}: idle frames committed");
+    };
+    let shake = |rt: &mut Runtime<State>, what: &str| {
+        quiet(rt, what);
+        rt.set_viewport((1100.0, 700.0), 1.0);
+        quiet(rt, &format!("{what}, resized"));
+        rt.set_viewport((980.0, 620.0), 1.0);
+        quiet(rt, &format!("{what}, resized back"));
+        rt.wheel(500.0, 300.0, 120.0);
+        quiet(rt, &format!("{what}, scrolled"));
+    };
+    for (name, d) in [("plain", many("idle", 80)), ("images", images("idle", 80))] {
+        let mut rt = runtime(&d);
+        shake(&mut rt, &format!("{name}: list"));
+        run(&mut rt, Cmd::AsIcons);
+        shake(&mut rt, &format!("{name}: icons"));
+        run(&mut rt, Cmd::AsList);
+        shake(&mut rt, &format!("{name}: list again"));
+        run(&mut rt, Cmd::NewTab);
+        shake(&mut rt, &format!("{name}: new tab"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

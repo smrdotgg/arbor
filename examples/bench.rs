@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! bench [RUNS] [ROUNDS] [--bin PATH] [--keep] [--tabs N] [--preview N] [--jump N] [--search N] [--rename N] [--grid N]
-//!       [--pace MS] [--gap MS]
+//!       [--idle N] [--pace MS] [--gap MS]
 //! ```
 //!
 //! Makes a folder of 10,000 entries in the temp dir, then cold-starts Arbor on it RUNS times
@@ -69,6 +69,13 @@
 //! run counts only with 2 × ROUNDS keys after As Icons, and in the image folder a first
 //! thumbnail and a screenful.
 //!
+//! `--idle N` (default 1; 0 skips it) checks NORTHSTAR's "idle means idle": N starts in a folder
+//! of a few JPEGs, PNGs and text files with `ARBOR_BENCH_IDLE=list`, and N with `=icons` (see
+//! `src/timing.rs`). Once a run says it's idle, the bench lets it settle for [`IDLE_SETTLE`],
+//! measures the CPU time Arbor uses over [`IDLE_WINDOW`] (from outside: `/proc` on Linux, `ps`
+//! on macOS, `GetProcessTimes` on Windows) and kills it. More than [`IDLE_MAX_CPU`] fails the
+//! bench (exit status 1): an idle window draws nothing, so it should be zero.
+//!
 //! `--pace MS` spaces every step of every run at least MS apart (`ARBOR_BENCH_PACE_MS`), as a
 //! person types (120 is brisk typing): the CPU cools between keys, as it does for a real user,
 //! which back-to-back steps hide (on the M4 Pro, 4–5× for Jump keys and regex previews).
@@ -97,6 +104,11 @@ const SEARCH_FILES: usize = 120_000;
 const SEARCH_DIRS: usize = 2_000;
 /// Photos in the `--grid` image folder.
 const GRID_IMAGES: usize = 1_000;
+/// `--idle`: how long an idle window settles before, and is measured for, and the most CPU
+/// time it may use in that window.
+const IDLE_SETTLE: Duration = Duration::from_secs(2);
+const IDLE_WINDOW: Duration = Duration::from_secs(5);
+const IDLE_MAX_CPU: f64 = 0.05;
 
 fn main() {
     let mut nums = Vec::new();
@@ -108,6 +120,7 @@ fn main() {
     let mut search_runs = 0;
     let mut rename_runs = 0;
     let mut grid_runs = 0;
+    let mut idle_runs = 1;
     let (mut pace, mut gap) = (0u64, 0u64);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -120,6 +133,7 @@ fn main() {
             "--search" => search_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--search N"),
             "--rename" => rename_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--rename N"),
             "--grid" => grid_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--grid N"),
+            "--idle" => idle_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--idle N"),
             "--pace" => pace = args.next().and_then(|n| n.parse::<u64>().ok()).expect("--pace MS"),
             "--gap" => gap = args.next().and_then(|n| n.parse::<u64>().ok()).expect("--gap MS"),
             n => nums.push(n.parse::<u32>().unwrap_or_else(|_| panic!("not a number: {n}"))),
@@ -273,6 +287,28 @@ fn main() {
             }
         }
     }
+    // (view, CPU seconds over IDLE_WINDOW) per idle run.
+    let mut idle = Vec::new();
+    let mut idle_failed = Vec::new();
+    if idle_runs > 0 {
+        let dir = root.join("idle");
+        make_idle_folder(&dir);
+        for run in 0..idle_runs * 2 {
+            let view = if run % 2 == 0 { "list" } else { "icons" };
+            match idle_once(&bin, &dir, view) {
+                Ok(cpu) => {
+                    if cpu > IDLE_MAX_CPU {
+                        idle_failed.push(format!("{view} {cpu:.2} s"));
+                    }
+                    idle.push((view, cpu));
+                }
+                Err(e) => {
+                    eprintln!("idle run {run} ({view}): INVALID: {e}");
+                    idle_failed.push(format!("{view} invalid"));
+                }
+            }
+        }
+    }
     if !keep {
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -376,10 +412,124 @@ fn main() {
         if late.is_empty() { String::new() } else { format!(" (late: {})", late.join(", ")) }
     );
     println!("Times end when the frame is submitted to the GPU (a proxy): pixels reach the screen at least one refresh later.");
+    if idle_runs > 0 {
+        let each: Vec<String> = idle.iter().map(|(v, cpu)| format!("{v} {cpu:.2} s")).collect();
+        println!(
+            "idle CPU over {} s, after As Icons (and As List for list): {} (at most {IDLE_MAX_CPU} s){}",
+            IDLE_WINDOW.as_secs(),
+            each.join(", "),
+            if idle_failed.is_empty() { String::new() } else { format!("  OVER: {}", idle_failed.join(", ")) }
+        );
+    }
     if !invalid.is_empty() {
         println!("INVALID: {} of {runs} runs ({invalid:?}); see above. These numbers don't count.", invalid.len());
         std::process::exit(1);
     }
+    if !idle_failed.is_empty() {
+        println!("IDLE OVER: an idle window used CPU ({}); NORTHSTAR: idle means idle.", idle_failed.join(", "));
+        std::process::exit(1);
+    }
+}
+
+/// One `--idle` run: starts Arbor in `dir` with `ARBOR_BENCH_IDLE=view`, waits for it to say
+/// it's idle, lets it settle, and returns the CPU seconds it used over [`IDLE_WINDOW`].
+fn idle_once(bin: &Path, dir: &Path, view: &str) -> Result<f64, String> {
+    let mut cmd = Command::new(bin);
+    for var in [
+        "ARBOR_BENCH_TABS",
+        "ARBOR_BENCH_PREVIEW",
+        "ARBOR_BENCH_JUMP",
+        "ARBOR_BENCH_SEARCH",
+        "ARBOR_BENCH_RENAME",
+        "ARBOR_BENCH_GRID",
+        "ARBOR_BENCH_PACE_MS",
+        "ARBOR_TIMING",
+    ] {
+        cmd.env_remove(var);
+    }
+    let mut child = cmd
+        .arg(dir)
+        .env("RUNE_DIRS_ROOT", dir.parent().unwrap_or(dir).join("dirs-idle"))
+        .env("ARBOR_BENCH", "1")
+        .env("ARBOR_BENCH_IDLE", view)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let err = child.stderr.take().expect("piped");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(err).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut lines = Vec::new();
+    let measured = loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(line) if line.starts_with("arbor-timing idle-ready") => {
+                std::thread::sleep(IDLE_SETTLE);
+                let before = cpu_secs(&child);
+                std::thread::sleep(IDLE_WINDOW);
+                break match (before, cpu_secs(&child)) {
+                    (Some(a), Some(b)) => Ok(b - a),
+                    _ => Err("couldn't read its CPU time".to_string()),
+                };
+            }
+            Ok(line) => lines.push(line),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {
+                if let Ok(Some(status)) = child.try_wait() {
+                    break Err(format!("arbor exited with {status} before it was idle:\n{}", lines.join("\n")));
+                }
+            }
+            Err(_) => {
+                break Err(format!("never said it was idle; its last lines:\n{}", lines[lines.len().saturating_sub(12)..].join("\n")));
+            }
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    measured
+}
+
+/// The CPU time (user and system) `child` has used so far, in seconds.
+#[cfg(target_os = "linux")]
+fn cpu_secs(child: &std::process::Child) -> Option<f64> {
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).ok()?;
+    // After the name (in parentheses, which may hold spaces): the state is field 3, utime 14
+    // and stime 15, in clock ticks.
+    let fields: Vec<&str> = stat.get(stat.rfind(')')? + 2..)?.split_whitespace().collect();
+    let ticks = fields.get(11)?.parse::<f64>().ok()? + fields.get(12)?.parse::<f64>().ok()?;
+    // SAFETY: sysconf only reads a configuration value.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (hz > 0).then(|| ticks / hz as f64)
+}
+
+/// The CPU time (user and system) `child` has used so far, in seconds: `ps`'s `[[hh:]mm:]ss.cc`.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn cpu_secs(child: &std::process::Child) -> Option<f64> {
+    let out = Command::new("ps").args(["-o", "time=", "-p", &child.id().to_string()]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.trim().split(':').try_fold(0.0, |acc, part| part.parse::<f64>().ok().map(|v| acc * 60.0 + v))
+}
+
+/// The CPU time (user and kernel) `child` has used so far, in seconds.
+#[cfg(windows)]
+fn cpu_secs(child: &std::process::Child) -> Option<f64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    let zero = || FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut created, mut exited, mut kernel, mut user) = (zero(), zero(), zero(), zero());
+    // SAFETY: the handle is the child's own, open until it's waited for; the out-pointers are
+    // to live locals.
+    let ok = unsafe { GetProcessTimes(child.as_raw_handle(), &mut created, &mut exited, &mut kernel, &mut user) };
+    // 100 ns units.
+    let secs = |t: FILETIME| ((u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)) as f64 / 1e7;
+    (ok != 0).then(|| secs(kernel) + secs(user))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -789,6 +939,27 @@ fn make_image_folder(dir: &Path) {
             .write_image(&px, w, h, image::ExtendedColorType::Rgb8)
             .expect("encode a photo");
         std::fs::write(dir.join(format!("IMG_{i:04}.jpg")), jpg).expect("write a photo");
+    }
+}
+
+/// `--idle`'s folder: a few small JPEGs and PNGs (so the icon view decodes thumbnails) and text
+/// files.
+fn make_idle_folder(dir: &Path) {
+    use image::ImageEncoder;
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).expect("temp dir");
+    let (w, h) = (96u32, 64u32);
+    for i in 0..4u32 {
+        let px: Vec<u8> = (0..w * h).flat_map(|p| [(p % w * 255 / w) as u8, (p / w * 255 / h) as u8, (i * 60) as u8]).collect();
+        let mut jpg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 85)
+            .write_image(&px, w, h, image::ExtendedColorType::Rgb8)
+            .expect("encode a JPEG");
+        std::fs::write(dir.join(format!("photo-{i}.jpg")), jpg).expect("write a JPEG");
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png).write_image(&px, w, h, image::ExtendedColorType::Rgb8).expect("encode a PNG");
+        std::fs::write(dir.join(format!("picture-{i}.png")), png).expect("write a PNG");
+        std::fs::write(dir.join(format!("notes-{i}.txt")), "idle\n").expect("write a text file");
     }
 }
 

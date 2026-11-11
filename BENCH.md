@@ -10,6 +10,7 @@ scripts/bench.sh 11 10 --search 5              # plus 5 cold starts searching a 
 scripts/bench.sh 11 10 --rename 5              # plus 5 cold starts typing in Batch Rename over 10k items
 scripts/bench.sh 1 10 --grid 4                 # plus 4 + 4 cold starts paging the icon view (10k, and 1,000 photos)
 scripts/bench.sh 1 12 --jump 5 --pace 120 --gap 1000   # the same, paced as a person types (report both)
+scripts/bench.sh 1 2 --idle 3                  # 3 + 3 starts left idle (list, icons): CPU over 5 s, fails above 0.05 s
 cargo test --release -- --ignored --nocapture search_speed   # walk speed by thread count (vendor/, or ARBOR_SEARCH_TREE)
 xvfb-run -a scripts/bench.sh 11 10             # Linux without a display
 cargo test --release -- --ignored --nocapture list_10k   # read + sort only, no window
@@ -27,6 +28,34 @@ runs two to three frames behind submission (`frame/present_time.rs`). Rune doesn
 frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below means the
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
+
+## 2026-11-11, idle CPU (the list view drew every frame while idle)
+
+Since 7cd20cb, an idle list view drew a frame every refresh until the next key (RUNE-GAPS.md,
+"Idle: a `Tx::live_only` that no commit follows…"). Launched on a folder of 3 JPEGs and 3 PNGs
+with `view.default` set, left alone 15 s, then CPU time over 10 s (`ps -o time=`), release
+builds on the M4 (macOS, 60 Hz display):
+
+| Commit | list | icons |
+| --- | --- | --- |
+| 0ca5968 (before milestone 16) | 0.00 s | 0.00 s |
+| e393af8 (milestone 16) | 0.00 s | 0.00 s |
+| 7e356e3, 8f4152c, 1d7bae4, e1ac88f | 0.00 s | 0.00 s |
+| **7cd20cb** (drag-select follows the wheel) | 0.89 s | |
+| 9466d00 | 0.85 s | |
+| 2beefb5 | 0.93 s | 0.00 s |
+| 7390515 (v0.1.0-alpha.2's code) | 0.74–0.92 s | 0.00 s |
+| this | 0.00 s, 0.00 s | 0.00 s, 0.00 s |
+
+`bench 1 2 --idle N` (after As Icons, and As List for list; CPU over 5 s, at most 0.05 s):
+
+| Machine | before (this commit without its view change) | this |
+| --- | --- | --- |
+| M4 (macOS), `--idle 3` | not run | list 0.00, 0.00, 0.00 s; icons 0.01, 0.00, 0.00 s |
+| tabot-dev (Xvfb, lavapipe), `--idle 1` | list 8.88 s, icons 0.00 s | list 0.00 s, icons 0.00 s |
+
+The icon view was spared while thumbnails were on screen: they're live sources, and latching
+them clears the flag that kept the list view drawing.
 
 ## 2026-11-10, milestone 16 (drag-select, the icon view and its thumbnails)
 

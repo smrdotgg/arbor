@@ -194,7 +194,9 @@ text file and a 12 MP JPEG from Space to the frame showing it, and keys while it
 end of the walk, and keys pressed while results stream in, and `--rename N` adds N runs typing
 in Batch Rename over 10,000 items: each key to the frame showing its preview, and `--grid N` adds
 N runs paging the icon view of the 10k folder and N in a folder of 1,000 photos: each key, and
-the time to the first thumbnail and to a screenful; `--pace MS` spaces
+the time to the first thumbnail and to a screenful, and every bench ends with `--idle N` (default 1, 0
+skips it): N starts left idle in the list and N in the icon view, after As Icons (and As List), each
+failing the bench if it uses more than 0.05 s of CPU in 5 s; `--pace MS` spaces
 the steps as a person types and `--gap MS` idles between cold starts, since a cooled CPU is
 several times slower than a busy one: report both). It opens and closes windows, so leave the machine alone
 while it runs. `cargo test --release -- --ignored --nocapture list_10k` times reading and

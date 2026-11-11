@@ -144,6 +144,9 @@ struct Ctx {
     icons: crate::grid::IconSize,
     /// Device pixels per point.
     scale: f32,
+    /// A selection rectangle is being dragged out in this pane, so its rows report where
+    /// they're laid out (`list::follow_band`).
+    banding: bool,
 }
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
@@ -196,6 +199,7 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
             list,
             icons: s.icon_size,
             scale,
+            banding: s.band.as_ref().is_some_and(|b| b.pane == p.id()),
         };
         panes = panes.child(pane(s, p, c));
     }

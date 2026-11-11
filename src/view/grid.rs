@@ -14,7 +14,7 @@ pub(super) fn cells(f: &Folder, c: Ctx, base: El) -> El {
     f.grid_cols.set(g.cols);
     let n = f.visible.len();
     let cols = g.cols;
-    base.child(
+    base.child(super::list::follow_band(
         col()
             .key(f.rows_key())
             .w_full()
@@ -38,9 +38,9 @@ pub(super) fn cells(f: &Folder, c: Ctx, base: El) -> El {
             )
             .virtual_rows_version((f.version, cols))
             // The rows on screen are the only ones thumbnailed; scrolling cancels the rest.
-            .on_visible_rows(move |s: &mut State, rows| s.tiles_visible(id, rows))
-            .on_layout_tx(move |s: &mut State, r: [f32; 4], tx: &mut rune::Tx| band_follows(s, id, r, tx)),
-    )
+            .on_visible_rows(move |s: &mut State, rows| s.tiles_visible(id, rows)),
+        c,
+    ))
 }
 
 /// The grid's layout in pane `c`: its icon size, in the list's width as last laid out.

@@ -67,6 +67,10 @@
 //! covered or not yet visible, no drawable in time) asks for nothing, and Rune draws again when
 //! it can. (A wake from an undrawn frame was handled in the same run-loop turn, so AppKit never
 //! got to say the window was visible, and the bench spun: RUNE-GAPS.md.)
+//! `ARBOR_BENCH_IDLE=list` (or `icons`) checks that an idle window costs nothing: the first
+//! step switches to the icon view, `list`'s second back to the list (each switch once left Rune
+//! drawing every frame until the next key), then it logs `arbor-timing idle-ready` and does
+//! nothing more, never quitting: the bench measures its CPU time from outside, then kills it.
 //! `ARBOR_BENCH_PACE_MS=N` spaces the steps at least N ms apart, as a person types (a thread
 //! sleeps and wakes the window; nothing polls), so the CPU cools between keys as it does for a
 //! real user. The ↓ is synthetic, so its `key` time starts when the handler
@@ -142,6 +146,9 @@ thread_local! {
     /// folder of photos, whose first screen of thumbnails it waits for.
     static GRID: Cell<bool> = const { Cell::new(false) };
     static GRID_PHOTOS: Cell<bool> = const { Cell::new(false) };
+    /// `ARBOR_BENCH_IDLE`: the view the bench leaves the window idle in, and whether it has.
+    static IDLE: Cell<Option<crate::grid::ViewMode>> = const { Cell::new(None) };
+    static IDLE_READY: Cell<bool> = const { Cell::new(false) };
     /// As Icons asked for thumbnails: when, and whether the first one showed yet.
     static TILE_ASKED: Cell<Option<(Instant, bool)>> = const { Cell::new(None) };
     /// The first thumbnail, and the screen's last, land in the frame being built.
@@ -195,8 +202,11 @@ pub fn init() -> bool {
     RENAME.set(set("ARBOR_BENCH_RENAME"));
     GRID.set(set("ARBOR_BENCH_GRID"));
     GRID_PHOTOS.set(std::env::var("ARBOR_BENCH_GRID").is_ok_and(|v| v.trim() == "2"));
+    IDLE.set(std::env::var("ARBOR_BENCH_IDLE").ok().and_then(|v| crate::grid::ViewMode::named(v.trim())));
     PACE_MS.set(std::env::var("ARBOR_BENCH_PACE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0));
-    let steps = if SEARCH.get() {
+    let steps = if let Some(view) = IDLE.get() {
+        if view == crate::grid::ViewMode::Icons { 1 } else { 2 }
+    } else if SEARCH.get() {
         rounds
     } else if RENAME.get() {
         rounds * RENAME_STEPS
@@ -464,7 +474,12 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
         return false;
     }
     if left == 0 {
-        if n > 0 {
+        if IDLE.get().is_some() {
+            // Left alone from here on: the bench measures, then kills it.
+            if !IDLE_READY.replace(true) {
+                eprintln!("arbor-timing idle-ready view={:?}", s.cur().view);
+            }
+        } else if n > 0 {
             tx.quit();
         }
         return false;
@@ -554,6 +569,11 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
     }
     if PREVIEW.get() {
         WAIT_PREVIEW.set(preview_step(s, tx, n, now));
+        return true;
+    }
+    if IDLE.get().is_some() {
+        let cmd = if n == 0 { Cmd::AsIcons } else { Cmd::AsList };
+        measured(s, tx, now, |s, tx| run(s, cmd, tx));
         return true;
     }
     if GRID.get() {
@@ -742,7 +762,8 @@ fn shown(drawn: bool) -> bool {
     if drawn {
         STEP_SHOWN.set(true);
     }
-    drawn && benching()
+    // Once the idle bench is idle, nothing wakes it.
+    drawn && benching() && !IDLE_READY.get()
 }
 
 #[cfg(test)]

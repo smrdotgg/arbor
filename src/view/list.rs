@@ -143,7 +143,7 @@ pub(super) fn list(f: &Folder, c: Ctx, active: Option<String>) -> El {
     if f.view == crate::grid::ViewMode::Icons {
         return super::grid::cells(f, c, base);
     }
-    base.child(
+    base.child(follow_band(
         col()
             .key(f.rows_key())
             .w_full()
@@ -160,19 +160,30 @@ pub(super) fn list(f: &Folder, c: Ctx, active: Option<String>) -> El {
                     None => el(),
                 },
             )
-            .virtual_rows_version(f.version)
-            .on_layout_tx(move |s: &mut State, r: [f32; 4], tx: &mut rune::Tx| band_follows(s, id, r, tx)),
-    )
+            .virtual_rows_version(f.version),
+        c,
+    ))
 }
 
-/// The rows moved (a scroll): a rectangle being dragged out follows (`State::band_scrolled`);
-/// otherwise nothing changes and no view runs.
-pub(super) fn band_follows(s: &mut State, id: u64, r: [f32; 4], tx: &mut rune::Tx) {
-    if s.band_scrolled(id, r[1]) {
-        tx.instant();
-    } else {
-        tx.live_only();
+/// While a selection rectangle is being dragged out in pane `c`, its rows (`rows`, the list's
+/// or the grid's) report where they're laid out, so the rectangle follows the wheel
+/// (`State::band_scrolled`). Otherwise they report nothing: a report Arbor ignores still costs
+/// a frame, and one whose handler says `Tx::live_only` left Rune drawing every frame until the
+/// next key in a window with no live values, such as the list view (RUNE-GAPS.md). The press
+/// that starts a rectangle and the release that ends it both commit, so the view adds and
+/// removes the handler in time.
+pub(super) fn follow_band(rows: El, c: Ctx) -> El {
+    if !c.banding {
+        return rows;
     }
+    let id = c.id;
+    rows.on_layout_tx(move |s: &mut State, r: [f32; 4], tx: &mut rune::Tx| {
+        // A report that changed nothing commits too (never `live_only`, see above): it comes
+        // only while the rectangle is held and the rows moved, and the view is cheap.
+        if s.band_scrolled(id, r[1]) {
+            tx.instant();
+        }
+    })
 }
 
 /// How pane `c`'s items lie, for drag-select.

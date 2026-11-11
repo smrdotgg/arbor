@@ -9,6 +9,16 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-11 · The idle list view's endless frames (since 7cd20cb): the rows hear their
+  layout only while a selection rectangle is held, and never say `Tx::live_only` there.**
+  Rune doesn't clear what a `live_only` event leaves behind in a window with no live values
+  (RUNE-GAPS.md), so a handler that said it on every idle scroll, resize or view switch kept the
+  list view drawing every frame. Outside a rectangle drag nothing listens; during one, a report
+  that changed nothing commits a cheap view. `bench` now ends with an idle check (`--idle 1` by
+  default, about 15 s; `--idle 0` skips it) that fails above 0.05 s of CPU in 5 s. Undo:
+  `list::follow_band` and `Ctx::banding` (`src/view/`), `--idle`'s default in
+  `examples/bench.rs`.
+
 - **2026-11-10 · Milestone 16 review fixes: three judgment calls.**
   - **An emptied Go To field stays open** (real-Mac QA: Backspace held to clear ⌘L's path went
     on to the parent folder, up to `/`). Once Backspace empties it, the status bar still shows
