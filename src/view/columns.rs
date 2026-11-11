@@ -33,13 +33,15 @@ pub(super) fn columns(s: &State, f: &Folder, c: Ctx, cx: &mut Cx<State>, active:
     let active_at = cols.active();
     for k in shown.clone() {
         let column = if k < active_at {
-            col().key(slot_key(cols.left[k].uid)).w(w).h_full().child(other_column(&cols.left[k], c, w))
+            let view = cx.layout_with(&cols.left[k].key(), |r| r).unwrap_or_default();
+            col().key(slot_key(cols.left[k].uid)).w(w).h_full().child(other_column(&cols.left[k], c, w, view))
         } else if k == active_at {
             // The element of the column it was (keyed by its number), so a column keeps its
             // element, rows, scroll and any gesture in it when it becomes the active one.
             col().key(slot_key(f.col_uid.unwrap_or(0))).w(w).h_full().child(list(f, Ctx { narrow: true, ..c }, active.clone()))
         } else if let Some(r) = &cols.right {
-            col().key(slot_key(r.uid)).w(w).h_full().child(other_column(r, c, w))
+            let view = cx.layout_with(&r.key(), |r| r).unwrap_or_default();
+            col().key(slot_key(r.uid)).w(w).h_full().child(other_column(r, c, w, view))
         } else {
             // The selected file's preview, over the rest of the width.
             let panel = match &s.preview {
@@ -121,8 +123,10 @@ fn divider(l: Look) -> El {
 }
 
 /// A column other than the active one: its folder's items, the highlighted one grey (the
-/// active column has the accent). A press anywhere in it makes it the active column first.
-fn other_column(column: &Column, c: Ctx, w: f32) -> El {
+/// active column has the accent). A press anywhere in it makes it the active column first; one
+/// in its blank space that moves then drags out a selection rectangle there, as in the active
+/// column (`view` is its viewport, as last laid out).
+fn other_column(column: &Column, c: Ctx, w: f32, view: [f32; 4]) -> El {
     let col_el = col;
     let col = column;
     let (id, l) = (c.id, c.l);
@@ -142,6 +146,17 @@ fn other_column(column: &Column, c: Ctx, w: f32) -> El {
         .on_secondary_press(move |s: &mut State, press, tx| {
             if s.activate_column(id, &menu_at, None, tx) {
                 s.context_menu(None, press, tx);
+            }
+        })
+        .on_drag({
+            let at = path.clone();
+            move |s: &mut State, d: &mut Drag, tx: &mut rune::Tx| {
+                // The press makes the column active (its element becomes the active list's, so
+                // the gesture goes on there), then it's that list's rectangle.
+                if d.phase == Phase::Down && !s.activate_column(id, &at, None, tx) {
+                    return;
+                }
+                s.band_drag(id, d, crate::band::Layout::List { row_h: ROW_H }, view, true, tx);
             }
         })
         .on_drop_files(move |s: &mut State, files, tx| {

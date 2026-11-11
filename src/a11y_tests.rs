@@ -1710,3 +1710,34 @@ fn a_drag_from_another_column_keeps_its_gesture() {
     assert!(d.join("Dest/readme.txt").exists(), "{:?}", rt.state.note);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A rectangle dragged out from the blank space of another column: its press makes that column
+/// the active one, and the same gesture goes on as the active list's rectangle, selecting the
+/// rows it touches there.
+#[test]
+fn a_rectangle_starts_in_another_columns_blank_space() {
+    let d = nested("band-other-column");
+    let mut rt = runtime(&d);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    let c = rt.state.cur().cols.as_ref().unwrap().right.as_ref().unwrap();
+    assert_eq!(c.path, d.join("Docs"));
+    let b = rect_of(&rt, &c.key()).unwrap();
+    // Below Docs' two rows, dragged up over both.
+    let start = (b[0] + b[2] - 20.0, b[1] + 150.0);
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"), "the press made Docs the active column");
+    rt.pointer_move(start.0 - 10.0, start.1 - 40.0);
+    rt.frame(0.0);
+    rt.pointer_move(start.0 - 30.0, b[1] + 10.0);
+    rt.frame(0.0);
+    assert!(rt.state.band.is_some(), "a rectangle");
+    assert_eq!(picked(&rt), ["Work".to_string(), "readme.txt".to_string()]);
+    rt.pointer_up(start.0 - 30.0, b[1] + 10.0);
+    rt.frame(0.0);
+    assert!(rt.state.band.is_none());
+    assert_eq!(picked(&rt), ["Work".to_string(), "readme.txt".to_string()], "kept on release");
+    let _ = std::fs::remove_dir_all(&d);
+}
