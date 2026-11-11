@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use rune::{Latest, Tx};
 
 use crate::fs::{self, Entry, Listing, Sort, SortKey};
+use crate::marked::Marked;
+pub use crate::marked::Picked;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Nav {
@@ -73,6 +75,33 @@ pub struct Answer {
     pub req: u64,
     pub sort: Sort,
     pub listing: Listing,
+    /// The names it was asked to select (two or more), and those of them it lists, with their
+    /// sizes: found on the worker, so landing a reload of a big folder with a big selection
+    /// doesn't look through it on the window's thread.
+    pub picked: Option<(Vec<OsString>, Marked)>,
+}
+
+impl Answer {
+    pub fn new(req: u64, sort: Sort, listing: Listing) -> Answer {
+        Answer { req, sort, listing, picked: None }
+    }
+
+    /// The listing's read of `path`, selecting `select` once it lands (on the worker).
+    fn read(req: u64, sort: Sort, path: PathBuf, select: Vec<OsString>, stop: &AtomicBool) -> Option<Answer> {
+        let listing = fs::list_until(path, sort, stop)?;
+        let picked = match (&listing.result, select.len() > 1) {
+            (Ok(entries), true) => Some(picked_in(entries, &select)).map(|m| (select, m)),
+            _ => None,
+        };
+        Some(Answer { req, sort, listing, picked })
+    }
+}
+
+/// The items of `entries` named in `select`, selected (what's gone isn't). Looks through the
+/// whole listing: done on the listing's worker after a reload.
+pub(crate) fn picked_in(entries: &[Entry], select: &[OsString]) -> Marked {
+    let want: HashSet<&OsString> = select.iter().collect();
+    Marked::of(entries.iter().filter(|e| want.contains(&e.os)))
 }
 
 /// Every folder's `version` comes from one counter, so a row handler from one folder's frame
@@ -105,8 +134,9 @@ pub struct Folder {
     pub visible: Vec<u32>,
     /// The cursor: index into `visible`.
     pub sel: usize,
-    /// Extra selection by name (⇧-arrows, ⌘-click, ⌘A). Empty means "just the cursor".
-    pub marked: HashSet<OsString>,
+    /// Extra selection by name (⇧-arrows, ⌘-click, ⌘A), with its totals (`marked.rs`). Empty
+    /// means "just the cursor".
+    pub marked: Marked,
     /// How many times the user has picked a selection (a click, an arrow, ⌘A, Select by
     /// Pattern…): a reload asked for before the latest pick keeps it ([`Pending::picks`]).
     pub picks: u64,
@@ -168,25 +198,10 @@ pub struct Folder {
     pub(crate) col_uid: Option<u64>,
     /// A column made the active folder, landing (`State::adopt_column`): for its request only.
     pub(crate) adopted: Option<Adopted>,
-    /// [`Folder::picked_size`] as last worked out, for the version, picks and selection size
-    /// it was worked out at (derived from what's on screen, nothing read from the disk).
-    picked_memo: Cell<Option<(PickedAt, Picked)>>,
     /// The free space last read for a folder (shown while it's the one on screen), and where
     /// the answer to the newest query lands ([`Folder::ask_free`], `volinfo.rs`).
     pub(crate) free: Option<(PathBuf, Option<u64>)>,
     pub(crate) free_inbox: Arc<crate::volinfo::Inbox>,
-}
-
-/// What a [`Picked`] was worked out at: the listing's version, the picks and the selection's size.
-type PickedAt = (u64, u64, usize);
-
-/// What two or more selected items hold ([`Folder::picked_size`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Picked {
-    pub count: usize,
-    /// The files' sizes added up.
-    pub bytes: u64,
-    pub folders: usize,
 }
 
 /// What a column made the active folder brings besides its listing.
@@ -221,7 +236,7 @@ impl Folder {
             entries: Vec::new(),
             visible: Vec::new(),
             sel: 0,
-            marked: HashSet::new(),
+            marked: Marked::default(),
             picks: 0,
             anchor: 0,
             filter: String::new(),
@@ -249,7 +264,6 @@ impl Folder {
             cols_w: Rc::new(Cell::new(0.0)),
             col_uid: None,
             adopted: None,
-            picked_memo: Cell::new(None),
             free: None,
             free_inbox,
         }
@@ -363,7 +377,8 @@ impl Folder {
         // An answer about the folder's volume asked before isn't wanted: the new listing asks
         // again when it lands (`State::land`), with the volume its identity names.
         self.free_inbox.forget();
-        self.loader.request_opt(path, move |p| Some(Answer { req, sort, listing: fs::list_until(p, sort, &stop)? }));
+        let select = self.pending.as_ref().map(|p| p.select.clone()).unwrap_or_default();
+        self.loader.request_opt(path, move |p| Answer::read(req, sort, p, select, &stop));
     }
 
     /// Asks for a fresh read of the folder as it is ([`Nav::Show`]), waiting here at most `wait`
@@ -372,7 +387,8 @@ impl Folder {
     pub(crate) fn request_now(&mut self, wait: std::time::Duration) -> Option<Answer> {
         let req = self.pending.as_ref()?.req;
         let (path, sort, stop) = (self.cwd.clone(), self.sort, self.stop_read());
-        crate::bounded::read_waiting(&self.loader, wait, move || Some(Answer { req, sort, listing: fs::list_until(path, sort, &stop)? }))
+        let select = self.pending.as_ref().map(|p| p.select.clone()).unwrap_or_default();
+        crate::bounded::read_waiting(&self.loader, wait, move || Answer::read(req, sort, path, select, &stop))
     }
 
     /// This tab's lightweight state, to keep while it's hidden.
@@ -596,33 +612,17 @@ impl Folder {
         }
     }
 
+    /// Tests: selects the items named (with their sizes, as a click would).
+    #[cfg(test)]
+    pub fn mark_names(&mut self, names: &[&str]) {
+        self.marked = Marked::of(self.entries.iter().filter(|e| names.iter().any(|n| e.os == *n)));
+    }
+
     /// What the selection holds, for the status bar, while two or more items are selected:
     /// how many, the files' total size, and how many folders (whose size isn't known: nothing
-    /// walks them). Worked out once per selection and listing, not every frame.
+    /// walks them). Kept as the selection changes (`marked.rs`): no work here.
     pub fn picked_size(&self) -> Option<Picked> {
-        if self.marked.len() < 2 {
-            return None;
-        }
-        let key = (self.version, self.picks, self.marked.len());
-        if let Some((k, p)) = self.picked_memo.get()
-            && k == key
-        {
-            return Some(p);
-        }
-        let mut p = Picked { count: 0, bytes: 0, folders: 0 };
-        for &i in &self.visible {
-            let e = &self.entries[i as usize];
-            if self.marked.contains(&e.os) {
-                p.count += 1;
-                if e.is_dir {
-                    p.folders += 1;
-                } else {
-                    p.bytes += e.size;
-                }
-            }
-        }
-        self.picked_memo.set(Some((key, p)));
-        Some(p)
+        (self.marked.len() >= 2).then(|| self.marked.picked())
     }
 
     /// Asks for the free space of the volume the folder on screen is on (`volinfo.rs`: its own
@@ -683,13 +683,13 @@ impl Folder {
             return;
         }
         if self.marked.is_empty()
-            && let Some(n) = self.cursor_name()
+            && let Some(&c) = self.visible.get(self.sel)
         {
-            self.marked.insert(n);
+            self.marked.insert(&self.entries[c as usize]);
         }
-        let name = self.entries[self.visible[i] as usize].os.clone();
-        if !self.marked.remove(&name) {
-            self.marked.insert(name);
+        let e = &self.entries[self.visible[i] as usize];
+        if !self.marked.remove(&e.os) {
+            self.marked.insert(e);
         }
         self.sel = i;
         self.anchor = i;
@@ -703,13 +703,13 @@ impl Folder {
         }
         let i = i.min(self.visible.len() - 1);
         let (a, b) = (self.anchor.min(i), self.anchor.max(i));
-        self.marked = self.visible[a..=b].iter().map(|&e| self.entries[e as usize].os.clone()).collect();
+        self.marked = Marked::of(self.visible[a..=b].iter().map(|&e| &self.entries[e as usize]));
         self.sel = i;
     }
 
     pub fn select_all(&mut self) {
         self.picks += 1;
-        self.marked = self.visible.iter().map(|&e| self.entries[e as usize].os.clone()).collect();
+        self.marked = Marked::of(self.visible.iter().map(|&e| &self.entries[e as usize]));
     }
 
     pub fn step(&mut self, by: isize, extend: bool, tx: &mut Tx) {
@@ -805,9 +805,7 @@ impl Folder {
         e.key = format!("f:{}", e.name);
         // A dot hides it, everywhere; other ways of hiding (a flag) come with the fresh read.
         e.hidden = e.name.starts_with('.') || (e.hidden && !old.to_string_lossy().starts_with('.'));
-        if self.marked.remove(old) {
-            self.marked.insert(new.to_os_string());
-        }
+        self.marked.rename(old, new.to_os_string());
         let cursor = if keep { Some(new.to_os_string()) } else { self.cursor_name() };
         self.refilter(cursor.as_deref());
     }
@@ -860,9 +858,7 @@ impl Folder {
                 e.name = name;
             }
             let was = std::mem::replace(&mut e.os, new.into_os_string());
-            if marked.remove(&was) {
-                marked.insert(e.os.clone());
-            }
+            marked.rename(&was, e.os.clone());
         }
         self.marked = marked;
         self.refilter(keep.as_deref());

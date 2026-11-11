@@ -36,6 +36,7 @@ mod info;
 mod jump;
 mod leftovers;
 mod listcols;
+mod marked;
 mod menu;
 mod mounts;
 mod noclobber;

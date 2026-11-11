@@ -421,9 +421,7 @@ impl Folder {
                 let name = Path::new(to).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 e.lower = name.to_lowercase();
                 e.name = name;
-                if self.marked.remove(&was) {
-                    self.marked.insert(e.os.clone());
-                }
+                self.marked.rename(&was, e.os.clone());
             }
         }
         let changed: HashMap<&str, (bool, u64, i64, Option<fs::Ident>)> =

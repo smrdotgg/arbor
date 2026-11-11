@@ -946,7 +946,7 @@ impl State {
                     let req = self.boot_req.take();
                     let ix = self.panes.iter().position(|p| req.is_some() && p.f.pending.as_ref().map(|p| p.req) == req);
                     if let (Some(ix), Some(req)) = (ix, req) {
-                        changed |= self.land(ix, Answer { req, sort, listing }, tx);
+                        changed |= self.land(ix, Answer::new(req, sort, listing), tx);
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -1140,9 +1140,13 @@ impl State {
                 let f = &mut self.panes[ix].f;
                 f.marked.clear();
                 if p.select.len() > 1 {
-                    // Only names still here: what was trashed or deleted isn't selected.
-                    let here: std::collections::HashSet<&OsString> = f.entries.iter().map(|e| &e.os).collect();
-                    f.marked.extend(p.select.iter().filter(|n| here.contains(n)).cloned());
+                    // Only names still here: what was trashed or deleted isn't selected. The
+                    // listing's worker found them (with their sizes, for the totals) when this is
+                    // what it was asked to select; otherwise they're found here.
+                    f.marked = match a.picked.filter(|(asked, _)| *asked == p.select) {
+                        Some((_, m)) => m,
+                        None => crate::folder::picked_in(&f.entries, &p.select),
+                    };
                 }
                 match adopt_rows {
                     // A column's rows, as it showed them (same sort, no filter, the hidden-file

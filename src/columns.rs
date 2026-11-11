@@ -227,7 +227,7 @@ impl Column {
         self.sort = sort;
         self.hidden = hidden;
         self.load = Load::Loading;
-        crate::bounded::start(&self.loader, true, move || Some(Answer { req, sort, listing: fs::list_until(path, sort, &stop)? }))
+        crate::bounded::start(&self.loader, true, move || Some(Answer::new(req, sort, fs::list_until(path, sort, &stop)?)))
     }
 
     /// A finished read, if it's the one this column waits for. True when it landed.
@@ -680,7 +680,7 @@ impl State {
         let rows = (col.sort == f.sort && col.hidden == f.show_hidden).then(|| (std::mem::take(&mut col.visible), col.version));
         f.adopted = Some(crate::folder::Adopted { req, uid: col.uid, rows });
         let listing = Listing { path: col.path.clone(), result: Ok(std::mem::take(&mut col.entries)), dir_id: col.dir_id, missing: false };
-        self.col_ready = Some((id, Answer { req, sort, listing }));
+        self.col_ready = Some((id, Answer::new(req, sort, listing)));
         // Landed by the next handler with a `Tx` (a key's, a command's, a press's), or else by
         // the `poll` this wakes.
         if let Some(w) = &self.waker {
@@ -1115,7 +1115,7 @@ mod tests {
         let d = tree("stale");
         let mut c = Column::new(d.join("a"), None);
         let sort = Sort::new(fs::SortKey::Name, false);
-        let answer = |req: u64, path: PathBuf| Answer { req, sort, listing: fs::list(path, sort) };
+        let answer = |req: u64, path: PathBuf| Answer::new(req, sort, fs::list(path, sort));
         let first = c.read(sort, false);
         drop(first);
         let old = c.req;

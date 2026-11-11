@@ -70,7 +70,7 @@ impl Folder {
 
     /// The selection as names: what's marked, or the cursor's row.
     pub fn selection(&self) -> HashSet<OsString> {
-        if self.marked.is_empty() { self.cursor_name().into_iter().collect() } else { self.marked.clone() }
+        if self.marked.is_empty() { self.cursor_name().into_iter().collect() } else { self.marked.iter().cloned().collect() }
     }
 
     /// Makes `names` the selection, moving the cursor onto it if it's off it. Nothing to select
@@ -102,7 +102,9 @@ impl Folder {
             self.sel = i;
         }
         self.anchor = self.sel;
-        self.marked = names;
+        // Each with its size, for the totals (a pattern or an inversion looks at every row
+        // anyway).
+        self.marked = crate::marked::Marked::of(self.entries.iter().filter(|e| names.contains(&e.os)));
         true
     }
 

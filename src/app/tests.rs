@@ -401,8 +401,7 @@ fn a_stale_boot_listing_never_takes_a_newer_reload() {
 fn a_late_listing_lands_only_for_its_own_request() {
     let (a, b) = (folder("late-a", 1), folder("late-b", 3));
     let mut s = state_in(&a);
-    let late =
-        |req: u64, p: &Path| Answer { req, sort: Settings::default().sort, listing: fs::list(p.to_path_buf(), Settings::default().sort) };
+    let late = |req: u64, p: &Path| Answer::new(req, Settings::default().sort, fs::list(p.to_path_buf(), Settings::default().sort));
     // Navigated since.
     s.go(b.clone(), Nav::New, None);
     let old = s.cur().pending.as_ref().unwrap().req;
@@ -441,7 +440,7 @@ fn a_listing_read_under_an_old_sort_is_sorted_again() {
     let req = s.cur().pending.as_ref().unwrap().req;
     let by_name = Settings::default().sort;
     s.set_sort(SortKey::Size); // largest first, while the read is in flight
-    let a = Answer { req, sort: by_name, listing: fs::list(d.clone(), by_name) };
+    let a = Answer::new(req, by_name, fs::list(d.clone(), by_name));
     assert!(s.land(0, a, &mut Tx::default()));
     let names: Vec<&str> = s.cur().entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["c", "b", "a"]);
