@@ -424,6 +424,7 @@ impl State {
                     nav: Nav::Reload,
                     select: Vec::new(),
                     cursor: None,
+                    none: false,
                     rename: false,
                     scroll: 0.0,
                     picks: 0,
@@ -586,6 +587,7 @@ impl State {
             nav: Nav::Fresh,
             select: Vec::new(),
             cursor: None,
+            none: false,
             rename: false,
             scroll: 0.0,
             picks: 0,
@@ -1035,7 +1037,7 @@ impl State {
         if p.nav == Nav::Reload && f.picks != p.picks {
             p.rename = false;
             p.picks = f.picks;
-            (p.select, p.cursor) = (Vec::new(), None);
+            (p.select, p.cursor, p.none) = (Vec::new(), None, f.selected().is_none());
             // The selection on screen now, found in the new listing on a worker (handed over as
             // it is: looking through a big folder, or even copying its names, here would hold
             // up the window). Then it lands, unless the user picks again meanwhile.
@@ -1193,11 +1195,12 @@ impl State {
                 // here; nothing when it's gone (no other row is chosen in its place) or nothing
                 // was selected; a folder newly opened, its first row.
                 if !several {
-                    f.none = match (p.select.first(), &p.cursor) {
-                        (Some(x), _) => f.cursor_name().as_ref() != Some(x),
-                        (None, Some(_)) => true,
-                        (None, None) => f.visible.is_empty(),
-                    };
+                    f.none = p.none
+                        || match (p.select.first(), &p.cursor) {
+                            (Some(x), _) => f.cursor_name().as_ref() != Some(x),
+                            (None, Some(_)) => true,
+                            (None, None) => f.visible.is_empty(),
+                        };
                 } else if !survived {
                     // None of the items to select is here any more: nothing selected.
                     f.none = true;

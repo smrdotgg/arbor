@@ -42,6 +42,10 @@ pub(crate) struct Pending {
     pub select: Vec<OsString>,
     /// Where the cursor goes, when not on the first of `select` (it may be deselected).
     pub cursor: Option<OsString>,
+    /// Nothing was selected (a reload or a hidden tab of a folder with nothing selected): it
+    /// lands with nothing selected, even where an item appeared (a folder newly opened selects
+    /// its first row).
+    pub none: bool,
     /// Start renaming the first selected name once it lands (a new folder).
     pub rename: bool,
     /// Where to scroll the list once it lands ([`Nav::Show`]).
@@ -78,6 +82,8 @@ pub struct TabMemo {
     pub select: Vec<OsString>,
     /// The cursor's item (which may be deselected).
     pub cursor: Option<OsString>,
+    /// Nothing was selected.
+    pub none: bool,
     /// How far the list was scrolled, in points.
     pub scroll: f32,
     pub filter: String,
@@ -483,14 +489,14 @@ impl Folder {
     /// ([`Pending::cursor`]).
     pub(crate) fn request_chosen(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, cursor: Option<OsString>, rename: bool) {
         let pick = if Pending::marks_for(&select, cursor.as_ref()) { Pick::Names(select.clone()) } else { Pick::Nothing };
-        self.request_pick(path, nav, select, cursor, rename, pick);
+        self.request_pick(path, nav, select, cursor, rename, pick, false);
     }
 
     /// A read of the folder again keeping the selection on screen as it is: handed to the
     /// worker without copying a name ([`Kept`]), which finds it in the new listing.
     pub(crate) fn request_kept(&mut self, nav: Nav, rename: bool) {
-        let kept = self.kept();
-        self.request_pick(self.cwd.clone(), nav, Vec::new(), None, rename, Pick::Kept(kept));
+        let (kept, none) = (self.kept(), self.selected().is_none());
+        self.request_pick(self.cwd.clone(), nav, Vec::new(), None, rename, Pick::Kept(kept), none);
     }
 
     /// The selection on screen, for a worker ([`Kept`]): two shared pointers and the selected
@@ -499,7 +505,17 @@ impl Folder {
         Kept { entries: self.entries.clone(), rows: self.visible.clone(), marked: self.marked.clone(), sel: self.sel, none: self.none }
     }
 
-    fn request_pick(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, cursor: Option<OsString>, rename: bool, pick: Pick) {
+    #[allow(clippy::too_many_arguments)]
+    fn request_pick(
+        &mut self,
+        path: PathBuf,
+        nav: Nav,
+        select: Vec<OsString>,
+        cursor: Option<OsString>,
+        rename: bool,
+        pick: Pick,
+        none: bool,
+    ) {
         // Going anywhere ends a search (its walk stops), and the thumbnails being decoded. The
         // go-to field stays as it is (a reload keeps it; a navigation that lands clears its text
         // and closes it together).
@@ -509,7 +525,7 @@ impl Folder {
         self.adopted = None;
         let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
         let picks = self.picks;
-        self.pending = Some(Pending { req, path: path.clone(), nav, select, cursor, rename, scroll: 0.0, picks });
+        self.pending = Some(Pending { req, path: path.clone(), nav, select, cursor, none, rename, scroll: 0.0, picks });
         // An answer about the folder's volume asked before isn't wanted: the new listing asks
         // again when it lands (`State::land`), with the volume its identity names.
         self.free_inbox.forget();
@@ -564,6 +580,7 @@ impl Folder {
                 fwd,
                 select: p.select.clone(),
                 cursor: p.cursor.clone(),
+                none: p.none,
                 scroll: 0.0,
                 filter: String::new(),
                 goto: false,
@@ -581,6 +598,7 @@ impl Folder {
                 fwd: self.fwd.clone(),
                 select: p.select.clone(),
                 cursor: p.cursor.clone(),
+                none: p.none,
                 scroll: p.scroll,
                 filter: self.filter.clone(),
                 goto: self.goto,
@@ -597,6 +615,7 @@ impl Folder {
             path: self.cwd.clone(),
             back: self.back.clone(),
             fwd: self.fwd.clone(),
+            none: select.is_empty(),
             select,
             cursor,
             scroll: self.scroll.get(),
@@ -646,6 +665,7 @@ impl Folder {
             nav: Nav::Show,
             select: m.select,
             cursor: m.cursor,
+            none: m.none,
             rename: false,
             scroll: m.scroll,
             picks: self.picks,

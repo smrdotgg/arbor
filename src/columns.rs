@@ -927,7 +927,8 @@ impl Folder {
         self.loader.cancel();
         let req = crate::folder::next_request();
         let picks = self.picks;
-        self.pending = Some(crate::folder::Pending { req, path, nav, select, cursor: None, rename: false, scroll: 0.0, picks });
+        self.pending =
+            Some(crate::folder::Pending { req, path, nav, select, cursor: None, none: false, rename: false, scroll: 0.0, picks });
         req
     }
 }

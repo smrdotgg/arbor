@@ -1797,3 +1797,24 @@ fn a_cancelled_rename_leaves_the_selection_as_it_was() {
     s.cancel_rename(&mut Tx::default());
     assert_eq!(s.cur().target_paths(), [d.join("a")]);
 }
+
+/// An empty folder has nothing selected, and reading it again once a file appears (a reload,
+/// or its hidden tab shown again) still selects nothing: nobody chose the file.
+#[test]
+fn a_file_appearing_in_an_empty_folder_isnt_selected() {
+    let d = folder("empty-appears", 0);
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    assert!(s.cur().targets().is_empty());
+    std::fs::write(d.join("new"), "x").unwrap();
+    s.reload();
+    settle_all(&mut s);
+    assert_eq!(s.cur().visible.len(), 1);
+    assert!(s.cur().targets().is_empty(), "reloaded: {:?}", s.cur().target_paths());
+    std::fs::write(d.join("newer"), "x").unwrap();
+    s.new_tab(&mut Tx::default());
+    s.run(Cmd::PrevTab, &mut Tx::default());
+    settle_all(&mut s);
+    assert_eq!(s.cur().visible.len(), 2);
+    assert!(s.cur().targets().is_empty(), "shown again: {:?}", s.cur().target_paths());
+}
