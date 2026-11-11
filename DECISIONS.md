@@ -66,9 +66,18 @@ Format: date · decision · why · how to undo.
     It runs on a thread per volume with a query in flight (`volinfo.rs`), below the window's
     priority; a query for a volume still stuck waits behind it (no second thread), and a
     folder's newer query supersedes its older one. The cost: the free space shows a frame after
-    the listing rather than in its frame. Not shown in a search's results (they can cross disks). The selection's total
-    is worked out once per selection and listing (`Folder::picked_size`), not every frame.
-    Undo: `view::status`, `Folder::{ask_free, picked_size}`.
+    the listing rather than in its frame. Not shown in a search's results (they can cross
+    disks). **The selection's totals are kept by every change (after review)** (`marked.rs`:
+    each selected name with its size): a click, ⌘-click or a rectangle's move costs what it
+    changes (a scan of a 500k list per change was 33 ms); a pattern, an inversion and ⌘A look
+    at every row anyway; a reload's selection is found on the listing's worker. ⇧-click still
+    makes its range afresh, as it did. Undo: `view::status`, `volinfo.rs`, `marked.rs`.
+  - **Narrow panes (after review):** once every other column is gone, Size narrows to its
+    least and then goes, so Name keeps its 180 pt; a search's Folder column gets only what's
+    past Name's least. Only on screen: the widths kept are the user's. Undo: `ListCols::fit`.
+  - **"Column Options…"** (palette, no key) opens the header's menu under the header, the
+    keyboard's way to it; Shift+F10 and the Menu key aren't bound (rows have no keyboard
+    context menu either). Undo: `State::column_options`.
   - **A test fixed, not the app**: `a_drop_on_a_column_refuses_a_replaced_folder` dropped
     right after an operation and waited one frame; the free-space read after the operation can
     land in that frame, and Rune holds a file drop a frame when state changed since the last
