@@ -298,6 +298,16 @@ impl Folder {
         }
     }
 
+    /// Where a drop on this folder's background goes: the folder, as its listing knew it.
+    pub fn dest(&self) -> crate::ops::Dest {
+        crate::ops::Dest { path: self.cwd.clone(), id: self.dir_id.map(crate::ops::DestId::Folder) }
+    }
+
+    /// Where a drop on folder row `e` goes: into it, as this listing read it.
+    pub fn row_dest(&self, e: &Entry) -> crate::ops::Dest {
+        crate::ops::Dest { path: self.cwd.join(&e.os), id: e.id.map(crate::ops::DestId::Item) }
+    }
+
     /// Whether this folder is the one at `path` (with identity `id`): the same identity when
     /// both are known (a symlink and its target are one folder), else the same path.
     pub fn shows(&self, path: &Path, id: Option<crate::noclobber::FileId>) -> bool {

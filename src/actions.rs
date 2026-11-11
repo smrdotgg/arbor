@@ -95,7 +95,7 @@ impl State {
         let expect = ours.map(|c| c.expect.clone()).unwrap_or_default();
         let op = if move_requested || was_cut { Op::Move { sources: files, dest } } else { Op::Copy { sources: files, dest } };
         let op = checked(op, expect);
-        if self.start_into(op, dest_id.map(|id| (id, "pasted"))) && was_cut {
+        if self.start_into(op, dest_id.map(|id| (ops::DestId::Folder(id), "pasted"))) && was_cut {
             self.clip = None;
         }
     }
@@ -267,7 +267,7 @@ impl State {
 
     /// [`State::start`], for a copy or move into a folder that must still be the one with
     /// identity `dest_id` when the worker starts (with the verb its refusal says).
-    pub fn start_into(&mut self, op: Op, dest_id: Option<(crate::noclobber::FileId, &'static str)>) -> bool {
+    pub fn start_into(&mut self, op: Op, dest_id: Option<(ops::DestId, &'static str)>) -> bool {
         if self.job.is_some() {
             self.note = Some("Still working on the last operation (Esc cancels it)".into());
             return false;
@@ -467,29 +467,14 @@ impl State {
         Some(item)
     }
 
-    /// Files dropped on a folder (or on the list, for the current folder). Same disk moves,
-    /// another disk copies, as in Finder; ⌥ always copies.
-    pub fn drop_files(&mut self, files: &[PathBuf], into: PathBuf, tx: &mut Tx) {
-        self.drop_checked(files, into, ops::Checks::default(), tx);
-    }
-
-    /// [`State::drop_files`] for rows dragged from a pane, each checked against the identity
-    /// its listing or the walk saw.
-    pub(crate) fn drop_checked(&mut self, files: &[PathBuf], into: PathBuf, expect: ops::Checks, tx: &mut Tx) {
-        self.drop_into(files, into, None, expect, tx);
-    }
-
-    /// [`State::drop_files`] into a folder that must still be the one with identity `into_id`
-    /// (when known) as the worker starts: a column's, from the listing it shows. One put in its
-    /// place since is refused, as a paste into it would be.
-    pub(crate) fn drop_into(
-        &mut self,
-        files: &[PathBuf],
-        into: PathBuf,
-        into_id: Option<crate::noclobber::FileId>,
-        expect: ops::Checks,
-        tx: &mut Tx,
-    ) {
+    /// Files dropped on a folder: every drop, from other apps or Arbor's own rows (each of
+    /// those checked against the identity its listing or the walk saw, `expect`), on any view's
+    /// folder row or background, a column, or the other pane. Same disk moves, another disk
+    /// copies, as in Finder; ⌥ always copies. The folder goes with the identity it was listed
+    /// with, and the worker refuses one put in its place since, as a paste does; one whose
+    /// identity wasn't known (not read yet, or unreadable) takes nothing.
+    pub(crate) fn drop_into(&mut self, files: &[PathBuf], dest: ops::Dest, expect: ops::Checks, tx: &mut Tx) {
+        let ops::Dest { path: into, id } = dest;
         for p in &mut self.panes {
             p.f.drop_target = None;
             if let Some(cols) = p.f.cols.as_mut() {
@@ -500,9 +485,14 @@ impl State {
         if files.is_empty() {
             return;
         }
+        let Some(id) = id else {
+            let name = into.file_name().map_or_else(|| into.display().to_string(), |n| n.to_string_lossy().into_owned());
+            self.note = Some(format!("Nothing was dropped: “{name}” isn't read yet, so Arbor can't tell it's the folder shown"));
+            return;
+        };
         let copy = tx.mods().alt || !files.iter().all(|f| same_disk(f, &into));
         let op = if copy { Op::Copy { sources: files, dest: into } } else { Op::Move { sources: files, dest: into } };
-        self.start_into(checked(op, expect), into_id.map(|id| (id, "dropped")));
+        self.start_into(checked(op, expect), Some((id, "dropped")));
     }
 
     // ---- context menu -----------------------------------------------------------------------

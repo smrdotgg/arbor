@@ -348,8 +348,8 @@ impl State {
             self.note = Some(crate::app::IN_OTHER_SEARCH.into());
             return;
         }
-        let (files, into, expect) = (src.f.drag_paths(i), dst.f.cwd.clone(), src.f.drag_checks(i));
-        self.drop_checked(&files, into, expect, tx);
+        let (files, into, expect) = (src.f.drag_paths(i), dst.f.dest(), src.f.drag_checks(i));
+        self.drop_into(&files, into, expect, tx);
     }
 }
 

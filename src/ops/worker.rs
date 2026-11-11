@@ -163,14 +163,14 @@ impl<'a> Worker<'a> {
 
     /// [`Worker::run`], first checking that a copy's or move's destination is still the folder
     /// with identity `dest_id`.
-    pub(super) fn run_into(&mut self, op: Op, dest_id: Option<(noclobber::FileId, &'static str)>) -> Outcome {
+    pub(super) fn run_into(&mut self, op: Op, dest_id: Option<(super::DestId, &'static str)>) -> Outcome {
         // Through the identity checks of the items (a paste of what Arbor cut, rows dragged).
         let inner = match &op {
             Op::Checked { op, .. } => op.as_ref(),
             op => op,
         };
         if let (Some((want, verb)), Op::Copy { dest, .. } | Op::Move { dest, .. }) = (dest_id, inner)
-            && noclobber::dir_id(dest) != Some(want)
+            && !want.holds(dest)
         {
             let why = if dest.symlink_metadata().is_ok() {
                 "is another folder now (the one there was moved or replaced)"

@@ -163,8 +163,11 @@ fn other_column(column: &Column, c: Ctx, w: f32, view: [f32; 4]) -> El {
             tx.instant();
             // Into the folder this column listed, checked on the worker: a folder put at its
             // path since is refused.
-            let listed = column_of(s, id, &drop_in).and_then(|c| c.dir_id);
-            s.drop_into(files, drop_in.clone(), listed, Default::default(), tx);
+            let dest = match column_of(s, id, &drop_in) {
+                Some(c) => c.dest(),
+                None => crate::ops::Dest { path: drop_in.clone(), id: None },
+            };
+            s.drop_into(files, dest, Default::default(), tx);
         });
     match &col.load {
         Load::Ready if col.visible.is_empty() => base.center().child(text("Empty folder").font(SMALL).color(l.t.text_secondary)),
@@ -261,11 +264,12 @@ fn column_row(f: &Folder, col: &Column, i: usize, c: Ctx) -> El {
         });
     r = column_drags(r, c, path.clone(), name.clone());
     if e.is_dir {
-        let (into, hover) = (target.clone(), target);
+        // Into the folder this row lists, as its column read it (checked on the worker).
+        let (into, hover) = (col.row_dest(e), target);
         r = r
             .on_drop_files(move |s: &mut State, files, tx| {
                 tx.instant();
-                s.drop_files(files, into.clone(), tx);
+                s.drop_into(files, into.clone(), Default::default(), tx);
             })
             .on_drop_hover(move |s: &mut State, over, tx| {
                 tx.instant();

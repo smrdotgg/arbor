@@ -373,6 +373,35 @@ const TRASH: TrashFn = crate::trash::trash;
 #[cfg(test)]
 const TRASH: TrashFn = tests::fake_trash;
 
+/// How the folder a copy or move goes into was known when the user chose it: what the worker
+/// compares with what's at its path before touching anything ([`start`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DestId {
+    /// The folder's own identity, links followed (`Folder::dir_id`, a column's): a paste, a drop
+    /// on a list's or a column's background, on the other pane.
+    Folder(noclobber::FileId),
+    /// A folder row's identity as its listing read it (not following a link): a drop on a row.
+    Item(crate::fs::Ident),
+}
+
+impl DestId {
+    /// Whether the folder at `path` is still the one it was.
+    pub fn holds(self, path: &Path) -> bool {
+        match self {
+            DestId::Folder(id) => noclobber::dir_id(path) == Some(id),
+            DestId::Item(id) => crate::fs::ident_at(path) == Some(id),
+        }
+    }
+}
+
+/// Where a drop goes: a folder on screen, and how its listing knew it (`None`: it didn't, as a
+/// folder whose read hasn't landed).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dest {
+    pub path: PathBuf,
+    pub id: Option<DestId>,
+}
+
 /// Runs `op` on a worker thread; its outcome comes back through [`Running::take`].
 ///
 /// With `dest_id`, a copy or move goes only into the folder the user chose as the one with that
@@ -380,7 +409,7 @@ const TRASH: TrashFn = tests::fake_trash;
 /// folder at its `dest` isn't that one when the worker starts (renamed away and another made
 /// at its path, or gone), it refuses before touching anything, saying "Nothing was" and the
 /// verb given with it ("pasted", "dropped").
-pub fn start(op: Op, dest_id: Option<(noclobber::FileId, &'static str)>, waker: Option<rune::Waker>) -> Running {
+pub fn start(op: Op, dest_id: Option<(DestId, &'static str)>, waker: Option<rune::Waker>) -> Running {
     let progress = Arc::new(Progress::default());
     let done = Arc::new(Mutex::new(None));
     let verb = op.verb();

@@ -181,6 +181,16 @@ impl Column {
         self.version = crate::folder::next_version();
     }
 
+    /// Where a drop on this column's background goes: its folder, as its read knew it.
+    pub fn dest(&self) -> crate::ops::Dest {
+        crate::ops::Dest { path: self.path.clone(), id: self.dir_id.map(crate::ops::DestId::Folder) }
+    }
+
+    /// Where a drop on its folder row `e` goes: into it, as this column's read saw it.
+    pub fn row_dest(&self, e: &Entry) -> crate::ops::Dest {
+        crate::ops::Dest { path: self.path.join(&e.os), id: e.id.map(crate::ops::DestId::Item) }
+    }
+
     /// Whether it has a listing to show: read, or being read again with the last one still on
     /// screen (after a file operation changed it, or ⌘R).
     pub fn listed(&self) -> bool {
@@ -1105,7 +1115,9 @@ mod tests {
         };
         assert_eq!(rows(&s), ["o.txt"]);
         // top.txt dropped on the folder whose contents are the right column.
-        s.drop_files(&[d.join("top.txt")], d.join("other"), &mut Tx::default());
+        let dest = cols(&s).right.as_ref().unwrap().dest();
+        assert_eq!(dest.path, d.join("other"));
+        s.drop_into(&[d.join("top.txt")], dest, Default::default(), &mut Tx::default());
         crate::app::tests::finish_job(&mut s);
         settle(&mut s);
         assert_eq!(rows(&s), ["o.txt", "top.txt"]);

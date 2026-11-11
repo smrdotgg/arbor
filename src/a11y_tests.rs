@@ -1884,3 +1884,83 @@ fn a_failed_read_keeps_no_listing() {
     assert!(targets.is_empty(), "nor acted on");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Every drop goes into the folder the user saw, or nowhere: a folder row (in a column, the
+/// list, the icon view), the active column's or the list's background, and the other pane in a
+/// split each carry the identity the folder was listed with, and the worker refuses one put in
+/// its place since. Nothing moves.
+#[test]
+fn every_drop_refuses_a_replaced_destination() {
+    let refused = |rt: &mut Runtime<State>, d: &Path, into: &str, what: &str| {
+        until(rt, |s| s.job.is_none());
+        assert!(d.join("top.txt").exists(), "{what}: nothing moved ({:?})", rt.state.note);
+        assert!(!d.join(into).join("top.txt").exists(), "{what}: the replacement got nothing");
+        assert!(rt.state.note.as_deref().is_some_and(|n| n.starts_with("Nothing was dropped")), "{what}: {:?}", rt.state.note);
+    };
+    let replace = |d: &Path, rel: &str| {
+        std::fs::rename(d.join(rel), d.join(format!("{rel}-away"))).unwrap();
+        std::fs::create_dir(d.join(rel)).unwrap();
+    };
+    // A folder row in another column.
+    let d = nested("drop-row");
+    let mut rt = runtime(&d);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    let b = row_box(&mut rt, "Folder Work");
+    replace(&d, "Docs/Work");
+    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 40.0, b[1] + b[3] * 0.5)));
+    rt.frame(0.0);
+    refused(&mut rt, &d, "Docs/Work", "a folder row in a column");
+    // The active column's background.
+    key(&mut rt, Key::Right, false);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"));
+    let b = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
+    replace(&d, "Docs");
+    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 40.0, b[1] + 150.0)));
+    rt.frame(0.0);
+    refused(&mut rt, &d, "Docs", "the active column");
+    let _ = std::fs::remove_dir_all(&d);
+    // A folder row in the list and in the icon view, and the list's background.
+    for view in [Cmd::AsList, Cmd::AsIcons] {
+        let d = nested(&format!("drop-{view:?}"));
+        let mut rt = runtime(&d);
+        run(&mut rt, view);
+        let row = rect_of(&rt, "f:Docs").unwrap();
+        replace(&d, "Docs");
+        rt.drop_files(vec![d.join("top.txt")], Some((row[0] + 20.0, row[1] + row[3] * 0.5)));
+        rt.frame(0.0);
+        refused(&mut rt, &d, "Docs", &format!("a folder row, {view:?}"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    let d = nested("drop-list-background");
+    let mut rt = runtime(&d);
+    let docs = d.join("Docs");
+    rt.update(move |s, _| s.go_to(docs));
+    until(&mut rt, |s| !s.cur().is_loading());
+    let list = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
+    replace(&d, "Docs");
+    rt.drop_files(vec![d.join("top.txt")], Some((list[0] + 100.0, list[1] + list[3] - 40.0)));
+    rt.frame(0.0);
+    refused(&mut rt, &d, "Docs", "the list's background");
+    let _ = std::fs::remove_dir_all(&d);
+    // A row dragged onto the other pane of a split.
+    let d = nested("drop-pane");
+    let mut rt = runtime(&d);
+    run(&mut rt, Cmd::Split);
+    let docs = d.join("Docs");
+    rt.update(move |s, _| s.go_to(docs));
+    until(&mut rt, |s| !s.cur().is_loading());
+    rt.update(|s, tx| s.activate(0, tx));
+    rt.frame(0.0);
+    replace(&d, "Docs");
+    let (from, to) = (rt.state.panes[0].id(), rt.state.panes[1].id());
+    rt.update(move |s, tx| {
+        let f = &s.panes[0].f;
+        let i = f.visible.iter().position(|&e| f.entries[e as usize].name == "top.txt").unwrap();
+        let version = f.version;
+        s.drop_on_pane(from, i, version, to, tx);
+    });
+    refused(&mut rt, &d, "Docs", "the other pane");
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -100,8 +100,8 @@ pub(super) fn list(f: &Folder, c: Ctx, active: Option<String>) -> El {
                     s.note = Some("Drop onto a folder in the results, or leave the search (Esc) to drop here".into());
                     return;
                 }
-                let here = p.f.cwd.clone();
-                s.drop_files(files, here, tx);
+                let here = p.f.dest();
+                s.drop_into(files, here, Default::default(), tx);
             }
         })
         .on_secondary_press(move |s: &mut State, press, tx| {
@@ -361,12 +361,13 @@ pub(super) fn folder_drop(e: El, f: &Folder, c: Ctx, entry: &crate::fs::Entry) -
         return e;
     }
     let id = c.id;
-    let target = f.cwd.join(&entry.os);
+    // Into the folder this row lists, as its listing read it (checked on the worker).
+    let target = f.row_dest(entry);
     let os = entry.os.clone();
     e.on_drop_files(move |s: &mut State, files, tx| {
         tx.instant();
-        crate::draglog::log(|| format!("drop on={:?} files={}", target.display(), files.len()));
-        s.drop_files(files, target.clone(), tx);
+        crate::draglog::log(|| format!("drop on={:?} files={}", target.path.display(), files.len()));
+        s.drop_into(files, target.clone(), Default::default(), tx);
     })
     .on_drop_hover(move |s: &mut State, over, tx| {
         tx.instant();
