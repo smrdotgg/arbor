@@ -249,6 +249,10 @@ impl Worker<'_> {
                     out.errors.push(format!("“{name}” was replaced just now, so it was left alone"));
                     left.push(step);
                 }
+                Err(e) if e.kind() == ErrorKind::Other && e.get_ref().is_some_and(|r| r.is::<LeftAside>()) => {
+                    out.errors.push(format!("“{name}”: {e}"));
+                    left.push(step);
+                }
                 Err(e) if making && e.kind() == ErrorKind::AlreadyExists => {
                     out.errors.push(format!("“{name}” was taken just now, so the link wasn't made again"));
                     left.push(step);
@@ -298,17 +302,38 @@ impl Worker<'_> {
     }
 
     /// Removes a link Arbor made (the link itself; never what it points at), only while it's
-    /// still that object with that target, checked right before through what removes it
-    /// ([`remove_if_still`]): a link put at its name since the check, even at the same inode with
-    /// the same times and target, is left alone.
-    fn remove_link(&self, step: &Step, link: &Link) -> io::Result<()> {
+    /// still that object with that target, checked again as it's removed ([`remove_if_still`]):
+    /// a link put at its name since the check, even at the same inode with the same times and
+    /// target, or at the instant of removal, is left alone.
+    fn remove_link(&mut self, step: &Step, link: &Link) -> io::Result<()> {
         #[cfg(test)]
         if self.hooks.fail_remove.as_ref().is_some_and(|f| f(&step.at)) {
             return Err(io::Error::new(ErrorKind::PermissionDenied, "permission denied"));
         }
         let want = step.ident.ok_or_else(|| io::Error::other(Replaced))?;
-        remove_if_still(&step.at, want, link, &step.print)
+        #[cfg(test)]
+        let mut hook = |at: Removal, p: &Path| {
+            if let Some(h) = &mut self.hooks.removing {
+                h(at, p);
+            }
+        };
+        #[cfg(not(test))]
+        let mut hook = |_: Removal, _: &Path| {};
+        remove_if_still(&step.at, want, link, &step.print, &mut hook)
     }
+}
+
+/// Where a link's removal is, for tests to change the disk at that instant (Windows holds the
+/// link open instead of moving it aside: only `BeforeUnlink` there).
+#[cfg_attr(windows, allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Removal {
+    /// Checked at its own name; not moved aside yet.
+    BeforeAside,
+    /// Moved aside to its temporary name; not checked there yet.
+    Aside,
+    /// Checked; about to be removed.
+    BeforeUnlink,
 }
 
 /// What [`remove_if_still`] says when the item isn't the one it was told to remove.
@@ -330,32 +355,80 @@ fn made_step(at: &Path, link: Link) -> io::Result<Step> {
     Ok(Step { print: Print::of(at, &m), at: at.to_path_buf(), back: None, split: None, link: Some(link), ident })
 }
 
-/// Unix: removes the link at `at` only while it's `want` pointing at the link's target. The
-/// folder is opened once; the identity and target are read relative to it (`statx`,
-/// `readlinkat`) and the link removed relative to it (`unlinkat`), so no path is resolved again
-/// between the check and the removal.
+/// Unix: removes the link at `at` only while it's `want` pointing at the link's target.
+///
+/// `statx`, `readlinkat` and `unlinkat` each look the name up again, even relative to the
+/// folder's descriptor, so checking at `at` and then unlinking `at` could remove a link swapped
+/// in between. Instead the entry is first moved aside, with the no-replace rename, to a fresh
+/// hidden name in the same folder that nothing else knows (`noclobber::temp_sibling`), and the
+/// entry there is checked and removed. Whatever was at `at` at the instant of the move is what's
+/// checked; one put at `at` after it is never touched. One that isn't Arbor's link goes back to
+/// `at` (no-replace again); if something has taken `at` meanwhile, it stays at the temporary
+/// name and the error says where ([`LeftAside`]).
+///
+/// The move changes the inode's ctime, so where identity is told by ctime alone (no birth time,
+/// no handle) the check aside compares the rest of it ([`crate::fs::Ident::same_but_ctime`]),
+/// after a full check at `at` just before.
 #[cfg(unix)]
-fn remove_if_still(at: &Path, want: crate::fs::Ident, link: &Link, _: &Print) -> io::Result<()> {
+fn remove_if_still(at: &Path, want: crate::fs::Ident, link: &Link, _: &Print, hook: &mut dyn FnMut(Removal, &Path)) -> io::Result<()> {
     use crate::dirfd;
     let (Some(parent), Some(name)) = (at.parent(), at.file_name()) else { return Err(io::Error::from(ErrorKind::InvalidInput)) };
     let dir = dirfd::open_dir(libc::AT_FDCWD, &crate::ffi::cstr(parent)?, true)?;
-    let name = crate::ffi::cstr(name)?;
-    if dirfd::ident_at(&dir, &name)? != want {
+    let ours = |name: &std::ffi::CStr, aside: bool| -> io::Result<bool> {
+        let id = dirfd::ident_at(&dir, name)?;
+        let same = if aside && want.by_ctime() { id.same_but_ctime(&want) } else { id == want };
+        Ok(same && (link.shortcut || dirfd::read_link_at(&dir, name)? == link.target))
+    };
+    if !ours(&crate::ffi::cstr(name)?, false)? {
         return Err(io::Error::other(Replaced));
     }
-    if !link.shortcut && dirfd::read_link_at(&dir, &name)? != link.target {
-        return Err(io::Error::other(Replaced));
+    hook(Removal::BeforeAside, at);
+    let aside = noclobber::temp_sibling(at)?;
+    noclobber::rename(at, &aside)?;
+    hook(Removal::Aside, at);
+    let aside_name = crate::ffi::cstr(aside.file_name().unwrap_or_default())?;
+    match ours(&aside_name, true) {
+        Ok(true) => {
+            hook(Removal::BeforeUnlink, at);
+            dirfd::unlink_at(&dir, &aside_name)
+        }
+        // Not Arbor's link (or it couldn't be read): back where it was, never over anything.
+        verdict => match noclobber::rename(&aside, at) {
+            Ok(()) => Err(verdict.err().unwrap_or_else(|| io::Error::other(Replaced))),
+            Err(e) => Err(io::Error::other(LeftAside { at: aside, why: e.to_string() })),
+        },
     }
-    dirfd::unlink_at(&dir, &name)
 }
+
+/// A removal that found another item at the link's name, moved it aside, and couldn't put it
+/// back because something took the name meanwhile: where it is now.
+#[derive(Debug)]
+struct LeftAside {
+    at: PathBuf,
+    why: String,
+}
+
+impl std::fmt::Display for LeftAside {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "it was replaced just now, and the item that replaced it couldn't go back to its name ({}), so it's now named “{}” in the same folder",
+            self.why,
+            name_of(&self.at)
+        )
+    }
+}
+
+impl std::error::Error for LeftAside {}
 
 /// Windows: removes the link at `at` only while it's `want` (with its target, or a shortcut's
 /// size and time). The link itself is opened (not what it points at) for deletion, sharing no
-/// delete access, so nothing can rename, replace or remove it while it's held; it's checked
-/// through that handle and then marked for deletion through it (`FileDispositionInfo`), so
-/// nothing is looked up by name again in between.
+/// delete access, so nothing can rename, replace or remove it while it's held: its identity is
+/// read through that handle, its target by name (which can only lead to the held link), and it
+/// is marked for deletion through the handle (`FileDispositionInfo`), so what's removed is the
+/// object checked.
 #[cfg(windows)]
-fn remove_if_still(at: &Path, want: crate::fs::Ident, link: &Link, print: &Print) -> io::Result<()> {
+fn remove_if_still(at: &Path, want: crate::fs::Ident, link: &Link, print: &Print, hook: &mut dyn FnMut(Removal, &Path)) -> io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -379,6 +452,7 @@ fn remove_if_still(at: &Path, want: crate::fs::Ident, link: &Link, print: &Print
         // Read by name, but the name can't lead elsewhere while the handle holds it unshared.
         return Err(io::Error::other(Replaced));
     }
+    hook(Removal::BeforeUnlink, at);
     let info = FILE_DISPOSITION_INFO { DeleteFile: 1 };
     // SAFETY: an open handle with DELETE access, and a disposition record as long as we say.
     let ok = unsafe {

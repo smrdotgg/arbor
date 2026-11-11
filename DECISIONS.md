@@ -38,11 +38,16 @@ Format: date · decision · why · how to undo.
     nothing. "Exactly" (after review): its fingerprint, its object identity (`fs::Ident`, with
     the birth time or Linux's handle, recorded when it was made: a `cp -a` copy put back at the
     freed inode has the same inode, times and target) and its target, checked once with the
-    others and again at the removal itself: on Unix through the open folder (`statx`,
-    `readlinkat`, then `unlinkat`, no path resolved in between); on Windows through a handle on
-    the link that shares no delete access, deleted through that handle. New File's undo checks
-    the same identity when it checks and again right before the trash (which itself goes by
-    path). Removing also means redo works on Windows, where the Recycle Bin doesn't say where it
+    others and again at the removal itself. On Unix every call looks the name up again (even
+    `statx`, `readlinkat` and `unlinkat` relative to the folder), so the link is first moved
+    aside with the no-replace rename to a fresh hidden name in its folder, checked there, and
+    removed there; anything else found there goes back to its name (no-replace), or, when the
+    name was taken meanwhile, stays under the hidden name and the status bar says which (after
+    the second review: a swap at the instant of `unlinkat` deleted the newcomer). On Windows,
+    through a handle on the link that shares no delete access, deleted through that handle.
+    New File's undo checks the same identity when it checks and again right before the trash;
+    the trash itself goes by path, and isn't moved aside first: the Trash would then record the
+    hidden name, and Put Back or redo would restore the file under it. Removing also means redo works on Windows, where the Recycle Bin doesn't say where it
     put an item. New File's undo trashes the file, as New Folder's does (the task's rule). Undo:
     `Worker::undo_links`, `links::remove_if_still`.
   - **Windows: `std`'s symbolic-link calls** (they pass

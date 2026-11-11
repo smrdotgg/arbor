@@ -523,6 +523,8 @@ fn run_hooked(op: Op, trash: TrashFn, hooks: Hooks) -> Outcome {
 type PathHook = Box<dyn FnMut(&Path)>;
 #[cfg(test)]
 type PathTest = Box<dyn Fn(&Path) -> bool>;
+#[cfg(test)]
+type RemovalHook = Box<dyn FnMut(links::Removal, &Path)>;
 
 /// Test-only ways to make the worker meet the disk at its worst. Not compiled outside tests.
 #[cfg(test)]
@@ -548,6 +550,9 @@ struct Hooks {
     copied: Option<PathHook>,
     /// The mount table, instead of the system's (a folder a test says is a mount point).
     mounts: Option<crate::mounts::Mounts>,
+    /// Called at each step of a link's removal (`links::Removal`), with the link's path: where a
+    /// test swaps the link at the instant of removal.
+    removing: Option<RemovalHook>,
 }
 
 /// A path for comparing names case aside (what a disk that ignores case sees as one name).

@@ -2366,6 +2366,90 @@ mod links {
         let _ = fs::remove_dir_all(&d);
     }
 
+    fn removing(stage: links::Removal, f: impl FnMut(&Path) + 'static) -> Hooks {
+        let mut f = f;
+        Hooks {
+            removing: Some(Box::new(move |at, p| {
+                if at == stage {
+                    f(p)
+                }
+            })),
+            ..Hooks::default()
+        }
+    }
+
+    /// The reviewer's case, without a shim: a link put at the name at the instant of the
+    /// removal, after every check (another app swapping it then). Arbor's link was moved aside
+    /// before that instant, so what's removed is Arbor's own, and the newcomer stays.
+    #[test]
+    fn a_link_swapped_in_at_the_instant_of_removal_stays() {
+        let d = tmp("links-instant");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::write(d.join("other.txt"), "o").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+        let other = d.join("other.txt");
+        let swap = move |at: &Path| {
+            let _ = fs::remove_file(at);
+            std::os::unix::fs::symlink(&other, at).unwrap();
+        };
+        let o = run_hooked(Op::Undo(u), fake_trash, removing(links::Removal::BeforeUnlink, swap));
+        assert!(o.errors.is_empty() && o.refused.is_none(), "{:?} {:?}", o.errors, o.refused);
+        assert_eq!(fs::read_link(d.join("a link.txt")).unwrap(), d.join("other.txt"), "the newcomer stays");
+        assert_eq!(fs::read_dir(&d).unwrap().count(), 3, "nothing left aside: {:?}", fs::read_dir(&d).unwrap().collect::<Vec<_>>());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A link swapped in after the check at its name, before the move aside: the newcomer is
+    /// what's moved aside, the check there refuses it, and it goes back to its name. When
+    /// something took the name while it was aside, it stays aside and the error says where.
+    #[test]
+    fn a_link_swapped_in_before_the_move_aside_goes_back() {
+        let d = tmp("links-aside");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::write(d.join("other.txt"), "o").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+        let other = d.join("other.txt");
+        let swap = move |at: &Path| {
+            fs::remove_file(at).unwrap();
+            std::os::unix::fs::symlink(&other, at).unwrap();
+        };
+        let o = run_hooked(Op::Undo(u.clone()), fake_trash, removing(links::Removal::BeforeAside, swap));
+        assert!(o.errors.first().is_some_and(|e| e.contains("“a link.txt” was replaced just now")), "{:?}", o.errors);
+        assert_eq!(fs::read_link(d.join("a link.txt")).unwrap(), d.join("other.txt"), "back at its name");
+        assert_eq!(fs::read_dir(&d).unwrap().count(), 3, "nothing left aside");
+        assert!(o.undo.is_some(), "the record stays");
+        // The name taken while the newcomer was aside: it stays aside, and the error says where.
+        let d = tmp("links-aside-taken");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::write(d.join("other.txt"), "o").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+        let other = d.join("other.txt");
+        let mut hooks = removing(links::Removal::BeforeAside, move |at: &Path| {
+            fs::remove_file(at).unwrap();
+            std::os::unix::fs::symlink(&other, at).unwrap();
+        });
+        let mut stage = hooks.removing.take().unwrap();
+        hooks.removing = Some(Box::new(move |at, p| {
+            stage(at, p);
+            if at == links::Removal::Aside {
+                fs::write(p, "took the name").unwrap();
+            }
+        }));
+        let o = run_hooked(Op::Undo(u), fake_trash, hooks);
+        let e = o.errors.first().cloned().unwrap_or_default();
+        assert!(e.contains("couldn't go back to its name") && e.contains("now named “.arbor-"), "{e}");
+        assert_eq!(fs::read_to_string(d.join("a link.txt")).unwrap(), "took the name", "nothing replaced");
+        let aside: Vec<PathBuf> = fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(".arbor-"))
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(fs::read_link(&aside[0]).unwrap(), d.join("other.txt"), "the newcomer, kept whole");
+        let _ = fs::remove_dir_all(&d);
+    }
+
     /// The items are checked to be the ones listed: one replaced since gets no link.
     #[test]
     fn a_link_is_made_only_to_the_item_chosen() {
@@ -2492,5 +2576,31 @@ fn new_file_undo_never_trashes_a_replacement() {
         assert!(why.contains("replaced"), "{why}");
         assert!(at.exists() && !d.join(".trash").exists());
     }
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// Windows (CI): a link put at the name right before the removal (after undo's check) isn't
+/// the one Arbor made, by its file id through the held handle, and stays.
+#[cfg(windows)]
+#[test]
+fn windows_undo_leaves_a_replacement_link_alone() {
+    let d = tmp("win-links-swap");
+    fs::write(d.join("a.txt"), "a").unwrap();
+    fs::write(d.join("other.txt"), "o").unwrap();
+    let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+    let made = u.steps[0].link.clone().unwrap();
+    let at = u.steps[0].at.clone();
+    let newcomer = Link { target: d.join("other.txt"), ..made };
+    let swap: PathHook = Box::new(move |at: &Path| {
+        fs::remove_file(at).unwrap();
+        make_link_at(at, &newcomer).unwrap();
+    });
+    let o = run_hooked(Op::Undo(u), fake_trash, hooked(swap, false));
+    assert!(o.errors.first().is_some_and(|e| e.contains("was replaced just now")), "{:?} {:?}", o.errors, o.refused);
+    assert!(at.symlink_metadata().is_ok(), "the newcomer stays");
+    if !made.shortcut {
+        assert_eq!(fs::read_link(&at).unwrap(), d.join("other.txt"));
+    }
+    assert!(o.undo.is_some(), "the record stays");
     let _ = fs::remove_dir_all(&d);
 }
