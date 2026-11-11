@@ -2060,3 +2060,45 @@ fn a_drop_lands_in_the_column_it_was_drawn_as() {
     assert_eq!(at, Some((rt.state.cur().cwd.parent().unwrap().join("Docs"), None)), "the root's Docs row, before any frame");
     let _ = start;
 }
+
+/// F5 and F6 go into the other pane's folder as it was listed, or nowhere: one put in its place
+/// since is refused on the worker, as a drop or a paste into it is (F6 moved the file into the
+/// replacement).
+#[test]
+fn copy_and_move_to_the_other_pane_refuse_a_replaced_folder() {
+    for key_ in [6, 5] {
+        let d = nested(&format!("f{key_}-dest"));
+        let mut rt = runtime(&d);
+        run(&mut rt, Cmd::Split);
+        let docs = d.join("Docs");
+        rt.update(move |s, _| s.go_to(docs));
+        until(&mut rt, |s| !s.cur().is_loading());
+        rt.update(|s, tx| {
+            s.activate(0, tx);
+            let f = s.cur_mut();
+            let i = f.visible.iter().position(|&k| f.entries[k as usize].name == "top.txt").unwrap();
+            f.select(i);
+        });
+        std::fs::rename(d.join("Docs"), d.join("Docs-away")).unwrap();
+        std::fs::create_dir(d.join("Docs")).unwrap();
+        key(&mut rt, Key::Function(key_), false);
+        until(&mut rt, |s| s.job.is_none());
+        let what = if key_ == 6 { "moved" } else { "copied" };
+        assert!(d.join("top.txt").exists(), "F{key_}: the source stays");
+        assert!(!d.join("Docs/top.txt").exists() && !d.join("Docs-away/top.txt").exists(), "F{key_}: nothing went in");
+        assert!(
+            rt.state.note.as_deref().is_some_and(|n| n.starts_with(&format!("Nothing was {what}")) && n.contains("another folder now")),
+            "F{key_}: {:?}",
+            rt.state.note
+        );
+        // Into the folder as it is, once read again: it goes.
+        rt.update(|s, tx| s.activate(1, tx));
+        run(&mut rt, Cmd::Reload);
+        until(&mut rt, |s| !s.cur().is_loading());
+        rt.update(|s, tx| s.activate(0, tx));
+        key(&mut rt, Key::Function(key_), false);
+        until(&mut rt, |s| s.job.is_none());
+        assert!(d.join("Docs/top.txt").exists(), "F{key_} after ⌘R: {:?}", rt.state.note);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

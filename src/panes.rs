@@ -12,7 +12,6 @@ use rune::Tx;
 
 use crate::app::{NOT_SPLIT, Pane, State, title};
 use crate::folder::{Folder, TabMemo};
-use crate::ops::Op;
 
 /// How many closed tabs "Reopen Closed Tab" remembers.
 const CLOSED_MAX: usize = 20;
@@ -322,9 +321,10 @@ impl State {
     }
 
     /// F5 / F6: copies or moves the selection into the other pane's folder, as a paste would
-    /// (on a worker, never over anything, undoable).
+    /// (on a worker, never over anything, undoable), into that folder as its pane listed it:
+    /// one put in its place since is refused, as a drop into it is (`State::send_into`).
     pub fn send_to_other_pane(&mut self, mv: bool) {
-        let Some(dest) = self.other().map(|o| o.cwd.clone()) else {
+        let Some(dest) = self.other().map(Folder::dest) else {
             self.note = Some(NOT_SPLIT.into());
             return;
         };
@@ -332,8 +332,8 @@ impl State {
         if sources.is_empty() {
             return;
         }
-        let op = if mv { Op::Move { sources, dest } } else { Op::Copy { sources, dest } };
-        self.start(crate::actions::checked(op, self.cur().target_checks()));
+        let expect = self.cur().target_checks();
+        self.send_into(sources, dest, expect, mv, if mv { "moved" } else { "copied" });
     }
 
     /// A row drag from pane `from` (row `i`, drawn at `version`) let go over pane `to`: into

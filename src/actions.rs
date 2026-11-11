@@ -474,25 +474,34 @@ impl State {
     /// with, and the worker refuses one put in its place since, as a paste does; one whose
     /// identity wasn't known (not read yet, or unreadable) takes nothing.
     pub(crate) fn drop_into(&mut self, files: &[PathBuf], dest: ops::Dest, expect: ops::Checks, tx: &mut Tx) {
-        let ops::Dest { path: into, id } = dest;
         for p in &mut self.panes {
             p.f.drop_target = None;
             if let Some(cols) = p.f.cols.as_mut() {
                 cols.drop_target = None;
             }
         }
-        let files: Vec<PathBuf> = files.iter().filter(|f| f.parent() != Some(into.as_path()) || tx.mods().alt).cloned().collect();
+        let alt = tx.mods().alt;
+        let files: Vec<PathBuf> = files.iter().filter(|f| f.parent() != Some(dest.path.as_path()) || alt).cloned().collect();
         if files.is_empty() {
             return;
         }
+        let copy = alt || !files.iter().all(|f| same_disk(f, &dest.path));
+        self.send_into(files, dest, expect, !copy, "dropped");
+    }
+
+    /// What every copy or move into a folder the user chose on screen goes through (a drop,
+    /// F5 and F6 into the other pane): into `dest` as it was listed, the worker refusing a
+    /// folder put in its place since, and one whose identity wasn't known taking nothing, each
+    /// item checked against `expect`. `verb` is what its refusal says wasn't done.
+    pub(crate) fn send_into(&mut self, files: Vec<PathBuf>, dest: ops::Dest, expect: ops::Checks, mv: bool, verb: &'static str) {
+        let ops::Dest { path: into, id } = dest;
         let Some(id) = id else {
             let name = into.file_name().map_or_else(|| into.display().to_string(), |n| n.to_string_lossy().into_owned());
-            self.note = Some(format!("Nothing was dropped: “{name}” isn't read yet, so Arbor can't tell it's the folder shown"));
+            self.note = Some(format!("Nothing was {verb}: “{name}” isn't read yet, so Arbor can't tell it's the folder shown"));
             return;
         };
-        let copy = tx.mods().alt || !files.iter().all(|f| same_disk(f, &into));
-        let op = if copy { Op::Copy { sources: files, dest: into } } else { Op::Move { sources: files, dest: into } };
-        self.start_into(checked(op, expect), Some((id, "dropped")));
+        let op = if mv { Op::Move { sources: files, dest: into } } else { Op::Copy { sources: files, dest: into } };
+        self.start_into(checked(op, expect), Some((id, verb)));
     }
 
     // ---- context menu -----------------------------------------------------------------------
