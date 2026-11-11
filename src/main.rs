@@ -15,6 +15,7 @@ mod archive;
 mod band;
 mod batch;
 mod bounded;
+mod coldstart;
 mod columns;
 mod commands;
 mod complete;
@@ -105,6 +106,9 @@ fn main() {
     }
     let mut app = window::configure(App::new(spec), window::FIRST);
     window::register(window::FIRST, app.handle());
+    if timed {
+        timing::hold(app.handle());
+    }
     if timing::benching() {
         app = app.open_inactive(); // the bench never takes focus from what the user is doing
     } else if rune::tooling::headless_run().is_none() {

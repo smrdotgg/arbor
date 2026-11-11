@@ -98,6 +98,9 @@ fn native(id: u64) -> Option<WindowHandle> {
 }
 
 fn set_native(id: u64, handle: &WindowHandle) {
+    if id == FIRST {
+        crate::timing::window_created();
+    }
     if let Some(e) = windows().iter_mut().find(|e| e.id == id) {
         e.native = Some(handle.clone());
     }
