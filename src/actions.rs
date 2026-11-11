@@ -217,7 +217,7 @@ impl State {
         let Some(row) = f.selected_row() else { return };
         let at = f.visible[row] as usize;
         let e = &f.entries[at];
-        let (os, label, is_dir) = (e.os.clone(), e.name.clone(), e.is_dir);
+        let (os, label, is_dir) = (e.os.clone(), f.label(e).into_owned(), e.is_dir);
         let stem = match label.rfind('.') {
             Some(i) if i > 0 && !is_dir => i,
             _ => label.len(),
@@ -266,7 +266,7 @@ impl State {
         tx.blur();
         let new = r.edit.text.trim().to_string();
         // The item's own name (in a search, `os` is a path below the root).
-        let from = self.cur().cwd.join(&r.os);
+        let from = self.cur().cwd.join(self.cur().current_os(&r.os));
         let Some(old) = from.file_name().map(|n| n.to_os_string()) else { return };
         if new.is_empty() || new == old.to_string_lossy() {
             return;
@@ -820,7 +820,7 @@ impl State {
         }
         let files: Vec<PathBuf> = {
             let f = self.cur();
-            f.targets().iter().filter(|e| !e.is_dir).map(|e| f.cwd.join(&e.os)).collect()
+            f.targets().iter().filter(|e| !e.is_dir).map(|e| f.path_of(e)).collect()
         };
         self.menu_apps = apps.map(|a| (files, a));
         tx.popup_menu(menu, press, |s: &mut State, picked, tx| {

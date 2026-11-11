@@ -456,16 +456,13 @@ impl Folder {
     }
 
     pub fn target_paths(&self) -> Vec<PathBuf> {
-        self.targets().into_iter().map(|e| self.cwd.join(&e.os)).collect()
+        self.targets().into_iter().map(|e| self.path_of(e)).collect()
     }
 
     /// The targets as items to delete permanently, each with the identity its listing (or the
     /// search's walk) read, so the delete leaves alone anything put at its path since.
     pub fn doomed(&self) -> Vec<crate::ops::Doomed> {
-        self.targets()
-            .into_iter()
-            .map(|e| crate::ops::Doomed { path: self.cwd.join(&e.os), id: e.id, dir: e.is_dir && !e.is_link })
-            .collect()
+        self.targets().into_iter().map(|e| crate::ops::Doomed { path: self.path_of(e), id: e.id, dir: e.is_dir && !e.is_link }).collect()
     }
 
     /// Files a drag out of row `i` carries: the whole selection if the row is in it, else the row.
@@ -473,7 +470,7 @@ impl Folder {
         if self.is_selected(i) {
             self.target_paths()
         } else {
-            self.visible.get(i).map(|&e| self.cwd.join(&self.entries[e as usize].os)).into_iter().collect()
+            self.visible.get(i).map(|&e| self.path_of(&self.entries[e as usize])).into_iter().collect()
         }
     }
 
@@ -484,7 +481,7 @@ impl Folder {
 
     /// Where a drop on folder row `e` goes: into it, as this listing read it.
     pub fn row_dest(&self, e: &Entry) -> crate::ops::Dest {
-        crate::ops::Dest { path: self.cwd.join(&e.os), id: e.id.map(crate::ops::DestId::Item) }
+        crate::ops::Dest { path: self.path_of(e), id: e.id.map(crate::ops::DestId::Item) }
     }
 
     /// Whether this folder is the one at `path` (with identity `id`): the same identity when
@@ -1090,32 +1087,73 @@ impl Folder {
     /// it's now hidden or filtered out (or back); while a reload's worker holds the listing, a
     /// rename beside it ([`Folder::renames`]).
     fn renamed(&mut self, old: &OsStr, new: &OsStr, at: Option<usize>) {
-        let Some(ix) = self.entry_at(old, at) else { return };
         if self.shared() {
-            self.renames.push((old.to_os_string(), new.to_os_string()));
-            self.bump();
+            self.note_rename(old, new);
             return;
         }
+        if let Some(ix) = self.entry_at(old, at) {
+            self.rename_entry(ix, new);
+        }
+    }
+
+    /// A rename beside a listing a worker holds: `old` is the item's name now (its listing's,
+    /// or what an earlier rename beside it made it).
+    fn note_rename(&mut self, old: &OsStr, new: &OsStr) {
+        match self.renames.iter_mut().find(|(_, n)| n == old) {
+            Some(r) => r.1 = new.to_os_string(),
+            None => self.renames.push((old.to_os_string(), new.to_os_string())),
+        }
+        self.bump();
+    }
+
+    /// Entry `ix` is called `new` now, in the listing itself (nobody else holds it).
+    fn rename_entry(&mut self, ix: usize, new: &OsStr) {
         let shown = |f: &Folder, e: &Entry| {
             let q = if f.path_mode() { String::new() } else { f.filter.to_lowercase() };
             (f.show_hidden || !e.hidden) && (q.is_empty() || e.lower.contains(&q))
         };
         let before = shown(self, &self.entries[ix]);
         let e = &mut Arc::make_mut(&mut self.entries)[ix];
+        let was_dot = e.name.starts_with('.');
         e.os = new.to_os_string();
         e.name = new.to_string_lossy().into_owned();
         e.lower = e.name.to_lowercase();
         e.key = format!("f:{}", e.name);
         // A dot hides it, everywhere; other ways of hiding (a flag) come with the fresh read.
-        e.hidden = e.name.starts_with('.') || (e.hidden && !old.to_string_lossy().starts_with('.'));
+        e.hidden = e.name.starts_with('.') || (e.hidden && !was_dot);
         if shown(self, &self.entries[ix]) == before {
             // The same rows: its row shows the new name (its key changed).
             self.bump();
             return;
         }
-        let keep = self.visible.get(self.sel) == Some(&(ix as u32));
-        let cursor = if keep { Some(new.to_os_string()) } else { self.cursor_name() };
-        self.refilter(cursor.as_deref());
+        let keep = if self.visible.get(self.sel) == Some(&(ix as u32)) { Some(new.to_os_string()) } else { self.cursor_name() };
+        self.refilter(keep.as_deref());
+    }
+
+    /// Renames made beside the listing ([`Folder::renames`]) go into it once no worker holds
+    /// it any more (from `State::poll`): from then on it names every item as the disk does.
+    pub(crate) fn absorb_renames(&mut self) -> bool {
+        if self.renames.is_empty() || self.shared() {
+            return false;
+        }
+        for (old, new) in std::mem::take(&mut self.renames) {
+            if let Some(ix) = self.entry_at(&old, None) {
+                self.rename_entry(ix, &new);
+            }
+        }
+        true
+    }
+
+    /// An item's name on disk now: its listing's, or what a rename beside the listing made it
+    /// ([`Folder::renames`]). What every action goes by.
+    pub fn current_os<'a>(&'a self, os: &'a OsStr) -> &'a OsStr {
+        self.renames.iter().rev().find(|(o, _)| o == os).map_or(os, |(_, n)| n.as_os_str())
+    }
+
+    /// Where entry `e` is on disk now ([`Folder::current_os`]): the path every action on it
+    /// takes (with the identity its listing read, which a rename keeps).
+    pub fn path_of(&self, e: &Entry) -> PathBuf {
+        self.cwd.join(self.current_os(&e.os))
     }
 
     /// Items renamed on disk (`(from, to)`, absolute, each within its own folder): shows the
@@ -1142,8 +1180,9 @@ impl Folder {
         }
         // A reload's worker holds the listing: beside it, not in it (see `renames`).
         if self.shared() && !searching {
-            self.renames.extend(map.into_iter().map(|(f, t)| (f.into_os_string(), t.into_os_string())));
-            self.bump();
+            for (f, t) in map {
+                self.note_rename(f.as_os_str(), t.as_os_str());
+            }
             return;
         }
         let moved = |rel: &Path| -> Option<(PathBuf, bool)> {

@@ -616,14 +616,14 @@ impl State {
             let dirs = picked.iter().filter(|e| e.is_dir && !e.is_link).count();
             let size = picked.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
             let name = if picked.len() == 1 { picked[0].name.clone() } else { format!("{} items", picked.len()) };
-            (picked.iter().map(|e| f.cwd.join(&e.os)).collect(), dirs, picked.len() - dirs, size, name)
+            (picked.iter().map(|e| f.path_of(e)).collect(), dirs, picked.len() - dirs, size, name)
         };
         let dir = f.cwd.clone();
         // Folders (not links to them) are walked; selected files count from the listing.
         let walk_roots: Vec<Root> = if picked.is_empty() {
             vec![Root::Here(f.cwd.clone(), f.dir_id)]
         } else {
-            picked.iter().filter(|e| e.is_dir && !e.is_link).map(|e| Root::Picked(f.cwd.join(&e.os), e.id)).collect()
+            picked.iter().filter(|e| e.is_dir && !e.is_link).map(|e| Root::Picked(f.path_of(e), e.id)).collect()
         };
         let known = match picked.as_slice() {
             [e] => Some(Meta {

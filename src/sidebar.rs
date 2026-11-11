@@ -593,7 +593,7 @@ impl State {
     /// selected (from the listing: no disk I/O).
     pub fn add_to_sidebar(&mut self) {
         let f = self.cur();
-        let picked: Vec<PathBuf> = f.targets().iter().filter(|e| e.is_dir).map(|e| f.cwd.join(&e.os)).collect();
+        let picked: Vec<PathBuf> = f.targets().iter().filter(|e| e.is_dir).map(|e| f.path_of(e)).collect();
         let dirs = if picked.is_empty() { vec![f.cwd.clone()] } else { picked };
         self.add_favorites(dirs, None);
     }
@@ -688,7 +688,7 @@ impl State {
         let Some(p) = self.pane(id).filter(|p| p.f.version == version) else { return };
         let f = &p.f;
         let rows = if f.is_selected(i) { f.targets() } else { f.visible.get(i).map(|&e| &f.entries[e as usize]).into_iter().collect() };
-        let dirs: Vec<PathBuf> = rows.iter().filter(|e| e.is_dir).map(|e| f.cwd.join(&e.os)).collect();
+        let dirs: Vec<PathBuf> = rows.iter().filter(|e| e.is_dir).map(|e| f.path_of(e)).collect();
         if dirs.is_empty() {
             self.note = Some("Only folders can go in the sidebar".into());
             return;

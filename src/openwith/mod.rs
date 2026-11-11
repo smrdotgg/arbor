@@ -141,7 +141,7 @@ impl State {
     /// The files the selection holds (folders aren't opened with an app).
     fn open_with_files(&self) -> Vec<PathBuf> {
         let f = self.cur();
-        f.targets().iter().filter(|e| !e.is_dir).map(|e| f.cwd.join(&e.os)).collect()
+        f.targets().iter().filter(|e| !e.is_dir).map(|e| f.path_of(e)).collect()
     }
 
     /// "Open With…": the box listing the apps for the selected files (read on a worker; the box

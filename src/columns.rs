@@ -507,7 +507,7 @@ impl State {
         // its way, what's on the right stays.
         let loading = f.is_loading();
         let single = f.marked.len() <= 1;
-        let want_right = f.selected().filter(|e| single && e.is_dir).map(|e| f.cwd.join(&e.os));
+        let want_right = f.selected().filter(|e| single && e.is_dir).map(|e| f.path_of(e));
         let cols = f.cols.get_or_insert_with(|| {
             changed = true;
             Box::new(Columns::new(PathBuf::new()))

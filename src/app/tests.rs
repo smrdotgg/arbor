@@ -1975,3 +1975,33 @@ fn open_folder_and_pattern_remove_act_on_the_selection() {
     s.cur_mut().apply_matches(all, crate::select::How::Remove);
     assert!(s.cur().targets().is_empty(), "{:?}", s.cur().target_paths());
 }
+
+/// Split on one folder (the panes share its listing), a folder renamed, and another made
+/// under its old name before the panes read the folder again: every action on the row goes
+/// to the renamed folder it shows, never the newcomer at the old name. → opens it.
+#[test]
+fn actions_on_a_renamed_row_go_to_its_new_name_before_the_reload() {
+    let d = folder("renamed-row", 0);
+    std::fs::create_dir(d.join("old")).unwrap();
+    std::fs::write(d.join("other.txt"), "x").unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.run(Cmd::Split, &mut Tx::default());
+    settle_all(&mut s);
+    let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "old").unwrap();
+    s.cur_mut().select(i);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "renamed".into();
+    s.commit_rename(&mut Tx::default());
+    wait_job(&mut s);
+    assert!(d.join("renamed").is_dir());
+    std::fs::create_dir(d.join("old")).unwrap();
+    // Before any read lands: what the row shows, and what it acts on.
+    let f = s.cur();
+    assert_eq!(f.selected().map(|e| f.label(e).into_owned()).as_deref(), Some("renamed"));
+    assert_eq!(s.cur().target_paths(), [d.join("renamed")]);
+    assert_eq!(s.cur().target_checks().items.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), [d.join("renamed")]);
+    s.run(Cmd::Into, &mut Tx::default());
+    settle_all(&mut s);
+    assert_eq!(s.cur().cwd, d.join("renamed"), "opened the folder the row shows");
+}

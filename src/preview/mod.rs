@@ -136,12 +136,13 @@ pub struct Target {
 }
 
 impl Target {
-    fn of(pane: u64, dir: &Path, e: &Entry) -> Target {
+    /// `os`: its name on disk now (`Folder::current_os`).
+    fn of(pane: u64, dir: &Path, e: &Entry, os: &std::ffi::OsStr) -> Target {
         Target {
             pane,
             dir: dir.to_path_buf(),
-            os: e.os.clone(),
-            name: e.name.clone(),
+            os: os.to_os_string(),
+            name: os.to_string_lossy().into_owned(),
             is_dir: e.is_dir,
             is_link: e.is_link,
             size: e.size,
@@ -152,8 +153,8 @@ impl Target {
     /// Whether this is still `e` in pane `pane` showing `dir` (no allocation: it runs every
     /// frame while the panel is open). A changed size or date (a reload after an edit) is a new
     /// target, read again.
-    fn is(&self, pane: u64, dir: &Path, e: &Entry) -> bool {
-        self.pane == pane && self.os == e.os && self.size == e.size && self.mtime_ms == e.mtime_ms && self.dir == dir
+    fn is(&self, pane: u64, dir: &Path, e: &Entry, os: &std::ffi::OsStr) -> bool {
+        self.pane == pane && self.os == os && self.size == e.size && self.mtime_ms == e.mtime_ms && self.dir == dir
     }
 
     pub fn path(&self) -> PathBuf {
@@ -386,9 +387,9 @@ impl State {
         let Some(p) = &mut self.preview else { return info };
         let f = &self.panes[self.active].f;
         let target = match (f.selected(), &p.target) {
-            (Some(e), Some(t)) if t.is(f.id, &f.cwd, e) => return info,
+            (Some(e), Some(t)) if t.is(f.id, &f.cwd, e, f.current_os(&e.os)) => return info,
             (None, None) if p.body == Body::Empty => return info,
-            (e, _) => e.map(|e| Target::of(f.id, &f.cwd, e)),
+            (e, _) => e.map(|e| Target::of(f.id, &f.cwd, e, f.current_os(&e.os))),
         };
         if target.is_some() {
             self.preview_reads += 1;

@@ -123,7 +123,11 @@ Format: date · decision · why · how to undo.
     500,000 to change one name took 136 ms. Showing and landing a rename take under 10 µs there
     now, the item found by its row, not by looking through the folder. Until the reload lands,
     the row still names the old item for actions (refused, as for anything changed since it was
-    read). Undo: `Folder::{labels, renames}`.
+    read). **Every action resolves through it (fifth review)**: an entry's path is
+    `Folder::path_of` (its name now, through a rename beside the listing), with the identity
+    its listing read (a rename keeps it), so a folder made under the old name meanwhile is never
+    what an open, a trash, a copy, a drag or Get Info acts on; and the renames go into the
+    listing as soon as no worker holds it (`absorb_renames`). Undo: `Folder::{labels, renames}`.
   - **Narrow panes (after review):** once every other column is gone, Size narrows to its
     least and then goes, so Name keeps its 180 pt; a search's Folder column gets only what's
     past Name's least. Only on screen: the widths kept are the user's. Undo: `ListCols::fit`.

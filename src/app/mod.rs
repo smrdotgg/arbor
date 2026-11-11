@@ -644,7 +644,7 @@ impl State {
     pub(crate) fn folder_to_open(&self) -> Option<PathBuf> {
         let f = self.cur();
         match f.targets().as_slice() {
-            [e] if e.is_dir && !f.labels.contains_key(&e.os) => Some(f.cwd.join(&e.os)),
+            [e] if e.is_dir && !f.labels.contains_key(&e.os) => Some(f.path_of(e)),
             _ => None,
         }
     }
@@ -823,7 +823,7 @@ impl State {
     /// With several files selected, opens each file.
     pub fn open_selected(&mut self) {
         let f = self.cur();
-        let targets: Vec<(PathBuf, bool)> = f.targets().iter().map(|e| (f.cwd.join(&e.os), e.is_dir)).collect();
+        let targets: Vec<(PathBuf, bool)> = f.targets().iter().map(|e| (f.path_of(e), e.is_dir)).collect();
         if let [(path, true)] = targets.as_slice() {
             let p = path.clone();
             self.go(p, Nav::New, None);
@@ -841,7 +841,7 @@ impl State {
 
     pub fn reveal_selected(&mut self) {
         let f = self.cur();
-        let path = f.selected().map_or_else(|| f.cwd.clone(), |e| f.cwd.join(&e.os));
+        let path = f.selected().map_or_else(|| f.cwd.clone(), |e| f.path_of(e));
         if let Err(err) = fs::reveal(&path) {
             self.note = Some(format!("Couldn't reveal: {err}"));
         }
@@ -865,6 +865,8 @@ impl State {
             if let Some(a) = self.panes[ix].f.loader.take() {
                 changed |= self.land(ix, a, tx);
             }
+            // Renames made beside a listing a worker held go into it once it's free.
+            changed |= self.panes[ix].f.absorb_renames();
         }
         // Free space, asked when a folder's listing landed: only an answer for the folder the
         // active pane shows changes the status bar.
@@ -1290,7 +1292,7 @@ impl State {
     fn rename_made(&mut self) {
         let Some((path, id)) = self.made.take() else { return };
         let f = self.cur();
-        let ours = f.selected().is_some_and(|e| f.cwd.join(&e.os) == path && (id.is_none() || e.id.is_none() || e.id == id));
+        let ours = f.selected().is_some_and(|e| f.path_of(e) == path && (id.is_none() || e.id.is_none() || e.id == id));
         if ours {
             self.start_rename();
         }
@@ -1384,7 +1386,7 @@ impl State {
     /// a slow disk), waiting here at most a frame.
     pub fn show_original(&mut self) {
         let f = self.cur();
-        let Some(link) = f.selected().filter(|e| e.is_link).map(|e| f.cwd.join(&e.os)) else { return };
+        let Some(link) = f.selected().filter(|e| e.is_link).map(|e| f.path_of(e)) else { return };
         let id = crate::folder::next_request();
         self.going_to = Some(id);
         let wait = self.show_wait;
