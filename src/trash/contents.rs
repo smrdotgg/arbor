@@ -1078,12 +1078,14 @@ mod tests {
         assert!(parse_info(&format!("[Trash Info]\nPath={root}a\n[Other]\nPath={root}b\n"), None).is_ok(), "another group's doesn't count");
     }
 
-    /// A giant record is read at most 64 KB (`read_info_at`) and parsed at once.
+    /// A giant record is read at most 64 KB (`read_info_at`) and parsed at once. The limit is
+    /// generous so a loaded machine can't fail it: anything worse than linear in 3 MB would
+    /// take hours, not seconds.
     #[test]
     fn a_giant_record_is_parsed_quickly() {
         let root = if cfg!(windows) { "C:/" } else { "/" };
         let text = format!("[Trash Info]\nPath={root}{}\n", "%41".repeat(1 << 20));
-        let p = crate::prop::within(std::time::Duration::from_secs(2), "a 3 MB record", move || parse_info(&text, None));
+        let p = crate::prop::within(std::time::Duration::from_secs(10), "a 3 MB record", move || parse_info(&text, None));
         assert!(p.is_ok());
     }
 

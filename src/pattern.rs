@@ -21,6 +21,26 @@ pub const MAX_ALTS: usize = 256;
 /// read compiles) is refused rather than left to run for minutes.
 pub const MAX_LEN: usize = 4096;
 
+#[cfg(test)]
+thread_local! {
+    /// Test only: units of matching and parsing work done on this thread, so tests bound the
+    /// work itself, which a busy machine can't stretch as it stretches time.
+    static STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Work counted locally (a character looked at, a loop turned) and added to `STEPS` once, when
+/// dropped: no cost per step, and none at all outside tests.
+struct Work(usize);
+
+impl Drop for Work {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        STEPS.with(|s| s.set(s.get() + self.0 as u64));
+        #[cfg(not(test))]
+        let _ = self.0;
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Case {
     Sensitive,
@@ -112,6 +132,8 @@ impl Fast {
     }
 
     fn matches(&self, s: &str) -> bool {
+        // The string tests are the standard library's, linear in `s`.
+        let mut w = Work(s.len() + 1);
         match self {
             Fast::Exact(x) => s == x,
             Fast::Prefix(x) => s.starts_with(x.as_str()),
@@ -128,6 +150,8 @@ impl Fast {
                         Piece::Char(c) => rest.find(*c).map(|i| i + c.len_utf8()),
                         Piece::Str(x) => rest.find(x.as_str()).map(|i| i + x.len()),
                     };
+                    // Each search starts where the last ended: what it passes over, it never sees again.
+                    w.0 += found.unwrap_or(rest.len()) + 1;
                     match found {
                         Some(end) => rest = &rest[end..],
                         None => return false,
@@ -242,10 +266,12 @@ fn expand_braces(p: &str) -> Result<Vec<String>, String> {
             Some((open, end, commas)) => {
                 let mut from = open + 1;
                 let mut parts = Vec::new();
+                let mut w = Work(0);
                 for c in commas.into_iter().chain([end]) {
                     let mut next: Vec<char> = p[..open].to_vec();
                     next.extend_from_slice(&p[from..c]);
                     next.extend_from_slice(&p[end + 1..]);
+                    w.0 += next.len() + 1;
                     parts.push(next);
                     from = c + 1;
                 }
@@ -264,8 +290,10 @@ fn expand_braces(p: &str) -> Result<Vec<String>, String> {
 /// and its top-level commas.
 fn first_group(p: &[char]) -> Option<(usize, usize, Vec<usize>)> {
     let next = closes(p);
+    let mut w = Work(0);
     let mut i = 0;
     while i < p.len() {
+        w.0 += 1;
         match p[i] {
             '[' => i = class_end(p, &next, i).map_or(i + 1, |e| e + 1),
             '{' => {
@@ -283,7 +311,9 @@ fn first_group(p: &[char]) -> Option<(usize, usize, Vec<usize>)> {
 /// The `}` matching the `{` at `open`, and the top-level commas between them.
 fn brace_end(p: &[char], next: &[usize], open: usize) -> Option<(usize, Vec<usize>)> {
     let (mut depth, mut commas, mut i) = (0, Vec::new(), open + 1);
+    let mut w = Work(0);
     while i < p.len() {
+        w.0 += 1;
         match p[i] {
             '[' => {
                 i = class_end(p, next, i).map_or(i + 1, |e| e + 1);
@@ -304,6 +334,7 @@ fn brace_end(p: &[char], next: &[usize], open: usize) -> Option<(usize, Vec<usiz
 /// where a class ends takes no scan: one that never closes would otherwise make every `[` and
 /// `{` after it look to the end of the pattern again.
 fn closes(p: &[char]) -> Vec<usize> {
+    let _w = Work(p.len() + 1);
     let mut next = vec![usize::MAX; p.len() + 1];
     for j in (0..p.len()).rev() {
         next[j] = if p[j] == ']' { j } else { next[j + 1] };
@@ -331,6 +362,8 @@ fn is_sep(c: char) -> bool {
 fn tokens(p: &str, path: bool) -> Vec<Tok> {
     let chars: Vec<char> = p.chars().collect();
     let next = closes(&chars);
+    // Each turn of the loop consumes at least one character (a class, all of its own).
+    let _w = Work(chars.len() + 1);
     let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
@@ -408,7 +441,9 @@ fn match_name(toks: &[Tok], s: &str, case: Case) -> bool {
     let (mut ti, mut si) = (0usize, 0usize);
     // (token after the last star, where in `s` that star's run ends now)
     let mut back: Option<(usize, usize)> = None;
+    let mut w = Work(0);
     loop {
+        w.0 += 1;
         let c = s[si..].chars().next();
         match (toks.get(ti), c) {
             (Some(Tok::Star | Tok::Deep), _) => {
@@ -441,13 +476,18 @@ fn match_name(toks: &[Tok], s: &str, case: Case) -> bool {
 fn match_name_ascii(toks: &[Tok], s: &[u8], case: Case) -> bool {
     let (mut ti, mut si) = (0usize, 0usize);
     let mut back: Option<(usize, usize)> = None;
+    // Turns of the loop, and bytes the skips look at.
+    let mut w = Work(0);
     loop {
+        w.0 += 1;
         match (toks.get(ti), s.get(si)) {
             (Some(Tok::Star | Tok::Deep), _) => {
                 ti += 1;
                 // A literal next: skip straight to its next occurrence.
                 if let Some(Tok::Lit(c)) = toks.get(ti) {
-                    match s[si..].iter().position(|&b| b == *c as u8) {
+                    let k = s[si..].iter().position(|&b| b == *c as u8);
+                    w.0 += k.unwrap_or(s.len() - si);
+                    match k {
                         Some(k) => si += k,
                         None => return false,
                     }
@@ -467,7 +507,9 @@ fn match_name_ascii(toks: &[Tok], s: &[u8], case: Case) -> bool {
             Some((bt, bs)) if bs < s.len() => {
                 let mut next = bs + 1;
                 if let Some(Tok::Lit(c)) = toks.get(bt) {
-                    match s[next..].iter().position(|&b| b == *c as u8) {
+                    let k = s[next..].iter().position(|&b| b == *c as u8);
+                    w.0 += k.unwrap_or(s.len() - next);
+                    match k {
                         Some(k) => next += k,
                         None => return false,
                     }
@@ -488,10 +530,13 @@ fn match_name_ascii(toks: &[Tok], s: &[u8], case: Case) -> bool {
 /// two rows of memory, and time tokens × length, stopping early once nothing can match.
 fn match_path(toks: &[Tok], s: &[char], case: Case) -> bool {
     let n = s.len();
+    let mut w = Work(2 * (n + 1));
     let mut can = vec![false; n + 1];
     let mut next = vec![false; n + 1];
     can[0] = true;
     for tok in toks {
+        // A pass over the row, and a look for anything still matching.
+        w.0 += 2 * (n + 1);
         match tok {
             // Any run within a folder name: from each reachable point, on to the next separator.
             Tok::Star => {
@@ -695,29 +740,74 @@ mod tests {
         });
     }
 
+    /// Runs `f` and returns its answer and the work it did on this thread.
+    fn counted<T>(f: impl FnOnce() -> T) -> (T, u64) {
+        STEPS.with(|s| s.set(0));
+        let r = f();
+        (r, STEPS.with(|s| s.get()))
+    }
+
+    /// The most work matching `s` against `g` can take: linear in the subject for each
+    /// alternative, never exponential or quadratic in it.
+    ///
+    /// - A name, `t` tokens against `n` bytes: the greedy matchers turn their loop at most
+    ///   `(n + 1)(t + 1) + 1` times, as only the last star is ever gone back to, where it starts
+    ///   (`bs`) never moves back, each going back moves it on, and between two the tokens only go
+    ///   forward. The byte-wise one's skips look at each byte at most once (each starts at or
+    ///   past `bs` and ends where the next `bs` is), and its last skip at most the rest: `2n`.
+    ///   The plain string tests are linear. All within `2(n + 2)(t + 2)`.
+    /// - A path: two passes over a row of `n + 1` per token, and two rows: `2(n + 1)(t + 1)`.
+    fn match_bound(g: &Glob, s: &str) -> u64 {
+        let n = if g.path { s.chars().count() } else { s.len() } as u64;
+        g.alts
+            .iter()
+            .map(|a| {
+                let t = a.toks.len() as u64;
+                if g.path { 2 * (n + 1) * (t + 1) } else { 2 * (n + 2) * (t + 2) }
+            })
+            .sum()
+    }
+
     /// Patterns that make a backtracking matcher take exponential time, and brace bombs: each
-    /// answers within its bound, against names and paths far longer than real ones.
+    /// answers within its bound of work, against names and paths far longer than real ones.
+    /// Work is counted, not timed, so a loaded machine can't fail it; the generous time limits
+    /// only catch a hang.
     #[test]
     fn pathological_globs_are_bounded() {
         use std::time::Duration;
+        let check = |g: &Glob, s: &str, what: &str| {
+            let (hit, steps) = counted(|| g.matches(s));
+            assert!(!hit, "{what}");
+            let bound = match_bound(g, s);
+            assert!(steps <= bound, "{what}: {steps} steps, over the bound of {bound}");
+        };
         let long_a = "a".repeat(10_000);
         let long_path = format!("/{}", vec!["aaaa"; 2_000].join("/"));
-        let t = std::time::Instant::now();
         for pat in ["*a*a*a*a*a*b", "*a*a*a*a*a*a*a*a*a*a*a*a*b*", "?*?*?*?*?*?*?*b", "*[ab]*[ab]*[ab]*[ab]*c", "IMG_*a*a*a*a*b.jpg"] {
             for case in [Case::Sensitive, Case::Insensitive] {
                 let g = Glob::name(pat, case).unwrap();
-                assert!(!g.matches(&long_a), "{pat}");
-                assert!(!g.matches(&format!("{long_a}é")), "{pat}: the general matcher too");
+                check(&g, &long_a, pat);
+                check(&g, &format!("{long_a}é"), &format!("{pat}: the general matcher too"));
             }
         }
         for pat in ["/**a**a**a**a**b", "/*/*/*/*/*/*/b/**", "**/a*a*a*a*b"] {
-            let g = Glob::path(pat, Case::Sensitive).unwrap();
-            assert!(!g.matches(&long_path), "{pat}");
+            check(&Glob::path(pat, Case::Sensitive).unwrap(), &long_path, pat);
         }
-        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
-        // Brace bombs stop at the limit; deep or unclosed braces are quick.
+        // A brace bomb stops at the limit. Each pass over the worklist costs at most `6(L + 1)`
+        // for a pattern of `L` characters (finding where its first group closes, splitting it in
+        // two, and the alternative's tokens). Each split adds one item waiting and each answer
+        // takes one away, and the expansion is refused past `MAX_ALTS` answers or `4 MAX_ALTS`
+        // waiting, so there are at most `6 MAX_ALTS + 2` passes, where all 2³⁰ would be exponential.
         let bomb = "{a,b}".repeat(30);
-        assert!(crate::prop::within(Duration::from_secs(2), "a brace bomb", move || Glob::name(&bomb, Case::Sensitive).is_err()));
+        let bound = (6 * MAX_ALTS as u64 + 2) * 6 * (bomb.len() as u64 + 1);
+        let (refused, steps) =
+            crate::prop::within(Duration::from_secs(10), "a brace bomb", move || counted(|| Glob::name(&bomb, Case::Sensitive).is_err()));
+        assert!(refused);
+        assert!(steps <= bound, "a brace bomb: {steps} steps, over the bound of {bound}");
+        // Deep or unclosed braces and classes take at most `L²`, as `MAX_LEN` says: an unclosed
+        // `{` looks to the end once (`L²/2` for all of them, `L²/4` between classes); each of
+        // `L/2` nested groups is found, split and peeled in three passes over what's left
+        // (`3L²/4`); where a class closes is looked up, not scanned for. Cubic would be `L³`.
         let n = MAX_LEN;
         for (what, pat) in [
             ("deep braces", format!("{}x{}", "{".repeat(n / 2 - 1), "}".repeat(n / 2 - 1))),
@@ -725,11 +815,11 @@ mod tests {
             ("unclosed classes", "[".repeat(n)),
             ("classes and braces", "[{".repeat(n / 2)),
         ] {
-            let t = std::time::Instant::now();
-            crate::prop::within(Duration::from_secs(2), what, move || {
-                let _ = Glob::name(&pat, Case::Sensitive).map(|g| g.matches("x"));
+            let len = pat.chars().count() as u64;
+            let (_, steps) = crate::prop::within(Duration::from_secs(10), what, move || {
+                counted(|| Glob::name(&pat, Case::Sensitive).map(|g| g.matches("x")))
             });
-            assert!(t.elapsed() < Duration::from_millis(500), "{what}: {:?}", t.elapsed());
+            assert!(steps <= len * len, "{what}: {steps} steps, over the bound of {}", len * len);
         }
     }
 
@@ -765,12 +855,15 @@ mod tests {
     /// Found by `pathological_globs_are_bounded`: an unclosed `{` or `[` made each one look for
     /// its end to the end of the pattern, so 80,000 of them took 16 s, and `config.toml` (up to
     /// 1 MB) could hold such a `jump.exclude` for the startup read to compile. A pattern over
-    /// `MAX_LEN` characters is refused now, at once.
+    /// `MAX_LEN` characters is refused now, at once: before any of the parsing work.
     #[test]
     fn an_absurdly_long_pattern_is_refused_at_once() {
         let pat = "{".repeat(1 << 20);
-        let r = crate::prop::within(std::time::Duration::from_secs(1), "a 1 MB pattern", move || Glob::path(&pat, Case::Sensitive).err());
+        let (r, steps) = crate::prop::within(std::time::Duration::from_secs(10), "a 1 MB pattern", move || {
+            counted(|| Glob::path(&pat, Case::Sensitive).err())
+        });
         assert!(r.is_some_and(|e| e.contains("longer than 4096")));
+        assert_eq!(steps, 0, "refused before parsing");
         let c = crate::config::Config::parse(&format!("[jump]\nexclude = [\"{}\"]\n", "[".repeat(100_000)), rune::KeyPlatform::Linux);
         assert!(c.errors.iter().any(|e| e.contains("longer than 4096")), "{:?}", c.errors);
     }
