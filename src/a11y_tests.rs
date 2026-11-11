@@ -2295,8 +2295,10 @@ fn the_header_columns_menu_and_status_tree() {
     let mut rows = Vec::new();
     all(find(&tree, "list-0").unwrap(), "list-box-option", &mut rows);
     let notes = rows.iter().find(|r| r["name"].as_str().is_some_and(|n| n.starts_with("notes.txt"))).unwrap();
-    #[cfg(unix)]
-    assert!(notes["name"].as_str().unwrap().contains("-rw"), "{notes}");
+    // Its permissions (Unix, as `ls -l`) or attributes (Windows, as Explorer: a new file is
+    // ready for archiving).
+    let perms = if cfg!(windows) { " A" } else { "-rw" };
+    assert!(notes["name"].as_str().unwrap().contains(perms), "{notes}");
     // The header's menu.
     rt.update(|s, tx| {
         let items = s.header_menu_items();
