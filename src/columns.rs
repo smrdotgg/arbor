@@ -551,23 +551,37 @@ impl State {
         changed
     }
 
-    /// Going to `path` in the active pane, when it's a column on screen with its listing: the
-    /// column becomes the active folder now, from that listing (no read), landing as a read
-    /// would ([`State::flush_columns`]: history, selection, scroll, title). False when it isn't
-    /// one (the folder is read as usual).
+    /// Going to `path` in the active pane, when it's one of its columns: the column becomes the
+    /// active folder now. With its listing on screen, from that listing (no read), landing as a
+    /// read would ([`State::flush_columns`]: history, selection, scroll, title). Without one
+    /// (its read on its way, off screen, failed), empty and loading its own read, so nothing
+    /// selected in another folder stays what actions act on. False when it isn't a column (the
+    /// folder is read as usual).
     pub(crate) fn adopt_column(&mut self, path: &Path, nav: Nav, select: &[OsString]) -> bool {
         let id = self.cur().id;
+        let waker = self.waker.clone();
         let f = self.cur_mut();
         if f.view != ViewMode::Columns || f.searching() {
             return false;
         }
         let Some(cols) = f.cols.as_mut() else { return false };
-        let found = cols.left.iter().position(|c| c.path == path && c.listed());
-        let col = match found {
+        let col = match cols.left.iter().position(|c| c.path == path) {
             Some(k) => cols.left.remove(k),
-            None if cols.right.as_ref().is_some_and(|c| c.path == path && c.listed()) => cols.right.take().expect("checked just above"),
+            None if cols.right.as_ref().is_some_and(|c| c.path == path) => cols.right.take().expect("checked just above"),
             None => return false,
         };
+        if !col.listed() {
+            let (old, entries, old_id) = f.enter_unread(col.path.clone(), nav, select.to_vec(), col.dir_id);
+            if !entries.is_empty()
+                && let Some(cols) = f.cols.as_mut()
+            {
+                let spare = Column::ready(old, entries, old_id, f.sort, f.show_hidden, waker.as_ref());
+                cols.spare.push(spare);
+            }
+            self.history.record(path);
+            self.note = None;
+            return true;
+        }
         let req = f.pending_for(path.to_path_buf(), nav, select.to_vec());
         let sort = col.sort;
         let mut col = col;
@@ -676,6 +690,48 @@ fn reveal_of(c: &Column) -> Option<(String, String)> {
 }
 
 impl Folder {
+    /// Shows `path` at once, empty, its read asked for: a column without a listing made active
+    /// ([`State::adopt_column`]). A navigation (`nav`'s history now), landing as a reload of
+    /// the folder already shown, `select` selected. Gives back the folder left, its listing
+    /// and identity, for the column it becomes.
+    pub(crate) fn enter_unread(
+        &mut self,
+        path: PathBuf,
+        nav: Nav,
+        select: Vec<OsString>,
+        dir_id: Option<crate::noclobber::FileId>,
+    ) -> (PathBuf, Vec<Entry>, Option<crate::noclobber::FileId>) {
+        let old = std::mem::replace(&mut self.cwd, path.clone());
+        match nav {
+            Nav::New => {
+                self.back.push(old.clone());
+                self.fwd.clear();
+            }
+            Nav::Back => {
+                self.back.pop();
+                self.fwd.push(old.clone());
+            }
+            Nav::Forward => {
+                self.fwd.pop();
+                self.back.push(old.clone());
+            }
+            Nav::Reload | Nav::Show | Nav::Fresh => {}
+        }
+        let entries = std::mem::take(&mut self.entries);
+        let old_id = std::mem::replace(&mut self.dir_id, dir_id);
+        self.visible.clear();
+        self.marked.clear();
+        self.sel = 0;
+        self.anchor = 0;
+        self.filter.clear();
+        self.goto = false;
+        self.drop_target = None;
+        self.now = crate::folder::now();
+        self.bump();
+        self.request(path, Nav::Reload, select, false);
+        (old, entries, old_id)
+    }
+
     /// The folder is about to show `path`'s listing from a column ([`State::adopt_column`]):
     /// a request like any read's, but with nothing sent to a worker; its answer is in hand.
     pub(crate) fn pending_for(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>) -> u64 {

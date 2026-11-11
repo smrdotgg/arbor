@@ -1530,3 +1530,47 @@ fn the_column_view_at_rest_draws_nothing() {
     assert!(busy.is_empty(), "still drawing after: {busy:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A press in a column whose read is still on its way makes that column the active one at
+/// once, empty and loading, so nothing selected in another column stays the target: Trash has
+/// nothing to act on (it trashed the folder selected before, review of 7b3a373). The listing
+/// lands later with the item pressed selected.
+#[test]
+fn a_press_in_an_unread_column_leaves_nothing_else_actionable() {
+    let d = nested("unread-press");
+    let mut rt = runtime(&d);
+    let (started, wait_started) = std::sync::mpsc::channel();
+    let (go, wait_go) = std::sync::mpsc::channel();
+    let (done, _) = std::sync::mpsc::channel();
+    crate::fs::read_hook::GATES.lock().unwrap().push(crate::fs::read_hook::Gate {
+        path: d.join("Docs"),
+        started,
+        go: Some(wait_go),
+        done,
+        seen: 0,
+    });
+    run(&mut rt, Cmd::AsColumns);
+    wait_started.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let c = rt.state.cur().cols.as_ref().unwrap().right.as_ref().unwrap();
+    assert_eq!(c.load, crate::columns::Load::Loading);
+    let b = rect_of(&rt, &c.key()).unwrap();
+    let (x, y) = (b[0] + 50.0, b[1] + 100.0);
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"), "the pressed column is the active folder at once");
+    assert!(rt.state.cur().is_loading() && rt.state.cur().visible.is_empty());
+    assert!(rt.state.target_paths().is_empty(), "nothing from the folder before stays selected");
+    for cmd in [Cmd::Trash, Cmd::Delete, Cmd::Rename, Cmd::Duplicate, Cmd::Cut] {
+        assert!(rt.state.unavailable(cmd).is_some(), "{cmd:?} has nothing to act on");
+    }
+    assert_eq!(rt.state.cur().back, std::slice::from_ref(&d), "a navigation: ⌘[ goes back");
+    go.send(()).unwrap();
+    until(&mut rt, |s| !s.cur().is_loading());
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"));
+    assert_eq!(rt.state.cur().visible.len(), 2, "Work and readme.txt landed");
+    assert!(d.join("Docs").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
