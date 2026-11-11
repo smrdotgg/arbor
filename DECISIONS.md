@@ -38,7 +38,8 @@ Format: date · decision · why · how to undo.
     link's own, as `ls -l` shows it) or the record's attributes, a `u32` that sits in the
     padding beside the flags. No call more per entry and no bigger an entry, so the listing
     pays nothing for them, hidden or shown (a first version stored the birth time too: 16
-    bytes more per entry, about 1 ms on a 10k read). **Extension stays though Kind is the
+    bytes more per entry; its cost on a 10k read was within this host's noise, but a test now
+    holds `Entry` to its old size). **Extension stays though Kind is the
     extension today** (Kind says "Folder"/"File" too); asked for, off by default, free.
     Its header sorts as Kind does (same order); Permissions doesn't sort; Date Created adds
     "Sort by Date Created" and `sort = "created"`. Undo: `listcols::Field`.

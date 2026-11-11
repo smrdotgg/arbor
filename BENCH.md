@@ -71,8 +71,8 @@ without allocating.
 What could cost the default path: two fields a listing reads per entry (Date Created, the
 mode), the header's resize strips, a free-space read per listing, the selection's size in the
 status bar. Date Created is read from each entry's identity (its birth time) rather than stored
-again, and the mode sits in padding: `size_of::<Entry>()` is 256 bytes, as on main (a first
-version stored the birth time too, 272 bytes). The free space is one `statvfs` on another worker,
+again, and the mode sits in padding: `size_of::<Entry>()` is what it was on main (256 bytes on Linux
+and macOS, 272 on Windows; a first version stored the birth time too, 16 bytes more). The free space is one `statvfs` on another worker,
 asked with the listing, never waited for. The selection's size is worked out once per selection.
 
 tabot-dev (Xeon 8375C, 4 vCPU), release builds, main at 56145e1 ("base") against the branch,
