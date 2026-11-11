@@ -265,6 +265,8 @@ pub(crate) enum PathKind {
     Missing,
     /// Show Original: the item a symbolic link points at, there to select.
     Original,
+    /// Show Original: the same, a hidden item (a dot name, or Windows' hidden attribute).
+    HiddenOriginal,
     /// Show Original: the link points at nothing (or couldn't be read).
     Broken,
 }
@@ -292,10 +294,10 @@ pub(crate) fn original(link: &Path) -> (PathBuf, PathKind) {
     } else {
         Some(lexical(&abs))
     };
-    match resolved {
-        Some(p) if p.symlink_metadata().is_ok() => (p, PathKind::Original),
-        _ => (abs, PathKind::Broken),
-    }
+    let Some((p, m)) = resolved.and_then(|p| p.symlink_metadata().ok().map(|m| (p, m))) else { return (abs, PathKind::Broken) };
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let kind = if fs::is_hidden(&name, Some(&m)) { PathKind::HiddenOriginal } else { PathKind::Original };
+    (p, kind)
 }
 
 /// `p` with `.` and `..` taken out by their spelling.
@@ -1053,13 +1055,27 @@ impl State {
                 }
             }
             PathKind::Missing => self.note = Some(format!("No such folder: {}", path.display())),
-            PathKind::Original => match (path.parent(), path.file_name()) {
-                (Some(dir), Some(name)) if dir == self.cur().cwd && !self.cur().searching() => {
-                    self.reload_selecting(vec![name.to_os_string()], false);
+            PathKind::Original | PathKind::HiddenOriginal => {
+                // Nothing on screen may hide it: a filter goes (a navigation clears it too),
+                // and a hidden original turns hidden files on.
+                if kind == PathKind::HiddenOriginal && !self.show_hidden {
+                    self.toggle_hidden();
+                    self.note = Some(format!(
+                        "Showing hidden files: the original, “{}”, is hidden",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    ));
                 }
-                (Some(dir), Some(name)) => self.go(dir.to_path_buf(), Nav::New, Some(name.to_os_string())),
-                _ => self.go(path, Nav::New, None),
-            },
+                let f = self.cur_mut();
+                f.filter.clear();
+                f.goto = false;
+                match (path.parent(), path.file_name()) {
+                    (Some(dir), Some(name)) if dir == self.cur().cwd && !self.cur().searching() => {
+                        self.reload_selecting(vec![name.to_os_string()], false);
+                    }
+                    (Some(dir), Some(name)) => self.go(dir.to_path_buf(), Nav::New, Some(name.to_os_string())),
+                    _ => self.go(path, Nav::New, None),
+                }
+            }
             PathKind::Broken => self.note = Some(format!("The original isn't there: {}", fs::pretty(&path))),
         }
     }

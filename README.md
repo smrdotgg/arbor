@@ -761,7 +761,8 @@ administrator); without it, or on a drive with no links (FAT), Arbor makes a sho
 
 **Show Original** (palette, and the context menu of a symbolic link) selects what the link
 points at: in place when it's in the same folder, else in its folder in the same pane (⌘[ comes
-back). A link to nothing says the original isn't there. Not for Windows shortcuts.
+back), clearing a filter that would hide it and showing hidden files when it's hidden. A link
+to nothing says the original isn't there. Not for Windows shortcuts.
 
 ### Search in This Folder
 

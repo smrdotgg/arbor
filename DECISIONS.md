@@ -71,7 +71,9 @@ Format: date · decision · why · how to undo.
     read on the go-to worker with the usual one-frame wait; a target is used as written unless it
     has `.` or `..`, which are resolved through the real folders on Unix (as the kernel follows
     them) and by spelling on Windows. Symbolic links only,
-    not `.lnk` shortcuts. It's in an item's context menu only on a link. Undo:
+    not `.lnk` shortcuts. It's in an item's context menu only on a link.
+    Nothing on screen may hide the original (after review): the pane's filter is cleared, and a
+    hidden original turns hidden files on (for every pane, as ⌘. does), saying so. Undo:
     `State::show_original`, `app::original`.
 
 - **2026-11-11 · The idle list view's endless frames (since 7cd20cb): the rows hear their

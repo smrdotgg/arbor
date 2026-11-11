@@ -1062,3 +1062,49 @@ fn new_file_starts_no_rename_on_a_row_that_isnt_it() {
     assert!(s.rename.is_none(), "renaming {:?}", s.rename.as_ref().map(|r| r.os.clone()));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The review's case: Show Original under a filter that hides the original ("rl" shows the
+/// link alone) left the link selected. The filter is cleared and the original selected; a
+/// hidden original turns hidden files on (and says so), in this folder or another.
+#[cfg(unix)]
+#[test]
+fn show_original_clears_a_filter_and_shows_a_hidden_original() {
+    let d = folder("original-filter", 0);
+    std::fs::write(d.join("report.txt"), "r").unwrap();
+    std::fs::write(d.join(".secret"), "s").unwrap();
+    std::fs::create_dir(d.join("sub")).unwrap();
+    std::fs::write(d.join("sub/.deep"), "d").unwrap();
+    std::os::unix::fs::symlink(d.join("report.txt"), d.join("rlink")).unwrap();
+    std::os::unix::fs::symlink(d.join(".secret"), d.join("slink")).unwrap();
+    std::os::unix::fs::symlink(d.join("sub/.deep"), d.join("dlink")).unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let mut tx = Tx::default();
+    assert!(!s.show_hidden);
+    s.cur_mut().type_filter("rl");
+    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("rlink"));
+    s.run(Cmd::ShowOriginal, &mut tx);
+    settle_all(&mut s);
+    assert_eq!(s.cur().filter, "", "the filter that hid it is cleared");
+    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("report.txt"));
+    // Hidden, here.
+    let pick = |s: &mut State, name: &str| {
+        let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == name).unwrap();
+        s.cur_mut().select(i);
+    };
+    pick(&mut s, "slink");
+    s.run(Cmd::ShowOriginal, &mut tx);
+    settle_all(&mut s);
+    assert!(s.show_hidden, "hidden files are shown to show it");
+    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some(".secret"));
+    assert!(s.note.as_deref().is_some_and(|n| n.contains("hidden")), "{:?}", s.note);
+    // Hidden, in another folder.
+    s.toggle_hidden();
+    settle_all(&mut s);
+    pick(&mut s, "dlink");
+    s.run(Cmd::ShowOriginal, &mut tx);
+    settle_all(&mut s);
+    assert_eq!(s.cur().cwd, d.join("sub"));
+    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some(".deep"));
+    let _ = std::fs::remove_dir_all(&d);
+}
