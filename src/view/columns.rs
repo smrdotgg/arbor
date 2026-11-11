@@ -140,7 +140,10 @@ fn other_column(column: &Column, c: Ctx, w: f32) -> El {
         })
         .on_drop_files(move |s: &mut State, files, tx| {
             tx.instant();
-            s.drop_files(files, drop_in.clone(), tx);
+            // Into the folder this column listed, checked on the worker: a folder put at its
+            // path since is refused.
+            let listed = column_of(s, id, &drop_in).and_then(|c| c.dir_id);
+            s.drop_into(files, drop_in.clone(), listed, Default::default(), tx);
         });
     match &col.load {
         Load::Ready if col.visible.is_empty() => base.center().child(text("Empty folder").font(SMALL).color(l.t.text_secondary)),

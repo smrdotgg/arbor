@@ -1595,3 +1595,37 @@ fn quick_presses_in_another_column_select_the_last_one() {
     assert_eq!(rt.state.target_paths(), [d.join("Docs/readme.txt")]);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Files dropped on a column go into the folder that column listed, or nowhere: one put in its
+/// place since (moved away, another made with its name) is refused on the worker, as a paste
+/// into a replaced folder is, and nothing moves.
+#[test]
+fn a_drop_on_a_column_refuses_a_replaced_folder() {
+    let d = nested("replaced-dest");
+    let mut rt = runtime(&d);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    let c = rt.state.cur().cols.as_ref().unwrap().right.as_ref().unwrap();
+    assert!(c.dir_id.is_some(), "its identity, from its listing");
+    let b = rect_of(&rt, &c.key()).unwrap();
+    std::fs::rename(d.join("Docs"), d.join("Docs-away")).unwrap();
+    std::fs::create_dir(d.join("Docs")).unwrap();
+    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 50.0, b[1] + 150.0)));
+    rt.frame(0.0);
+    until(&mut rt, |s| s.job.is_none());
+    assert!(d.join("top.txt").exists(), "nothing moved");
+    assert!(!d.join("Docs/top.txt").exists() && !d.join("Docs-away/top.txt").exists());
+    assert!(
+        rt.state.note.as_deref().is_some_and(|n| n.starts_with("Nothing was dropped") && n.contains("another folder now")),
+        "{:?}",
+        rt.state.note
+    );
+    // The same drop on a column that's still its folder goes in.
+    std::fs::remove_dir(d.join("Docs")).unwrap();
+    std::fs::rename(d.join("Docs-away"), d.join("Docs")).unwrap();
+    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 50.0, b[1] + 150.0)));
+    rt.frame(0.0);
+    until(&mut rt, |s| s.job.is_none());
+    assert!(d.join("Docs/top.txt").exists(), "{:?}", rt.state.note);
+    let _ = std::fs::remove_dir_all(&d);
+}

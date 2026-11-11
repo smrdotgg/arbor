@@ -95,7 +95,7 @@ impl State {
         let expect = ours.map(|c| c.expect.clone()).unwrap_or_default();
         let op = if move_requested || was_cut { Op::Move { sources: files, dest } } else { Op::Copy { sources: files, dest } };
         let op = checked(op, expect);
-        if self.start_into(op, dest_id) && was_cut {
+        if self.start_into(op, dest_id.map(|id| (id, "pasted"))) && was_cut {
             self.clip = None;
         }
     }
@@ -266,8 +266,8 @@ impl State {
     }
 
     /// [`State::start`], for a copy or move into a folder that must still be the one with
-    /// identity `dest_id` when the worker starts.
-    pub fn start_into(&mut self, op: Op, dest_id: Option<crate::noclobber::FileId>) -> bool {
+    /// identity `dest_id` when the worker starts (with the verb its refusal says).
+    pub fn start_into(&mut self, op: Op, dest_id: Option<(crate::noclobber::FileId, &'static str)>) -> bool {
         if self.job.is_some() {
             self.note = Some("Still working on the last operation (Esc cancels it)".into());
             return false;
@@ -476,8 +476,25 @@ impl State {
     /// [`State::drop_files`] for rows dragged from a pane, each checked against the identity
     /// its listing or the walk saw.
     pub(crate) fn drop_checked(&mut self, files: &[PathBuf], into: PathBuf, expect: ops::Checks, tx: &mut Tx) {
+        self.drop_into(files, into, None, expect, tx);
+    }
+
+    /// [`State::drop_files`] into a folder that must still be the one with identity `into_id`
+    /// (when known) as the worker starts: a column's, from the listing it shows. One put in its
+    /// place since is refused, as a paste into it would be.
+    pub(crate) fn drop_into(
+        &mut self,
+        files: &[PathBuf],
+        into: PathBuf,
+        into_id: Option<crate::noclobber::FileId>,
+        expect: ops::Checks,
+        tx: &mut Tx,
+    ) {
         for p in &mut self.panes {
             p.f.drop_target = None;
+            if let Some(cols) = p.f.cols.as_mut() {
+                cols.drop_target = None;
+            }
         }
         let files: Vec<PathBuf> = files.iter().filter(|f| f.parent() != Some(into.as_path()) || tx.mods().alt).cloned().collect();
         if files.is_empty() {
@@ -485,7 +502,7 @@ impl State {
         }
         let copy = tx.mods().alt || !files.iter().all(|f| same_disk(f, &into));
         let op = if copy { Op::Copy { sources: files, dest: into } } else { Op::Move { sources: files, dest: into } };
-        self.start(checked(op, expect));
+        self.start_into(checked(op, expect), into_id.map(|id| (id, "dropped")));
     }
 
     // ---- context menu -----------------------------------------------------------------------

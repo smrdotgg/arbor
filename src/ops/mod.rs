@@ -376,10 +376,11 @@ const TRASH: TrashFn = tests::fake_trash;
 /// Runs `op` on a worker thread; its outcome comes back through [`Running::take`].
 ///
 /// With `dest_id`, a copy or move goes only into the folder the user chose as the one with that
-/// identity (a paste, asked for before the clipboard answered): if the folder at its `dest`
-/// isn't that one when the worker starts (renamed away and another made at its path, or gone),
-/// it refuses before touching anything.
-pub fn start(op: Op, dest_id: Option<noclobber::FileId>, waker: Option<rune::Waker>) -> Running {
+/// identity (a paste, asked for before the clipboard answered; a drop on a column): if the
+/// folder at its `dest` isn't that one when the worker starts (renamed away and another made
+/// at its path, or gone), it refuses before touching anything, saying "Nothing was" and the
+/// verb given with it ("pasted", "dropped").
+pub fn start(op: Op, dest_id: Option<(noclobber::FileId, &'static str)>, waker: Option<rune::Waker>) -> Running {
     let progress = Arc::new(Progress::default());
     let done = Arc::new(Mutex::new(None));
     let verb = op.verb();
