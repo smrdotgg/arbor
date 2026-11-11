@@ -356,43 +356,48 @@ pub fn check_size(total: u64, archive_len: u64) -> Result<(), Error> {
     Ok(())
 }
 
-/// Refuses an archive with a link that leads out of the folder: an absolute target, one whose
-/// `..`s climb above the folder from where the link is, or one that goes through another link
-/// of the archive (whose own target could put the rest anywhere). Names are compared loosely
-/// for that (ASCII case aside, anything else matching anything), since the disk may ignore case
-/// or Unicode normalization.
+/// Refuses an archive with a link whose target could lead out of the folder ([`link_target`]).
 fn check_links(items: &[Planned]) -> Result<(), Error> {
-    let loose = |s: &str| s.chars().map(|c| if c.is_ascii() { c.to_ascii_lowercase() } else { '?' }).collect::<String>();
-    let links: std::collections::HashSet<Vec<String>> =
-        items.iter().filter(|i| matches!(i.kind, Kind::Link(_))).map(|i| i.rel.iter().map(|s| loose(s)).collect()).collect();
     for i in items {
         let Kind::Link(target) = &i.kind else { continue };
-        let name = i.rel.join("/");
-        let out = |why: &str| Error::Refused(format!("the link “{name}” {why}"));
-        if target.is_empty() || target.contains('\0') {
-            return Err(out("has no usable target"));
+        if let Err(why) = link_target(i.rel.len() - 1, target) {
+            return Err(Error::Refused(format!("the link “{}” {why}", i.rel.join("/"))));
         }
-        if target.len() > limits::META {
-            return Err(out("has a target too long to be real"));
+    }
+    Ok(())
+}
+
+/// Whether a link `depth` folders down inside the folder made may have `target`, by the target
+/// alone, never by the names of other entries (which can be renamed when they're made, or
+/// spelled differently by the disk): it must be relative, its `..` parts may only come first,
+/// and there may be no more of them than `depth`. Empty and `.` parts are nothing. Such a
+/// target leads to the link's own folder or one of the folders holding it, then down by name,
+/// so it stays inside even through another link of the archive, which keeps to the same rule
+/// (the folders above a link are real folders: `out.rs` makes them without following
+/// anything, and makes links last).
+pub fn link_target(depth: usize, target: &str) -> Result<(), String> {
+    if target.is_empty() || target.contains('\0') {
+        return Err("has no usable target".into());
+    }
+    if target.len() > limits::META {
+        return Err("has a target too long to be real".into());
+    }
+    let shown = || target.chars().take(80).collect::<String>();
+    let b = target.as_bytes();
+    if target.starts_with(['/', '\\']) || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':') {
+        return Err(format!("points outside the folder (to “{}”)", shown()));
+    }
+    let (mut up, mut down) = (0, false);
+    for part in target.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." if down => return Err(format!("goes down and back up (“{}”), which Arbor doesn't follow", shown())),
+            ".." => up += 1,
+            _ => down = true,
         }
-        let b = target.as_bytes();
-        if target.starts_with(['/', '\\']) || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':') {
-            return Err(out(&format!("points outside the folder (to “{target}”)")));
-        }
-        let mut at: Vec<String> = i.rel[..i.rel.len() - 1].iter().map(|s| loose(s)).collect();
-        let steps: Vec<&str> = target.split(['/', '\\']).filter(|s| !s.is_empty() && *s != ".").collect();
-        for (n, step) in steps.iter().enumerate() {
-            if *step == ".." {
-                if at.pop().is_none() {
-                    return Err(out(&format!("points outside the folder (to “{target}”)")));
-                }
-                continue;
-            }
-            at.push(loose(step));
-            if n + 1 < steps.len() && links.contains(&at) {
-                return Err(out(&format!("points through another link (“{target}”)")));
-            }
-        }
+    }
+    if up > depth {
+        return Err(format!("points outside the folder (to “{}”)", shown()));
     }
     Ok(())
 }

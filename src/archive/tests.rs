@@ -116,12 +116,15 @@ fn links_that_leave_the_folder_are_refused() {
     // The top folder is the folder made: "../x" from inside it is outside.
     let why = refused(plan("Photos.zip", 100, &[dir("Photos/"), link("Photos/l", "../x")], Linux));
     assert!(why.contains("outside"), "{why}");
-    // Through another link the archive makes, whose target could put the rest anywhere; names
-    // compared loosely (a disk may ignore case).
-    for to in ["x/y/l/../..", "x/y/L/../..", "x/y/l/z"] {
+    // Down and back up: never followed, whatever the names on the way are (they may be links,
+    // or renamed when made).
+    for to in ["x/y/l/../..", "x/y/L/../..", "a/./../b", "a/b/../../.."] {
         let why = refused(plan("a.zip", 100, &[dir("x/y/"), link("x/y/l", ".."), link("m", to), file("f", 1)], Linux));
-        assert!(why.contains("through another link"), "{to}: {why}");
+        assert!(why.contains("goes down and back up"), "{to}: {why}");
     }
+    // Down through another link of the archive: that link keeps to the same rule, so this stays
+    // inside.
+    assert!(plan("a.zip", 100, &[dir("x/y/"), link("x/y/l", ".."), link("m", "x/y/l/z"), file("f", 1)], Linux).is_ok());
     // Links that stay inside are fine.
     let p = plan(
         "a.zip",
@@ -141,6 +144,20 @@ fn links_that_leave_the_folder_are_refused() {
     let p = plan("a.zip", 100, &[file("f", 1), link("l", "f")], Windows).unwrap();
     assert_eq!(p.items.len(), 1);
     assert!(p.notes.iter().any(|n| n.contains("links aren't extracted on Windows")), "{:?}", p.notes);
+}
+
+/// The review's case: a folder `a/b/c/Y`, a link `a/b/c/Y → ../../..` (which gets the free name
+/// "Y 2" when it's made, the folder having taken "Y"), and a link through the renamed one that
+/// climbs four folders above the destination. Checked by names, it passed (the names didn't
+/// match); by the target alone, it goes down and back up.
+#[test]
+fn a_link_through_a_renamed_link_is_refused() {
+    let entries = [dir("a/b/c/Y/"), link("a/b/c/Y", "../../.."), link("X", "a/b/c/Y 2/../../../../in1"), file("f", 1)];
+    let why = refused(plan("evil.zip", 100, &entries, Linux));
+    assert!(why.contains("“X”") && why.contains("down and back up"), "{why}");
+    assert!(link_target(3, "../../..").is_ok());
+    assert!(link_target(2, "../../..").is_err());
+    assert!(link_target(0, "./.").is_ok());
 }
 
 #[test]

@@ -255,6 +255,49 @@ fn nothing_is_written_through_a_link_the_archive_makes() {
     assert!(o.notes.iter().any(|n| n.contains("free ones")), "{:?}", o.notes);
 }
 
+/// The review's escape, end to end: nothing is made, and nothing four folders up.
+#[cfg(unix)]
+#[test]
+fn a_link_through_a_renamed_link_never_leads_outside() {
+    let base = tmp("renamed-link");
+    let d = base.join("1/2/3/4");
+    fs::create_dir_all(&d).unwrap();
+    let zip = d.join("evil.zip");
+    zip_at(&zip, |w| {
+        w.dir(b"a/b/c/Y/", true, None, 0o755).unwrap();
+        w.link(b"a/b/c/Y", true, b"../../..", None).unwrap();
+        w.link(b"X", true, b"a/b/c/Y 2/../../../../in1", None).unwrap();
+        add_file(w, &base, "f", b"f");
+    });
+    let o = extract(&zip);
+    assert!(o.errors.first().is_some_and(|e| e.contains("down and back up")), "{:?}", o.errors);
+    assert_eq!(names(&d), ["evil.zip"]);
+}
+
+/// A link another app put in the destination while it was extracting is never gone through by
+/// a link the archive makes.
+#[cfg(unix)]
+#[test]
+fn a_link_through_a_foreign_link_is_refused() {
+    let d = tmp("foreign-link");
+    let zip = d.join("pack.zip");
+    zip_at(&zip, |w| {
+        add_file(w, &d, "f", b"f");
+        w.link(b"l", true, b"planted/x", None).unwrap();
+    });
+    let hooks = Hooks {
+        after_made: Some(Box::new(|p: &Path| {
+            if p.ends_with("pack") {
+                std::os::unix::fs::symlink("/", p.join("planted")).unwrap();
+            }
+        })),
+        ..Hooks::default()
+    };
+    let o = hooked(Op::Extract { archives: vec![zip] }, hooks);
+    assert!(o.errors.first().is_some_and(|e| e.contains("a link this archive didn't make")), "{:?}", o.errors);
+    assert!(!d.join("pack/l").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn only_the_owners_permission_bits_are_kept() {

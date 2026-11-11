@@ -202,10 +202,13 @@ mod imp {
         }
 
         /// A symbolic link at `rel` to `target` (checked by `plan`), under a free name if it's
-        /// taken; whether it got one.
+        /// taken; whether it got one. Refused when the target's path, walked from the link's
+        /// folder without following anything, meets a link this extraction didn't make (another
+        /// app's, put there while it ran).
         pub fn link(&mut self, rel: &[String], target: &str, mtime: Option<SystemTime>) -> Result<bool, Error> {
             let (name, dirs) = rel.split_last().expect("a name");
             let dir = self.enter(dirs)?;
+            self.walk_target(dir, target).map_err(|why| Error::Refused(format!("the link “{}” {why}", rel.join("/"))))?;
             let t = cname(target)?;
             for n in 1..=TRIES {
                 let try_name = if n == 1 { name.clone() } else { variant(name, n, false) };
@@ -230,6 +233,36 @@ mod imp {
                 }
             }
             Err(Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, format!("every free name for “{name}” was taken"))))
+        }
+
+        /// Walks `target` from open folder `dir` (`..` up, names down, never following a link):
+        /// fine when it ends, meets something missing or a file, or reaches a link this
+        /// extraction made (itself checked the same way); an error when a part is a link it
+        /// didn't make.
+        fn walk_target(&self, dir: i32, target: &str) -> Result<(), String> {
+            let parts: Vec<&str> = target.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
+            let Some((_, through)) = parts.split_last() else { return Ok(()) };
+            let mut held: Option<OwnedFd> = None;
+            for part in through {
+                let at = held.as_ref().map_or(dir, |f| f.as_raw_fd());
+                let Ok(c) = cname(part) else { return Ok(()) };
+                if *part != ".." {
+                    let Ok(st) = crate::dirfd::stat_at_raw(at, &c) else { return Ok(()) };
+                    if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                        let id = crate::dirfd::node(&st);
+                        let ours = self.made.iter().any(|m| !m.dir && m.id == Some(id) && m.meta.file_type().is_symlink());
+                        return if ours { Ok(()) } else { Err(format!("goes through “{part}”, a link this archive didn't make")) };
+                    }
+                    if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+                        return Ok(());
+                    }
+                }
+                match open_dir(at, &c, false) {
+                    Ok(fd) => held = Some(fd),
+                    Err(_) => return Ok(()),
+                }
+            }
+            Ok(())
         }
 
         /// Sets the modified time of folder `rel` (the root when empty).
