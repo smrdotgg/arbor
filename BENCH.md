@@ -110,6 +110,21 @@ is in line with the icon view's (milestone 16: 6.2 ms on a quiet machine, when t
 | Columns: End onto a folder (a read) | — | 2.30 ms |
 | List view: the frame landing the same 10k listing (its read left out) | 10.39 ms | 7.67 ms |
 
+After the second review, on the Mac (MacBook Pro, M4 Pro; headless over ssh, CPU only, no
+GPU: `cargo test --release -- --ignored --nocapture --test-threads=1 column_cost frame_cost`),
+which keeps Arbor's own cost apart from tabot-dev's lavapipe and its load (16 at times):
+
+| Measure (median, p95) | 1k entries | 10k | 30k |
+| --- | --- | --- | --- |
+| Columns: ← out of the folder | 0.45, 0.48 ms | 0.45, 0.47 ms | 0.45, 0.48 ms |
+| Columns: → into it | 0.81, 0.86 ms | 0.82, 0.85 ms | 0.86, 0.90 ms |
+| Columns: End onto a folder (a read) | 0.76, 0.79 ms | 0.77, 0.81 ms | 0.83, 0.87 ms |
+| List view: the frame landing the folder's listing | 1.50, 1.58 ms | 2.65, 2.73 ms | 5.37, 5.45 ms |
+
+A column move costs the same whatever the folder's size (nothing in it is per entry any more);
+the list's ↓ (`frame_cost`, 10k) is 0.68 ms there. The p95 over 8 ms on tabot-dev is that host:
+its minimums are as flat (← about 2 ms, → about 3.5 ms at every size, at load 16).
+
 What changed: each column is one element, keyed by its number, whether it's the active column
 or another, and a listing moves between a column and the folder with its rows and their
 version, so Rune doesn't build a new list or key its 10k rows (it did both on every move, 0.5 ms

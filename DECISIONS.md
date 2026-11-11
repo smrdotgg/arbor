@@ -72,6 +72,19 @@ Format: date · decision · why · how to undo.
     or → (main too) was the rows' `live_only` layout handler, fixed on main (9e4f168, above).
     Its idle test and `bench --idle` now cover the tiles and column views too, a column move
     included: 0.00 s of CPU in 5 s for each view on tabot-dev.
+  - **Every drop is checked against the folder the user saw (second review).** One path
+    (`State::drop_into`, an `ops::Dest`): a folder row carries the identity its listing read
+    (`fs::Ident`, not following a link), a background (list, grid, column) or the other pane the
+    folder's own (`FileId`), and the worker refuses either if what's at the path differs, as a
+    paste does. A destination whose identity isn't known (a folder not read yet, a row whose
+    identity couldn't be read) takes nothing ("Nothing was dropped: … isn't read yet"), rather
+    than going ahead unchecked. The sidebar's favorites take no file drops (dropping folders on
+    the sidebar adds them as favorites), so there's nothing to check there. Undo: `drop_into`'s
+    `None` arm.
+  - **The column view drags rows in the window, never the system's way (second review)**, as
+    split view does: a file dragged onto a folder row or another column moves there; on macOS a
+    row can't then be dragged out to Finder from the column view (README, RUNE-GAPS). Undo: the
+    `None if c.narrow` arm in `view/list.rs::item_drags`, `column_drags`.
   - **Tiles: one size** (48 pt icon in 248 × 72 pt tiles, widened to fill the row), the kind in
     words then the extension ("Image · PNG"), then size and date; ⌘+/⌘- stay the icon view's.
     It's the icon view's machinery (virtual rows, thumbnails at 48 pt, 2-D arrows, the
