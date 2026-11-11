@@ -38,6 +38,9 @@ pub struct Item {
     crc: u32,
     csize: u64,
     pub size: u64,
+    /// The least its local header and data take: the fixed part, its name (the local header
+    /// repeats the directory's) and its compressed size.
+    span: u64,
 }
 
 /// An archive's list: the entries, and where each one's data is (same order).
@@ -232,19 +235,20 @@ pub fn list(f: &File, len: u64, stop: &dyn Fn() -> bool) -> Result<Listing, Erro
         };
         let mtime = mtime.or_else(|| super::from_dos(date, time));
         entries.push(Entry { name, kind, mode: mode.map(|m| m & 0o7777), mtime, lossy: false });
-        items.push(Item { offset, method, crc, csize, size });
+        let span = 30u64.saturating_add(nlen as u64).saturating_add(csize);
+        items.push(Item { offset, method, crc, csize, size, span });
     }
     // No two entries' data may overlap, and none may run into the directory.
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_unstable_by_key(|&i| items[i].offset);
     for w in order.windows(2) {
         let (a, b) = (&items[w[0]], &items[w[1]]);
-        if a.offset.saturating_add(30).saturating_add(a.csize) > b.offset {
+        if a.offset.saturating_add(a.span) > b.offset {
             return Err(Error::Refused("its entries overlap, as in a decompression bomb".into()));
         }
     }
     if let Some(&last) = order.last()
-        && items[last].offset.saturating_add(30).saturating_add(items[last].csize) > cd_start
+        && items[last].offset.saturating_add(items[last].span) > cd_start
     {
         return Err(corrupt("an entry runs into the directory"));
     }

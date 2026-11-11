@@ -457,6 +457,14 @@ fn zip_bombs_are_refused() {
     r.entry("b", 0, 8, crc, body.len() as u32, 100_000, &[], Some(0));
     let e = r.write(&d.join("overlap.zip")).err().unwrap();
     assert!(matches!(e, Error::Refused(ref s) if s.contains("overlap")), "{e}");
+    // The second entry starts inside the first's data once the first's name is counted (30 +
+    // 20 + 10 bytes, the second at 45).
+    let mut r = Raw::new();
+    let name = "n".repeat(20);
+    r.stored(&name, &[1; 10]);
+    r.entry("b", 0, 0, crc32fast::hash(&[1; 5]), 5, 5, &[], Some(45));
+    let e = r.write(&d.join("overlap-name.zip")).err().unwrap();
+    assert!(matches!(e, Error::Refused(ref s) if s.contains("overlap")), "{e}");
     // An entry that inflates past the size it declares: cut off there, and refused.
     let big = vec![7u8; 1 << 20];
     let body = deflated(&big);
