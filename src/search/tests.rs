@@ -1273,3 +1273,56 @@ fn a_change_made_through_another_path_reaches_the_search() {
     frames(&mut s, 10);
     assert!(results(&s).is_empty(), "{:?}", results(&s));
 }
+
+/// Names of what an action would act on.
+fn target_names(f: &Folder) -> Vec<String> {
+    f.targets().iter().map(|e| e.name.clone()).collect()
+}
+
+/// A sort while the walk is still going (1,000 of 1,500 results taken in) keeps the selection
+/// on its items wherever they land, taken in if they land past the end, and never puts another
+/// row in their place: reversing the name sort used to select `00001499.txt` instead of the
+/// first two.
+#[test]
+fn a_sort_keeps_the_selection_on_results_not_yet_shown() {
+    let mut f = Folder::new(0, PathBuf::from("/"), crate::fs::Sort::new(crate::fs::SortKey::Name, false), true, None);
+    f.entries = (0..1500).map(|i| Entry { size: i as u64 + 1, ..Entry::test(&format!("{i:08}.txt"), false) }).collect();
+    let mut s = Search::new(f.memo(), "txt", None);
+    s.upto = 1000;
+    f.search = Some(Box::new(s));
+    f.refilter(None);
+    f.select(0);
+    f.toggle_mark(1);
+    let want = ["00000000.txt", "00000001.txt"];
+    assert_eq!(target_names(&f), want);
+    f.set_sort(crate::fs::SortKey::Name);
+    f.set_sort(crate::fs::SortKey::Name);
+    assert!(f.sort.desc);
+    assert_eq!(target_names(&f), ["00000001.txt", "00000000.txt"], "the same two, in the new order");
+    assert_eq!(f.picked_size().map(|p| p.count), Some(2));
+    // The cursor alone selected, sorted away past the end: still it.
+    f.select(5);
+    let it = target_names(&f);
+    f.set_sort(crate::fs::SortKey::Name);
+    assert_eq!(target_names(&f), it);
+}
+
+/// What was selected and is gone leaves nothing selected, never another row: the cursor's
+/// item hidden (hidden files turned off) takes the selection with it, and a command on "the
+/// item" says to select one.
+#[test]
+fn a_selection_that_goes_isnt_replaced_by_another_row() {
+    let mut f = Folder::new(0, PathBuf::from("/"), crate::fs::Sort::new(crate::fs::SortKey::Name, false), true, None);
+    f.entries = [".a", "b", "c"].iter().map(|n| Entry::test(n, false)).collect();
+    f.refilter(None);
+    f.select(0);
+    assert_eq!(target_names(&f), [".a"]);
+    f.set_hidden(false);
+    assert!(target_names(&f).is_empty(), "nothing selected: {:?}", target_names(&f));
+    assert!(f.selected().is_none() && f.cursor().is_some(), "the cursor is still somewhere");
+    f.set_hidden(true);
+    assert!(target_names(&f).is_empty(), "shown again, still not selected");
+    // A click selects again.
+    f.select(1);
+    assert_eq!(target_names(&f), ["b"]);
+}

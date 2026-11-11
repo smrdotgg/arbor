@@ -82,6 +82,7 @@ impl Folder {
     /// the nearest row not in `avoid` instead. False when every row is in `avoid`.
     pub fn set_selection(&mut self, names: HashSet<OsString>, avoid: &HashSet<OsString>) -> bool {
         self.picks += 1;
+        self.none = false;
         fn name(f: &Folder, i: usize) -> &OsString {
             &f.entries[f.visible[i] as usize].os
         }
@@ -136,10 +137,11 @@ impl Folder {
     /// rows. With nothing left (everything was selected) the cursor stays where it is.
     pub fn invert_selection(&mut self) -> usize {
         self.picks += 1;
-        if self.marked.is_empty() {
+        if self.marked.is_empty() && !self.none {
             self.marked.set(self.sel, true, &self.visible);
         }
         self.marked.invert(&self.visible);
+        self.none = self.marked.is_empty();
         if !self.marked.contains(self.sel)
             && let Some(r) = self.marked.iter().next()
         {

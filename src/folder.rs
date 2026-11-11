@@ -162,8 +162,12 @@ pub struct Folder {
     /// The cursor: index into `visible`.
     pub sel: usize,
     /// Extra selection (⇧-arrows, ⌘-click, ⌘A): rows of `visible`, with their totals
-    /// (`marked.rs`). Empty means "just the cursor".
+    /// (`marked.rs`). Empty means "just the cursor", unless `none`.
     pub marked: Marked,
+    /// Nothing is selected, not even the cursor's row: what was selected went (hidden,
+    /// filtered out, gone from the folder) and no other row is chosen in its place. A click,
+    /// an arrow or any other choice selects again.
+    pub none: bool,
     /// How many times the user has picked a selection (a click, an arrow, ⌘A, Select by
     /// Pattern…): a reload asked for before the latest pick keeps it ([`Pending::picks`]).
     pub picks: u64,
@@ -267,6 +271,7 @@ impl Folder {
             visible: Rows::default(),
             sel: 0,
             marked: Marked::default(),
+            none: false,
             picks: 0,
             anchor: 0,
             filter: String::new(),
@@ -323,13 +328,23 @@ impl Folder {
         }
     }
 
+    /// The cursor's item, while it's selected (or other items are): what a command on "the
+    /// item" acts on. `None` with nothing selected.
     pub fn selected(&self) -> Option<&Entry> {
+        if self.none && self.marked.is_empty() {
+            return None;
+        }
+        self.cursor()
+    }
+
+    /// The cursor's item, selected or not: where the cursor is.
+    pub fn cursor(&self) -> Option<&Entry> {
         self.visible.get(self.sel).map(|&i| &self.entries[i as usize])
     }
 
     /// Whether row `i` (index into `visible`) is part of the selection.
     pub fn is_selected(&self, i: usize) -> bool {
-        if self.marked.is_empty() { i == self.sel } else { self.marked.contains(i) }
+        if self.marked.is_empty() { !self.none && i == self.sel } else { self.marked.contains(i) }
     }
 
     /// The selection as entries, in display order.
@@ -586,6 +601,13 @@ impl Folder {
                 self.entries[i as usize].sel = true;
             }
         }
+        // The cursor alone selected rides the same way: it's as much a selection.
+        if self.marked.is_empty()
+            && !self.none
+            && let Some(&i) = self.visible.get(self.sel)
+        {
+            self.entries[i as usize].sel = true;
+        }
         self.marked.clear();
     }
 
@@ -629,6 +651,17 @@ impl Folder {
         let by_prefix =
             || (!q.is_empty()).then(|| self.visible.iter().position(|&i| self.entries[i as usize].lower.starts_with(&q))).flatten();
         self.sel = by_name.or_else(by_prefix).unwrap_or(0);
+        // The cursor's item alone is the cursor alone selected; what was selected and is all
+        // gone leaves nothing selected (never a row put in its place); with nothing carried the
+        // caller says (a listing landing).
+        if self.marked.len() == 1 && self.marked.contains(self.sel) {
+            self.marked.clear();
+            self.none = false;
+        } else if !self.marked.is_empty() {
+            self.none = false;
+        } else if carried > 0 {
+            self.none = true;
+        }
         self.bump();
     }
 
@@ -643,15 +676,16 @@ impl Folder {
     pub fn selection_names(&self) -> (Vec<OsString>, Option<OsString>) {
         let cursor = self.cursor_name();
         let items = if self.marked.is_empty() {
-            cursor.clone().into_iter().collect()
+            cursor.clone().into_iter().filter(|_| !self.none).collect()
         } else {
             self.targets().into_iter().map(|e| e.os.clone()).collect()
         };
         (items, cursor)
     }
 
+    /// The cursor's item's name, selected or not.
     pub fn cursor_name(&self) -> Option<OsString> {
-        self.selected().map(|e| e.os.clone())
+        self.cursor().map(|e| e.os.clone())
     }
 
     pub fn set_sort(&mut self, key: SortKey) {
@@ -740,6 +774,13 @@ impl Folder {
         // The selection rides on its entries through the sort.
         self.carry_marks();
         fs::sort_entries(&mut self.entries, self.sort);
+        // A search shows only the results it has taken in so far: whatever is selected (and the
+        // cursor's item) is taken in too, wherever the sort put it, so nothing selected is lost
+        // past the end and no other row takes its place.
+        if let Some(s) = self.search.as_mut() {
+            let last = self.entries.iter().rposition(|e| e.sel || keep.as_ref().is_some_and(|k| e.os == *k));
+            s.upto = s.upto.max(last.map_or(0, |l| l + 1)).min(self.entries.len());
+        }
         self.refilter_carried(keep.as_deref());
     }
 
@@ -754,6 +795,7 @@ impl Folder {
     /// A plain click: just this row.
     pub fn select(&mut self, i: usize) {
         self.picks += 1;
+        self.none = false;
         if !self.visible.is_empty() {
             self.sel = i.min(self.visible.len() - 1);
             self.anchor = self.sel;
@@ -767,10 +809,13 @@ impl Folder {
         if i >= self.visible.len() {
             return;
         }
-        if self.marked.is_empty() {
+        // The cursor alone counts as selected (unless nothing is): ⌘ adds to it.
+        if self.marked.is_empty() && !self.none {
             self.marked.set(self.sel, true, &self.visible);
         }
         self.marked.toggle(i, &self.visible);
+        // Toggled down to nothing: nothing selected (the cursor's row was just deselected).
+        self.none = self.marked.is_empty();
         self.sel = i;
         self.anchor = i;
     }
@@ -783,6 +828,7 @@ impl Folder {
         }
         let i = i.min(self.visible.len() - 1);
         let (a, b) = (self.anchor.min(i), self.anchor.max(i));
+        self.none = false;
         // Grown or shrunk from the range it was: only the rows between change.
         self.marked.select_range(a, b, &self.visible);
         self.sel = i;
@@ -790,6 +836,7 @@ impl Folder {
 
     pub fn select_all(&mut self) {
         self.picks += 1;
+        self.none = self.visible.is_empty();
         self.marked.select_range(0, self.visible.len().saturating_sub(1), &self.visible);
     }
 
@@ -816,7 +863,7 @@ impl Folder {
             }
             return;
         }
-        if let Some(e) = self.selected() {
+        if let Some(e) = self.cursor() {
             tx.scroll_into_view_in(self.rows_key(), e.key.clone());
         }
     }
@@ -963,6 +1010,8 @@ impl Folder {
         self.goto = self.path_mode();
         self.marked.clear();
         self.refilter(if self.path_mode() { keep.as_deref() } else { None });
+        // Typing chose the row it found.
+        self.none = false;
     }
 }
 

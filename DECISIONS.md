@@ -90,6 +90,15 @@ Format: date · decision · why · how to undo.
     the user picks during a reload, the new pick is marked on the landed listing on a worker,
     then lands. Select by Pattern and Select All of This Kind still look at every row (they
     match names). Undo: `marked.rs`.
+  - **Nothing selected is a state (third review; Review)**: when what was selected goes
+    (hidden, filtered out, gone after a reload, a ⌘-click taking off the last item, a rectangle
+    over nothing), nothing is selected: the cursor stays where it lands but isn't selected, and
+    a command on "the item" says to select one. Before, the cursor's new row became the
+    selection, so the next trash or move acted on an item the user never chose. A click, an
+    arrow, typing a filter or any selection command selects again; a folder newly opened still
+    starts with its first row selected. A sort during a search takes in the results the
+    selection (and the cursor) landed on past the shown ones, rather than losing them. Undo:
+    `Folder::none`.
   - **Narrow panes (after review):** once every other column is gone, Size narrows to its
     least and then goes, so Name keeps its 180 pt; a search's Folder column gets only what's
     past Name's least. Only on screen: the widths kept are the user's. Undo: `ListCols::fit`.

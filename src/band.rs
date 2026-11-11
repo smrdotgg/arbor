@@ -164,8 +164,9 @@ pub struct Band {
     /// ⇧ or ⌘ with only the cursor selected: the cursor's row, put in the selection first (it
     /// was selected, as the cursor), and taken out again on Esc.
     pub seeded: Option<usize>,
-    /// The cursor and the anchor as they were, for Esc.
+    /// The cursor and the anchor as they were, and whether nothing was selected, for Esc.
     pub before: (usize, usize),
+    pub none_before: bool,
     /// It started below the rows or in a gutter: a click there (no rectangle) clears the
     /// selection.
     pub on_empty: bool,
@@ -212,7 +213,7 @@ impl Band {
             match self.mode {
                 Mode::Replace => self.cleared = Some(std::mem::take(&mut f.marked)),
                 // The cursor alone counts as selected: ⇧ adds to it, ⌘ toggles against it.
-                _ if f.marked.is_empty() => {
+                _ if f.marked.is_empty() && !f.none => {
                     let c = f.sel;
                     f.marked.set(c, true, &f.visible);
                     self.seeded = Some(c);
@@ -243,6 +244,8 @@ impl Band {
             (f.anchor, f.sel) = if down { (first, last) } else { (last, first) };
         }
         f.picks += 1;
+        // A rectangle over nothing selects nothing (not the cursor's row).
+        f.none = f.marked.is_empty();
         true
     }
 
@@ -259,6 +262,8 @@ impl Band {
             }
         }
         (f.sel, f.anchor) = self.before;
+        f.none = self.none_before;
+        f.picks += 1;
     }
 }
 
@@ -360,6 +365,7 @@ impl crate::app::State {
                     cleared: None,
                     seeded: None,
                     before: (f.sel, f.anchor),
+                    none_before: f.none,
                     on_empty,
                 };
                 b.start = b.content(d.window_point(), scroll);
@@ -528,6 +534,7 @@ mod tests {
             cleared: None,
             seeded: None,
             before: (0, 0),
+            none_before: false,
             on_empty: false,
         }
     }

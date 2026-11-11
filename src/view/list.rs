@@ -103,7 +103,7 @@ fn column_edge(field: crate::listcols::Field, w: f32, slack: f32, c: Ctx) -> El 
 /// it follows the keys (Tab switches panes without moving Rune's focus).
 pub(super) fn active_row(s: &State) -> Option<String> {
     let f = s.cur();
-    let e = f.selected()?;
+    let e = f.cursor()?;
     if f.view.is_grid() {
         // A cell is inside its grid row, which is keyed by the row's first item.
         let cols = f.grid_cols.get().max(1);
