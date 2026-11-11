@@ -9,6 +9,12 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-11 · Some reviews go to an Opus reviewer instead of GPT-6.1 Sol (Review).** OpenAI's
+  safety filter refused two re-reviews of the Make Link undo fix (checks that a symlink wasn't
+  swapped just before removal), even reworded in plain terms. Rather than reword further to get
+  past a safety filter, the PM gave that review to an independent Claude Opus 5.5 reviewer with
+  the same scope. Sol stays the default reviewer. Undo: none needed; it's a process choice.
+
 - **2026-11-11 · The idle list view's endless frames (since 7cd20cb): the rows hear their
   layout only while a selection rectangle is held, and never say `Tx::live_only` there.**
   Rune doesn't clear what a `live_only` event leaves behind in a window with no live values
