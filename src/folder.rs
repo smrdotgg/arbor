@@ -637,8 +637,11 @@ impl Folder {
             };
         }
         // The selection exactly (in display order, so it reads back the same), and the cursor
-        // apart: it may be off the selection.
+        // apart: it may be off the selection. By their names on disk now (a rename beside the
+        // listing too), as the folder read again names them.
         let (select, cursor) = self.selection_names();
+        let now = |n: OsString| self.current_os(&n).to_os_string();
+        let (select, cursor): (Vec<OsString>, Option<OsString>) = (select.into_iter().map(now).collect(), cursor.map(now));
         TabMemo {
             path: self.cwd.clone(),
             back: self.back.clone(),

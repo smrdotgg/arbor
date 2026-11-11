@@ -2005,3 +2005,27 @@ fn actions_on_a_renamed_row_go_to_its_new_name_before_the_reload() {
     settle_all(&mut s);
     assert_eq!(s.cur().cwd, d.join("renamed"), "opened the folder the row shows");
 }
+
+/// A tab hidden while a rename is shown beside the listing (before the reload lands) keeps
+/// the renamed item selected: shown again, it's that item, under its new name.
+#[test]
+fn a_hidden_tab_keeps_a_renamed_selection() {
+    let d = folder("renamed-tab", 0);
+    for n in ["a", "b"] {
+        std::fs::write(d.join(n), n).unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.run(Cmd::Split, &mut Tx::default());
+    settle_all(&mut s);
+    s.cur_mut().select(0);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "renamed".into();
+    s.commit_rename(&mut Tx::default());
+    wait_job(&mut s);
+    assert_eq!(s.cur().target_paths(), [d.join("renamed")]);
+    s.new_tab(&mut Tx::default());
+    s.run(Cmd::PrevTab, &mut Tx::default());
+    settle_all(&mut s);
+    assert_eq!(s.cur().target_paths(), [d.join("renamed")]);
+}
