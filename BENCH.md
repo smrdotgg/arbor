@@ -13,6 +13,7 @@ scripts/bench.sh 1 10 --columns 5 --tiles 4    # plus 5 cold starts moving in an
 cargo test --release -- --ignored --nocapture column_cost   # the column view's ← and → over 10k, CPU only, beside the list's own landing
 scripts/bench.sh 1 12 --jump 5 --pace 120 --gap 1000   # the same, paced as a person types (report both)
 scripts/bench.sh 1 10 --window 4               # plus 4 cold starts opening a new window on the 10k folder 10 times each
+scripts/bench.sh 11 10 --all-columns           # the same with every list column shown (Extension, Date Created, Permissions)
 scripts/bench.sh 1 2 --idle 3                  # 3 starts left idle in each view, and 3 with two windows: CPU over 5 s, fails above 0.05 s
 cargo test --release -- --ignored --nocapture search_speed   # walk speed by thread count (vendor/, or ARBOR_SEARCH_TREE)
 xvfb-run -a scripts/bench.sh 11 10             # Linux without a display
@@ -65,6 +66,61 @@ The bench under Xvfb (software rendering, not representative; 5 cold starts × 1
 The first pair ran while the box was busiest. Nothing on these paths changed: the context menu
 gains a row, and the palette's check for Extract Here reads the selected names' extensions
 without allocating.
+## 2026-11-11, list columns, Folders First, the status bar (`feature/columns-status`)
+
+What could cost the default path: two fields a listing reads per entry (Date Created, the
+mode), the header's resize strips, a free-space read per listing, the selection's size in the
+status bar. Date Created is read from each entry's identity (its birth time) rather than stored
+again, and the mode sits in padding: `size_of::<Entry>()` is 256 bytes, as on main (a first
+version stored the birth time too, 272 bytes). The free space is one `statvfs` on another worker,
+asked with the listing, never waited for. The selection's size is worked out once per selection.
+
+tabot-dev (Xeon 8375C, 4 vCPU), release builds, main at 56145e1 ("base") against the branch,
+while other agents' builds, stress tests and a fuzzer ran (load average 3–11; so every number is
+noisier than usual, and every row is over its budget here for base as well).
+
+`list_10k` (read and sort 10,000 entries, no window), each binary's median of 30, eight
+interleaved rounds: the medians fall in two clusters (about 24 and 31 ms) with the host's load,
+so per cluster:
+
+| | min | median, fast cluster | median, slow cluster |
+| --- | --- | --- | --- |
+| base | 23.8 ms | 24.6 ms (4 of 8) | 31.4 ms |
+| branch | 23.6 ms | 24.1 ms (5 of 8) | 31.9 ms |
+| branch without reading the mode | 23.0 ms | 23.7 ms (3 of 8) | 32.2 ms |
+
+(The first version, with the birth time stored, 20 rounds against base: min 23.7 against 23.5 ms,
+fast cluster 24.35 against 23.70 ms; not separable from the noise either, but its entries were
+16 bytes bigger, so it went.)
+No difference beyond the host's noise.
+
+`frame_cost` (a key to its committed frame over 10k entries, CPU only), three interleaved passes,
+median (p95):
+
+| | pass 1 | pass 2 | pass 3 |
+| --- | --- | --- | --- |
+| base, 980 pt | 3.23 (3.44) ms | 3.19 (3.38) ms | 2.56 (3.38) ms |
+| branch, 980 pt (Kind, Size, Modified) | 2.53 (3.43) ms | 3.32 (3.51) ms | 2.38 (3.39) ms |
+| branch, 1,600 pt, the same 3 columns | 2.66 (3.42) ms | 3.25 (3.42) ms | 2.50 (3.40) ms |
+| branch, 1,600 pt, all 6 columns | 3.78 (4.67) ms | 3.22 (4.58) ms | 3.44 (4.57) ms |
+
+Showing every column costs about 1 ms per key at the median and 1.2 ms at p95 (three more
+cells to lay out per row on screen); off by default, the default path is unchanged.
+
+`bench 8 10 --idle 0` under Xvfb (lavapipe), base, branch, branch `--all-columns` alternating,
+two passes (load 3–5), median (p95):
+
+| Measure | base | branch | branch, all columns |
+| --- | --- | --- | --- |
+| cold start | 195.4 (225.8), 192.3 (237.8) ms | 196.7 (241.4), 190.7 (232.6) ms | 200.3 (240.2), 186.1 (191.9) ms |
+| 10k listing, nav → frame | 61.0 (81.8), 65.3 (85.3) ms | 65.9 (84.9), 62.6 (79.4) ms | 70.0 (98.3), 64.5 (84.5) ms |
+| key → frame | 11.1 (14.2), 11.6 (16.2) ms | 11.3 (21.2), 11.3 (15.6) ms | 13.5 (23.2), 12.1 (16.0) ms |
+
+Two earlier passes at load 8–11 were 2× apart for the same binary and aren't reported. Idle
+(`bench 1 2 --idle 1`, and with `--all-columns`): list, icons, tiles, columns and two windows
+each 0.00 s of CPU in 5 s. Nothing runs while idle: the free space is read only with a listing
+or after a file operation (`free_space_is_read_off_the_window_thread_and_not_while_idle`).
+
 ## 2026-11-11, multiple windows (`feature/new-window`)
 
 tabot-dev (Xeon 8375C, 4 vCPU, Xvfb with lavapipe: software rendering, so frame and window

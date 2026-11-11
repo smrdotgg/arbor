@@ -198,7 +198,7 @@ the time to the first thumbnail and to a screenful, and `--tiles N` the same pag
 tiles view, and `--columns N` adds N runs moving out of and back into the 10k folder in the
 column view (← and →), each key to its frame (`column_cost` times the same without a GPU),
 and `--window N` adds N runs opening a new window on the 10k folder: ⌘N to the new window's
-first frame showing it, and every bench ends with `--idle N` (default 1, 0
+first frame showing it, and `--all-columns` shows every list column in every run, and every bench ends with `--idle N` (default 1, 0
 skips it): N starts left idle in each view (list, icons, tiles, columns), after switching to it,
 and N in the list with a second window open, each
 failing the bench if it uses more than 0.05 s of CPU in 5 s; `--pace MS` spaces
