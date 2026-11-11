@@ -66,6 +66,12 @@ jobs:
       - name: Test
         run: cargo test --release --locked
 
+      # The selection's model tests, 5,000 cases each from the same fixed seeds (`prop.rs`
+      # derives them from the test's name), beyond the few dozen every run has.
+      - name: Selection model, 5,000 cases
+        if: runner.os == 'Linux'
+        run: ARBOR_PROP_CASES=5000 cargo test --release --locked -- selection_matches_a_model
+
       - name: Clippy
         run: cargo clippy --release --locked --all-targets -- -D warnings
 

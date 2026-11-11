@@ -103,7 +103,12 @@ Format: date · decision · why · how to undo.
     moved to the match (typing now chooses afresh, and a filter matching nothing leaves nothing
     selected); a reload in which none of the selected items is left selected the cursor's row;
     "the item" for Rename or Get Info was the cursor's even after a ⌘-click took it off the
-    selection (it's now always a selected item). Undo: `Folder::none`.
+    selection (it's now always a selected item). The fourth review's stronger model (reloads
+    raced by any change and landing late, renames, type changes, patterns, the column view)
+    found two more: Open Folder (→) opened the cursor's folder when the cursor had been
+    ⌘-clicked off, and Select by Pattern taking out everything selected selected the row the
+    cursor moved to (it now leaves nothing selected). CI runs the models 5,000 cases each from
+    fixed seeds. Undo: `Folder::none`.
   - **A reload hands its selection to the worker as it is (third review)**: the listing is
     shared (`Arc`, copied only if changed while a worker holds it) and the selection goes as its
     rows' bits; the worker reads the names and finds them in the new listing. Asking for a

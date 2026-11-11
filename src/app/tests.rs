@@ -1560,28 +1560,158 @@ fn a_big_reload_hands_its_selection_over_without_copying_names() {
 
 /// The selection, as identities (names: one folder's are unique), against a plain model of it
 /// under random runs of what changes it or the rows it's on: clicks, ⌘-clicks, ⇧-clicks, ⌘A,
-/// Invert, sorts, Folders First, hidden files shown and hidden, a filter typed and backspaced,
-/// files added, removed and renamed on disk then read again, reloads that race a new pick,
-/// and a tab hidden and shown again. A choice (a click, typing) makes the model what was
-/// chosen; anything else only takes out what isn't shown any more, and never puts anything
-/// in. After every step, what an action would act on is exactly the model.
+/// Invert, Select by Pattern (replace, add, remove), typing a filter and backspacing, an
+/// inline rename started and cancelled or committed (to a new name, or one that's taken), sorts,
+/// Folders First, hidden files, files added, removed, renamed and replaced by a folder (or a
+/// folder by a file) of the same name on disk then read again, reloads raced by any of those
+/// and landing whenever a later poll takes them, a tab hidden and shown again, the column view
+/// and going into a folder and back. A choice makes the model what was chosen; anything else
+/// only takes out what isn't shown any more, and never puts anything in. After every step,
+/// what an action would act on is exactly the model, and the status bar's totals are theirs.
+///
+/// `ARBOR_PROP_CASES` runs more (CI runs 5,000 from the same fixed seeds).
 #[test]
 fn the_selection_matches_a_model_whatever_happens() {
     use std::collections::BTreeSet;
     use std::ffi::OsString;
+    type Model = BTreeSet<OsString>;
     fn shown(s: &State) -> Vec<OsString> {
         let f = s.cur();
         f.visible.iter().map(|&i| f.entries[i as usize].os.clone()).collect()
     }
-    fn targets(s: &State) -> BTreeSet<OsString> {
+    fn targets(s: &State) -> Model {
         s.cur().targets().iter().map(|e| e.os.clone()).collect()
     }
-    fn keep_shown(model: &mut BTreeSet<OsString>, s: &State) {
-        let rows: BTreeSet<OsString> = shown(s).into_iter().collect();
+    fn keep_shown(model: &mut Model, s: &State) {
+        let rows: Model = shown(s).into_iter().collect();
         model.retain(|n| rows.contains(n));
     }
+    fn poll(s: &mut State, times: usize) {
+        for _ in 0..times {
+            std::thread::sleep(Duration::from_millis(1));
+            s.poll(&mut Tx::default());
+        }
+    }
+    /// A change of selection the user makes (or of the rows): returns what it did, or `None`
+    /// when it couldn't (no rows). `racing`: a reload is on its way (nothing that starts an
+    /// operation or waits for reads).
+    fn choose(s: &mut State, model: &mut Model, r: &mut crate::prop::Rng, racing: bool) -> Option<String> {
+        let n = s.cur().visible.len();
+        let row = |r: &mut crate::prop::Rng| r.below(n.max(1));
+        Some(match r.below(if racing { 11 } else { 12 }) {
+            0 | 1 if n > 0 => {
+                let i = row(r);
+                s.cur_mut().select(i);
+                *model = [shown(s)[i].clone()].into();
+                format!("click {i}")
+            }
+            2 if n > 0 => {
+                let i = row(r);
+                s.cur_mut().toggle_mark(i);
+                let name = shown(s)[i].clone();
+                if !model.remove(&name) {
+                    model.insert(name);
+                }
+                format!("cmd-click {i}")
+            }
+            3 if n > 0 => {
+                let i = row(r);
+                let a = s.cur().anchor.min(n - 1);
+                s.cur_mut().extend_to(i);
+                *model = shown(s)[a.min(i)..=a.max(i)].iter().cloned().collect();
+                format!("shift-click {i} (anchor {a})")
+            }
+            4 => {
+                s.cur_mut().select_all();
+                *model = shown(s).into_iter().collect();
+                "select all".into()
+            }
+            5 => {
+                s.cur_mut().invert_selection();
+                *model = shown(s).into_iter().filter(|n| !model.contains(n)).collect();
+                "invert".into()
+            }
+            6 => {
+                let cmd = [Cmd::SortName, Cmd::SortKind, Cmd::SortSize, Cmd::SortModified, Cmd::SortReverse, Cmd::FoldersFirst][r.below(6)];
+                s.run(cmd, &mut Tx::default());
+                format!("{cmd:?}")
+            }
+            7 => {
+                s.toggle_hidden();
+                keep_shown(model, s);
+                "hidden files".into()
+            }
+            8 => {
+                // Typing chooses the row it finds; backspacing only shows more.
+                let c = ["a", "1", "z", "img", "q"][r.below(5)];
+                s.cur_mut().type_filter(c);
+                *model = s.cur().cursor_name().into_iter().filter(|_| !s.cur().visible.is_empty()).collect();
+                for _ in 0..c.len() {
+                    s.on_key(&KeyEvent { key: Key::Backspace, mods: rune::Mods::default() }, &mut Tx::default());
+                }
+                keep_shown(model, s);
+                format!("type {c:?}, backspace")
+            }
+            9 => {
+                use crate::select::How;
+                let glob = ["*.jpg", "a*", "*1*", "img_*", "*.md", "dir*"][r.below(6)];
+                let how = [How::Replace, How::Add, How::Remove][r.below(3)];
+                let g = crate::pattern::Glob::name(glob, crate::pattern::Case::Insensitive).unwrap();
+                let matches = s.cur().matching(&g);
+                let m: Model = matches.iter().cloned().collect();
+                s.cur_mut().apply_matches(matches, how);
+                *model = match how {
+                    How::Replace => m,
+                    How::Add => model.union(&m).cloned().collect(),
+                    How::Remove => model.difference(&m).cloned().collect(),
+                };
+                format!("pattern {glob:?} {how:?}")
+            }
+            10 => {
+                // The view changes: the selection doesn't.
+                let cmd = if s.cur().view == crate::grid::ViewMode::Columns { Cmd::AsList } else { Cmd::AsColumns };
+                s.run(cmd, &mut Tx::default());
+                format!("{cmd:?}")
+            }
+            11 if !s.busy() => {
+                // An inline rename: started (it, alone, selected), then cancelled or committed.
+                let e = s.cur().selected().map(|e| e.os.clone())?;
+                s.start_rename();
+                *model = [e.clone()].into();
+                match r.below(3) {
+                    0 => {
+                        s.cancel_rename(&mut Tx::default());
+                        "rename, cancelled".into()
+                    }
+                    k => {
+                        let names = shown(s);
+                        let taken = k == 1 && names.len() > 1;
+                        let to: OsString = if taken {
+                            names.iter().find(|n| **n != e).cloned().unwrap()
+                        } else {
+                            format!("ren{}.txt", r.next() % 100_000).into()
+                        };
+                        s.rename.as_mut().unwrap().edit.text = to.to_string_lossy().into_owned();
+                        let was_free = !s.cur().cwd.join(&to).exists();
+                        s.commit_rename(&mut Tx::default());
+                        finish_job(s);
+                        // Renamed, unless refused (the name taken, or the item replaced since it
+                        // was read): the disk says which.
+                        let dir = s.cur().cwd.clone();
+                        // (A name taken in a listing that hasn't caught up may be free on disk.)
+                        if was_free && dir.join(&to).exists() && !dir.join(&e).exists() {
+                            *model = [to.clone()].into();
+                        }
+                        keep_shown(model, s);
+                        format!("rename {e:?} to {to:?}{}", if taken { " (taken)" } else { "" })
+                    }
+                }
+            }
+            _ => return None,
+        })
+    }
     let d = folder("selection-model", 0);
-    crate::prop::check("selection_model", 24, |r| {
+    crate::prop::check("selection_model", 48, |r| {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let mut made = 0;
@@ -1590,7 +1720,7 @@ fn the_selection_matches_a_model_whatever_happens() {
             let dot = if r.one_in(5) { "." } else { "" };
             let name = format!("{dot}{}{made}.{}", ["a", "B", "c", "img_", "Z"][r.below(5)], ["txt", "jpg", "md"][r.below(3)]);
             std::fs::write(d.join(&name), vec![b'x'; r.below(3000)]).unwrap();
-            if r.one_in(6) {
+            if r.one_in(5) {
                 std::fs::create_dir(d.join(format!("dir{made}"))).unwrap();
             }
         };
@@ -1598,119 +1728,115 @@ fn the_selection_matches_a_model_whatever_happens() {
             add(r);
         }
         let mut s = state_in(&d);
+        s.places = vec![("Test".into(), d.clone())];
         settle_all(&mut s);
-        let mut model: BTreeSet<OsString> = s.cur().selected().map(|e| e.os.clone()).into_iter().collect();
-        let mut log = Vec::new();
+        let mut model: Model = s.cur().selected().map(|e| e.os.clone()).into_iter().collect();
+        let mut log: Vec<String> = Vec::new();
         for step in 0..40 {
-            let n = s.cur().visible.len();
-            let row = |r: &mut crate::prop::Rng| r.below(n.max(1));
-            let what = r.below(14);
-            match what {
-                0 | 1 if n > 0 => {
-                    let i = row(r);
-                    log.push(format!("click {i}"));
-                    s.cur_mut().select(i);
-                    model = [shown(&s)[i].clone()].into();
-                }
-                2 | 3 if n > 0 => {
-                    let i = row(r);
-                    log.push(format!("cmd-click {i}"));
-                    s.cur_mut().toggle_mark(i);
-                    let name = shown(&s)[i].clone();
-                    if !model.remove(&name) {
-                        model.insert(name);
+            let names: Vec<OsString> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name()).collect();
+            let pick = |r: &mut crate::prop::Rng| names.get(r.below(names.len().max(1))).cloned();
+            match r.below(10) {
+                0..=4 => match choose(&mut s, &mut model, r, false) {
+                    Some(what) => log.push(what),
+                    None => continue,
+                },
+                5 | 6 => {
+                    // The disk changes; the folder is read again, or the read is raced by
+                    // choices and left to land whenever a later poll takes it.
+                    let what = match r.below(4) {
+                        0 => {
+                            add(r);
+                            "added".to_string()
+                        }
+                        1 => match pick(r) {
+                            Some(n) => {
+                                let p = d.join(&n);
+                                let _ = std::fs::remove_file(&p).or_else(|_| std::fs::remove_dir(&p));
+                                format!("removed {n:?}")
+                            }
+                            None => "nothing".into(),
+                        },
+                        2 => match pick(r) {
+                            Some(n) => {
+                                let to = format!("moved{step}-{}", n.to_string_lossy());
+                                let _ = std::fs::rename(d.join(&n), d.join(&to));
+                                format!("renamed {n:?} to {to:?}")
+                            }
+                            None => "nothing".into(),
+                        },
+                        _ => match pick(r) {
+                            // Replaced by one of the other type, under the same name.
+                            Some(n) => {
+                                let p = d.join(&n);
+                                if p.is_dir() {
+                                    if std::fs::remove_dir(&p).is_ok() {
+                                        std::fs::write(&p, "was a folder").unwrap();
+                                    }
+                                } else if std::fs::remove_file(&p).is_ok() {
+                                    std::fs::create_dir(&p).unwrap();
+                                }
+                                format!("replaced {n:?} by the other type")
+                            }
+                            None => "nothing".into(),
+                        },
+                    };
+                    s.reload();
+                    if r.one_in(2) {
+                        let mut raced = Vec::new();
+                        for _ in 0..1 + r.below(3) {
+                            if let Some(w) = choose(&mut s, &mut model, r, true) {
+                                raced.push(w);
+                            }
+                            poll(&mut s, r.below(2));
+                            keep_shown(&mut model, &s);
+                        }
+                        log.push(format!("disk: {what}; reload raced by {raced:?}"));
+                    } else {
+                        settle_all(&mut s);
+                        log.push(format!("disk: {what}; reload"));
                     }
-                }
-                4 if n > 0 => {
-                    let i = row(r);
-                    let a = s.cur().anchor.min(n - 1);
-                    log.push(format!("shift-click {i} (anchor {a})"));
-                    s.cur_mut().extend_to(i);
-                    model = shown(&s)[a.min(i)..=a.max(i)].iter().cloned().collect();
-                }
-                5 => {
-                    log.push("select all".into());
-                    s.cur_mut().select_all();
-                    model = shown(&s).into_iter().collect();
-                }
-                6 => {
-                    log.push("invert".into());
-                    s.cur_mut().invert_selection();
-                    model = shown(&s).into_iter().filter(|n| !model.contains(n)).collect();
                 }
                 7 => {
-                    let cmd = [Cmd::SortName, Cmd::SortKind, Cmd::SortSize, Cmd::SortModified, Cmd::SortReverse][r.below(5)];
-                    log.push(format!("{cmd:?}"));
-                    s.run(cmd, &mut Tx::default());
-                }
-                8 => {
-                    log.push("folders first".into());
-                    s.run(Cmd::FoldersFirst, &mut Tx::default());
-                }
-                9 => {
-                    log.push("hidden files".into());
-                    s.toggle_hidden();
-                    keep_shown(&mut model, &s);
-                }
-                10 => {
-                    // Typing chooses the first match; backspacing only shows more.
-                    let c = ["a", "1", "z", "img", "q"][r.below(5)];
-                    log.push(format!("type {c:?}, backspace"));
-                    s.cur_mut().type_filter(c);
-                    model = s.cur().cursor_name().into_iter().filter(|_| !s.cur().visible.is_empty()).collect();
-                    for _ in 0..c.len() {
-                        s.on_key(&KeyEvent { key: Key::Backspace, mods: rune::Mods::default() }, &mut Tx::default());
-                    }
-                    keep_shown(&mut model, &s);
-                }
-                11 | 12 => {
-                    // The disk changes, then the folder is read again; or a pick races the read.
-                    let names: Vec<OsString> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name()).collect();
-                    match r.below(3) {
-                        0 => add(r),
-                        1 if !names.is_empty() => {
-                            let p = d.join(&names[r.below(names.len())]);
-                            let _ = std::fs::remove_file(&p).or_else(|_| std::fs::remove_dir(&p));
-                        }
-                        _ if !names.is_empty() => {
-                            let from = &names[r.below(names.len())];
-                            let _ = std::fs::rename(d.join(from), d.join(format!("renamed{step}-{}", from.to_string_lossy())));
-                        }
-                        _ => {}
-                    }
-                    s.reload();
-                    let racing = what == 12 && n > 0;
-                    if racing {
-                        let i = row(r);
-                        s.cur_mut().toggle_mark(i);
-                        let name = shown(&s)[i].clone();
-                        if !model.remove(&name) {
-                            model.insert(name);
-                        }
-                    }
-                    log.push(format!("disk change, reload{}", if racing { " raced by a cmd-click" } else { "" }));
-                    settle_all(&mut s);
-                    keep_shown(&mut model, &s);
-                }
-                13 => {
                     log.push("tab hidden and shown".into());
                     s.new_tab(&mut Tx::default());
                     s.run(Cmd::PrevTab, &mut Tx::default());
                     settle_all(&mut s);
-                    keep_shown(&mut model, &s);
                     let (ix, last) = (s.active, s.panes[s.active].tabs.len() - 1);
                     s.close_tab(ix, last, &mut Tx::default());
                 }
-                _ => continue,
+                8 => {
+                    // Into a folder and back: the folder it came from is selected.
+                    settle_all(&mut s);
+                    let Some(dir) = s.cur().selected().filter(|e| e.is_dir && !s.busy()).map(|e| e.os.clone()) else { continue };
+                    if s.cur().marked.len() > 1 {
+                        continue;
+                    }
+                    s.run(Cmd::Into, &mut Tx::default());
+                    settle_all(&mut s);
+                    s.run(Cmd::Parent, &mut Tx::default());
+                    settle_all(&mut s);
+                    if s.cur().cwd != d {
+                        continue;
+                    }
+                    model = [dir.clone()].into();
+                    log.push(format!("into {dir:?} and back"));
+                }
+                _ => {
+                    log.push("polls".into());
+                    poll(&mut s, 3);
+                }
             }
+            poll(&mut s, r.below(2));
+            keep_shown(&mut model, &s);
             assert_eq!(targets(&s), model, "after {log:#?}\nrows {:?}", shown(&s));
-            let p = s.cur().picked_size();
-            assert_eq!(
-                p.map_or(model.len().min(1), |p| p.count),
-                model.len().max(usize::from(p.is_none() && !model.is_empty())),
-                "count after {log:#?}"
-            );
+            if let Some(p) = s.cur().picked_size() {
+                let t = s.cur().targets();
+                let bytes: u64 = t.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
+                let folders = t.iter().filter(|e| e.is_dir).count();
+                assert_eq!((p.count, p.bytes, p.folders), (t.len(), bytes, folders), "totals after {log:#?}");
+            }
         }
+        settle_all(&mut s);
     });
 }
 
@@ -1819,4 +1945,33 @@ fn a_file_appearing_in_an_empty_folder_isnt_selected() {
     settle_all(&mut s);
     assert_eq!(s.cur().visible.len(), 2);
     assert!(s.cur().targets().is_empty(), "shown again: {:?}", s.cur().target_paths());
+}
+
+/// Open Folder (→) opens the selected folder, never the cursor's when it was ⌘-clicked off
+/// the selection; and Select by Pattern taking out everything selected leaves nothing
+/// selected, not the row the cursor moves to.
+#[test]
+fn open_folder_and_pattern_remove_act_on_the_selection() {
+    let d = folder("into-selected", 0);
+    for n in ["a-dir", "b-dir"] {
+        std::fs::create_dir(d.join(n)).unwrap();
+    }
+    std::fs::write(d.join("c.txt"), "x").unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let f = s.cur_mut();
+    f.select(0);
+    f.toggle_mark(1);
+    f.toggle_mark(1);
+    assert_eq!(s.cur().target_paths(), [d.join("a-dir")]);
+    s.run(Cmd::Into, &mut Tx::default());
+    settle_all(&mut s);
+    assert_eq!(s.cur().cwd, d.join("a-dir"), "into the selected folder, not the cursor's");
+    s.run(Cmd::Parent, &mut Tx::default());
+    settle_all(&mut s);
+    s.cur_mut().select_all();
+    let g = crate::pattern::Glob::name("*", crate::pattern::Case::Insensitive).unwrap();
+    let all = s.cur().matching(&g);
+    s.cur_mut().apply_matches(all, crate::select::How::Remove);
+    assert!(s.cur().targets().is_empty(), "{:?}", s.cur().target_paths());
 }

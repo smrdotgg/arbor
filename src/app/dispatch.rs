@@ -358,9 +358,12 @@ impl State {
         match cmd {
             Open => self.open_selected(),
             Into => {
+                // The selected folder (never a cursor ⌘-clicked off the selection).
                 let f = self.cur_mut();
-                f.select(f.sel);
-                self.open_selected();
+                if let Some(row) = f.selected_row() {
+                    f.select(row);
+                    self.open_selected();
+                }
             }
             Parent => self.parent(),
             Back if self.cur().searching() => self.leave_search(self.active, tx),

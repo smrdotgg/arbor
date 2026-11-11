@@ -10,9 +10,8 @@
 //! refreshes keeps it. Case follows the platform's usual file system (insensitive on macOS and
 //! Windows, sensitive on Linux) unless `select.case_sensitive` says otherwise.
 //!
-//! Arbor always has a selected row while a folder has any (with nothing marked, the cursor's
-//! row is the selection), so taking out every selected item leaves the cursor on the nearest
-//! row that isn't one of them.
+//! Taking out every selected item leaves nothing selected, the cursor on the nearest row that
+//! isn't one of them.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -74,12 +73,12 @@ impl Folder {
         self.selection_names().0.into_iter().collect()
     }
 
-    /// Makes `names` the selection, moving the cursor onto it if it's off it. Nothing to select
-    /// can't be had (the cursor's row is the selection then), so an empty set puts the cursor on
-    /// the nearest row not in `avoid` instead. False when every row is in `avoid`.
+    /// Makes `names` the selection, moving the cursor onto it if it's off it. An empty set
+    /// selects nothing, the cursor moving to the nearest row not in `avoid` (it isn't
+    /// selected). False when every row is in `avoid`.
     pub fn set_selection(&mut self, names: HashSet<OsString>, avoid: &HashSet<OsString>) -> bool {
         self.picks += 1;
-        self.none = false;
+        self.none = names.is_empty();
         fn name(f: &Folder, i: usize) -> &OsString {
             &f.entries[f.visible[i] as usize].os
         }
@@ -483,7 +482,8 @@ mod tests {
         assert_eq!(names(&s), ["IMG_1.heic", "IMG_2.heic"]);
     }
 
-    /// Taking out everything selected leaves the cursor on a row that wasn't.
+    /// Taking out everything selected leaves nothing selected, the cursor on a row that
+    /// wasn't.
     #[test]
     fn removing_everything_moves_the_cursor_off_the_matches() {
         let d = folder("remove-all", FILES);
@@ -496,8 +496,8 @@ mod tests {
         s.open_pick(&mut tx);
         typed(&mut s, "*.jpg");
         s.pick_apply(How::Remove, &mut tx);
-        assert!(s.cur().marked.is_empty());
-        assert!(!s.cur().selected().unwrap().lower.ends_with(".jpg"));
+        assert!(s.cur().targets().is_empty(), "nothing selected");
+        assert!(!s.cur().cursor().unwrap().lower.ends_with(".jpg"));
     }
 
     /// The listing refreshes while the box is open (a file operation, a reload): the count
