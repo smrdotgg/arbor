@@ -198,7 +198,7 @@ fn redo_after_undo_and_a_new_operation_clears_it() {
     s.run(Cmd::Redo, &mut tx);
     finish_job(&mut s);
     assert!(d.join("a copy.txt").exists(), "redone");
-    assert_eq!(s.note.as_deref(), Some("Redid 1 item"));
+    assert_eq!(s.note.as_deref(), Some("Made “a copy.txt” again"));
     assert_eq!((s.undo.len(), s.redo.len()), (1, 0));
     // Undo it again, then a new operation: nothing to redo any more.
     s.run(Cmd::Undo, &mut tx);
@@ -1106,5 +1106,39 @@ fn show_original_clears_a_filter_and_shows_a_hidden_original() {
     settle_all(&mut s);
     assert_eq!(s.cur().cwd, d.join("sub"));
     assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some(".deep"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Undo and redo say what they did (the real-Mac QA: undoing New File or Make Link said
+/// "Restored 1 item").
+#[cfg(unix)]
+#[test]
+fn undo_and_redo_say_what_they_did() {
+    let d = folder("undo-words", 0);
+    std::fs::write(d.join("a.txt"), "a").unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let mut tx = Tx::default();
+    let mut step = |s: &mut State, cmd: Cmd| {
+        s.rename = None;
+        s.run(cmd, &mut tx);
+        finish_job(s);
+        s.note.clone().unwrap_or_default()
+    };
+    step(&mut s, Cmd::NewFile);
+    let bin = crate::trash::BIN;
+    assert_eq!(step(&mut s, Cmd::Undo), format!("Moved “untitled.txt” to the {bin}"));
+    assert_eq!(step(&mut s, Cmd::Redo), "Made “untitled.txt” again");
+    step(&mut s, Cmd::Undo);
+    let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "a.txt").unwrap();
+    s.cur_mut().select(i);
+    assert_eq!(step(&mut s, Cmd::MakeLink), "Made 1 link");
+    assert_eq!(step(&mut s, Cmd::Undo), "Removed 1 link");
+    assert_eq!(step(&mut s, Cmd::Redo), "Made 1 link again");
+    step(&mut s, Cmd::Undo);
+    let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "a.txt").unwrap();
+    s.cur_mut().select(i);
+    step(&mut s, Cmd::Duplicate);
+    assert_eq!(step(&mut s, Cmd::Undo), format!("Moved “a copy.txt” to the {bin}"));
     let _ = std::fs::remove_dir_all(&d);
 }

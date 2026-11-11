@@ -366,6 +366,40 @@ pub struct Outcome {
     /// New File and New Folder: what they made, as an identity (read right after), so the
     /// rename starts on that item and no other row.
     pub made: Option<crate::fs::Ident>,
+    /// An undo or a redo: what it reversed, and which way (`true`: a redo), for its words
+    /// ([`undone_note`]).
+    pub undid: Option<(What, bool)>,
+}
+
+/// What an undo (`redo` false) or a redo of a `what` that went through for `results` says:
+/// each kind in its own words ("Moved “untitled.txt” to the Trash", "Removed 1 link", "Made
+/// “untitled.txt” again"). One item is named; more are counted.
+pub fn undone_note(what: What, redo: bool, results: &[PathBuf]) -> String {
+    let n = results.len();
+    let named = |one: &str, many: &str| match (n, results.first()) {
+        (1, Some(p)) => format!("“{}”", name_of(p)),
+        _ => format!("{n} {}", if n == 1 { one } else { many }),
+    };
+    let items = || named("item", "items");
+    let bin = crate::trash::BIN;
+    match (what, redo) {
+        (What::Rename | What::BatchRename, false) => format!("Renamed {} back", items()),
+        (What::Rename | What::BatchRename, true) => format!("Renamed {} again", items()),
+        (What::Move, false) => format!("Moved {} back", items()),
+        (What::Move, true) => format!("Moved {} again", items()),
+        // Undoing what an operation made sends it to the Trash; redoing takes it back out.
+        (What::Copy | What::Duplicate, false) => format!("Moved {} to the {bin}", named("copy", "copies")),
+        (What::Copy | What::Duplicate, true) => format!("Made {} again", named("copy", "copies")),
+        (What::NewFolder, false) | (What::NewFile, false) => format!("Moved {} to the {bin}", items()),
+        (What::NewFolder, true) | (What::NewFile, true) => format!("Made {} again", items()),
+        // Links are removed for good (they hold no data) and made again.
+        (What::Link, false) => format!("Removed {n} link{}", if n == 1 { "" } else { "s" }),
+        (What::Link, true) => format!("Made {n} link{} again", if n == 1 { "" } else { "s" }),
+        (What::Trash, false) => format!("Put back {} from the {bin}", items()),
+        (What::Trash, true) => format!("Moved {} to the {bin} again", items()),
+        (What::PutBack, false) => format!("Moved {} back to the {bin}", items()),
+        (What::PutBack, true) => format!("Put back {} again", items()),
+    }
 }
 
 /// `id` as Arbor's own action left it, from an outcome's [`Outcome::reidentified`]; `id` when

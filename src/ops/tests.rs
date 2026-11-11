@@ -2604,3 +2604,27 @@ fn windows_undo_leaves_a_replacement_link_alone() {
     assert!(o.undo.is_some(), "the record stays");
     let _ = fs::remove_dir_all(&d);
 }
+
+/// Every kind of undo and redo says what it did, in its own words.
+#[test]
+fn undo_and_redo_notes_name_what_they_did() {
+    let one = [PathBuf::from("/d/a.txt")];
+    let two = [PathBuf::from("/d/a"), PathBuf::from("/d/b")];
+    let bin = crate::trash::BIN;
+    let say = |w, redo, r: &[PathBuf]| undone_note(w, redo, r);
+    assert_eq!(say(What::Rename, false, &one), "Renamed “a.txt” back");
+    assert_eq!(say(What::BatchRename, true, &two), "Renamed 2 items again");
+    assert_eq!(say(What::Move, false, &two), "Moved 2 items back");
+    assert_eq!(say(What::Move, true, &one), "Moved “a.txt” again");
+    assert_eq!(say(What::Copy, false, &two), format!("Moved 2 copies to the {bin}"));
+    assert_eq!(say(What::Duplicate, true, &one), "Made “a.txt” again");
+    assert_eq!(say(What::NewFolder, false, &one), format!("Moved “a.txt” to the {bin}"));
+    assert_eq!(say(What::NewFile, true, &one), "Made “a.txt” again");
+    assert_eq!(say(What::Link, false, &one), "Removed 1 link");
+    assert_eq!(say(What::Link, false, &two), "Removed 2 links");
+    assert_eq!(say(What::Link, true, &two), "Made 2 links again");
+    assert_eq!(say(What::Trash, false, &one), format!("Put back “a.txt” from the {bin}"));
+    assert_eq!(say(What::Trash, true, &two), format!("Moved 2 items to the {bin} again"));
+    assert_eq!(say(What::PutBack, false, &one), format!("Moved “a.txt” back to the {bin}"));
+    assert_eq!(say(What::PutBack, true, &two), "Put back 2 items again");
+}

@@ -196,6 +196,7 @@ impl<'a> Worker<'a> {
                 canon: Vec::new(),
                 reidentified: Vec::new(),
                 made: None,
+                undid: None,
                 folders: Vec::new(),
             };
         }
@@ -246,6 +247,7 @@ impl<'a> Worker<'a> {
             folders,
             reidentified: Vec::new(),
             made: None,
+            undid: None,
         };
         match op {
             Op::Copy { sources, dest } => {
@@ -397,9 +399,14 @@ impl<'a> Worker<'a> {
             }
             Op::MakeLinks { items } => self.make_links(items, &mut out),
             Op::Rename { items } => self.batch_rename(items, &mut out),
-            Op::Undo(undo) if undo.what == What::BatchRename => self.undo_batch_rename(undo, &mut out),
-            Op::Undo(undo) if undo.what == What::Link => self.undo_links(undo, &mut out),
-            Op::Undo(undo) => self.undo(undo, &mut out),
+            Op::Undo(undo) => {
+                out.undid = Some((undo.what, undo.redo));
+                match undo.what {
+                    What::BatchRename => self.undo_batch_rename(undo, &mut out),
+                    What::Link => self.undo_links(undo, &mut out),
+                    _ => self.undo(undo, &mut out),
+                }
+            }
             Op::Checked { expect, op } => return self.run_checked(&expect, *op),
         }
         out.cancelled = self.cancelled();
@@ -449,6 +456,7 @@ impl<'a> Worker<'a> {
                 canon: Vec::new(),
                 reidentified: Vec::new(),
                 made: None,
+                undid: None,
                 folders: Vec::new(),
             };
         }

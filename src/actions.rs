@@ -392,6 +392,8 @@ impl State {
                 (0, true) => format!("Nothing was moved to the {}", crate::trash::BIN),
                 (n, _) => format!("Moved {n} item{} to the {}", plural(n), crate::trash::BIN),
             }
+        } else if let Some((what, redo)) = out.undid {
+            ops::undone_note(what, redo, &out.results)
         } else if verb == ops::MAKING_LINKS {
             format!("Made {n} link{}", plural(n))
         } else {

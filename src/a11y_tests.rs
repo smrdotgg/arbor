@@ -242,7 +242,8 @@ fn results_and_errors_are_announced() {
     rt.update(|s, _| crate::app::tests::finish_job(s));
     rt.frame(0.0);
     let note = find(&rt.accessibility_json(), "note").cloned().expect("a note");
-    assert_eq!((note["role"].as_str(), note["name"].as_str()), (Some("status"), Some("Restored 1 item")));
+    assert_eq!(note["role"].as_str(), Some("status"));
+    assert_eq!(note["name"].as_str(), Some(format!("Put back “notes.txt” from the {}", crate::trash::BIN).as_str()));
 }
 
 /// Until an assistive client asks, nothing is built: Rune builds the tree only on activation,

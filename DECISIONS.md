@@ -62,6 +62,13 @@ Format: date · decision · why · how to undo.
     made again at the freed inode (ext4) for the one listed, so New File, New Folder, a paste
     and a drop went into it. Never the ctime, which a folder's every new entry changes. Every
     "same folder?" check uses it. Undo: `noclobber::dir_id`.
+  - **Undo and redo say what they did, per kind** (real-Mac QA: undoing New File or Make Link
+    said "Restored 1 item"): "Removed 1 link" / "Made 1 link again"; New File, New Folder and
+    copies "Moved “untitled.txt” to the Trash" / "Made “untitled.txt” again" (not the QA's
+    suggested "Removed “untitled.txt”": the file is in the Trash, not gone, and saying so tells
+    the user where to find it); moves and renames "Moved/Renamed … back" / "… again"; a trash
+    "Put back … from the Trash" / "Moved … to the Trash again". One item is named, more are
+    counted. Undo: `ops::undone_note`.
   - **New File and New Folder clear a filter, and rename only what they made** (after review):
     a filter hiding "untitled.txt" left another row selected, and the rename opened on it. The
     active pane's filter (or go-to text) is cleared when the item is made, as Finder shows a new
