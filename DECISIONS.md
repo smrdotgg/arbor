@@ -17,9 +17,11 @@ Format: date · decision · why · how to undo.
 - **2026-11-11 · New File, Make Symbolic Link and Show Original (`feature/new-file-links`;
   Review: the link's name and target, the keys).**
   - **Keys (Review): New File ⌥⌘N (Ctrl+Alt+N off macOS)**, beside New Folder's ⇧⌘N; free on
-    all three (the registry test checks), and ⌘N stays for New Window. **Make Symbolic Link: ⌃⌘A
-    on macOS only** (Finder's Make Alias); Explorer and Linux file managers have no
-    conventional key, so none there. **Show Original: no key** (Finder's ⌘R is Reload here).
+    all three (the registry test checks), and ⌘N stays for New Window. **Make Symbolic Link: no
+    default key.** Finder's Make Alias is ⌃⌘A, but `cmd+ctrl+a` in a settings file written on a
+    Mac reads as Ctrl+A (Select All) on Windows and Linux, where ⌘ is Ctrl (macOS CI's template
+    test caught it); Explorer and Linux file managers have no conventional key. Bind
+    `file.make_link` in the settings file. **Show Original: no key** (Finder's ⌘R is Reload here).
     Undo: `NewFile`, `MakeLink`, `ShowOriginal` in `commands.rs`.
   - **A link points at the item's absolute path as listed (Review)**, not a relative one and not
     resolved: a link made beside its item is for moving elsewhere (Finder's aliases work that
@@ -49,8 +51,9 @@ Format: date · decision · why · how to undo.
     `State::here` in `actions.rs`.
   - **Show Original selects the original in the same pane** (in place when it's in the same
     folder, else navigating there, ⌘[ back), not in a new tab: it's Reveal for links. The link is
-    read on the go-to worker with the usual one-frame wait; `..` is resolved through the real
-    folders on Unix (as the kernel follows it) and by spelling on Windows. Symbolic links only,
+    read on the go-to worker with the usual one-frame wait; a target is used as written unless it
+    has `.` or `..`, which are resolved through the real folders on Unix (as the kernel follows
+    them) and by spelling on Windows. Symbolic links only,
     not `.lnk` shortcuts. It's in an item's context menu only on a link. Undo:
     `State::show_original`, `app::original`.
 

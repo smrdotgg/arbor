@@ -748,8 +748,8 @@ at its path since makes nothing ("Nothing was made: … is another folder now"; 
 the same). ⌘Z sends it to the Trash only while it's still exactly as made (empty, same identity
 and time); once you've written to it, undo refuses and keeps it. ⇧⌘Z takes it back out.
 
-**Make Symbolic Link** (palette and the item's context menu; ⌃⌘A on macOS, Finder's Make Alias
-key) puts a link beside each selected item: `photo link.jpg` for `photo.jpg` (" link" goes before
+**Make Symbolic Link** (palette and the item's context menu; no default key, bind
+`file.make_link` in the settings) puts a link beside each selected item: `photo link.jpg` for `photo.jpg` (" link" goes before
 the extension, so the link keeps its type for opening, icons and previews), `Projects link` for a
 folder, `… link 2` when taken; never over anything. It points at the item's **absolute** path, so
 it keeps working when you move the link alone (to another folder or the Desktop), as Finder's
@@ -863,7 +863,7 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Move to Other Pane | F6 | F6 | `file.move_to_other` |
 | Copy Path | ⇧⌘C, ⌥⌘C | Ctrl+Shift+C, Ctrl+Alt+C | `file.copy_path` |
 | Duplicate | ⌘D | Ctrl+D | `file.duplicate` |
-| Make Symbolic Link | ⌃⌘A |  | `file.make_link` |
+| Make Symbolic Link |  |  | `file.make_link` |
 | Rename… | F2, ⇧⌘R | F2, Ctrl+Shift+R | `file.rename` |
 | Batch Rename… |  |  | `file.batch_rename` |
 | New Folder | ⇧⌘N | Ctrl+Shift+N | `file.new_folder` |
@@ -1117,7 +1117,7 @@ On the Mac, check:
       with it, the dialog counts the items and size, Cancel keeps them, Empty Trash empties
       `~/.Trash` (and a USB stick's `.Trashes`), and Finder's Trash shows empty.
 - [ ] ⌥⌘N in each view (list, icons, columns, tiles): `untitled.txt` with "untitled" selected
-      for renaming. ⌃⌘A on a file: `… link.txt` opens the file from Finder too, and moved to the
+      for renaming. Make Symbolic Link on a file: `… link.txt` opens the file from Finder too, and moved to the
       Desktop it still does. Show Original on it selects the file.
 - [ ] On an Intel Mac (or `arch -x86_64` with Rosetta), the universal `Arbor.app` opens.
 - [ ] Drag a tab along its strip, and onto the other pane of a split window.

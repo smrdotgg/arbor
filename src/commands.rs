@@ -120,7 +120,7 @@ commands! {
     MoveToOther "file.move_to_other" "Move to Other Pane", ["f6"];
     CopyPath "file.copy_path" "Copy Path", ["cmd+shift+c", "cmd+alt+c"];
     Duplicate "file.duplicate" "Duplicate", ["cmd+d"];
-    MakeLink "file.make_link" "Make Symbolic Link", ["mac:cmd+ctrl+a"];
+    MakeLink "file.make_link" "Make Symbolic Link", [];
     Rename "file.rename" "Rename…", ["f2", "cmd+shift+r"];
     BatchRename "file.batch_rename" "Batch Rename…", [];
     NewFolder "file.new_folder" "New Folder", ["cmd+shift+n"];

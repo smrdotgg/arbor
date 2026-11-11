@@ -988,9 +988,13 @@ fn originals_resolve_relative_targets() {
     std::os::unix::fs::symlink("../t", d.join("x/y/up")).unwrap();
     std::os::unix::fs::symlink("y/../t", d.join("x/mid")).unwrap();
     std::os::unix::fs::symlink("nowhere", d.join("x/none")).unwrap();
+    std::os::unix::fs::symlink("t", d.join("x/plain")).unwrap();
+    std::os::unix::fs::symlink(d.join("x/t"), d.join("abs")).unwrap();
     let canon = std::fs::canonicalize(&d).unwrap();
-    assert_eq!(original(&d.join("x/y/up")), (canon.join("x/t"), PathKind::Original));
-    assert_eq!(original(&d.join("x/mid")), (canon.join("x/t"), PathKind::Original));
+    assert_eq!(original(&d.join("x/y/up")), (canon.join("x/t"), PathKind::Original), "`..` through the real folders");
+    assert_eq!(original(&d.join("x/mid")), (d.join("x/t"), PathKind::Original), "back in the link's folder: its spelling");
+    assert_eq!(original(&d.join("x/plain")), (d.join("x/t"), PathKind::Original), "as written");
+    assert_eq!(original(&d.join("abs")), (d.join("x/t"), PathKind::Original), "as written");
     assert_eq!(original(&d.join("x/none")), (d.join("x/nowhere"), PathKind::Broken));
     assert_eq!(original(&d.join("x/t")).1, PathKind::Broken, "not a link");
     assert_eq!(lexical(Path::new("/a/b/../c/./d")), Path::new("/a/c/d"));

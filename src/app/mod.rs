@@ -266,16 +266,24 @@ pub(crate) enum PathKind {
     Broken,
 }
 
-/// Where the symbolic link at `link` points: the original's path, with `.` and `..` resolved
-/// (on Unix through the folders' real paths, as the system follows a link; Windows resolves a
-/// relative target by its spelling), and whether something is there. The original itself is
-/// kept as it is, a link too perhaps (Show Original on it goes on).
+/// Where the symbolic link at `link` points: the original's path, and whether something is
+/// there. Spelled as written (Arbor's own links are absolute) unless it has `.` or `..` in it:
+/// then those are resolved, on Unix through the folders' real paths, as the system follows a
+/// link (kept in the link's own spelling when that lands in the link's folder), and on Windows
+/// by their spelling, as Windows resolves them. The original itself is kept as it is, a link
+/// too perhaps (Show Original on it goes on).
 pub(crate) fn original(link: &Path) -> (PathBuf, PathKind) {
+    use std::path::Component;
     let Ok(target) = std::fs::read_link(link) else { return (link.to_path_buf(), PathKind::Broken) };
-    let abs = if target.is_absolute() { target } else { link.parent().unwrap_or(Path::new("")).join(target) };
-    let resolved = if cfg!(unix) {
+    let here = link.parent().unwrap_or(Path::new(""));
+    let abs = if target.is_absolute() { target } else { here.join(target) };
+    let resolved = if !abs.components().any(|c| matches!(c, Component::CurDir | Component::ParentDir)) {
+        Some(abs.clone())
+    } else if cfg!(unix) {
         match (abs.parent(), abs.file_name()) {
-            (Some(dir), Some(name)) => std::fs::canonicalize(dir).map(|d| d.join(name)).ok(),
+            (Some(dir), Some(name)) => std::fs::canonicalize(dir)
+                .ok()
+                .map(|d| if std::fs::canonicalize(here).is_ok_and(|h| h == d) { here.join(name) } else { d.join(name) }),
             _ => std::fs::canonicalize(&abs).ok(),
         }
     } else {
