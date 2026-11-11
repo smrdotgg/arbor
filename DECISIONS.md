@@ -80,19 +80,21 @@ Format: date · decision · why · how to undo.
   dialog in the state where there's nothing to confirm, not a new kind. When only some trashes
   can be read, it keeps the button, counts what can be emptied, names the unreadable trash and
   says it can't be undone. Undo: `contents::ask_words`, `Ask::action`/`settings`.
-- **2026-11-10 · A row's OS drag never starts from a release** (Mac QA: after a single-pane drag
-  nothing took, keys did nothing until Esc). **Under review (later on 2026-11-10):** the next
-  real-Mac QA (0ca5968) still sees keys blocked until Esc after a drop on a folder row (not
-  after one on empty space), and Rune's `drag_out::macos::drag_event` already refuses to start
-  from a release with the button up, so the cause below is doubtful. `ARBOR_DRAG_LOG=1` now
-  logs the sequence for a real-Mac run; this entry and RUNE-GAPS' follow once it's in. Cause: winit sends a release's position as a move
-  before the release, and Rune starts a drag-out from that move when it crosses the threshold;
-  AppKit's session then waits for a release that already happened, eating keys. Arbor's
-  `drag_out` asks AppKit for the current event and offers nothing on a release or plain move; the
-  status bar then says how to move files. Such a flick starts no drag (Finder would drag).
-  Off macOS, an unsplit in-window row drag let go on nothing now says the same (it said nothing).
-  RUNE-GAPS has the entry. Undo: `actions::os_drag_can_start`, the `drag_out` closure in
-  `view/list.rs`, the `far && split.is_none()` branch there.
+- **2026-11-11 · A row's system drag left behind by its release is given the release again**
+  (Mac QA: after a quick single-pane drag nothing took, keys did nothing until Esc). The
+  real-Mac `ARBOR_DRAG_LOG` runs showed the cause: the release came before AppKit's session took
+  over the mouse, so it went to the window, and the session waited for another (RUNE-GAPS.md has
+  the timings). Folder rows had nothing to do with it. When Rune reports the session started,
+  Arbor asks the window server whether the left button is still down, and if not posts a
+  left-mouse-up at the pointer to its own event queue (in-process, no permission); the session
+  ends Cancelled and the status bar says how to move files. 7ae015b's check (refusing a drag
+  offered while the event being handled was a release) is reverted: Rune already refuses that,
+  and the event at offer time can't see a release that comes later. Nothing is checked at offer
+  time: Rune has no hook between the offer and the session, and the offer is where synthetic
+  input read "no button down" mid-drag. Judgment call: with synthetic input that never sets the
+  button state, a drag still held when the session starts is ended at once (Cancelled, the same
+  hint); a real mouse reports it. Undo: `State::drag_out_started` and the `on_drag_start` in
+  `view/list.rs::item_drags`.
 - **2026-11-10 · Shift + wheel turns sideways in the text preview on macOS too** (Mac QA: the
   tool's horizontal scroll didn't move the preview). Rune delivers horizontal deltas fine (tests
   feed a tilt wheel and a trackpad swipe); what it leaves to macOS is turning Shift + wheel, which

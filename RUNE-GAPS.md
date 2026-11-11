@@ -56,38 +56,43 @@ Newest first.
 - **Suggested Rune change:** on macOS, turn a non-precise delta with Shift held and no horizontal
   part as other platforms do (a delta the system turned already has one, so nothing turns twice).
 
-## Drag out: a release past the threshold starts a system drag that never ends
-
-**Under review (2026-11-10):** the cause below is doubtful. Rune's `drag_event` already returns
-no event (so no session) when the current event isn't a drag or press and the button is up, and
-a real-Mac run of 0ca5968 still blocks keys after a drop on a folder row, not on empty space.
-`ARBOR_DRAG_LOG=1` (`src/draglog.rs`) logs the sequence on the Mac; this entry will be corrected
-or removed from what it shows.
+## Drag out: a release before the session takes over the mouse leaves it waiting
 
 - **Feature:** dragging rows out of the list (macOS, one pane): to Finder and other apps, and the
   guidance when nothing takes the drop.
-- **What Rune is missing:** a guarantee that `drag_out` never starts a session once the button is
-  up. Rune means to (`Runtime::release`: "A release never starts a drag-out"), but winit's
-  `mouseUp:` sends the release's position as a `CursorMoved` before the `MouseInput` release
-  (`view.rs`: `mouse_motion` then `mouse_click`), and that move goes through `pointer_move`, which
-  starts the drag-out when it crosses the threshold (`window/events.rs` then calls
-  `drag_out::begin` with the mouse-up as the current event). AppKit's session then waits for a
-  release that already happened: it eats every key (⌘J, F2, anything) until Esc cancels it, and
-  `on_drag_end` doesn't run until then. It happens when the press moved less than the threshold
-  in its last drag event and the rest arrived with the release: a quick flick, Screen Sharing, or
-  an automation tool's drag (the QA session's "keys blocked after a single-pane drag until Esc").
-- **What we did instead:** the row's `drag_out` closure asks AppKit for the event being handled
-  (`NSApp.currentEvent`) and offers nothing when it's a release or a plain move
-  (`os_drag_can_start` in `src/actions.rs`), marking `State::drag_refused`; the next frame's
-  `poll` (or the next key) says how to move files, as a drag nothing took does. The press then
-  ends as a press that moved off its row: nothing happens.
-- **What users lose:** such a flick starts no drag at all, where Finder would still drag. Arbor
-  calls into AppKit from a view closure, which every Rune app with `drag_out` would need.
-- **Suggested Rune change:** don't start a drag-out from a move that comes with a release: in the
-  winit shell, skip `take_drag_out` (and drop the request as `Cancelled`) when
-  `NSApp.currentEvent` isn't a mouse-dragged event, or have `pointer_move` check that the button
-  is still down (`NSEvent.pressedMouseButtons`). Better still, also pass where a session ended to
-  `on_drag_end` (see "Drag between panes" below).
+- **What Rune is missing:** a `drag_out` session that can't outlive its gesture. Rune begins the
+  system session inside the mouse-dragged event that crossed the threshold
+  (`window/events.rs`, `drag_out::begin`), but AppKit's session takes over the mouse only a
+  little later (20–50 ms in the real-Mac logs below), and Rune doesn't check the button is
+  still down when it does. A release in that gap is dispatched to the window as an ordinary
+  mouse-up (which Rune ignores: the press's capture went with the drag-out), and the session
+  then waits for a release that already happened: it eats every key (⌘J, F2, anything) until
+  Esc or another click ends it, and `on_drag_end` doesn't run until then. It takes a quick
+  drag: a flick, Screen Sharing, an automation tool. `ARBOR_DRAG_LOG=1` on the M4 Pro (QA at
+  2beefb5): offered at 14127 ms, the window got `LeftMouseDragged` at 14143 and
+  `LeftMouseUp` at 14144, Rune reported the session started at 14166, and it ended Cancelled
+  at 61764 on Esc. A drag held half a second ended normally on its release: no event reached
+  the window between the offer and the end (the session had them all). Whether the drop was on
+  a folder row or empty space made no difference; the earlier theory here (a session begun
+  from the release itself) was wrong: Rune's `drag_event` already refuses that.
+- **What we did instead:** the row's `on_drag_start` (which Rune runs in the frame after it
+  began the session) asks the window server which buttons are down
+  (`NSEvent.pressedMouseButtons`); if the left one isn't, Arbor posts a left-mouse-up at the
+  pointer to the front of its own event queue (`-[NSApplication postEvent:atStart:]`,
+  in-process), which the session takes as its drop: over Arbor's own window, which takes none of
+  its own drags, so it ends Cancelled and the status bar says how to move files
+  (`State::drag_out_started` in `src/actions.rs`).
+- **What users lose:** little, if the session has taken over the mouse by the time Rune reports
+  it started (the logs say it had: it was still waiting long after). A release in the frame
+  between that report and the takeover would still be missed. Every Rune app with `drag_out`
+  would need the same workaround. Synthetic input from automation tools may not set
+  `pressedMouseButtons` (the logs read 0 mid-drag), so for such a drag still held when the
+  session starts, Arbor ends it at once (it ends Cancelled with the same hint).
+- **Suggested Rune change:** when the session's first tracking event arrives (or right before
+  `beginDraggingSession`, and again when a left-mouse-up reaches the window while a session is
+  pending), check `NSEvent.pressedMouseButtons`; if the button is up, end the session (post the
+  release to it, or cancel it) and report `on_drag_end(Cancelled)`. Better still, also pass
+  where a session ended to `on_drag_end` (see "Drag between panes" below).
 
 ## Volumes: no mount or device notifications
 

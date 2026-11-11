@@ -95,9 +95,6 @@ pub struct State {
     pub lands: u64,
     /// The pane a row drag between panes is over.
     pub pane_drop: Option<u64>,
-    /// A row's OS drag was refused because the pointer had already been let go
-    /// (`actions::os_drag_can_start`); the next frame's `poll` (or key) says how to move files.
-    pub drag_refused: std::cell::Cell<bool>,
     pub show_hidden: bool,
     /// The user toggled hidden files (even back to where it was), so settings that land late
     /// at startup leave it alone.
@@ -310,7 +307,6 @@ impl State {
             show_wait: FIRST_PAINT_WAIT,
             lands: 0,
             pane_drop: None,
-            drag_refused: std::cell::Cell::new(false),
             show_hidden: config.settings.show_hidden,
             hidden_set: false,
             places,
@@ -585,7 +581,6 @@ impl State {
         tx.instant();
         crate::draglog::poll();
         let mut changed = self.poll_job();
-        changed |= self.drag_not_taken();
         if let Some(a) = self.ask_next.take() {
             self.ask_with(a, tx);
             changed = true;

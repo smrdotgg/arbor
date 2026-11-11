@@ -2,18 +2,21 @@
 //! run on a real Mac (where a drag can't be driven from a test):
 //!
 //! ```text
-//! arbor-drag t=1234.5 drag-out ask row="a.txt" ev=LeftMouseDragged buttons=1 mode=kCFRunLoopDefaultMode -> offered
-//! arbor-drag t=1234.9 drag-out started row="a.txt"
-//! arbor-drag t=1240.2 loop mode=NSEventTrackingRunLoopMode
-//! arbor-drag t=1802.7 drag-out end row="a.txt" outcome=Cancelled
+//! arbor-drag t=1234.5 drag-out ask row="a.txt" ev=LeftMouseDragged pressed=1 mode=kCFRunLoopDefaultMode -> offered
+//! arbor-drag t=1250.9 drag-out row="a.txt"
+//! arbor-drag t=1250.9 drag-out started pressed=0 -> released (posted a left-mouse-up)
+//! arbor-drag t=1251.3 drag-out end row="a.txt" outcome=Cancelled ev=LeftMouseUp pressed=0 mode=kCFRunLoopDefaultMode
 //! arbor-drag t=1803.0 loop mode=kCFRunLoopDefaultMode
 //! arbor-drag t=2101.4 appkit KeyDown chars="j" mode=kCFRunLoopDefaultMode
 //! arbor-drag t=2101.6 key Command('j') cmd -> Jump
 //! ```
 //!
 //! - `drag-out ask`: Rune asked a row what to drag (the pointer crossed the threshold), with
-//!   the AppKit event being handled, the mouse buttons down and the run loop's mode; `offered`
-//!   or `refused`. `drag-out started` and `drag-out end` bracket the system's session.
+//!   the AppKit event being handled, the mouse buttons the window server says are down
+//!   (`pressed`, a bit mask; synthetic input from automation tools may not set it) and the run
+//!   loop's mode. `drag-out started` (when Rune says the system's session began, a frame
+//!   later, with the buttons down then, and whether Arbor gave a session left behind by its
+//!   release that release again) and `drag-out end` bracket the session.
 //! - `loop`: the main run loop's mode, each time it changes, seen from `poll` (every frame's).
 //!   `NSEventTrackingRunLoopMode` is a tracking loop running (a drag session, a menu).
 //! - `appkit`: every key press and left-button press, drag and release AppKit dispatches to the
@@ -103,7 +106,7 @@ mod mac {
 
     pub(super) fn event_and_buttons() -> String {
         if !main_thread() {
-            return "ev=? buttons=?".into();
+            return "ev=? pressed=?".into();
         }
         // SAFETY: AppKit getters on the main thread.
         unsafe {
@@ -116,7 +119,7 @@ mod mac {
                 kind_name(k)
             };
             let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
-            format!("ev={kind} buttons={buttons}")
+            format!("ev={kind} pressed={buttons}")
         }
     }
 
@@ -170,7 +173,7 @@ use mac::{event_and_buttons, run_loop_mode};
 
 #[cfg(not(target_os = "macos"))]
 fn event_and_buttons() -> String {
-    "ev=- buttons=-".into()
+    "ev=- pressed=-".into()
 }
 
 #[cfg(not(target_os = "macos"))]

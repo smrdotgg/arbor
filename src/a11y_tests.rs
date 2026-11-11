@@ -554,21 +554,22 @@ fn drag_row(rt: &mut Runtime<State>, from: &str, onto: &str) {
 
 /// QA (macOS): after a single-pane drag of a file onto a folder row that nothing took, the
 /// next key reaches its command (F2 renames), with no Esc first. Both ways it ends: a drag
-/// that went out and came back with nothing, and one AppKit couldn't start because the button
-/// was already up (winit reports the release's position as a move first): that one is
-/// refused, so no system drag is left waiting for a release that already happened, and it
-/// says how to move files instead.
+/// still held when its system session started, and one whose button came up before the session
+/// took over the mouse (the real-Mac log: the release reached the window 22 ms before Rune said
+/// the session had started, and the session waited for another until Esc). That one is given
+/// its release again, once, and says how to move files.
 #[test]
 fn after_a_drag_nothing_took_the_next_key_reaches_its_command() {
     let d = folder("drag-keys");
     for released in [false, true] {
         let mut rt = runtime(&d);
-        crate::actions::PRETEND_EVENT.with(|c| c.set(released.then_some(2)));
+        crate::actions::RELEASES_POSTED.with(|n| n.set(0));
+        crate::actions::PRETEND_PRESSED.with(|c| c.set(Some(if released { 0 } else { 1 })));
         drag_row(&mut rt, "notes.txt", "Photos");
-        crate::actions::PRETEND_EVENT.with(|c| c.set(None));
-        if released {
-            assert_eq!(rt.state.note.as_deref(), Some(crate::actions::DRAG_NOT_TAKEN), "it says how to move files");
-        }
+        crate::actions::PRETEND_PRESSED.with(|c| c.set(None));
+        let posted = crate::actions::RELEASES_POSTED.with(std::cell::Cell::get);
+        assert_eq!(posted, usize::from(released), "a release given again only when the button was up (released: {released})");
+        assert_eq!(rt.state.note.as_deref(), Some(crate::actions::DRAG_NOT_TAKEN), "it says how to move files");
         assert_eq!(rt.state.cur().selected().map(|e| e.name.clone()).as_deref(), Some("notes.txt"));
         key(&mut rt, Key::Function(2), false);
         assert!(rt.state.rename.is_some(), "F2 renames right after the drag (released: {released})");
@@ -577,12 +578,17 @@ fn after_a_drag_nothing_took_the_next_key_reaches_its_command() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// The macOS check behind it: an OS drag never starts from a release or a plain move.
+/// The decision behind it: a session that starts with the left button up was left behind by
+/// its release; with the button (or the left and another) down it wasn't; with no word from
+/// the window server (off macOS) nothing is done.
 #[test]
-fn an_os_drag_never_starts_from_a_release() {
-    for (kind, ok) in [(6, true), (7, true), (27, true), (2, false), (4, false), (26, false), (5, false)] {
-        assert_eq!(crate::actions::drag_may_start_on(kind), ok, "NSEventType {kind}");
-    }
+fn a_drag_session_is_left_behind_only_with_the_left_button_up() {
+    use crate::actions::drag_left_behind;
+    assert!(drag_left_behind(Some(0)));
+    assert!(drag_left_behind(Some(2)), "only the right button down");
+    assert!(!drag_left_behind(Some(1)));
+    assert!(!drag_left_behind(Some(3)));
+    assert!(!drag_left_behind(None));
 }
 
 // ---- Scrolling the text preview sideways -----------------------------------------------------

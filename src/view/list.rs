@@ -305,12 +305,6 @@ pub(super) fn item_drags(e: El, c: Ctx, i: usize, version: u64) -> El {
                     if s.pane(id)?.f.version != version {
                         return None;
                     }
-                    // Never from a release: AppKit's session would wait for one forever.
-                    if !crate::actions::os_drag_can_start() {
-                        crate::draglog::log(|| format!("drag-out ask row={:?} {} -> refused", row_name(s), crate::draglog::appkit()));
-                        s.drag_refused.set(true);
-                        return None;
-                    }
                     crate::draglog::log(|| format!("drag-out ask row={:?} {} -> offered", row_name(s), crate::draglog::appkit()));
                     s.drag_item(id, i)
                 })
@@ -320,9 +314,13 @@ pub(super) fn item_drags(e: El, c: Ctx, i: usize, version: u64) -> El {
                     s.drag_out_ended(outcome);
                 })
                 .on_drag(inside);
-            // Only while logging (`ARBOR_DRAG_LOG`): a handler more per row otherwise.
-            if crate::draglog::on() {
-                e.on_drag_start(move |s: &mut State, _| crate::draglog::log(|| format!("drag-out started row={:?}", row_name(s))))
+            // macOS only (elsewhere Rune starts no system drag): a session that started after
+            // the button came up is given its release (`State::drag_out_started`).
+            if cfg!(any(target_os = "macos", test)) || crate::draglog::on() {
+                e.on_drag_start(move |s: &mut State, _| {
+                    crate::draglog::log(|| format!("drag-out row={:?}", row_name(s)));
+                    s.drag_out_started();
+                })
             } else {
                 e
             }

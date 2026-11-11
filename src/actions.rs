@@ -142,18 +142,6 @@ impl State {
         }
     }
 
-    /// A row's OS drag that [`os_drag_can_start`] refused (the pointer was already let go)
-    /// ended as a drag nothing took: say so, as [`State::drag_out_ended`] does. True when it
-    /// had. Called from `poll` (the frame after the release) and before each key.
-    pub(crate) fn drag_not_taken(&mut self) -> bool {
-        if !self.drag_refused.take() {
-            return false;
-        }
-        crate::draglog::log(|| "note: a refused drag-out ended as nothing taken".into());
-        self.note = Some(DRAG_NOT_TAKEN.into());
-        true
-    }
-
     /// A drag out of the list ended (macOS: an OS drag session). Moved: what went is gone from
     /// here. Nothing took it: say how to move files into a folder here, since an OS drag can't
     /// land in the window it came from, and Rune doesn't say where it was let go (RUNE-GAPS.md).
@@ -737,58 +725,144 @@ fn deleted_note(out: &ops::Outcome, n: usize, total: usize, place: &str) -> Stri
     }
 }
 
-/// Whether an OS drag may start from the event being handled now. AppKit's session needs the
-/// button held: one begun from a release waits for a release that already happened, eating
-/// every key until Esc (the QA session's "keys blocked after a drag"). winit reports a
-/// release's position as a move before the release itself, so Rune, which never starts a
-/// drag-out on a release, starts one from that move when the button came up past the drag
-/// threshold (a quick flick, Screen Sharing, automation tools): RUNE-GAPS.md. Arbor's
-/// `drag_out` asks first and offers nothing then. Off macOS, and off AppKit's main thread
-/// (tests), there's no such event and nothing to refuse.
-pub(crate) fn os_drag_can_start() -> bool {
+/// The mouse buttons down now, as the window server says (`NSEvent.pressedMouseButtons`: bit 0
+/// is the left button), on macOS's main thread; `None` elsewhere (no system drags there).
+pub(crate) fn pressed_buttons() -> Option<usize> {
     #[cfg(test)]
-    if let Some(kind) = PRETEND_EVENT.with(std::cell::Cell::get) {
-        return drag_may_start_on(kind);
+    if let Some(mask) = PRETEND_PRESSED.with(std::cell::Cell::get) {
+        return Some(mask);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::{class, msg_send};
+        // SAFETY: class methods with no arguments, on the main thread only.
+        unsafe {
+            let main: bool = msg_send![class!(NSThread), isMainThread];
+            if !main {
+                return None;
+            }
+            let mask: usize = msg_send![class!(NSEvent), pressedMouseButtons];
+            Some(mask)
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// Whether a system drag session that has just started was left waiting for a release that
+/// already happened: the left button isn't down any more (`pressed`, [`pressed_buttons`]).
+pub(crate) fn drag_left_behind(pressed: Option<usize>) -> bool {
+    pressed.is_some_and(|mask| mask & 1 == 0)
+}
+
+/// Ends a system drag session waiting for a release that already happened, by giving the app
+/// that release again: a left-mouse-up at the pointer, posted to the front of Arbor's own event
+/// queue (`-[NSApplication postEvent:atStart:]`; in-process, so no permission and nothing
+/// outside the app). The session's tracking loop takes it as the drop, over Arbor's own window,
+/// which takes no drops from its own drags, so the session ends Cancelled and the status bar
+/// says how to move files. True when it posted.
+pub(crate) fn release_left_behind_drag() -> bool {
+    #[cfg(test)]
+    if PRETEND_PRESSED.with(std::cell::Cell::get).is_some() {
+        RELEASES_POSTED.with(|n| n.set(n.get() + 1));
+        return true;
     }
     #[cfg(target_os = "macos")]
     {
         use objc2::runtime::AnyObject;
         use objc2::{class, msg_send};
-        // SAFETY: class methods and getters of AppKit's application and its current event,
-        // only on the main thread, where AppKit dispatches events (and calls `drag_out`).
+        use objc2_core_foundation::CGPoint;
+        // SAFETY: AppKit calls on the main thread with live objects: the shared application,
+        // its key (else main) window, and an event from AppKit's own constructor.
         unsafe {
             let main: bool = msg_send![class!(NSThread), isMainThread];
             if !main {
-                return true;
+                return false;
             }
             let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
             if app.is_null() {
-                return true;
+                return false;
             }
-            let ev: *mut AnyObject = msg_send![app, currentEvent];
+            let mut window: *mut AnyObject = msg_send![app, keyWindow];
+            if window.is_null() {
+                window = msg_send![app, mainWindow];
+            }
+            if window.is_null() {
+                return false;
+            }
+            let at: CGPoint = msg_send![window, mouseLocationOutsideOfEventStream];
+            let number: isize = msg_send![window, windowNumber];
+            let ev = left_mouse_up(at, number);
             if ev.is_null() {
-                return true;
+                return false;
             }
-            let kind: usize = msg_send![ev, type];
-            drag_may_start_on(kind)
+            let _: () = msg_send![app, postEvent: ev, atStart: true];
+            true
         }
     }
     #[cfg(not(target_os = "macos"))]
-    true
+    false
+}
+
+/// A left-mouse-up event at `at` (window points) in window `number`, now. Made, not posted.
+#[cfg(target_os = "macos")]
+fn left_mouse_up(at: objc2_core_foundation::CGPoint, number: isize) -> *mut objc2::runtime::AnyObject {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    // NSEventTypeLeftMouseUp.
+    const LEFT_MOUSE_UP: usize = 2;
+    // SAFETY: AppKit's documented constructor, with arguments of the types it declares.
+    unsafe {
+        let info: *mut AnyObject = msg_send![class!(NSProcessInfo), processInfo];
+        let now: f64 = msg_send![info, systemUptime];
+        msg_send![class!(NSEvent),
+            mouseEventWithType: LEFT_MOUSE_UP,
+            location: at,
+            modifierFlags: 0usize,
+            timestamp: now,
+            windowNumber: number,
+            context: std::ptr::null_mut::<AnyObject>(),
+            eventNumber: 0isize,
+            clickCount: 1isize,
+            pressure: 0.0f32]
+    }
+}
+
+/// macOS: the release Arbor would post is a left-mouse-up where asked (made, never posted:
+/// this checks the AppKit calls' signatures, which `msg_send!` verifies only as they run).
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn the_release_given_again_is_a_left_mouse_up() {
+    use objc2::msg_send;
+    let ev = left_mouse_up(objc2_core_foundation::CGPoint::new(12.0, 34.0), 0);
+    assert!(!ev.is_null());
+    // SAFETY: a live event AppKit just made.
+    let (kind, at, clicks): (usize, objc2_core_foundation::CGPoint, isize) =
+        unsafe { (msg_send![ev, type], msg_send![ev, locationInWindow], msg_send![ev, clickCount]) };
+    assert_eq!((kind, at.x, at.y, clicks), (2, 12.0, 34.0, 1));
 }
 
 #[cfg(test)]
 thread_local! {
-    /// Tests: the AppKit event type [`os_drag_can_start`] pretends is being handled.
-    pub(crate) static PRETEND_EVENT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    /// Tests: the mouse buttons [`pressed_buttons`] pretends are down, and how many releases
+    /// [`release_left_behind_drag`] would have posted.
+    pub(crate) static PRETEND_PRESSED: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    pub(crate) static RELEASES_POSTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// [`os_drag_can_start`] for an AppKit event type (`NSEventType`): not on a release
-/// (left 2, right 4, other 26) or a move with no button held (5).
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-pub(crate) fn drag_may_start_on(kind: usize) -> bool {
-    const RELEASE_OR_HOVER: [usize; 4] = [2, 4, 5, 26];
-    !RELEASE_OR_HOVER.contains(&kind)
+impl State {
+    /// A row's system drag session started (macOS; Rune says so in the frame after it began
+    /// it). If the button came up before the session took over the mouse, that release went to
+    /// the window as an ordinary mouse-up, and the session would wait for another, eating every
+    /// key until Esc (RUNE-GAPS.md): it's given the release again.
+    pub(crate) fn drag_out_started(&mut self) {
+        let pressed = pressed_buttons();
+        let posted = drag_left_behind(pressed) && release_left_behind_drag();
+        crate::draglog::log(|| {
+            let mask = pressed.map_or("-".into(), |m| m.to_string());
+            format!("drag-out started pressed={mask}{}", if posted { " -> released (posted a left-mouse-up)" } else { "" })
+        });
+    }
 }
 
 /// What a drag out of the list that nothing took says.
