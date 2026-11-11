@@ -1776,3 +1776,24 @@ fn typing_during_a_reload_keeps_what_typing_chose() {
     settle_all(&mut s);
     assert_eq!(s.cur().target_paths(), [d.join("banana")], "not apple, nor anything else");
 }
+
+/// Starting a rename and cancelling it leaves the selection exactly as it was: one item
+/// selected with the cursor ⌘-clicked off another stays that item, not the cursor's.
+#[test]
+fn a_cancelled_rename_leaves_the_selection_as_it_was() {
+    let d = folder("rename-cancel", 0);
+    for n in ["a", "b", "c"] {
+        std::fs::write(d.join(n), n).unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let f = s.cur_mut();
+    f.select(0);
+    f.toggle_mark(1);
+    f.toggle_mark(1);
+    assert_eq!(s.cur().target_paths(), [d.join("a")]);
+    s.start_rename();
+    assert_eq!(s.rename.as_ref().map(|r| r.os.clone()), Some("a".into()));
+    s.cancel_rename(&mut Tx::default());
+    assert_eq!(s.cur().target_paths(), [d.join("a")]);
+}

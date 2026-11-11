@@ -222,7 +222,14 @@ impl State {
         let mut edit = TextEdit::new(label);
         edit.set_selection(0, stem);
         edit.focused = true;
-        self.cur_mut().marked.clear();
+        // The item renamed is the selection, the cursor on it: what was selected (it, alone),
+        // so cancelling leaves exactly that, never a cursor the user had deselected.
+        let f = self.cur_mut();
+        if let Some(row) = f.visible.iter().position(|&i| f.entries[i as usize].os == os)
+            && !(f.marked.is_empty() && f.sel == row)
+        {
+            f.select(row);
+        }
         self.rename = Some(Rename { os, edit });
     }
 
