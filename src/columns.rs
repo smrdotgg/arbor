@@ -234,6 +234,9 @@ impl Column {
                 self.refilter(hidden);
             }
             Err(e) => {
+                // An error isn't a listing: nothing from before stays behind it.
+                self.entries = Vec::new();
+                self.visible = Vec::new();
                 self.load = Load::Failed(e);
                 self.version = crate::folder::next_version();
             }

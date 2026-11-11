@@ -767,6 +767,18 @@ impl State {
             p.select = f.picked();
             p.rename = false;
         }
+        // The folder on screen couldn't be read again (a reload, a tab shown): what it listed
+        // before isn't shown or acted on any more, only why it can't be read. (A navigation
+        // elsewhere that fails leaves the folder it was in, as it was.)
+        if a.listing.result.is_err() && p.path == f.cwd {
+            f.entries = Vec::new();
+            f.visible.clear();
+            f.marked.clear();
+            f.sel = 0;
+            f.anchor = 0;
+            f.dir_id = None;
+            f.bump();
+        }
         let jumped = self.jump_req.take_if(|&mut r| r == p.req).is_some();
         let placed = self.side.going.take_if(|(r, _)| *r == p.req).is_some();
         match a.listing.result {

@@ -1847,3 +1847,40 @@ fn the_views_are_idle_after_each_kind_of_input() {
     assert_idle(&mut rt, "tiles, scrolled");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A read that fails shows what went wrong and nothing of the listing from before: a column's
+/// error isn't drawn over entries it keeps, and a folder whose reload fails (the list, any
+/// view) empties instead of showing what it listed last.
+#[cfg(unix)]
+#[test]
+fn a_failed_read_keeps_no_listing() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = nested("failed-read");
+    let mut rt = runtime(&d);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cols.as_ref().unwrap().right.as_ref().unwrap().visible.len(), 2);
+    std::fs::set_permissions(d.join("Docs"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    run(&mut rt, Cmd::Reload);
+    settle_columns(&mut rt);
+    let c = rt.state.cur().cols.as_ref().unwrap().right.as_ref().unwrap();
+    let (load, entries, visible) = (c.load.clone(), c.entries.len(), c.visible.len());
+    std::fs::set_permissions(d.join("Docs"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(load, crate::columns::Load::Failed(_)), "{load:?}");
+    assert_eq!((entries, visible), (0, 0), "an error isn't a listing: nothing kept behind it");
+    // The list: Docs open, then unreadable, then ⌘R.
+    run(&mut rt, Cmd::AsList);
+    let docs = d.join("Docs");
+    rt.update(move |s, _| s.go_to(docs));
+    until(&mut rt, |s| !s.cur().is_loading());
+    assert_eq!(rt.state.cur().visible.len(), 2);
+    std::fs::set_permissions(d.join("Docs"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    run(&mut rt, Cmd::Reload);
+    until(&mut rt, |s| !s.cur().is_loading());
+    let (entries, visible, targets) = (rt.state.cur().entries.len(), rt.state.cur().visible.len(), rt.state.target_paths());
+    std::fs::set_permissions(d.join("Docs"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(rt.state.note.is_some(), "it says why");
+    assert_eq!((entries, visible), (0, 0), "the listing from before isn't shown");
+    assert!(targets.is_empty(), "nor acted on");
+    let _ = std::fs::remove_dir_all(&d);
+}
