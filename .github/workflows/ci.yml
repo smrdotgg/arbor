@@ -20,6 +20,12 @@ jobs:
       run:
         shell: bash
     steps:
+      # Files exactly as committed, LF line endings on Windows too: Rune loads its precompiled
+      # DXBC uber shader only when the WGSL it embeds hashes as committed. With the Windows
+      # runner's default (core.autocrlf true) every launch compiled it with FXC instead
+      # (BENCH.md, 2026-11-12); build.rs now refuses such a checkout.
+      - name: Check out without converting line endings
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
 
       # Rune at the commit pinned in RUNE_REV, crates from crates.io. Locally, .cargo/config.toml

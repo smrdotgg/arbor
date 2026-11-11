@@ -15,6 +15,9 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/icon/png");
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if os == "windows" {
+        refuse_crlf_shaders();
+    }
     if os != "windows" || env != "msvc" {
         return;
     }
@@ -31,6 +34,30 @@ fn main() {
     let out = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("arbor.res");
     std::fs::write(&out, res).expect("writing arbor.res");
     println!("cargo:rustc-link-arg-bins={}", out.display());
+}
+
+/// Rune's WGSL as Rune embeds it. On Windows Rune draws with a precompiled DXBC copy of its uber
+/// shader only while this text hashes exactly as committed; a checkout that turned its line
+/// endings into CRLF (Git for Windows' `core.autocrlf true`, the GitHub runner's default) makes
+/// every launch compile it with FXC instead, hundreds of milliseconds before the first frame,
+/// with no message (BENCH.md, 2026-11-12). So such a build stops here.
+const RUNE_WGSL: [&str; 2] = ["vendor/rune/crates/rune/src/shader.wgsl", "vendor/rune/crates/rune/src/clip.wgsl"];
+
+fn refuse_crlf_shaders() {
+    let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    for rel in RUNE_WGSL {
+        let path = root.join(rel);
+        println!("cargo:rerun-if-changed={}", path.display());
+        // A layout without vendor/rune (Rune from elsewhere) can't be checked here.
+        let Ok(text) = std::fs::read(&path) else { continue };
+        assert!(
+            !text.contains(&b'\r'),
+            "{rel} has CRLF line endings, so Rune would compile its uber shader at every launch instead of \
+             loading the precompiled one. Check Rune out again without converting line endings: \
+             `git -C vendor/rune config core.autocrlf false`, then `git -C vendor/rune checkout -- .` \
+             (or `git config --global core.autocrlf false` before cloning)."
+        );
+    }
 }
 
 const RT_ICON: u16 = 3;
