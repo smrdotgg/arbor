@@ -33,13 +33,13 @@ pub(super) fn columns(s: &State, f: &Folder, c: Ctx, cx: &mut Cx<State>, active:
     let active_at = cols.active();
     for k in shown.clone() {
         let column = if k < active_at {
-            other_column(&cols.left[k], c, w)
+            col().key(slot_key(cols.left[k].uid)).w(w).h_full().child(other_column(&cols.left[k], c, w))
         } else if k == active_at {
-            // Keyed, so the list keeps its path (and its scroll, and what scrolls it) as it
-            // moves along the strip.
-            col().key("column-active").w(w).h_full().child(list(f, Ctx { narrow: true, ..c }, active.clone()))
+            // The element of the column it was (keyed by its number), so a column keeps its
+            // element, rows, scroll and any gesture in it when it becomes the active one.
+            col().key(slot_key(f.col_uid.unwrap_or(0))).w(w).h_full().child(list(f, Ctx { narrow: true, ..c }, active.clone()))
         } else if let Some(r) = &cols.right {
-            other_column(r, c, w)
+            col().key(slot_key(r.uid)).w(w).h_full().child(other_column(r, c, w))
         } else {
             // The selected file's preview, over the rest of the width.
             let panel = match &s.preview {
@@ -78,6 +78,12 @@ pub(super) fn columns(s: &State, f: &Folder, c: Ctx, cx: &mut Cx<State>, active:
         );
     }
     strip
+}
+
+/// A column's slot in the strip, by the number of its element: the same whether it's the
+/// active column (the folder's list) or another.
+fn slot_key(uid: u64) -> String {
+    format!("colw-{uid}")
 }
 
 /// A sideways wheel over pane `id`'s columns scrolls them by whole columns (a vertical one

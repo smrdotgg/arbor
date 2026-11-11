@@ -818,9 +818,13 @@ impl State {
                     && let Some(cols) = f.cols.as_mut()
                     && !old_entries.is_empty()
                 {
-                    let col = crate::columns::Column::ready(old, old_entries, old_id, f.sort, f.show_hidden, self.waker.as_ref());
+                    // The column left takes the element the folder was drawn as; the folder, the
+                    // one of the column it came from (`adopt_column`), or a new one.
+                    let uid = f.col_uid.replace(f.adopt_uid.take().unwrap_or_else(crate::columns::next_uid));
+                    let col = crate::columns::Column::ready(old, old_entries, old_id, f.sort, f.show_hidden, uid, self.waker.as_ref());
                     cols.spare.push(col);
                 }
+                f.adopt_uid = None;
                 f.now = crate::folder::now();
                 let navigated = matches!(p.nav, Nav::New | Nav::Back | Nav::Forward | Nav::Fresh);
                 if navigated {

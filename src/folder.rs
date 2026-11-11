@@ -162,6 +162,12 @@ pub struct Folder {
     pub cols: Option<Box<crate::columns::Columns>>,
     /// The width the columns have, as last laid out (geometry, written by the view).
     pub(crate) cols_w: Rc<Cell<f32>>,
+    /// Showing as columns: the number of the column element this folder is drawn as
+    /// (`columns::next_uid`). It moves with the listing when a column becomes the active one
+    /// and back, so a column keeps its element, its scroll and any gesture in it.
+    pub(crate) col_uid: Option<u64>,
+    /// The column element a read that's landing came from (`State::adopt_column`).
+    pub(crate) adopt_uid: Option<u64>,
 }
 
 impl Drop for Folder {
@@ -209,6 +215,8 @@ impl Folder {
             tiles_for: None,
             cols: None,
             cols_w: Rc::new(Cell::new(0.0)),
+            col_uid: None,
+            adopt_uid: None,
         }
     }
 
@@ -220,12 +228,19 @@ impl Folder {
         self.stop.clone()
     }
 
+    /// The list's element key: the pane's, or as columns the column element's it's drawn as.
     pub fn list_key(&self) -> String {
-        format!("list-{}", self.id)
+        match self.col_uid {
+            Some(u) => format!("col-{u}"),
+            None => format!("list-{}", self.id),
+        }
     }
 
     pub fn rows_key(&self) -> String {
-        format!("rows-{}", self.id)
+        match self.col_uid {
+            Some(u) => format!("colrows-{u}"),
+            None => format!("rows-{}", self.id),
+        }
     }
 
     pub fn selected(&self) -> Option<&Entry> {
@@ -400,6 +415,7 @@ impl Folder {
         self.grid_rows = None;
         self.tiles_for = None;
         self.cols = None;
+        self.col_uid = None;
         self.entries = Vec::new();
         self.visible.clear();
         self.marked.clear();

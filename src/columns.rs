@@ -69,6 +69,11 @@ pub enum Load {
 /// scroll) for as long as it shows the same folder.
 static COLUMN: AtomicU64 = AtomicU64::new(1);
 
+/// A new column element's number.
+pub(crate) fn next_uid() -> u64 {
+    COLUMN.fetch_add(1, Relaxed)
+}
+
 /// One column other than the active one.
 pub struct Column {
     pub path: PathBuf,
@@ -104,7 +109,7 @@ impl Column {
         }
         Column {
             path,
-            uid: COLUMN.fetch_add(1, Relaxed),
+            uid: next_uid(),
             dir_id: None,
             entries: Vec::new(),
             visible: Vec::new(),
@@ -119,16 +124,21 @@ impl Column {
         }
     }
 
-    /// A column of a listing on screen this frame (the folder just left), sorted by `sort`.
+    /// A column of a listing on screen this frame (the folder just left), sorted by `sort`,
+    /// drawn as element `uid` (the one it was drawn as) when there was one.
     pub(crate) fn ready(
         path: PathBuf,
         entries: Vec<Entry>,
         dir_id: Option<crate::noclobber::FileId>,
         sort: Sort,
         hidden: bool,
+        uid: Option<u64>,
         waker: Option<&rune::Waker>,
     ) -> Column {
         let mut c = Column::new(path, waker);
+        if let Some(u) = uid {
+            c.uid = u;
+        }
         c.entries = entries;
         c.dir_id = dir_id;
         c.sort = sort;
@@ -412,7 +422,9 @@ impl State {
         let covered = self.split() && ix != self.active && self.panel_docked();
         let f = &self.panes[ix].f;
         if f.view != ViewMode::Columns || f.searching() {
-            return self.panes[ix].f.cols.take().is_some();
+            let f = &mut self.panes[ix].f;
+            f.col_uid = None;
+            return f.cols.take().is_some();
         }
         if covered {
             let Some(cols) = self.panes[ix].f.cols.as_mut() else { return false };
@@ -435,6 +447,9 @@ impl State {
         let waker = self.waker.clone();
         let f = &mut self.panes[ix].f;
         let mut changed = false;
+        if f.col_uid.is_none() {
+            f.col_uid = Some(next_uid());
+        }
         // The right column: the selected folder's contents. While the folder's own read is on
         // its way, what's on the right stays.
         let loading = f.is_loading();
@@ -588,10 +603,12 @@ impl State {
         };
         if !col.listed() {
             let (old, entries, old_id) = f.enter_unread(col.path.clone(), nav, select.to_vec(), col.dir_id);
+            // The folder takes the column's element; the folder left, its own.
+            let old_uid = f.col_uid.replace(col.uid);
             if !entries.is_empty()
                 && let Some(cols) = f.cols.as_mut()
             {
-                let spare = Column::ready(old, entries, old_id, f.sort, f.show_hidden, waker.as_ref());
+                let spare = Column::ready(old, entries, old_id, f.sort, f.show_hidden, old_uid, waker.as_ref());
                 cols.spare.push(spare);
             }
             self.history.record(path);
@@ -599,6 +616,7 @@ impl State {
             return true;
         }
         let req = f.pending_for(path.to_path_buf(), nav, select.to_vec());
+        f.adopt_uid = Some(col.uid);
         let sort = col.sort;
         let mut col = col;
         let listing = Listing { path: col.path.clone(), result: Ok(std::mem::take(&mut col.entries)), dir_id: col.dir_id, missing: false };

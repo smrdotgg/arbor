@@ -1357,7 +1357,8 @@ fn the_columns_are_a_group_of_named_list_boxes() {
         .collect();
     assert_eq!(on_the_way, ["Folder Docs", "Folder Work"], "the ▸ reads as Folder, as without the Kind column");
     assert!(find(group, "columns-back").is_none(), "nothing scrolled off");
-    assert_eq!(boxes[2]["key"], "list-0", "the active column is the pane's list");
+    assert_eq!(boxes[2]["key"].as_str(), Some(rt.state.cur().list_key().as_str()), "the active column is the pane's list");
+    assert!(rt.state.cur().list_key().starts_with("col-"), "drawn as its column's element");
     assert!(boxes[2]["activeDescendant"].as_str().is_some_and(|a| a.ends_with("f:notes.md")));
     let preview = find(group, "preview").expect("the preview is the last column");
     assert_eq!(preview["role"], "complementary");
@@ -1466,7 +1467,7 @@ fn a_sideways_wheel_over_a_column_scrolls_the_columns() {
     let shown = |rt: &Runtime<State>| rt.state.cur().cols.as_ref().map(|c| c.shown());
     assert_eq!(shown(&rt), Some(2..4), "Work and notes.md's preview");
     assert!(rt.state.cur().cols.as_ref().unwrap().holding().is_empty(), "the root and Docs are off screen");
-    let list = rect_of(&rt, "list-0").expect("the active column");
+    let list = rect_of(&rt, &rt.state.cur().list_key()).expect("the active column");
     let (x, y) = (list[0] + 40.0, list[1] + 30.0);
     rt.wheel_event(WheelEvent::new(0.0, -30.0).at(x, y));
     rt.frame(0.0);
@@ -1668,5 +1669,44 @@ fn covered_columns_hold_nothing() {
     run(&mut rt, Cmd::Info);
     until(&mut rt, |s| s.panes[other].f.cols.as_ref().is_some_and(|c| !c.holding().is_empty()));
     assert_eq!(holding(&rt), [d.join("Docs")], "read again when it shows");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A drag from a row in another column keeps going once its press has made that column the
+/// active one: the row keeps its element (each column is one element, active or not), so the
+/// gesture reaches the other pane and moves the file there.
+#[test]
+fn a_drag_from_another_column_keeps_its_gesture() {
+    let d = nested("drag-other-column");
+    std::fs::create_dir_all(d.join("Dest")).unwrap();
+    let mut rt = runtime(&d);
+    rt.update(|s, _| s.col_w = 140.0);
+    run(&mut rt, Cmd::Split);
+    rt.update(|s, tx| s.activate(1, tx));
+    let dest = d.join("Dest");
+    rt.update(move |s, _| s.go_to(dest));
+    until(&mut rt, |s| !s.cur().is_loading());
+    rt.update(|s, tx| s.activate(0, tx));
+    run(&mut rt, Cmd::AsColumns);
+    // Docs (Dest sorts first): its contents in the column on the right.
+    key(&mut rt, Key::Down, false);
+    settle_columns(&mut rt);
+    let b = row_box(&mut rt, "readme.txt");
+    let start = (b[0] + 35.0, b[1] + b[3] * 0.5);
+    let other = rect_of(&rt, &format!("pane-{}", rt.state.panes[1].id())).unwrap();
+    let end = (other[0] + 60.0, other[1] + 150.0);
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"), "the press made Docs active");
+    rt.pointer_move(start.0 + 10.0, start.1 + 5.0);
+    rt.frame(0.0);
+    rt.pointer_move(end.0, end.1);
+    rt.frame(0.0);
+    assert_eq!(rt.state.pane_drop, Some(rt.state.panes[1].id()), "still dragging, over the other pane");
+    rt.pointer_up(end.0, end.1);
+    rt.frame(0.0);
+    until(&mut rt, |s| s.job.is_none());
+    assert!(d.join("Dest/readme.txt").exists(), "{:?}", rt.state.note);
     let _ = std::fs::remove_dir_all(&d);
 }
