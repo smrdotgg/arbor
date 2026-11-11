@@ -73,6 +73,10 @@ A/B in one job (a slower VM: win32-hello 46 ms), 15 alternating launches, proces
 | `rune::warm_gpu` first in `main` | **785.5 ms** | 12.1 | 58.0 | 746.7 |
 | the same, 13 system DLLs `/DELAYLOAD`ed | 785.7 ms | 8.3 | 60.6 | 747.5 |
 
+A third job on a faster VM (a4cb912 against a620e33, 15 each): 466.1 → **441.1 ms** (before
+`main` 8.3 ms both, `setup` at 17.7 → 22.2, window at 438.8 → 414.9). So `warm_gpu` saves 25–55 ms
+on the runner, depending on the VM.
+
 `warm_gpu` makes the GPU device and renderer on a thread from the top of `main`, so they overlap
 the event loop, fonts and window (macOS's `prewarm_gpu` does nothing elsewhere). Delay-loading
 moves 3.8 ms from before `main` into the startup that needs the same DLLs anyway: not kept.

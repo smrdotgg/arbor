@@ -13,7 +13,7 @@ Format: date · decision · why · how to undo.
   (`perf/fast-start`; Review: the probe release).**
   - **`rune::warm_gpu` first thing in `main` on Windows and Linux**: the window's GPU device and
     renderer made on Rune's warm-up thread while the event loop, fonts and window are made
-    (Windows runner 841 → 786 ms, Linux under Xvfb 127 → 101 ms; BENCH.md). Arbor gains `wgpu`
+    (Windows runner 841 → 786 and 466 → 441 ms on two VMs, Linux under Xvfb 127 → 101 ms; BENCH.md). Arbor gains `wgpu`
     as a direct dependency on those platforms, only for `wgpu::Features::empty()` (the same crate
     Rune builds; no new crate in the lock file). Undo: remove the call and the dependency.
   - **The pre-release `coldstart-probe-1`** (MSVC builds of a620e33 by the "Cold start

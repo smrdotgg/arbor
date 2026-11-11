@@ -51,7 +51,7 @@ Newest first.
 - **What we did instead:** `rune::warm_gpu` first thing in `main` on Windows and Linux
   (`src/main.rs`), which makes the device and renderer on a thread while the event loop, fonts
   and window are made, as `prewarm_gpu` does on macOS: Linux 127 → 101 ms, Windows runner
-  841 → 786 ms. It hides the probes
+  841 → 786 and 466 → 441 ms (two VMs). It hides the probes
   of item 1 only up to the length of everything else (~30–50 ms), so a slow adapter probe still
   shows. The first window waits at most 8 ms for the first folder (`FIRST_PAINT_WAIT`), unchanged.
 - **What users lose:** on a hybrid laptop, most of a second at every launch (and the discrete
