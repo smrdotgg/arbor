@@ -33,8 +33,13 @@ pub struct NewFile {
     pub renamed: bool,
 }
 
+/// Told of each item the moment it's created (its path, its metadata and identity, from its
+/// handle where there is one), before anything is written to it: the leftovers record names
+/// what an extraction cut short by quitting left (`crate::leftovers`).
+pub type Created<'a> = &'a dyn Fn(&Path, &std::fs::Metadata, Option<crate::noclobber::FileId>);
+
 /// The folder an extraction writes into, and what it has made there.
-pub struct Out {
+pub struct Out<'a> {
     root: PathBuf,
     /// The open folders from the root down to the last one written in (Unix).
     #[cfg(unix)]
@@ -43,6 +48,7 @@ pub struct Out {
     #[cfg(not(unix))]
     stack: Vec<String>,
     pub made: Vec<Made>,
+    created: Created<'a>,
 }
 
 /// How many free names a taken name tries ("name 2" to "name 100").
@@ -108,15 +114,15 @@ mod imp {
         [omit, stamp(t)]
     }
 
-    impl Out {
+    impl<'a> Out<'a> {
         /// The folder at `root`, just made by the caller and known by `id`: opened without
         /// following a link, and refused if it isn't that folder.
-        pub fn new(root: PathBuf, id: crate::noclobber::FileId) -> Result<Out, Error> {
+        pub fn new(root: PathBuf, id: crate::noclobber::FileId, created: Created<'a>) -> Result<Out<'a>, Error> {
             let fd = open_dir(libc::AT_FDCWD, &crate::ffi::cstr(&root)?, false)?;
             if crate::dirfd::node(&crate::dirfd::fstat(&fd)?) != id {
                 return Err(Error::Io(io::Error::other("the folder it was extracting into was replaced")));
             }
-            Ok(Out { root, stack: vec![(String::new(), fd)], made: Vec::new() })
+            Ok(Out { root, stack: vec![(String::new(), fd)], made: Vec::new(), created })
         }
 
         fn path(&self, rel: &[String]) -> PathBuf {
@@ -151,6 +157,7 @@ mod imp {
                         let path = self.path(&dirs[..=i]);
                         if fresh && let Ok(meta) = path.symlink_metadata() {
                             let id = crate::noclobber::file_id(&path, &meta);
+                            (self.created)(&path, &meta, id);
                             self.made.push(Made { path: path.clone(), dir: true, meta, id });
                         }
                         return Err(if matches!(e.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP)) {
@@ -164,7 +171,9 @@ mod imp {
                     let f = File::from(fd.try_clone()?);
                     let meta = f.metadata()?;
                     let id = crate::dirfd::node(&crate::dirfd::fstat(&fd)?);
-                    self.made.push(Made { path: self.path(&dirs[..=i]), dir: true, meta, id: Some(id) });
+                    let path = self.path(&dirs[..=i]);
+                    (self.created)(&path, &meta, Some(id));
+                    self.made.push(Made { path, dir: true, meta, id: Some(id) });
                 }
                 self.stack.push((d.clone(), fd));
             }
@@ -191,6 +200,9 @@ mod imp {
                     let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
                     let mut path = self.path(dirs);
                     path.push(&try_name);
+                    if let Ok(meta) = file.metadata() {
+                        (self.created)(&path, &meta, id_of(&file).ok());
+                    }
                     return Ok(NewFile { file, path, renamed: n > 1 });
                 }
                 let e = last_err();
@@ -224,6 +236,7 @@ mod imp {
                     path.push(&try_name);
                     let meta = path.symlink_metadata()?;
                     let id = crate::noclobber::file_id(&path, &meta);
+                    (self.created)(&path, &meta, id);
                     self.made.push(Made { path, dir: false, meta, id });
                     return Ok(n > 1);
                 }
@@ -289,13 +302,13 @@ mod imp {
 mod imp {
     use super::*;
 
-    impl Out {
+    impl<'a> Out<'a> {
         /// The folder at `root`, just made by the caller and known by `id`.
-        pub fn new(root: PathBuf, id: crate::noclobber::FileId) -> Result<Out, Error> {
-            if crate::noclobber::dir_id(&root) != Some(id) {
+        pub fn new(root: PathBuf, id: crate::noclobber::FileId, created: Created<'a>) -> Result<Out<'a>, Error> {
+            if root.symlink_metadata().ok().and_then(|m| crate::noclobber::file_id(&root, &m)) != Some(id) {
                 return Err(Error::Io(io::Error::other("the folder it was extracting into was replaced")));
             }
-            Ok(Out { root, stack: Vec::new(), made: Vec::new() })
+            Ok(Out { root, stack: Vec::new(), made: Vec::new(), created })
         }
 
         fn path(&self, rel: &[String]) -> PathBuf {
@@ -316,6 +329,7 @@ mod imp {
                     Ok(()) => {
                         let meta = p.symlink_metadata()?;
                         let id = crate::noclobber::file_id(&p, &meta);
+                        (self.created)(&p, &meta, id);
                         self.made.push(Made { path: p, dir: true, meta, id });
                     }
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -341,7 +355,12 @@ mod imp {
             for n in 1..=TRIES {
                 let path = dir.join(if n == 1 { name.clone() } else { variant(name, n, true) });
                 match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                    Ok(file) => return Ok(NewFile { file, path, renamed: n > 1 }),
+                    Ok(file) => {
+                        if let Ok(meta) = file.metadata() {
+                            (self.created)(&path, &meta, id_of(&file).ok());
+                        }
+                        return Ok(NewFile { file, path, renamed: n > 1 });
+                    }
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(e) => return Err(Error::Io(e)),
                 }
@@ -381,7 +400,7 @@ mod imp {
     }
 }
 
-impl Out {
+impl Out<'_> {
     /// A file written whole: its time set, and recorded as made (by its handle).
     pub fn done(&mut self, nf: NewFile, mtime: Option<SystemTime>) -> Result<(), Error> {
         if let Some(t) = mtime {

@@ -87,6 +87,12 @@ Format: date · decision · why · how to undo.
     inside, devices, sockets, FIFOs, links on Windows. Its temporary file is
     `.<name>.arbor-<pid>-<n>.part` beside the items (shown on Windows while it runs). Undo:
     `ops/archive/mod.rs`.
+  - **With multiple windows (main's aeeed9e):** Compress and Extract Here start through the
+    app's one operation slot like every operation, and their outcome refreshes every window
+    showing the folder, by identity. What they make is registered for the leftovers record the
+    moment it's made (the extracted folder and each item in it, Compress's temporary file), so
+    quitting mid-way names what cleanup couldn't remove; a finished one is cleared. Undo and redo
+    say "Moved “Photos.zip” to the Trash", "Put back “Photos” from the Trash".
   - **Tar: read twice** (once for the list, so it's checked whole before anything is written,
     then to write it, each entry matched against the list; a gzipped tar is decompressed twice),
     hard links, devices and sparse files left out with a note, names that aren't UTF-8 shown with

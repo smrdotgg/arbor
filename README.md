@@ -958,7 +958,6 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Batch Rename… |  |  | `file.batch_rename` |
 | New Folder | ⇧⌘N | Ctrl+Shift+N | `file.new_folder` |
 | New File | ⌥⌘N | Ctrl+Alt+N | `file.new_file` |
-
 | Compress |  |  | `file.compress` |
 | Extract Here |  |  | `file.extract` |
 | Move to Trash | ⌘⌫, ⌦ | Ctrl+Backspace, Delete | `file.trash` |

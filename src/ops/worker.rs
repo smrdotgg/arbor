@@ -123,7 +123,7 @@ impl<'a> Worker<'a> {
 
     /// `dst` was just created, with creation mark `mark`: confirmed in `Progress::created`
     /// at once, before anything is written to it (one it can't mark isn't).
-    fn created(p: &Progress, dst: &Path, mark: Option<&String>) {
+    pub(super) fn created(p: &Progress, dst: &Path, mark: Option<&String>) {
         if let Some(mark) = mark
             && let Ok(mut c) = p.created.lock()
         {

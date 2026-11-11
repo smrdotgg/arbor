@@ -290,13 +290,13 @@ mod tests {
         }
         assert_eq!(sel(&s), Some(4), "past the separator to Get Info");
         assert!(s.on_key(&key(Key::Text("c".into())), &mut tx));
-        assert_eq!(sel(&s), Some(7), "Compress");
+        assert_eq!(sel(&s), Some(8), "Compress");
         assert!(s.on_key(&key(Key::Text("c".into())), &mut tx));
-        assert_eq!(sel(&s), Some(10), "then Copy");
+        assert_eq!(sel(&s), Some(11), "then Copy");
         assert!(s.on_key(&key(Key::Text("c".into())), &mut tx));
-        assert_eq!(sel(&s), Some(11), "then Cut");
+        assert_eq!(sel(&s), Some(12), "then Cut");
         assert!(s.on_key(&key(Key::Text("C".into())), &mut tx));
-        assert_eq!(sel(&s), Some(13), "then Copy Path, case aside");
+        assert_eq!(sel(&s), Some(14), "then Copy Path, case aside");
         assert!(s.on_key(&key(Key::End), &mut tx));
         assert_eq!(sel(&s), Some(18));
         let picked = s.cur().sel;

@@ -110,13 +110,17 @@ impl Worker<'_> {
             }
         };
         let temp_id = file_id_of(&file);
+        // Registered for the leftovers record at once (quitting mid-compress).
+        let temp_mark = file.metadata().ok().and_then(|m| super::print::creation_mark(&m, temp_id));
+        Self::created(self.p, &temp, temp_mark.as_ref());
         let mut left = Left::default();
         let r = self.write_zip(file, &keep, &mounts, &mut left);
-        let fail = |why: String, out: &mut Outcome| out.errors.push(with_kept(why, remove_temp(&temp, temp_id)));
+        let fail =
+            |why: String, out: &mut Outcome| out.errors.push(with_kept(why, remove_temp(self.p, &temp, temp_id, temp_mark.as_ref())));
         let file = match r {
             Ok(f) => f,
             Err(AErr::Cancelled) => {
-                let kept = remove_temp(&temp, temp_id).map_or_else(String::new, |k| format!("; {k}"));
+                let kept = remove_temp(self.p, &temp, temp_id, temp_mark.as_ref()).map_or_else(String::new, |k| format!("; {k}"));
                 out.said = Some(format!("Cancelled: “{name}” wasn't made{kept}"));
                 return;
             }
@@ -133,6 +137,7 @@ impl Worker<'_> {
             self.before_act(&to);
             match noclobber::rename(&temp, &to) {
                 Ok(()) => {
+                    self.made_whole();
                     placed = Some(to);
                     break;
                 }
@@ -395,7 +400,7 @@ impl Worker<'_> {
             match self.extract_one(a, &mut out.notes) {
                 Ok((root, print)) => {
                     out.results.push(root.clone());
-                    steps.push(Step { at: root, print, back: None, split: None });
+                    steps.push(Step { at: root, print, back: None, split: None, link: None, ident: None });
                 }
                 Err(_) if self.cancelled() => {}
                 Err(why) => out.errors.push(format!("Couldn't extract “{}”: {why}", name_of(a))),
@@ -456,23 +461,32 @@ impl Worker<'_> {
         // else can take its place.
         let meta = root.symlink_metadata().map_err(|e| e.to_string())?;
         let root_print = Print::of(&root, &meta);
+        // Registered for the leftovers record as each item is made (quitting mid-extraction).
+        let mark = super::print::creation_mark(&meta, root_print.id);
+        Self::created(self.p, &root, mark.as_ref());
         self.after_made(&root);
-        let mut made = vec![Made { src: PathBuf::new(), dst: root.clone(), dir: true, was: None, made: Some(root_print.clone()) }];
+        let mut made = vec![Made { src: PathBuf::new(), dst: root.clone(), dir: true, was: None, made: Some(root_print.clone()), mark }];
         let Some(id) = root_print.id else {
-            return Err(with_kept("its folder couldn't be identified".into(), unmake(&made)));
+            return Err(with_kept("its folder couldn't be identified".into(), unmake(self.p, &made)));
         };
-        let mut o = match Out::new(root.clone(), id) {
+        let p = self.p;
+        let created = move |path: &Path, m: &std::fs::Metadata, id: Option<noclobber::FileId>| {
+            Self::created(p, path, super::print::creation_mark(m, id).as_ref());
+        };
+        let mut o = match Out::new(root.clone(), id, &created) {
             Ok(o) => o,
-            Err(e) => return Err(with_kept(said(&e), unmake(&made))),
+            Err(e) => return Err(with_kept(said(&e), unmake(self.p, &made))),
         };
         let r = self.write_entries(&mut o, fmt, &file, zl.as_ref(), &entries, &plan);
         made.extend(o.made.drain(..).map(|m| Made {
             src: PathBuf::new(),
             dir: m.dir,
             made: Some(Print::with_id(&m.meta, m.id)),
+            mark: super::print::creation_mark(&m.meta, m.id),
             dst: m.path,
             was: None,
         }));
+        drop(o);
         match r {
             Ok(dups) => {
                 notes.extend(plan.notes.iter().cloned());
@@ -483,9 +497,11 @@ impl Worker<'_> {
                     ));
                 }
             }
-            Err(AErr::Cancelled) => return Err(with_kept("cancelled".into(), unmake(&made))),
-            Err(e) => return Err(with_kept(said(&e), unmake(&made))),
+            Err(AErr::Cancelled) => return Err(with_kept("cancelled".into(), unmake(self.p, &made))),
+            Err(e) => return Err(with_kept(said(&e), unmake(self.p, &made))),
         }
+        // Whole: the folder is the result now, not a leftover.
+        self.made_whole();
         let print =
             self.print_all(&root).map_err(|e| format!("it was extracted into “{}”, but that can't be read back: {e}", name_of(&root)))?;
         Ok((root, print))
@@ -704,13 +720,25 @@ fn file_id_of(f: &File) -> Option<noclobber::FileId> {
 
 /// Removes Compress's temporary file, only while it's still the one it made (`id`); what was
 /// left and why otherwise.
-fn remove_temp(temp: &Path, id: Option<noclobber::FileId>) -> Option<String> {
-    let m = temp.symlink_metadata().ok()?;
-    if id.is_some() && noclobber::file_id(temp, &m) == id {
-        std::fs::remove_file(temp).err().map(|e| format!("kept “{}”: {e}", name_of(temp)))
-    } else {
-        Some(format!("kept “{}”: it changed after Arbor made it", name_of(temp)))
+/// One it couldn't remove goes to the leftovers record (`Progress::kept`, with its `mark`).
+fn remove_temp(p: &Progress, temp: &Path, id: Option<noclobber::FileId>, mark: Option<&String>) -> Option<String> {
+    let left = (|| {
+        let m = temp.symlink_metadata().ok()?;
+        if id.is_some() && noclobber::file_id(temp, &m) == id {
+            let e = std::fs::remove_file(temp).err()?;
+            let why = format!("it couldn't be removed ({e})");
+            if let (Some(mark), Ok(mut k)) = (mark, p.kept.lock()) {
+                k.push((temp.to_path_buf(), mark.clone(), why.clone()));
+            }
+            Some(format!("kept “{}”: {why}", name_of(temp)))
+        } else {
+            Some(format!("kept “{}”: it changed after Arbor made it", name_of(temp)))
+        }
+    })();
+    if let Ok(mut c) = p.created.lock() {
+        c.clear();
     }
+    left
 }
 
 /// A name's bytes as the archive stores them (Unix: as they are; Windows: UTF-8).

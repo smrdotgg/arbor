@@ -761,3 +761,48 @@ fn thread_cpu() -> f64 {
     }
     f64::NAN
 }
+
+/// What an extraction or a compress makes is registered for the leftovers record the moment
+/// it's made (so quitting mid-way names it, `crate::leftovers`), and no longer once it's whole.
+#[test]
+fn what_they_make_is_registered_for_the_leftovers_record() {
+    use std::sync::{Arc, Mutex};
+    let d = tmp("leftovers");
+    let zip = d.join("pack.zip");
+    zip_at(&zip, |w| {
+        add_file(w, &d, "dir/f0", b"0");
+        add_file(w, &d, "dir/f1", b"1");
+        add_file(w, &d, "g", b"g");
+    });
+    let p: &'static Progress = Box::leak(Box::new(Progress::default()));
+    let seen: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+    let s = seen.clone();
+    let mut w = Worker::new(p, None, crate::ops::tests::fake_trash);
+    w.hooks.cancel_at = Some(Box::new(move |at: &Path| {
+        if at.ends_with("f1") || at == Path::new("a.txt") {
+            *s.lock().unwrap() = p
+                .created
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(path, mark)| {
+                    assert!(!mark.is_empty());
+                    path.clone()
+                })
+                .collect();
+        }
+        false
+    }));
+    let o = w.run(Op::Extract { archives: vec![zip] });
+    ok(&o);
+    let root = d.join("pack");
+    assert_eq!(*seen.lock().unwrap(), [root.clone(), root.join("dir"), root.join("dir/f0"), root.join("dir/f1")]);
+    assert!(p.created.lock().unwrap().is_empty(), "whole: not a leftover");
+    // Compress: its temporary file, while it's written.
+    fs::write(d.join("a.txt"), "a").unwrap();
+    let o = w.run(Op::Compress { sources: vec![d.join("a.txt")], dir: d.clone() });
+    ok(&o);
+    let during = seen.lock().unwrap().clone();
+    assert!(during.len() == 1 && during[0].to_string_lossy().ends_with(".part"), "{during:?}");
+    assert!(p.created.lock().unwrap().is_empty());
+}

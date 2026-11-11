@@ -173,7 +173,7 @@ impl Op {
             Op::RenameOne { from, .. } => from.parent().map(Path::to_path_buf).into_iter().collect(),
             Op::NewFolder { dir } | Op::NewFile { dir } => vec![dir.clone()],
             Op::MakeLinks { items } => parents(items),
-            Op::NewFolder { dir } | Op::Compress { dir, .. } => vec![dir.clone()],
+            Op::Compress { dir, .. } => vec![dir.clone()],
             Op::Extract { archives } => parents(archives),
             Op::Checked { op, .. } => return op.folders(),
             Op::Undo(u) => u
@@ -436,6 +436,10 @@ pub fn undone_note(what: What, redo: bool, results: &[PathBuf]) -> String {
         (What::Trash, true) => format!("Moved {} to the {bin} again", items()),
         (What::PutBack, false) => format!("Moved {} back to the {bin}", items()),
         (What::PutBack, true) => format!("Put back {} again", items()),
+        (What::Compress, false) => format!("Moved {} to the {bin}", named("archive", "archives")),
+        (What::Compress, true) => format!("Made {} again", named("archive", "archives")),
+        (What::Extract, false) => format!("Moved {} to the {bin}", named("extracted folder", "extracted folders")),
+        (What::Extract, true) => format!("Put back {} from the {bin}", named("extracted folder", "extracted folders")),
     }
 }
 
