@@ -99,8 +99,18 @@ fn one_folder_holding_everything_is_the_folder_made() {
     assert_eq!(Format::stem(".zip"), "Archive");
 }
 
+/// Links that could lead out are left out, each named in a note; the rest is extracted.
+fn left_out_links(entries: &[Entry]) -> (Plan, String) {
+    let p = plan("a.zip", 100, entries, Linux).unwrap_or_else(|e| panic!("refused: {e}"));
+    assert!(p.items.iter().all(
+        |i| !matches!(i.kind, Kind::Link(_)) || link_target(i.rel.len() - 1, if let Kind::Link(t) = &i.kind { t } else { "" }).is_ok()
+    ));
+    let note = p.notes.iter().find(|n| n.starts_with("Left out")).cloned().unwrap_or_else(|| panic!("no note: {:?}", p.notes));
+    (p, note)
+}
+
 #[test]
-fn links_that_leave_the_folder_are_refused() {
+fn links_that_leave_the_folder_are_left_out() {
     for (at, to) in [
         ("l", "../outside"),
         ("l", "/etc/passwd"),
@@ -110,21 +120,28 @@ fn links_that_leave_the_folder_are_refused() {
         ("l", "a/../../x"),
         ("l", "\\\\server\\share"),
     ] {
-        let why = refused(plan("a.zip", 100, &[file("f", 1), link(at, to)], Linux));
-        assert!(why.contains("link"), "{at} → {to}: {why}");
+        let (p, note) = left_out_links(&[file("f", 1), link(at, to)]);
+        assert_eq!(p.items.len(), 1, "{at} → {to}: only the file");
+        assert!(note.contains(&format!("“{at}” → “{to}”")), "{note}");
     }
     // The top folder is the folder made: "../x" from inside it is outside.
-    let why = refused(plan("Photos.zip", 100, &[dir("Photos/"), link("Photos/l", "../x")], Linux));
-    assert!(why.contains("outside"), "{why}");
+    let p = plan("Photos.zip", 100, &[dir("Photos/"), file("Photos/a", 1), link("Photos/l", "../x")], Linux).unwrap();
+    assert_eq!(p.items.len(), 1);
+    assert!(p.notes.iter().any(|n| n.contains("“l” → “../x”")), "{:?}", p.notes);
     // Down and back up: never followed, whatever the names on the way are (they may be links,
     // or renamed when made).
     for to in ["x/y/l/../..", "x/y/L/../..", "a/./../b", "a/b/../../.."] {
-        let why = refused(plan("a.zip", 100, &[dir("x/y/"), link("x/y/l", ".."), link("m", to), file("f", 1)], Linux));
-        assert!(why.contains("goes down and back up"), "{to}: {why}");
+        let (p, note) = left_out_links(&[dir("x/y/"), link("x/y/l", ".."), link("m", to), file("f", 1)]);
+        assert_eq!(p.items.len(), 3, "{to}");
+        assert!(note.contains("“m”"), "{note}");
     }
+    // Several: three named, the rest counted.
+    let many: Vec<Entry> = (0..5).map(|i| link(&format!("l{i}"), "/")).chain([file("f", 1)]).collect();
+    let (_, note) = left_out_links(&many);
+    assert!(note.contains("“l2” → “/”") && note.ends_with("(and 2 more)"), "{note}");
     // Down through another link of the archive: that link keeps to the same rule, so this stays
     // inside.
-    assert!(plan("a.zip", 100, &[dir("x/y/"), link("x/y/l", ".."), link("m", "x/y/l/z"), file("f", 1)], Linux).is_ok());
+    assert!(plan("a.zip", 100, &[dir("x/y/"), link("x/y/l", ".."), link("m", "x/y/l/z"), file("f", 1)], Linux).unwrap().notes.is_empty());
     // Links that stay inside are fine.
     let p = plan(
         "a.zip",
@@ -153,8 +170,9 @@ fn links_that_leave_the_folder_are_refused() {
 #[test]
 fn a_link_through_a_renamed_link_is_refused() {
     let entries = [dir("a/b/c/Y/"), link("a/b/c/Y", "../../.."), link("X", "a/b/c/Y 2/../../../../in1"), file("f", 1)];
-    let why = refused(plan("evil.zip", 100, &entries, Linux));
-    assert!(why.contains("“X”") && why.contains("down and back up"), "{why}");
+    let p = plan("evil.zip", 100, &entries, Linux).unwrap();
+    assert!(p.items.iter().all(|i| i.rel != ["X"]), "X is left out");
+    assert!(p.notes.iter().any(|n| n.contains("“X” → ")), "{:?}", p.notes);
     assert!(link_target(3, "../../..").is_ok());
     assert!(link_target(2, "../../..").is_err());
     assert!(link_target(0, "./.").is_ok());

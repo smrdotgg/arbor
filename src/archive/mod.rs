@@ -309,7 +309,7 @@ pub fn plan(archive: &str, archive_len: u64, entries: &[Entry], p: Platform) -> 
     }
     // After the folder is chosen: a link's target is checked against the folder made, so
     // "Photos/l → ../x" in a "Photos.zip" made as "Photos" is outside.
-    check_links(&items)?;
+    unsafe_links(&mut items, &mut notes);
     // Windows makes links only for administrators or in Developer Mode: they're left out there.
     if p == Platform::Windows
         && let Some(first) = items.iter().find(|i| matches!(i.kind, Kind::Link(_))).map(|i| i.rel.join("/"))
@@ -356,15 +356,26 @@ pub fn check_size(total: u64, archive_len: u64) -> Result<(), Error> {
     Ok(())
 }
 
-/// Refuses an archive with a link whose target could lead out of the folder ([`link_target`]).
-fn check_links(items: &[Planned]) -> Result<(), Error> {
-    for i in items {
-        let Kind::Link(target) = &i.kind else { continue };
-        if let Err(why) = link_target(i.rel.len() - 1, target) {
-            return Err(Error::Refused(format!("the link “{}” {why}", i.rel.join("/"))));
+/// Leaves out every link whose target could lead out of the folder ([`link_target`]), with a
+/// note naming them; the rest of the archive is extracted. (An entry whose own path leads out
+/// refuses the whole archive: see [`parts`].)
+fn unsafe_links(items: &mut Vec<Planned>, notes: &mut Vec<String>) {
+    let mut out = Vec::new();
+    items.retain(|i| {
+        let Kind::Link(target) = &i.kind else { return true };
+        let ok = link_target(i.rel.len() - 1, target).is_ok();
+        if !ok {
+            out.push(format!("“{}” → “{}”", i.rel.join("/"), target.chars().take(80).collect::<String>()));
         }
+        ok
+    });
+    if !out.is_empty() {
+        let n = out.len();
+        let shown = out.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+        let more = if n > 3 { format!(" (and {} more)", n - 3) } else { String::new() };
+        let what = if n == 1 { "a link that points" } else { "links that point" };
+        notes.push(format!("Left out {what} outside the folder, or down and back up: {shown}{more}"));
     }
-    Ok(())
 }
 
 /// Whether a link `depth` folders down inside the folder made may have `target`, by the target

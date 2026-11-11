@@ -206,15 +206,6 @@ fn zip_slip_is_refused_and_nothing_is_written_anywhere() {
         ("drive", Box::new(|w| add_file(w, &scratch, "C:\\escaped.txt", b"x"))),
         ("unc", Box::new(|w| add_file(w, &scratch, "\\\\server\\share\\escaped.txt", b"x"))),
         ("nul", Box::new(|w| add_file(w, &scratch, "a\0b", b"x"))),
-        ("link-out", Box::new(|w| w.link(b"l", true, b"../..", None).unwrap())),
-        ("link-abs", Box::new(|w| w.link(b"l", true, b"/etc", None).unwrap())),
-        (
-            "link-through",
-            Box::new(|w| {
-                w.link(b"x/y", true, b"..", None).unwrap();
-                w.link(b"z", true, b"x/y/../..", None).unwrap();
-            }),
-        ),
     ];
     for (name, add) in cases {
         // Not "nul" itself: a device on Windows.
@@ -231,6 +222,29 @@ fn zip_slip_is_refused_and_nothing_is_written_anywhere() {
         assert_eq!(names(&case), ["evil.zip"], "{name}: nothing was made beside it");
     }
     assert!(!d.join("escaped.txt").exists() && !abs.exists() && !std::env::temp_dir().join("escaped.txt").exists());
+}
+
+/// Links that could lead out are left out and named; everything else is extracted.
+#[cfg(unix)]
+#[test]
+fn links_leading_out_are_left_out_and_the_rest_extracted() {
+    let d = tmp("bad-links");
+    let zip = d.join("mixed.zip");
+    zip_at(&zip, |w| {
+        add_file(w, &d, "fine.txt", b"ok");
+        w.link(b"out", true, b"../..", None).unwrap();
+        w.link(b"abs", true, b"/etc", None).unwrap();
+        w.link(b"x/y", true, b"..", None).unwrap();
+        w.link(b"z", true, b"x/y/../..", None).unwrap();
+        w.link(b"good", true, b"fine.txt", None).unwrap();
+    });
+    let o = extract(&zip);
+    ok(&o);
+    let r = d.join("mixed");
+    assert_eq!(names(&r), ["fine.txt", "good", "x"]);
+    assert_eq!(fs::read_link(r.join("x/y")).unwrap(), Path::new(".."));
+    let note = o.notes.iter().find(|n| n.starts_with("Left out")).unwrap_or_else(|| panic!("{:?}", o.notes));
+    assert!(note.contains("“out” → “../..”") && note.contains("“abs” → “/etc”") && note.contains("“z”"), "{note}");
 }
 
 /// A link the archive makes is made last, so no entry is ever written through it, even one
@@ -270,8 +284,11 @@ fn a_link_through_a_renamed_link_never_leads_outside() {
         add_file(w, &base, "f", b"f");
     });
     let o = extract(&zip);
-    assert!(o.errors.first().is_some_and(|e| e.contains("down and back up")), "{:?}", o.errors);
-    assert_eq!(names(&d), ["evil.zip"]);
+    ok(&o);
+    let r = d.join("evil");
+    assert!(r.join("a/b/c/Y 2").symlink_metadata().is_ok() && r.join("X").symlink_metadata().is_err(), "X left out");
+    assert!(o.notes.iter().any(|n| n.contains("“X” → ")), "{:?}", o.notes);
+    assert!(!base.join("in1").exists() && !base.join("1/in1").exists());
 }
 
 /// A link another app put in the destination while it was extracting is never gone through by
