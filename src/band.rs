@@ -673,6 +673,28 @@ mod tests {
         assert_eq!(f.picked_size().unwrap(), crate::marked::Picked { count: 8, bytes: 600_300 + rows, folders: 0 });
     }
 
+    /// Esc on a rectangle puts the selection's total back with the selection, whichever way it
+    /// started (alone, setting the old selection aside; ⇧ or ⌘, changing items one by one),
+    /// though as many items are selected before and during it.
+    #[test]
+    fn a_cancelled_rectangle_puts_the_total_back() {
+        for mode in [Mode::Replace, Mode::Add, Mode::Toggle] {
+            let mut f = sized(100);
+            f.select(0);
+            f.toggle_mark(1);
+            let before = f.picked_size().unwrap();
+            assert_eq!(before.bytes, 300);
+            // Over rows 4 and 5 (alone: they replace rows 0 and 1, two for two).
+            let mut b = band(LIST, mode, &[]);
+            b.start = [5.0, 4.0 * 24.0 + 1.0];
+            b.end = [5.0, 5.0 * 24.0 + 1.0];
+            b.apply(&mut f);
+            assert_ne!(f.picked_size(), Some(before), "{mode:?}: it changed the selection");
+            b.cancel(&mut f);
+            assert_eq!(f.picked_size(), Some(before), "{mode:?}");
+        }
+    }
+
     /// The items between two rectangles, in a grid and a list, are exactly those that differ.
     #[test]
     fn the_difference_is_what_entered_or_left() {
