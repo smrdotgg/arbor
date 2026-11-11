@@ -1469,3 +1469,26 @@ fn a_reload_after_a_new_pick_finds_it_off_the_window_thread() {
     assert_eq!(s.cur().picked_size().map(|p| p.count), Some(3));
     assert!(!crate::folder::marked_on::here(), "looked through the listing on the window's thread");
 }
+
+/// Hiding deselects a hidden item, and that's a change of selection like any other: a reload
+/// asked for before (carrying the old selection) doesn't bring it back when it lands, even
+/// after the hidden files are shown again.
+#[test]
+fn a_reload_never_brings_back_an_item_hiding_deselected() {
+    let d = folder("hidden-race", 0);
+    for n in [".hidden", "a", "b"] {
+        std::fs::write(d.join(n), n).unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.toggle_hidden();
+    s.cur_mut().select_all();
+    assert_eq!(s.cur().target_paths().len(), 3);
+    s.reload();
+    s.toggle_hidden();
+    s.toggle_hidden();
+    let want = vec![d.join("a"), d.join("b")];
+    assert_eq!(s.cur().target_paths(), want, "hiding deselected it");
+    settle_all(&mut s);
+    assert_eq!(s.cur().target_paths(), want, "the reload didn't bring it back");
+}

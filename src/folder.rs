@@ -586,12 +586,18 @@ impl Folder {
         self.marked.clear();
         for r in 0..self.visible.len() {
             let e = &mut self.entries[self.visible[r] as usize];
-            if std::mem::take(&mut e.sel) {
+            if e.sel {
                 self.marked.set(r, true, &self.visible);
             }
         }
+        let mut carried = 0;
         for e in &mut self.entries {
-            e.sel = false;
+            carried += usize::from(std::mem::take(&mut e.sel));
+        }
+        // Items deselected because they aren't shown any more: the selection changed, so a
+        // reload asked for before (with the old selection) doesn't bring them back.
+        if self.marked.len() < carried {
+            self.picks += 1;
         }
         let by_name = select.and_then(|n| self.visible.iter().position(|&i| self.entries[i as usize].os == n));
         let by_prefix =
