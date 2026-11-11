@@ -428,6 +428,9 @@ impl Worker<'_> {
         let len = file.metadata().map_err(|e| e.to_string())?.len();
         self.p.bytes_done.store(0, Relaxed);
         let (entries, zl) = self.list_archive(fmt, &file, len).map_err(|e| said(&e))?;
+        if entries.is_empty() {
+            return Err("it's empty: there's nothing in it to extract".into());
+        }
         let plan = archive::plan(&name, &entries, crate::rename::Platform::current()).map_err(|e| said(&e))?;
         if let Some(free) = archive::free_space(&parent) {
             archive::room(plan.total, free)?;

@@ -533,6 +533,19 @@ fn tar_and_gzipped_tar_extract() {
     }
 }
 
+/// An empty archive (a 0-byte tar, a ZIP with no entries) says so and makes nothing.
+#[test]
+fn an_empty_archive_makes_nothing() {
+    let d = tmp("empty");
+    fs::write(d.join("none.tar"), b"").unwrap();
+    fs::write(d.join("none.zip"), Raw::new().bytes()).unwrap();
+    for a in ["none.tar", "none.zip"] {
+        let o = extract(&d.join(a));
+        assert!(o.errors.first().is_some_and(|e| e.contains("it's empty")), "{a}: {:?}", o.errors);
+    }
+    assert_eq!(names(&d), ["none.tar", "none.zip"]);
+}
+
 #[test]
 fn names_twice_in_an_archive_get_free_names() {
     let d = tmp("dups");
