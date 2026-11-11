@@ -179,6 +179,24 @@ impl<R: Read> Reader<R> {
         Err(corrupt("too many extended headers in a row"))
     }
 
+    /// Reads what's left of the stream after the tar's end, asking `stop` between reads: for a
+    /// gzipped tar, so the gzip stream is read to its end and its CRC and length are checked
+    /// (a stream that's damaged there is an error, not a quiet success).
+    pub fn drain(&mut self, stop: &dyn Fn() -> bool) -> Result<(), Error> {
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            if stop() {
+                return Err(Error::Cancelled);
+            }
+            match self.r.read(&mut buf) {
+                Ok(0) => return Ok(()),
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
     /// Reads the current entry's data.
     pub fn read_data(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
         if self.left == 0 {
@@ -254,7 +272,11 @@ impl<R: Read> Read for Counted<R> {
 /// Reads every entry of the tar in `r`, checking the running total against the limits as it
 /// goes; `stop` is asked between entries.
 pub fn list(r: impl Read, stop: &dyn Fn() -> bool) -> Result<Vec<Entry>, Error> {
-    let mut rd = Reader::new(r);
+    list_from(&mut Reader::new(r), stop)
+}
+
+/// [`list`] from a reader, which then has the rest of the stream after the tar's end.
+pub fn list_from<R: Read>(rd: &mut Reader<R>, stop: &dyn Fn() -> bool) -> Result<Vec<Entry>, Error> {
     let mut v = Vec::new();
     let mut total = 0u64;
     while let Some(e) = rd.next()? {

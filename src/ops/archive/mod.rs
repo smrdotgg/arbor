@@ -520,7 +520,10 @@ impl Worker<'_> {
                     }
                     p.cancel.load(Relaxed)
                 };
-                Ok((archive::tar::list(gz, &stop)?, None))
+                let mut rd = archive::tar::Reader::new(gz);
+                let entries = archive::tar::list_from(&mut rd, &stop)?;
+                rd.drain(&stop)?;
+                Ok((entries, None))
             }
         }
     }
@@ -609,6 +612,13 @@ impl Worker<'_> {
                     if let (AKind::Dir, Some(t)) = (&it.kind, it.mtime) {
                         times.push((&it.rel, t));
                     }
+                }
+                // Its gzip stream to the end again: it was checked while listing, but it's read
+                // afresh here.
+                if fmt == Format::TarGz {
+                    let p = self.p;
+                    rd.next()?.map_or(Ok(()), |_| Err(changed()))?;
+                    rd.drain(&|| p.cancel.load(Relaxed))?;
                 }
             }
         }

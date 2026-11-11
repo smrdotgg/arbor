@@ -408,6 +408,32 @@ fn a_damaged_archive_leaves_nothing_behind() {
     assert_eq!(names(&d), ["crc.zip", "cut.tar.gz", "cut.zip"]);
 }
 
+/// A gzipped tar whose gzip CRC (in its last 8 bytes, after the tar's end) doesn't match is
+/// damaged: nothing is extracted.
+#[test]
+fn a_tar_gz_with_a_bad_crc_is_damaged() {
+    let d = tmp("gz-crc");
+    let mut t = Vec::new();
+    tar_entry(&mut t, "a.txt", b'0', b"hello", "");
+    t.extend([0; 1024]);
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+    gz.write_all(&t).unwrap();
+    let mut gz = gz.finish().unwrap();
+    let n = gz.len();
+    gz[n - 8] ^= 0xFF;
+    fs::write(d.join("bad.tgz"), &gz).unwrap();
+    let o = extract(&d.join("bad.tgz"));
+    assert!(o.errors.first().is_some_and(|e| e.contains("damaged")), "{:?} {:?}", o.errors, o.said);
+    assert_eq!(names(&d), ["bad.tgz"]);
+    // Its length field too.
+    gz[n - 8] ^= 0xFF;
+    gz[n - 1] ^= 0x01;
+    fs::write(d.join("len.tgz"), &gz).unwrap();
+    let o = extract(&d.join("len.tgz"));
+    assert!(o.errors.first().is_some_and(|e| e.contains("damaged")), "{:?}", o.errors);
+    assert_eq!(names(&d), ["bad.tgz", "len.tgz"]);
+}
+
 #[test]
 fn cancelling_removes_what_was_made() {
     let d = tmp("cancel");
