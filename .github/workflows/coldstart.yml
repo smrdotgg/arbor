@@ -1,11 +1,12 @@
 name: Cold start (Windows)
 
-# The cold-start probes (`examples/win32_hello.rs`, `examples/rune_hello.rs`, and Arbor with
-# ARBOR_TIMING_FILE) built from the `dist` profile on a Windows runner, zipped as
-# coldstart-probes-windows.zip, measured here with the script the owner runs
-# (scripts/coldstart-probe.ps1), and published once as the pre-release `coldstart-probe-1`.
-# The runner has no real GPU (WARP or a basic display adapter), so its GPU numbers aren't a
-# laptop's; its CPU-side numbers are.
+# The cold-start probes, round 2 (`examples/gpu_probe.rs`, `examples/rune_hello.rs`,
+# `examples/win32_hello.rs`, Arbor with ARBOR_TIMING_FILE, and round 1's arbor.exe as the
+# baseline) built from the `dist` profile on a Windows runner, zipped as
+# coldstart-probes-2-windows.zip, measured here with the script the owner runs
+# (scripts/coldstart-probe-2.ps1), and published once as the pre-release `coldstart-probe-2`
+# (round 1, `coldstart-probe-1`, came from a620e33). The runner has no real GPU (WARP), so its
+# GPU numbers aren't a laptop's; its CPU-side numbers are.
 
 on:
   push:
@@ -24,6 +25,12 @@ jobs:
       run:
         shell: bash
     steps:
+      # Files exactly as committed, LF line endings on Windows too: Rune loads its precompiled
+      # DXBC uber shader only when the WGSL it embeds hashes as committed. With the Windows
+      # runner's default (core.autocrlf true) every launch compiled it with FXC instead
+      # (BENCH.md, 2026-11-12); build.rs now refuses such a checkout.
+      - name: Check out without converting line endings
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
 
       - name: Fetch Rune and use crates.io
@@ -41,80 +48,69 @@ jobs:
           key: coldstart-${{ hashFiles('RUNE_REV') }}
 
       - name: Build the probes (dist profile)
-        run: cargo build --profile dist --locked --bin arbor --example rune_hello --example win32_hello
+        run: cargo build --profile dist --locked --bin arbor --example rune_hello --example win32_hello --example gpu_probe
 
+      # coldstart-probes-2-windows.zip: gpu_probe (a console program), this commit's Arbor and
+      # rune-hello, win32-hello, and coldstart-probe-1's arbor.exe as arbor-base.exe
+      # (v0.1.0-alpha.4's startup, built from a Rune checkout with CRLF line endings).
       - name: Zip
         shell: pwsh
         run: |
+          Invoke-WebRequest https://github.com/smrdotgg/arbor/releases/download/coldstart-probe-1/coldstart-probes-windows.zip -OutFile base.zip
+          Expand-Archive base.zip base
           New-Item -ItemType Directory probes | Out-Null
           Copy-Item target/dist/arbor.exe probes/arbor.exe
           Copy-Item target/dist/examples/rune_hello.exe probes/rune-hello.exe
           Copy-Item target/dist/examples/win32_hello.exe probes/win32-hello.exe
+          Copy-Item target/dist/examples/gpu_probe.exe probes/gpu_probe.exe
+          Copy-Item base/arbor.exe probes/arbor-base.exe
           Get-ChildItem probes | Format-Table Name, Length
-          Compress-Archive -Path probes/*.exe -DestinationPath coldstart-probes-windows.zip
+          Compress-Archive -Path probes/*.exe -DestinationPath coldstart-probes-2-windows.zip
           Get-CimInstance Win32_VideoController | Format-List Name, DriverVersion, AdapterRAM
           Get-CimInstance Win32_Processor | Format-List Name, NumberOfLogicalProcessors
 
       - uses: actions/upload-artifact@v4
         with:
-          name: coldstart-probes-windows
-          path: coldstart-probes-windows.zip
+          name: coldstart-probes-2-windows
+          path: coldstart-probes-2-windows.zip
           if-no-files-found: error
 
       # The owner's script on the zip just built: Windows PowerShell 5.1, then PowerShell 7.
       - name: Measure (Windows PowerShell 5.1)
         shell: powershell
-        env:
-          ARBOR_PROBE_RUNS: '10'
         run: |
-          $env:ARBOR_PROBE_ZIP = (Resolve-Path coldstart-probes-windows.zip).Path
-          ./scripts/coldstart-probe.ps1
+          $env:ARBOR_PROBE_ZIP = (Resolve-Path coldstart-probes-2-windows.zip).Path
+          ./scripts/coldstart-probe-2.ps1
 
       - name: Measure (PowerShell 7)
         shell: pwsh
         run: |
-          $env:ARBOR_PROBE_ZIP = (Resolve-Path coldstart-probes-windows.zip).Path
-          ./scripts/coldstart-probe.ps1
+          $env:ARBOR_PROBE_ZIP = (Resolve-Path coldstart-probes-2-windows.zip).Path
+          ./scripts/coldstart-probe-2.ps1
 
-      # Which adapter and backend Rune picked, from its own log (stderr, redirected: a windows-
-      # subsystem exe still writes to an inherited handle).
-      - name: Rune's GPU log
-        shell: pwsh
-        run: |
-          $env:RUNE_GPU_LOG = '1'; $env:ARBOR_TIMING = '1'; $env:ARBOR_EXIT_AFTER_FIRST_FRAME = '1'
-          foreach ($i in 1..3) {
-            $p = Start-Process probes/arbor.exe -WorkingDirectory $HOME -PassThru -RedirectStandardError "err$i.txt"
-            if (-not $p.WaitForExit(30000)) { $p.Kill() }
-            Get-Content "err$i.txt"
-          }
-
-      # Baseline (the coldstart-probe-1 release's arbor.exe: v0.1.0-alpha.4's startup) against
-      # this commit, alternating. (Delay-loading the system DLLs was tried here: 3.8 ms less
-      # before `main`, the same total; BENCH.md.)
+      # Baseline (coldstart-probe-1's arbor.exe: v0.1.0-alpha.4's startup) against this commit,
+      # alternating. (Delay-loading the system DLLs was tried here: 3.8 ms less before `main`,
+      # the same total; BENCH.md.)
       - name: A/B against coldstart-probe-1
         continue-on-error: true
         shell: pwsh
-        run: |
-          Invoke-WebRequest https://github.com/smrdotgg/arbor/releases/download/coldstart-probe-1/coldstart-probes-windows.zip -OutFile base.zip
-          Expand-Archive base.zip base
-          ./scripts/coldstart-ab.ps1 -Runs 15 base/arbor.exe probes/arbor.exe
+        run: ./scripts/coldstart-ab.ps1 -Runs 15 probes/arbor-base.exe probes/arbor.exe
 
       # Published once: a later push doesn't replace what the owner may have downloaded.
-      - name: Publish the pre-release (once)
+      - name: Publish coldstart-probe-2 (once)
         id: publish
         if: github.event_name == 'push' && github.ref == 'refs/heads/perf/fast-start'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view coldstart-probe-1 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "coldstart-probe-1 exists; left as it is"
+          if gh release view coldstart-probe-2 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "coldstart-probe-2 exists; left as it is"
           else
-            gh release create coldstart-probe-1 coldstart-probes-windows.zip --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
-              --title "Cold-start probes 1" \
-              --notes "Three exes for timing cold start on Windows (process creation to first frame): win32-hello (bare Win32 + GDI), rune-hello (one Rune text view, Arbor's features and dist profile), arbor (with ARBOR_TIMING_FILE). Not a release of Arbor. Run in PowerShell: irm https://raw.githubusercontent.com/smrdotgg/arbor/coldstart-probe-1/scripts/coldstart-probe.ps1 | iex"
+            gh release create coldstart-probe-2 coldstart-probes-2-windows.zip --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+              --title "Cold-start probes 2" --notes-file scripts/coldstart-probe-2-notes.md
           fi
 
       - name: The owner's one-liner, from the release (Windows PowerShell 5.1)
         if: steps.publish.outcome == 'success'
         shell: powershell
-        run: irm https://raw.githubusercontent.com/smrdotgg/arbor/coldstart-probe-1/scripts/coldstart-probe.ps1 | iex
+        run: irm https://raw.githubusercontent.com/smrdotgg/arbor/coldstart-probe-2/scripts/coldstart-probe-2.ps1 | iex

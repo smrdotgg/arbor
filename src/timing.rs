@@ -100,7 +100,9 @@
 //! runs `setup`, before the native window), `window_at_ms` (the native window exists,
 //! `App::on_window`), `frame_start_ms` (the first frame starts: GPU device, surface and
 //! drawable ready), then `update_ms` and `encode_ms` up to `main_ms` (submitted), all but the
-//! first from the top of `main`.
+//! first from the top of `main`; and Rune's GPU events (`rune::on_gpu`, registered only when
+//! timing is on): `gpu_starting_at_ms` (it starts making a device) and `gpu_drew_at_ms` (the
+//! device first drew: with `warm_gpu`, its warm-up pass, so the device and renderer are ready).
 //!
 //! Off, nothing here runs: `main` reads the variables once and, unless one is set, hands
 //! Rune the plain callbacks and registers no frame hook. No flag is checked per frame or per key.
@@ -147,6 +149,10 @@ static MAIN: OnceLock<(Instant, SystemTime)> = OnceLock::new();
 /// How long the process had existed when `main` started (Windows: the loader, DLL imports and
 /// static initialisers before it), where the OS says.
 static BEFORE_MAIN_MS: OnceLock<Option<f64>> = OnceLock::new();
+/// Rune's GPU events (`rune::on_gpu`), the first of each: it starts making a device, and a
+/// device first draws (with `warm_gpu`, its warm-up pass: the device and renderer are ready).
+static GPU_STARTING: OnceLock<Instant> = OnceLock::new();
+static GPU_DREW: OnceLock<Instant> = OnceLock::new();
 /// Wakes the window between bench steps.
 static WAKER: OnceLock<rune::Waker> = OnceLock::new();
 
@@ -270,6 +276,13 @@ pub fn init() -> bool {
     }
     MAIN.get_or_init(|| (Instant::now(), SystemTime::now()));
     BEFORE_MAIN_MS.get_or_init(coldstart::since_process_created);
+    rune::on_gpu(|event| {
+        let slot = match event {
+            rune::GpuEvent::Starting => &GPU_STARTING,
+            rune::GpuEvent::Drew => &GPU_DREW,
+        };
+        slot.get_or_init(Instant::now);
+    });
     if let Some(file) = file {
         let _ = FILE.set(file);
     }
@@ -936,12 +949,14 @@ pub fn frame(f: &FrameEncoded) {
         let since = |t: Option<Instant>| t.map_or(f64::NAN, |t| t.saturating_duration_since(main).as_secs_f64() * 1000.0);
         say!(
             "arbor-timing first-frame main_ms={:.2} before_main_ms={:.2} init_at_ms={init_at:.2} init_ms={init:.2} setup_at_ms={:.2} \
-             window_at_ms={:.2} frame_start_ms={:.2} epoch_us={epoch} entries={n} {split}",
+             window_at_ms={:.2} frame_start_ms={:.2} gpu_starting_at_ms={:.2} gpu_drew_at_ms={:.2} epoch_us={epoch} entries={n} {split}",
             ms(main),
             BEFORE_MAIN_MS.get().copied().flatten().unwrap_or(f64::NAN),
             SETUP_AT_MS.get(),
             WINDOW_AT_MS.get(),
             since(f.started()),
+            since(GPU_STARTING.get().copied()),
+            since(GPU_DREW.get().copied()),
         );
         // The cold-start probes' line (`coldstart.rs`): from the process's creation where known.
         let total = match BEFORE_MAIN_MS.get().copied().flatten() {
