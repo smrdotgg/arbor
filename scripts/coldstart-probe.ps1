@@ -31,10 +31,14 @@ $env:ARBOR_EXIT_AFTER_FIRST_FRAME = '1'
 $names = 'win32-hello', 'rune-hello', 'arbor'
 foreach ($n in $names) {
     for ($i = 1; $i -le $runs; $i++) {
-        $p = Start-Process -FilePath (Join-Path $dir "$n.exe") -WorkingDirectory $HOME -PassThru
-        if (-not $p.WaitForExit(30000)) {
-            try { $p.Kill() } catch { }
-            Add-Content -Path $log -Value "$n timeout"
+        try {
+            $p = Start-Process -FilePath (Join-Path $dir "$n.exe") -WorkingDirectory $HOME -PassThru
+            if (-not $p.WaitForExit(30000)) {
+                try { $p.Kill() } catch { }
+                Add-Content -Path $log -Value "$n timeout"
+            }
+        } catch {
+            Add-Content -Path $log -Value "$n failed: $($_.Exception.Message)"
         }
         Start-Sleep -Milliseconds 300
     }
@@ -44,11 +48,14 @@ foreach ($n in $names) {
 $env:ARBOR_TIMING_FILE = Join-Path $dir 'gpu-run.txt'
 $env:RUNE_GPU_LOG = '1'
 $gpuLog = Join-Path $dir 'rune-gpu.txt'
-$p = Start-Process -FilePath (Join-Path $dir 'rune-hello.exe') -WorkingDirectory $HOME -PassThru -RedirectStandardError $gpuLog
-if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch { } }
+try {
+    $p = Start-Process -FilePath (Join-Path $dir 'rune-hello.exe') -WorkingDirectory $HOME -PassThru -RedirectStandardError $gpuLog
+    if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch { } }
+} catch { }
 Remove-Item Env:ARBOR_TIMING_FILE, Env:ARBOR_EXIT_AFTER_FIRST_FRAME, Env:RUNE_GPU_LOG
 
-$lines = @(Get-Content -Path $log)
+$lines = @()
+if (Test-Path -LiteralPath $log) { $lines = @(Get-Content -Path $log) }
 $rows = foreach ($n in $names) {
     $v = @($lines | Where-Object { $_ -like "$n *" } | ForEach-Object { ($_ -split ' ')[1] })
     $later = @($v | Select-Object -Skip 1 | Where-Object { $_ -match '^[0-9.]+$' } | ForEach-Object { [double]$_ } | Sort-Object)
