@@ -69,6 +69,11 @@ Format: date · decision · why · how to undo.
     the user where to find it); moves and renames "Moved/Renamed … back" / "… again"; a trash
     "Put back … from the Trash" / "Moved … to the Trash again". One item is named, more are
     counted. Undo: `ops::undone_note`.
+  - **In the column view, New File and New Folder go into the column holding the selection**
+    (the active column: the parent of a selected folder, whose contents are open in the next
+    column), as Finder does; into that folder only once its column is made active (→, or a
+    click in it). The real-Mac QA noted it; it's the column view's rule that every action acts
+    on the active column. Undo: `State::here` would take the selected folder instead.
   - **New File and New Folder clear a filter, and rename only what they made** (after review):
     a filter hiding "untitled.txt" left another row selected, and the rename opened on it. The
     active pane's filter (or go-to text) is cleared when the item is made, as Finder shows a new

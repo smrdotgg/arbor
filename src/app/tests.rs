@@ -1142,3 +1142,29 @@ fn undo_and_redo_say_what_they_did() {
     assert_eq!(step(&mut s, Cmd::Undo), format!("Moved “a copy.txt” to the {bin}"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The column view: with a folder selected (its contents open in the next column), New File and
+/// New Folder go into the column holding the selection, the selected folder's parent, as in
+/// Finder; into the folder only once its column is the active one.
+#[test]
+fn in_columns_new_items_go_where_the_selection_is() {
+    let d = folder("cols-new-here", 0);
+    std::fs::create_dir(d.join("sub")).unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let mut tx = Tx::default();
+    s.run(Cmd::AsColumns, &mut tx);
+    settle_all(&mut s);
+    let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "sub").unwrap();
+    s.cur_mut().select(i);
+    s.flush_columns(&mut tx);
+    settle_all(&mut s);
+    for cmd in [Cmd::NewFile, Cmd::NewFolder] {
+        s.rename = None;
+        s.run(cmd, &mut tx);
+        finish_job(&mut s);
+    }
+    assert!(d.join("untitled.txt").is_file() && d.join("untitled folder").is_dir(), "beside the selected folder");
+    assert_eq!(std::fs::read_dir(d.join("sub")).unwrap().count(), 0, "not inside it");
+    let _ = std::fs::remove_dir_all(&d);
+}
