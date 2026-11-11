@@ -9,6 +9,10 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-11 · Cold start on Windows and Linux: under 30 ms (owner).** The owner found Arbor
+  takes about a second to open on a Windows gaming laptop and set the budget: "less than 30ms…
+  the 100ms floor was macOS only." NORTHSTAR's row now says under 30 ms on Windows and Linux.
+
 - **2026-11-11 · feature/columns-status merges without its real-Mac QA (owner's call).** The Mac
   may be off; the owner chose to merge on CI (macOS runner included) plus the GPT-6.1 Sol review
   and run the Codex Mac pass on the next round, together with updating /Applications/Arbor.app.
