@@ -43,12 +43,14 @@ Format: date · decision · why · how to undo.
     from Windows tools), so `a\..\..\x` is refused on every OS. Damage (CRC, truncation) and
     cancel remove everything made, identity-checked (`ops::unmake`). Undo: `archive::parts`,
     `check_links`.
-  - **Deflate level 3** for Compress. A 1 GB folder of mixed files on tabot-dev (load 6–10):
-    level 1 compresses at ~180 MB/s to 70% of its size, level 3 ~105 MB/s to 66%, level 6
-    33–51 MB/s to 65%. Files already compressed are stored by extension, and a big file whose
-    first 256 KB don't deflate below 97% is stored without deflating the rest. Compressing files
-    on several threads would be the next step if it's wanted. Undo: `LEVEL` in
-    `ops/archive/mod.rs`.
+  - **Deflate level 3** for Compress. A 1 GB folder of mixed files on tabot-dev (BENCH.md),
+    in CPU time on the worker's thread (the box's load was 6–11, which made wall-clock times
+    swing 2–3×): level 1 compresses at 171 MB/s to 70% of its size, level 3 at 84–100 MB/s to
+    66%, level 6 at 72 MB/s to 65%. Level 6 saves 1% more for a quarter more time; level 1 is
+    twice as fast and its deflated text a fifth bigger. Files already compressed are stored by
+    extension, and a big file whose first 256 KB don't deflate below 97% is stored without
+    deflating the rest. Compressing files on several threads would be the next step if it's
+    wanted. Undo: `LEVEL` in `ops/archive/mod.rs`.
   - **Links: stored as links on macOS and Linux, left out on Windows both ways** (making one
     needs Developer Mode or an administrator), with a note. **Permissions: a file keeps its
     owner's read, write and run bits from the archive (read always), the rest from the umask;
@@ -68,6 +70,7 @@ Format: date · decision · why · how to undo.
     replacement characters (noted). **`__MACOSX/` is left out silently** (macOS's resource forks,
     which Archive Utility folds back into the files). Undo: `archive::tar`, the `__MACOSX` check
     in `plan`.
+
 - **2026-11-11 · Some reviews go to an Opus reviewer instead of GPT-6.1 Sol (Review).** OpenAI's
   safety filter refused two re-reviews of the Make Link undo fix (checks that a symlink wasn't
   swapped just before removal), even reworded in plain terms. Rather than reword further to get

@@ -454,9 +454,11 @@ impl Worker<'_> {
             }
         }
         let root = made_root.ok_or("every free name for its folder was taken before it could be used")?;
+        // Its identity at once (on Windows read through a handle on the path), before anything
+        // else can take its place.
         let meta = root.symlink_metadata().map_err(|e| e.to_string())?;
-        self.after_made(&root);
         let root_print = Print::of(&root, &meta);
+        self.after_made(&root);
         let mut made = vec![Made { src: PathBuf::new(), dst: root.clone(), dir: true, was: None, made: Some(root_print.clone()) }];
         let Some(id) = root_print.id else {
             return Err(with_kept("its folder couldn't be identified".into(), unmake(&made)));

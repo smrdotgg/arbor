@@ -217,7 +217,8 @@ fn zip_slip_is_refused_and_nothing_is_written_anywhere() {
         ),
     ];
     for (name, add) in cases {
-        let case = d.join(name);
+        // Not "nul" itself: a device on Windows.
+        let case = d.join(format!("case-{name}"));
         fs::create_dir(&case).unwrap();
         let zip = case.join("evil.zip");
         zip_at(&zip, |w| {
@@ -456,8 +457,9 @@ fn other_tools_read_arbors_zips() {
     ok(&o);
     let zip = d.join("src.zip");
     if let Some(py) = python() {
-        let script =
-            "import sys, zipfile\nz = zipfile.ZipFile(sys.argv[1])\nassert z.testzip() is None\nprint('\\n'.join(sorted(z.namelist())))";
+        // UTF-8 bytes, whatever the console's code page (Windows' is cp1252; `-I` ignores
+        // PYTHONIOENCODING).
+        let script = "import sys, zipfile\nz = zipfile.ZipFile(sys.argv[1])\nassert z.testzip() is None\nsys.stdout.buffer.write('\\n'.join(sorted(z.namelist())).encode())";
         let out = std::process::Command::new(py).arg("-I").arg("-c").arg(script).arg(&zip).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let listed = String::from_utf8(out.stdout).unwrap();
@@ -594,28 +596,50 @@ fn archive_throughput() {
         sum(&src)
     };
     let t = Instant::now();
+    let cpu0 = thread_cpu();
     let o = run(Op::Compress { sources: vec![src.clone()], dir: dir.clone() });
-    let c = t.elapsed();
+    let (c, c_cpu) = (t.elapsed(), thread_cpu() - cpu0);
     ok(&o);
     let zip = o.results[0].clone();
     let zlen = fs::metadata(&zip).unwrap().len();
     let moved = dir.join(format!("{}-original", name_of(&src)));
     fs::rename(&src, &moved).unwrap();
     let t = Instant::now();
+    let cpu0 = thread_cpu();
     let o = run(Op::Extract { archives: vec![zip.clone()] });
-    let x = t.elapsed();
+    let (x, x_cpu) = (t.elapsed(), thread_cpu() - cpu0);
     ok(&o);
     let mb = bytes as f64 / 1e6;
     eprintln!(
-        "{mb:.0} MB → {:.0} MB zip ({:.0}%): compress {:.2} s ({:.0} MB/s), extract {:.2} s ({:.0} MB/s)",
+        "{mb:.0} MB → {:.0} MB zip ({:.0}%): compress {:.2} s ({:.0} MB/s; CPU {:.2} s, {:.0} MB/s), extract {:.2} s ({:.0} MB/s; CPU {:.2} s, {:.0} MB/s)",
         zlen as f64 / 1e6,
         zlen as f64 * 100.0 / bytes as f64,
         c.as_secs_f64(),
         mb / c.as_secs_f64(),
+        c_cpu,
+        mb / c_cpu,
         x.as_secs_f64(),
-        mb / x.as_secs_f64()
+        mb / x.as_secs_f64(),
+        x_cpu,
+        mb / x_cpu
     );
     fs::remove_dir_all(&o.results[0]).unwrap();
     fs::rename(&moved, &src).unwrap();
     fs::remove_file(&zip).unwrap();
+}
+
+/// This thread's CPU time so far, in seconds (user and system), where the OS says; the bench
+/// runs the operation on this thread, so it's what the operation cost whatever else the machine
+/// is doing.
+fn thread_cpu() -> f64 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: a zeroed rusage is a valid out-buffer.
+        let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+        if unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut u) } == 0 {
+            let t = |v: libc::timeval| v.tv_sec as f64 + v.tv_usec as f64 / 1e6;
+            return t(u.ru_utime) + t(u.ru_stime);
+        }
+    }
+    f64::NAN
 }
