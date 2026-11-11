@@ -623,7 +623,27 @@ impl State {
             self.commit_rename(tx);
             return false;
         }
-        if self.cur().cwd == path && !self.cur().is_loading() {
+        // Already the active column (a press queued behind the one that made it so): the item
+        // pressed is still the one to select, now or when its listing lands.
+        if self.cur().cwd == path && self.cur().pending.as_ref().is_none_or(|p| p.path == path) {
+            if let Some(name) = name {
+                let f = self.cur_mut();
+                let picks = f.picks;
+                match f.pending.as_mut() {
+                    Some(p) => {
+                        p.select = vec![name.clone()];
+                        p.picks = picks;
+                    }
+                    None => {
+                        if let Some(i) = f.visible.iter().position(|&e| f.entries[e as usize].os == *name) {
+                            f.select(i);
+                            f.reveal(tx);
+                        }
+                    }
+                }
+                self.sync_preview();
+                self.flush_columns(tx);
+            }
             return true;
         }
         let pick = name.cloned().or_else(|| self.cur().cols.as_ref().and_then(|c| c.column(path)?.pick.clone()));

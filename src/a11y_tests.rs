@@ -1574,3 +1574,24 @@ fn a_press_in_an_unread_column_leaves_nothing_else_actionable() {
     assert!(d.join("Docs").exists());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Two presses in another column before a frame (Work, then readme.txt): the second selects
+/// what it pressed, though its column is already the active one by then (it stayed on Work).
+#[test]
+fn quick_presses_in_another_column_select_the_last_one() {
+    let d = nested("quick-presses");
+    let mut rt = runtime(&d);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    let a = row_box(&mut rt, "Folder Work");
+    let b = row_box(&mut rt, "readme.txt");
+    for r in [a, b] {
+        let (x, y) = (r[0] + 35.0, r[1] + r[3] * 0.5);
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+    }
+    rt.frame(0.0);
+    assert_eq!(rt.state.target_paths(), [d.join("Docs/readme.txt")]);
+    let _ = std::fs::remove_dir_all(&d);
+}
