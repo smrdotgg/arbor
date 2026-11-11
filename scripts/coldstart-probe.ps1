@@ -39,7 +39,14 @@ foreach ($n in $names) {
         Start-Sleep -Milliseconds 300
     }
 }
-Remove-Item Env:ARBOR_TIMING_FILE, Env:ARBOR_EXIT_AFTER_FIRST_FRAME
+# One more rune-hello, untimed, with Rune's GPU log (stderr, redirected to a file: these exes
+# have no console): which adapter it drew with, and why.
+$env:ARBOR_TIMING_FILE = Join-Path $dir 'gpu-run.txt'
+$env:RUNE_GPU_LOG = '1'
+$gpuLog = Join-Path $dir 'rune-gpu.txt'
+$p = Start-Process -FilePath (Join-Path $dir 'rune-hello.exe') -WorkingDirectory $HOME -PassThru -RedirectStandardError $gpuLog
+if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch { } }
+Remove-Item Env:ARBOR_TIMING_FILE, Env:ARBOR_EXIT_AFTER_FIRST_FRAME, Env:RUNE_GPU_LOG
 
 $lines = @(Get-Content -Path $log)
 $rows = foreach ($n in $names) {
@@ -57,4 +64,6 @@ Write-Host ('GPU: ' + ((Get-CimInstance Win32_VideoController | ForEach-Object {
 Write-Host ($rows | Format-Table -AutoSize | Out-String)
 Write-Host "Arbor's splits (ms from the top of main; before_main_ms is process creation to main):"
 $lines | Where-Object { $_ -like 'arbor-timing first-frame*' } | ForEach-Object { Write-Host $_ }
+Write-Host "Rune's GPU choice:"
+Get-Content -Path $gpuLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
 Write-Host "Full log: $log"
