@@ -475,6 +475,43 @@ fn a_tar_gz_with_trailing_zeros_or_several_members_extracts() {
     assert!(!d.join("z 3").exists());
 }
 
+/// What follows the gzip member holding the tar's end isn't decompressed: here a second member
+/// that's damaged (it was refused as damaged when everything after was read), and a big one
+/// (its bytes aren't read, past a buffer).
+#[test]
+fn nothing_after_the_tars_gzip_member_is_read() {
+    use crate::archive::tar::{Counted, Gz, Reader, list_from};
+    let d = tmp("gz-after");
+    let mut t = Vec::new();
+    tar_entry(&mut t, "after/a.txt", b'0', b"hello", "");
+    t.extend([0; 1024]);
+    let first = gz_of(&t, None);
+    let mut bad = gz_of(b"anything after the tar", None);
+    let n = bad.len();
+    bad[n - 8] ^= 0xFF; // its CRC
+    fs::write(d.join("extra.tgz"), [first.clone(), bad].concat()).unwrap();
+    let o = extract(&d.join("extra.tgz"));
+    ok(&o);
+    assert_eq!(fs::read(d.join("after/a.txt")).unwrap(), b"hello");
+    // The first member is still checked whole.
+    let mut broken = first.clone();
+    let m = broken.len();
+    broken[m - 8] ^= 0xFF;
+    fs::write(d.join("broken.tgz"), [broken, gz_of(b"x", None)].concat()).unwrap();
+    assert!(extract(&d.join("broken.tgz")).errors.first().is_some_and(|e| e.contains("damaged")));
+    // Bytes read: the first member and a buffer, not the 4 MB member after it.
+    let all = [first.clone(), gz_of(&noise(4 << 20), None)].concat();
+    let count = std::sync::Arc::new(AtomicU64::new(0));
+    let gz = Gz::new(std::io::BufReader::with_capacity(8 * 1024, Counted { r: &all[..], n: count.clone() }));
+    let last = gz.last();
+    let mut rd = Reader::new(gz);
+    assert_eq!(list_from(&mut rd, &|| false).unwrap().len(), 1);
+    last.set(true);
+    rd.drain(&|| false).unwrap();
+    let read = count.load(Relaxed);
+    assert!(read <= (first.len() + 16 * 1024) as u64, "read {read} of {}", all.len());
+}
+
 #[test]
 fn cancelling_removes_what_was_made() {
     let d = tmp("cancel");

@@ -540,8 +540,10 @@ impl Worker<'_> {
                     }
                     p.cancel.load(Relaxed)
                 };
+                let last = gz.last();
                 let mut rd = archive::tar::Reader::new(gz);
                 let entries = archive::tar::list_from(&mut rd, &stop)?;
+                last.set(true);
                 rd.drain(&stop)?;
                 Ok((entries, None))
             }
@@ -598,7 +600,14 @@ impl Worker<'_> {
                 // The tar again, from the start, each entry matched against the list.
                 (&*file).seek(SeekFrom::Start(0))?;
                 let raw = BufReader::with_capacity(256 * 1024, file);
-                let src: Box<dyn Read + '_> = if fmt == Format::TarGz { Box::new(archive::tar::Gz::new(raw)) } else { Box::new(raw) };
+                let mut last = std::rc::Rc::new(std::cell::Cell::new(false));
+                let src: Box<dyn Read + '_> = if fmt == Format::TarGz {
+                    let gz = archive::tar::Gz::new(raw);
+                    last.clone_from(&gz.last());
+                    Box::new(gz)
+                } else {
+                    Box::new(raw)
+                };
                 let mut rd = archive::tar::Reader::new(src);
                 let mut next = plan.items.iter().peekable();
                 let changed = || AErr::Corrupt("it changed while it was being extracted".into());
@@ -638,6 +647,7 @@ impl Worker<'_> {
                 if fmt == Format::TarGz {
                     let p = self.p;
                     rd.next()?.map_or(Ok(()), |_| Err(changed()))?;
+                    last.set(true);
                     rd.drain(&|| p.cancel.load(Relaxed))?;
                 }
             }

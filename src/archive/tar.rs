@@ -223,8 +223,8 @@ impl<R: Read> Reader<R> {
     }
 
     /// Reads what's left of the stream after the tar's end, asking `stop` between reads: for a
-    /// gzipped tar, so the gzip stream is read to its end and its CRC and length are checked
-    /// (a stream that's damaged there is an error, not a quiet success).
+    /// gzipped tar, so the gzip member holding the end is read to its end and its CRC and length
+    /// are checked (damage there is an error, not a quiet success). Set [`Gz::last`] first.
     pub fn drain(&mut self, stop: &dyn Fn() -> bool) -> Result<(), Error> {
         let mut buf = vec![0u8; 256 * 1024];
         loop {
@@ -300,16 +300,24 @@ fn pax(d: &[u8], p: &mut Pending) -> Result<(), Error> {
 
 /// A gzip stream, member after member (as `gzip -d` reads them), each member's CRC and length
 /// checked as it ends. Zero bytes after the last member are padding (tape blocks, some tools
-/// write them), the end; anything else after zero padding is damage.
+/// write them), the end; anything else after zero padding is damage. Once told the tar has
+/// ended ([`Gz::last`]), it ends with the member it's in: whatever follows isn't decompressed.
 pub struct Gz<R: io::BufRead> {
     dec: Option<flate2::bufread::GzDecoder<R>>,
     raw: Option<R>,
     done: bool,
+    last: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl<R: io::BufRead> Gz<R> {
     pub fn new(r: R) -> Gz<R> {
-        Gz { dec: Some(flate2::bufread::GzDecoder::new(r)), raw: None, done: false }
+        Gz { dec: Some(flate2::bufread::GzDecoder::new(r)), raw: None, done: false, last: Default::default() }
+    }
+
+    /// Set it once the tar's end has been read: the stream then ends with the current member
+    /// (read to its end, so its CRC and length are still checked).
+    pub fn last(&self) -> std::rc::Rc<std::cell::Cell<bool>> {
+        self.last.clone()
     }
 }
 
@@ -326,6 +334,10 @@ impl<R: io::BufRead> Read for Gz<R> {
                 }
                 // The member ended, its CRC and length checked.
                 self.raw = self.dec.take().map(flate2::bufread::GzDecoder::into_inner);
+                if self.last.get() {
+                    self.done = true;
+                    return Ok(0);
+                }
             }
             let Some(mut r) = self.raw.take() else { return Ok(0) };
             let mut zeros = false;
