@@ -406,9 +406,25 @@ impl State {
     fn sync_columns_in(&mut self, ix: usize, reads: &mut Vec<(usize, PathBuf, crate::bounded::Waiting<Answer>)>) -> bool {
         let preview = ix == self.active && self.column_preview_wanted();
         let col_w = self.col_w;
+        // Covered by Get Info or the preview (the other pane's place when split): nothing of
+        // it is on screen, so its columns drop their listings and stop their reads, and are
+        // read again once it shows.
+        let covered = self.split() && ix != self.active && self.panel_docked();
         let f = &self.panes[ix].f;
         if f.view != ViewMode::Columns || f.searching() {
             return self.panes[ix].f.cols.take().is_some();
+        }
+        if covered {
+            let Some(cols) = self.panes[ix].f.cols.as_mut() else { return false };
+            cols.spare.clear();
+            let mut changed = false;
+            for c in cols.left.iter_mut().chain(cols.right.as_mut()) {
+                if c.load != Load::Off || !c.entries.is_empty() {
+                    c.drop_entries();
+                    changed = true;
+                }
+            }
+            return changed;
         }
         // A new root only when needed: the sidebar's places are looked at then.
         let needs_root = f.cols.as_ref().is_none_or(|c| !f.cwd.starts_with(&c.root));

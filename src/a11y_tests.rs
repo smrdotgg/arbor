@@ -1629,3 +1629,44 @@ fn a_drop_on_a_column_refuses_a_replaced_folder() {
     assert!(d.join("Docs/top.txt").exists(), "{:?}", rt.state.note);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A pane covered by Get Info or the preview (which take the other pane's place when split)
+/// shows no columns, so its columns hold no listing and read nothing; uncovered, they're read
+/// again.
+#[test]
+fn covered_columns_hold_nothing() {
+    let d = nested("covered");
+    let mut rt = runtime(&d);
+    rt.update(|s, _| s.col_w = 140.0);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    run(&mut rt, Cmd::Split);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    rt.update(|s, tx| s.activate(0, tx));
+    rt.frame(0.0);
+    let other = 1 - rt.state.active;
+    let holding = |rt: &Runtime<State>| rt.state.panes[other].f.cols.as_ref().map(|c| c.holding()).unwrap_or_default();
+    assert_eq!(holding(&rt), [d.join("Docs")], "Docs on the right of the other pane");
+    run(&mut rt, Cmd::Info);
+    assert!(rt.state.panel_docked());
+    let id = rt.state.panes[other].f.id;
+    assert!(find(&rt.accessibility_json(), &format!("columns-{id}")).is_none(), "covered");
+    assert!(holding(&rt).is_empty(), "nothing kept for a pane not on screen");
+    assert!(
+        rt.state.panes[other]
+            .f
+            .cols
+            .as_ref()
+            .unwrap()
+            .left
+            .iter()
+            .chain(rt.state.panes[other].f.cols.as_ref().unwrap().right.as_ref())
+            .all(|c| c.load == crate::columns::Load::Off),
+        "and nothing being read"
+    );
+    run(&mut rt, Cmd::Info);
+    until(&mut rt, |s| s.panes[other].f.cols.as_ref().is_some_and(|c| !c.holding().is_empty()));
+    assert_eq!(holding(&rt), [d.join("Docs")], "read again when it shows");
+    let _ = std::fs::remove_dir_all(&d);
+}
