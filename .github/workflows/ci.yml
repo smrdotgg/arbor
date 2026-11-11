@@ -31,9 +31,18 @@ jobs:
           git -C vendor/rune checkout -q FETCH_HEAD
           rm .cargo/config.toml
 
+      # The runner's apt mirror (azure.archive.ubuntu.com) sometimes can't be resolved: three
+      # tries, then the same packages from archive.ubuntu.com (the runner's sources name it
+      # through apt-mirrors.txt; plain images, through either sources format).
       - name: Linux packages
         if: runner.os == 'Linux'
-        run: sudo apt-get update -q && sudo apt-get install -yq libxkbcommon-dev libwayland-dev
+        run: |
+          get() { sudo apt-get update -q && sudo apt-get install -yq libxkbcommon-dev libwayland-dev; }
+          for try in 1 2 3; do get && exit 0; sleep 15; done
+          for f in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+            if [ -f "$f" ]; then sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' "$f"; fi
+          done
+          get
 
       # What the runner's registry says about its Recycle Bins (src/trash/win.rs reads it before a trash).
       - name: Recycle Bin settings
