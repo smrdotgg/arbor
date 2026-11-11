@@ -821,9 +821,12 @@ edited, and the undo refuses and says so), and ⇧⌘Z takes it back out.
   4 GB, use ZIP64; names are UTF-8 (flagged so); times are kept to the second. A cancelled or
   failed archive's temporary file is removed, only while it's still the file Arbor wrote.
 - **Extract Here reads the whole list first** and refuses the archive, writing nothing, when any
-  entry would land outside its folder: an absolute path, `..`, a drive letter, a UNC path, a NUL
-  in a name, or a link whose target leaves the folder or goes through another link in the
-  archive. Names that aren't valid on this system (`a:b.txt` or `CON` on Windows, a name over 255
+  entry's path would land outside its folder: an absolute path, `..`, a drive letter, a UNC path
+  or a NUL in a name. A link is judged by its target alone, never by other entries' names: it
+  must be relative, with `..` only at its start and no more of them than the link is deep in the
+  folder (`lib/libfoo.so → libfoo.so.1` and `bin/foo → ../lib/foo` are fine; `/etc`, `../..`
+  at the top, or `a/../../x` aren't). Links that fail are left out and named in a note, and the
+  rest is extracted. An empty archive says so and makes nothing. Names that aren't valid on this system (`a:b.txt` or `CON` on Windows, a name over 255
   bytes) are changed to valid ones (`a_b.txt`, `_CON`) with a note, and a name the archive has
   twice (or twice to a disk that ignores case) gets a free one. Every file, folder and link is
   created relative to its open folder without following a link (`O_NOFOLLOW`, `O_EXCL`), and
@@ -833,19 +836,21 @@ edited, and the undo refuses and says so), and ⇧⌘Z takes it back out.
   Hard links, devices and FIFOs in a tar, and macOS's `__MACOSX` folder, are left out.
 - **Against decompression bombs:** an archive is refused before anything is written when it has
   more than 1,000,000 entries, folders more than 256 deep, entries whose data overlap (one
-  compressed stream counted many times), contents over 1 TB, or contents over 256 MB that are
-  more than 200 times the archive's size; or when it unpacks to more than the disk has free
-  ("too large to extract", saying the sizes). While writing, each entry is cut off at the size it
-  declared, and must reach it with a matching CRC.
-- **A damaged archive leaves nothing behind:** a bad CRC, a cut-off file or a broken stream stops
+  compressed stream counted many times), contents over 1 TB, or contents that wouldn't leave the
+  disk at least 1 GB or 5% of its free space ("too large to extract", saying the sizes). There's
+  no ratio rule: logs, zeros and disk images compress hundreds of times and extract. While
+  writing, each entry is cut off at the size it declared and must reach it with a matching CRC,
+  and Esc stops it, even in the middle of a big entry.
+- **A damaged archive leaves nothing behind:** a bad CRC (a `.tar.gz`'s gzip CRC and length
+  too, read after the tar's end), a cut-off file or a broken stream stops
   the extraction, and everything it made is removed again, each item only while it's still what
   Arbor made (anything another app put there stays, and the status bar says so). A cancel does
   the same. Encrypted entries and compression methods other than deflate (bzip2, LZMA,
   Zstandard, AES…) are refused by name, as are archives split across files.
 - **Formats:** ZIP (stored and deflate, ZIP64, data descriptors, UTF-8 and code page 437 names,
   Unix modes and links, extended and NTFS times), tar (ustar, pax and GNU long names), gzipped
-  tar. A gzipped tar is decompressed twice (the list, then the files), so its progress counts
-  the compressed bytes while the list is read. Browsing inside an archive is for later
+  tar. A plain tar's list seeks past the files' data; a gzipped tar is decompressed twice (the
+  list, then the files), so its progress counts the compressed bytes while the list is read. Browsing inside an archive is for later
   (NORTHSTAR).
 
 ### Search in This Folder

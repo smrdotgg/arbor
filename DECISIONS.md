@@ -30,19 +30,42 @@ Format: date · decision · why · how to undo.
     folder; then that folder is what's made** (Archive Utility's rule), so Arbor's own
     "Photos.zip" round-trips to "Photos", not "Photos/Photos". A lone file still gets a folder
     named after the archive. Undo: `single` in `archive::plan`.
-  - **Bomb limits (Review): refused before writing anything above 1,000,000 entries, 256
-    folders deep, 1 TB, more than the disk has free, or over 256 MB at more than 200 times the
-    archive's size; overlapping entries always.** Each entry is cut off at its declared size and
-    must reach it with its CRC. The ratio refuses real archives of very repetitive data: 4 GB of
-    zeros zips to 4 MB (1,029×), and a zeroed disk image would be refused. Undo or loosen:
-    `archive::limits`.
-  - **One unsafe entry refuses the whole archive** (an absolute path, `..`, a drive letter, a
-    UNC path, a NUL, a link leaving the folder or through another of the archive's links,
-    compared loosely: ASCII case aside, anything non-ASCII matching anything), rather than
-    skipping it: a crafted archive isn't partly trusted. `\` separates parts everywhere (archives
-    from Windows tools), so `a\..\..\x` is refused on every OS. Damage (CRC, truncation) and
-    cancel remove everything made, identity-checked (`ops::unmake`). Undo: `archive::parts`,
-    `check_links`.
+  - **Bomb limits (changed after review): no ratio rule.** Refused before writing anything above
+    1,000,000 entries, 256 folders deep, 1 TB, or when the contents wouldn't leave the disk 1 GB
+    or 5% of its free space (`archive::room`); overlapping entries always (their names counted,
+    after review). Each entry is cut off at its declared size and must reach it with its CRC, a
+    `.tar.gz`'s gzip stream is read to its end so its CRC and length are checked, and Esc works
+    inside a big entry (a plain tar seeks past data; a gzipped one asks every MB). The first
+    version refused contents over 256 MB at more than 200× the archive, which refused real
+    archives (logs at 294×, zeros at 1,029×, Arbor's own archive of a sparse image). Undo or
+    tighten: `archive::limits`.
+  - **An entry whose path leads out refuses the whole archive** (an absolute path, `..`, a drive
+    letter, a UNC path, a NUL): a crafted archive isn't partly trusted. `\` separates parts
+    everywhere (archives from Windows tools), so `a\..\..\x` is refused on every OS. Damage (CRC,
+    truncation) and cancel remove everything made, identity-checked (`ops::unmake`). An empty
+    archive says so and makes nothing. Undo: `archive::parts`.
+  - **Links (Review; rewritten after review): judged by the target alone, and links that fail
+    are left out with a note naming them (up to three), the rest extracted.** The first version
+    compared the target's path with other entries' names, which a link renamed when made ("Y 2")
+    or a disk's Unicode normalization slips past: the review's archive reached four folders above
+    the destination. Now a target must be relative, its `..` parts only first and no more than
+    the link's depth (`archive::link_target`), which keeps it inside by itself: its `..`s climb
+    real folders Arbor made, and the names after go down, through other links only if those keep
+    to the same rule. **Deviation from the review's suggestion:** a target that goes down through
+    another link the archive made is allowed, not refused, because that is safe by the rule above
+    and refusing it would break macOS frameworks in zipped apps (`Headers → Versions/Current/Headers`
+    with `Versions/Current → A`). Making each link, its target's path is walked from the link's
+    folder without following anything, and a link this extraction didn't make on the way (another
+    app's, put there while it ran) refuses the extraction (`out::walk_target`). Undo:
+    `unsafe_links`, `link_target`.
+  - **Names without the UTF-8 flag stay code page 437** (the ZIP spec's), unless they're valid
+    UTF-8 (which many tools write without the flag). Keeping raw bytes on Unix would give names
+    no other app shows the same way, and Windows can't; a review nit, left as is. Undo:
+    `archive::decode_cp437`.
+  - **A ZIP of 1,000,000 entries is listed whole in memory** (about 200 bytes an entry, so
+    ~200 MB at the cap): the plan needs every entry before writing anything (the one-folder rule,
+    the duplicate-free names, the total). Streaming the directory is for later if it matters; a
+    review nit, left as is. Undo: lower `limits::ENTRIES`.
   - **Deflate level 3** for Compress. A 1 GB folder of mixed files on tabot-dev (BENCH.md),
     in CPU time on the worker's thread (the box's load was 6–11, which made wall-clock times
     swing 2–3×): level 1 compresses at 171 MB/s to 70% of its size, level 3 at 84–100 MB/s to

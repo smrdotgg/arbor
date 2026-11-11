@@ -605,7 +605,9 @@ fn skipping_a_big_tar_entry_can_be_cancelled() {
 }
 
 /// A plain tar straight from its file seeks past entries' data: listing an 8 GB entry reads a
-/// few blocks, and a file cut short inside an entry is still damage.
+/// few blocks, and a file cut short inside an entry is still damage. Unix only: the test's 8 GB
+/// tar is sparse there, while NTFS would write the zeros.
+#[cfg(unix)]
 #[test]
 fn a_plain_tar_is_listed_without_reading_its_data() {
     use std::io::{Seek, SeekFrom};

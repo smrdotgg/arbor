@@ -1,13 +1,13 @@
 //! Archives: Compress makes a `.zip`, and Extract Here unpacks `.zip`, `.tar`, `.tar.gz` and
 //! `.tgz`. This module reads and writes the formats (`zip.rs`, `tar.rs`), decides what an
 //! archive's entries become on disk ([`plan`]) and writes them there without following any link
-//! (`out.rs`). The operation worker drives both (`ops/archive.rs`): progress, cancel, cleanup,
+//! (`out.rs`). The operation worker drives both (`ops/archive/`): progress, cancel, cleanup,
 //! undo.
 //!
 //! Extracting reads the whole list of entries first and refuses the archive before writing
 //! anything when one entry would land outside the folder it makes: an absolute path, a `..`,
-//! a drive letter, a UNC path, a NUL byte, or a link whose target leaves the folder (or goes
-//! through another link the archive makes, which could). Names that aren't valid here are
+//! a drive letter, a UNC path or a NUL byte. Links whose target could lead out are left out with
+//! a note, judged by the target alone ([`link_target`]). Names that aren't valid here are
 //! changed (batch rename's rules, [`crate::rename::invalid`]) and said so. Sizes are bounded
 //! against decompression bombs ([`limits`]): the total and the number of entries are checked
 //! up front, and every entry is cut off at the size it declared. Files, folders and links are
