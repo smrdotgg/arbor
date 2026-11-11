@@ -382,9 +382,15 @@ impl Folder {
     /// on, then the rest. Appending only: rows keep their keys and places, so nothing moves
     /// under the pointer and virtual rows need no new version. True when the list grew.
     fn take_in(&mut self) -> bool {
+        let walking = self.search.as_ref().is_some_and(|s| s.walking());
+        self.take_in_as(walking)
+    }
+
+    /// [`Folder::take_in`], as while the walk goes on (`walking`) or after it.
+    fn take_in_as(&mut self, walking: bool) -> bool {
         let Some(s) = self.search.as_mut() else { return false };
         let n = self.entries.len();
-        let to = if s.walking() { n.min(LIVE_ROWS.max(s.upto)) } else { n };
+        let to = if walking { n.min(LIVE_ROWS.max(s.upto)) } else { n };
         if to <= s.upto {
             return false;
         }

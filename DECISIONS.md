@@ -97,8 +97,13 @@ Format: date · decision · why · how to undo.
     selection, so the next trash or move acted on an item the user never chose. A click, an
     arrow, typing a filter or any selection command selects again; a folder newly opened still
     starts with its first row selected. A sort during a search takes in the results the
-    selection (and the cursor) landed on past the shown ones, rather than losing them. Undo:
-    `Folder::none`.
+    selection (and the cursor) landed on past the shown ones, rather than losing them. Found by
+    the randomized model tests (`the_selection_matches_a_model_whatever_happens`, and its search
+    twin): typing a filter carried the old cursor's item as the selection while the cursor
+    moved to the match (typing now chooses afresh, and a filter matching nothing leaves nothing
+    selected); a reload in which none of the selected items is left selected the cursor's row;
+    "the item" for Rename or Get Info was the cursor's even after a ⌘-click took it off the
+    selection (it's now always a selected item). Undo: `Folder::none`.
   - **A reload hands its selection to the worker as it is (third review)**: the listing is
     shared (`Arc`, copied only if changed while a worker holds it) and the selection goes as its
     rows' bits; the worker reads the names and finds them in the new listing. Asking for a

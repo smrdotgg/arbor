@@ -1177,6 +1177,7 @@ impl State {
                     marks = Some(crate::folder::mark_named(&f.entries, &p.select));
                 }
                 f.carry = if several { marks.unwrap_or_default() } else { Default::default() };
+                let mut survived = false;
                 match adopt_rows {
                     // A column's rows, as it showed them (same sort, no filter, the hidden-file
                     // rule it was shown with): kept, under their version.
@@ -1186,7 +1187,7 @@ impl State {
                         let pick = p.cursor_name();
                         f.sel = pick.and_then(|n| f.visible.iter().position(|&e| f.entries[e as usize].os == *n)).unwrap_or(0);
                     }
-                    _ => f.refilter_carried(p.cursor_name().map(OsString::as_os_str)),
+                    _ => survived = f.refilter_carried(p.cursor_name().map(OsString::as_os_str)),
                 }
                 // Without marks, what's selected is the item it was asked to select, if it's
                 // here; nothing when it's gone (no other row is chosen in its place) or nothing
@@ -1197,6 +1198,9 @@ impl State {
                         (None, Some(_)) => true,
                         (None, None) => f.visible.is_empty(),
                     };
+                } else if !survived {
+                    // None of the items to select is here any more: nothing selected.
+                    f.none = true;
                 }
                 f.anchor = f.sel;
                 // The folder was read: its volume's free space, now that its identity says which

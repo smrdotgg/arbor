@@ -396,13 +396,15 @@ impl Folder {
         }
     }
 
-    /// The cursor's item, while it's selected (or other items are): what a command on "the
-    /// item" acts on. `None` with nothing selected.
+    /// What a command on "the item" acts on: the cursor's item while it's selected, else the
+    /// first selected item (the cursor may have been ⌘-clicked off); `None` with nothing
+    /// selected. Never an item that isn't selected.
     pub fn selected(&self) -> Option<&Entry> {
-        if self.none && self.marked.is_empty() {
-            return None;
+        if self.marked.is_empty() {
+            return if self.none { None } else { self.cursor() };
         }
-        self.cursor()
+        let row = if self.marked.contains(self.sel) { Some(self.sel) } else { self.marked.iter().next() };
+        row.and_then(|r| self.visible.get(r)).map(|&i| &self.entries[i as usize])
     }
 
     /// The cursor's item, selected or not: where the cursor is.
@@ -714,7 +716,7 @@ impl Folder {
     /// or a listing marked on its worker): the rows shown, selected as their entries say.
     /// What isn't shown any more (hidden, filtered out) isn't selected any more: the selection
     /// is what's on screen, as what an action acts on is.
-    pub(crate) fn refilter_carried(&mut self, select: Option<&OsStr>) {
+    pub(crate) fn refilter_carried(&mut self, select: Option<&OsStr>) -> bool {
         let q = if self.path_mode() { String::new() } else { self.filter.to_lowercase() };
         let hidden = self.show_hidden;
         // A search's list holds only the results it has taken in so far (`search.rs`).
@@ -740,6 +742,7 @@ impl Folder {
         // The cursor's item alone is the cursor alone selected; what was selected and is all
         // gone leaves nothing selected (never a row put in its place); with nothing carried the
         // caller says (a listing landing).
+        let survived = !self.marked.is_empty();
         if self.marked.len() == 1 && self.marked.contains(self.sel) {
             self.marked.clear();
             self.none = false;
@@ -749,6 +752,7 @@ impl Folder {
             self.none = true;
         }
         self.bump();
+        survived
     }
 
     /// `visible` changed: virtual rows look at every key again.
@@ -1101,10 +1105,13 @@ impl Folder {
         self.filter.push_str(text);
         // A path opens the go-to field; anything else is a filter (and closes it).
         self.goto = self.path_mode();
+        // Typing chooses again: nothing of the old selection is carried (a filter selects the
+        // row it finds; go-to keeps the cursor where it was).
         self.marked.clear();
+        self.none = true;
         self.refilter(if self.path_mode() { keep.as_deref() } else { None });
-        // Typing chose the row it found.
-        self.none = false;
+        // Nothing matches: nothing selected (backspacing doesn't then select a row of its own).
+        self.none = self.visible.is_empty();
     }
 }
 
