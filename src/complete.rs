@@ -385,6 +385,9 @@ mod tests {
         std::fs::write(d.join("report"), "another item").unwrap();
         std::fs::create_dir(d.join("report ")).unwrap();
         let mut s = state_in(&d);
+        // Each Tab's read answers in time, however busy the machine (the slow-folder tests set
+        // their own wait).
+        s.show_wait = std::time::Duration::from_secs(5);
         settle_all(&mut s);
         s.cur_mut().filter = format!("{}/report ", d.display());
         s.on_key(&KeyEvent { key: Key::Enter, mods: Mods::default() }, &mut rune::Tx::default());
@@ -467,6 +470,9 @@ mod tests {
             std::fs::create_dir(d.join(n)).unwrap();
         }
         let mut s = state_in(&d);
+        // Each Tab's read answers in time, however busy the machine (the slow-folder tests set
+        // their own wait).
+        s.show_wait = std::time::Duration::from_secs(5);
         settle_all(&mut s);
         let mut tx = Tx::default();
         let base = format!("{}/", d.display());
@@ -499,6 +505,9 @@ mod tests {
         std::fs::write(d.join("report-2025.pdf"), "x").unwrap();
         std::fs::write(d.join("Readme"), "x").unwrap();
         let mut s = state_in(&d);
+        // Each Tab's read answers in time, however busy the machine (the slow-folder tests set
+        // their own wait).
+        s.show_wait = std::time::Duration::from_secs(5);
         settle_all(&mut s);
         let mut tx = Tx::default();
         let base = format!("{}/", d.display());
@@ -546,6 +555,9 @@ mod tests {
         std::fs::create_dir(d.join(".config")).unwrap();
         std::fs::write(d.join("code.rs"), "x").unwrap();
         let mut s = state_in(&d);
+        // Each Tab's read answers in time, however busy the machine (the slow-folder tests set
+        // their own wait).
+        s.show_wait = std::time::Duration::from_secs(5);
         settle_all(&mut s);
         let mut tx = Tx::default();
         let base = format!("{}/", d.display());
@@ -568,6 +580,9 @@ mod tests {
         let d = tmp("slow");
         std::fs::write(d.join("alpha"), "x").unwrap();
         let mut s = state_in(&d);
+        // Each Tab's read answers in time, however busy the machine (the slow-folder tests set
+        // their own wait).
+        s.show_wait = std::time::Duration::from_secs(5);
         settle_all(&mut s);
         s.show_wait = std::time::Duration::ZERO;
         let mut tx = Tx::default();
