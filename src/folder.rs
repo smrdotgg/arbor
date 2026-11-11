@@ -1106,7 +1106,9 @@ impl Folder {
         // A path opens the go-to field; anything else is a filter (and closes it).
         self.goto = self.path_mode();
         // Typing chooses again: nothing of the old selection is carried (a filter selects the
-        // row it finds; go-to keeps the cursor where it was).
+        // row it finds; go-to keeps the cursor where it was). A choice like a click: a reload
+        // asked for before brings back nothing of what was selected then.
+        self.picks += 1;
         self.marked.clear();
         self.none = true;
         self.refilter(if self.path_mode() { keep.as_deref() } else { None });

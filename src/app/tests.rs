@@ -1758,3 +1758,21 @@ fn a_closed_window_isnt_woken_by_its_free_space() {
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(woken.load(Ordering::SeqCst), 0, "the closed window was woken");
 }
+
+/// Typing to select is a choice like a click: a reload asked for before (with the old
+/// selection) lands with what typing chose.
+#[test]
+fn typing_during_a_reload_keeps_what_typing_chose() {
+    let d = folder("typing-race", 0);
+    for n in ["apple", "banana", "blueberry"] {
+        std::fs::write(d.join(n), n).unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    assert_eq!(s.cur().target_paths(), [d.join("apple")]);
+    s.reload();
+    s.cur_mut().type_filter("b");
+    assert_eq!(s.cur().target_paths(), [d.join("banana")]);
+    settle_all(&mut s);
+    assert_eq!(s.cur().target_paths(), [d.join("banana")], "not apple, nor anything else");
+}

@@ -426,6 +426,8 @@ impl State {
                 } else {
                     self.note = None;
                     let f = self.cur_mut();
+                    // The selection changes (to the cursor's item alone).
+                    f.picks += 1;
                     f.marked.clear();
                     let keep = f.cursor_name();
                     f.filter.clear();
