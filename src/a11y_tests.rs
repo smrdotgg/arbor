@@ -242,7 +242,8 @@ fn results_and_errors_are_announced() {
     rt.update(|s, _| crate::app::tests::finish_job(s));
     rt.frame(0.0);
     let note = find(&rt.accessibility_json(), "note").cloned().expect("a note");
-    assert_eq!((note["role"].as_str(), note["name"].as_str()), (Some("status"), Some("Restored 1 item")));
+    assert_eq!(note["role"].as_str(), Some("status"));
+    assert_eq!(note["name"].as_str(), Some(format!("Put back “notes.txt” from the {}", crate::trash::BIN).as_str()));
 }
 
 /// Until an assistive client asks, nothing is built: Rune builds the tree only on activation,
@@ -954,6 +955,54 @@ fn the_grid_is_a_list_box_of_named_options() {
     assert_eq!((icons_button["role"].as_str(), icons_button["name"].as_str()), (Some("radio-button"), Some("As Icons")));
     assert!(states(icons_button).contains(&"checked") && !states(find(&tree, "view-list").unwrap()).contains(&"checked"));
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The inline rename closes as it should in every view (the real-Mac QA: Esc left the field on
+/// screen, so did Enter after it, and a click elsewhere closed it but was lost). Rune's focused
+/// field took Escape to blur itself, so the first Esc left a field nobody was typing in, and
+/// every key after it but Esc was swallowed. One Esc cancels; Enter on the unchanged name closes
+/// it, focused or not; a click on another item closes it and selects that item.
+#[test]
+fn the_inline_rename_closes_in_one_press_in_every_view() {
+    for (i, view) in [Cmd::AsList, Cmd::AsIcons, Cmd::AsTiles, Cmd::AsColumns].into_iter().enumerate() {
+        for close in ["esc", "enter", "enter-unfocused", "click"] {
+            let d = folder(&format!("rename-close-{i}-{close}"));
+            let mut rt = runtime(&d);
+            if view != Cmd::AsList {
+                run(&mut rt, view);
+                settle_columns(&mut rt);
+            }
+            let pick = rt.state.cur().visible.iter().position(|&e| rt.state.cur().entries[e as usize].name == "notes.txt").unwrap();
+            rt.update(move |s, _| s.cur_mut().select(pick));
+            rt.frame(0.0);
+            key(&mut rt, Key::Function(2), false);
+            assert!(rt.state.rename.is_some() && rect_of(&rt, "rename").is_some(), "{view:?}: renaming");
+            match close {
+                "esc" => key(&mut rt, Key::Escape, false),
+                "enter" => key(&mut rt, Key::Enter, false),
+                "enter-unfocused" => {
+                    rt.update(|_, tx| tx.blur());
+                    rt.frame(0.0);
+                    key(&mut rt, Key::Enter, false);
+                }
+                _ => {
+                    let b = rect_of(&rt, "f:todo.md").unwrap_or_else(|| panic!("{view:?}: todo.md on screen"));
+                    let at = (b[0] + b[2] * 0.5, b[1] + b[3] * 0.5);
+                    rt.pointer_move(at.0, at.1);
+                    rt.pointer_down(at.0, at.1);
+                    rt.pointer_up(at.0, at.1);
+                    rt.frame(0.0);
+                }
+            }
+            rt.frame(0.0);
+            assert!(rt.state.rename.is_none() && rect_of(&rt, "rename").is_none(), "{view:?} {close}: the field is gone");
+            if close == "click" {
+                assert_eq!(rt.state.cur().selected().map(|e| e.name.as_str()), Some("todo.md"), "{view:?}: the click selected");
+            }
+            assert!(d.join("notes.txt").exists(), "nothing renamed");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
 }
 
 /// The view is the tab's: a new tab gets the default (`view.default`), and showing a tab again
@@ -2099,6 +2148,32 @@ fn copy_and_move_to_the_other_pane_refuse_a_replaced_folder() {
         key(&mut rt, Key::Function(key_), false);
         until(&mut rt, |s| s.job.is_none());
         assert!(d.join("Docs/top.txt").exists(), "F{key_} after ⌘R: {:?}", rt.state.note);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// New File (⌥⌘N) draws its rename field on the new file in every view: the row in the list,
+/// the cell in icons and tiles, the active column's row in the column view.
+#[test]
+fn new_file_draws_its_rename_field_in_every_view() {
+    for (i, view) in [Cmd::AsList, Cmd::AsIcons, Cmd::AsTiles, Cmd::AsColumns].into_iter().enumerate() {
+        let d = folder(&format!("new-file-{i}"));
+        let mut rt = runtime(&d);
+        if view != Cmd::AsList {
+            run(&mut rt, view);
+            settle_columns(&mut rt);
+        }
+        rt.key(KeyEvent { key: Key::Command('n'), mods: Mods { cmd: true, alt: true, ..Mods::default() } });
+        rt.frame(0.0);
+        until(&mut rt, |s| s.rename.is_some() && !s.cur().is_loading());
+        rt.frame(0.0);
+        assert!(d.join("untitled.txt").is_file(), "{view:?}");
+        assert_eq!(rt.state.rename.as_ref().map(|r| r.os.clone()), Some("untitled.txt".into()), "{view:?}");
+        let field = rect_of(&rt, "rename").unwrap_or_else(|| panic!("the rename field is drawn in {view:?}"));
+        let item = rect_of(&rt, "f:untitled.txt").unwrap_or_else(|| panic!("the new file is on screen in {view:?}"));
+        let inside = |r: [f32; 4]| r[0] >= item[0] - 1.0 && r[1] >= item[1] - 1.0 && r[0] + r[2] <= item[0] + item[2] + 1.0;
+        assert!(inside(field), "the field is on the new file in {view:?}: {field:?} in {item:?}");
+        key(&mut rt, Key::Escape, false);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

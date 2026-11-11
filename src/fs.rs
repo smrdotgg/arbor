@@ -271,6 +271,23 @@ pub fn ident_of(path: &Path, m: &std::fs::Metadata) -> Option<Ident> {
     }
 }
 
+/// Windows: the [`Ident`] of the item open as `f` (a link's own handle, opened with
+/// `FILE_FLAG_OPEN_REPARSE_POINT`, is the link): as [`ident_of`] reads it by path, but through
+/// the handle, so it's the object held open and nothing else.
+#[cfg(windows)]
+pub fn ident_of_file(f: &std::fs::File) -> Option<Ident> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+    let id = ident(&f.metadata().ok()?)?;
+    // SAFETY: a zeroed record is a valid out-buffer for an open handle.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
+        return None;
+    }
+    let file = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    Some(Ident { handle: win_dir::file_key(u64::from(info.dwVolumeSerialNumber), file), ..id })
+}
+
 /// Tests: how many identities this thread has read from the disk ([`ident_of`], [`ident_at`]).
 #[cfg(test)]
 pub(crate) mod reads {
@@ -384,7 +401,7 @@ pub struct Listing {
     pub result: Result<Vec<Entry>, String>,
     /// The folder's own identity (links followed), so two panes showing one folder by different
     /// paths (a symlink, a junction) are known to be the same. `None` when it can't be had.
-    pub dir_id: Option<crate::noclobber::FileId>,
+    pub dir_id: Option<crate::noclobber::DirId>,
     /// It couldn't be read because there's no folder there (checked on the worker, only after
     /// a failed read): Jump drops such a folder from its history.
     pub missing: bool,

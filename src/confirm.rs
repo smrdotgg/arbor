@@ -336,6 +336,9 @@ mod tests {
         let mut tx = Tx::default();
         s.run(Cmd::Jump, &mut tx);
         s.close_jump(&mut tx);
+        // Opening Jump waits a few ms for the history; on a loaded machine it lands later,
+        // through a frame's poll (asserting at once failed under a busy parallel run).
+        assert!(s.history.load(std::time::Duration::from_secs(10), None), "the history loaded");
         assert_eq!(s.history.agg.as_ref().unwrap().len(), 1);
         s
     }

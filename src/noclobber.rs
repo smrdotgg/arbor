@@ -283,23 +283,64 @@ pub fn file_id(_: &Path, _: &std::fs::Metadata) -> Option<FileId> {
     None
 }
 
-/// The identity of the folder `path` leads to, following links (a symlink or junction to a
-/// folder is that folder), so two paths to one folder compare equal. One `stat` on Unix; on
-/// Windows one open, without reading or locking anything. Run it off the UI thread.
-#[cfg(unix)]
-pub fn dir_id(path: &Path) -> Option<FileId> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+/// A folder's identity, links followed (see [`dir_id`]): its device and inode (Windows: volume
+/// and file id), and what tells a folder made since at a freed inode from the one that had it,
+/// as [`crate::fs::Ident`] does for items: its birth time where the file system keeps one, else
+/// (Linux) the file system's handle (inode and generation). Never its ctime, which changes with
+/// every entry added or removed. Where there's neither (ext2/3 without handles), a folder
+/// removed and made again at a reused inode reads as the same one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DirId {
+    node: FileId,
+    born: Option<i128>,
+    handle: Option<(u64, u64)>,
 }
 
+impl DirId {
+    /// Device and inode alone (the search walk's loop check, Get Info's walk).
+    #[cfg(any(unix, test))]
+    pub fn file_id(&self) -> FileId {
+        self.node
+    }
+}
+
+/// The identity of the folder `path` leads to, following links (a symlink or junction to a
+/// folder is that folder), so two paths to one folder compare equal, and a folder put at its
+/// path since (even at the inode the old one freed) doesn't. One `statx` on Unix (and on Linux
+/// without birth times, the handle); on Windows one open, without reading or locking anything.
+/// Run it off the UI thread.
+#[cfg(unix)]
+pub fn dir_id(path: &Path) -> Option<DirId> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path).ok()?;
+    let born = m.created().ok().and_then(ns).filter(|_| !crate::fs::pretend::no_birth_time());
+    #[cfg(target_os = "linux")]
+    let handle = born
+        .is_none()
+        .then(|| cstr(path).ok().and_then(|p| crate::dirfd::handle_key(libc::AT_FDCWD, &p, libc::AT_SYMLINK_FOLLOW)))
+        .flatten();
+    #[cfg(not(target_os = "linux"))]
+    let handle = None;
+    Some(DirId { node: (m.dev(), m.ino()), born, handle })
+}
+
+/// Windows: the volume and file id (NTFS's has the record's sequence number in it, so a reused
+/// record reads as another), and the creation time.
 #[cfg(windows)]
-pub fn dir_id(path: &Path) -> Option<FileId> {
-    handle_id(path, true)
+pub fn dir_id(path: &Path) -> Option<DirId> {
+    let node = handle_id(path, true)?;
+    let born = std::fs::metadata(path).ok().and_then(|m| m.created().ok()).and_then(ns);
+    Some(DirId { node, born, handle: None })
 }
 
 #[cfg(not(any(unix, windows)))]
-pub fn dir_id(_: &Path) -> Option<FileId> {
+pub fn dir_id(_: &Path) -> Option<DirId> {
     None
+}
+
+/// A time as ns since the Unix epoch; `None` before it.
+fn ns(t: std::time::SystemTime) -> Option<i128> {
+    t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_nanos() as i128)
 }
 
 /// Volume serial number and file index from a handle on `path`: the link itself, or with

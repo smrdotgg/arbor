@@ -10,7 +10,7 @@ One window, one `State` (`src/app/`), one UI thread. Rune calls four functions o
 `State::poll` (after a waker fires: land whatever background work finished) and `setup`.
 Handlers change `State` and land the change with `tx.instant()` (nothing animates). Anything
 that reads or changes the disk runs off the UI thread and lands through `poll`: listings, every
-file operation (the inline rename and New Folder too, since milestone 13's review), Get Info's
+file operation (the inline rename, New Folder and New File too), Show Original's link read, Get Info's
 details. What's left on the UI thread is small and named: starting other apps (`fs::open`,
 reveal), creating the settings file when it's opened, and one `lstat` per item for a drop's
 "same disk?" and for a pasted list of paths.
@@ -30,7 +30,7 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `config.rs` | `config.toml`: settings and key bindings, the template |
 | | `palette.rs`, `menu.rs`, `confirm.rs` | Palette, Linux's in-window context menu, the one dialog |
 | File ops | `actions.rs` | UI side of file operations: clipboard, paste, rename, drag and drop, context menu |
-| | `ops/` | The operation worker (`worker.rs`), undo and redo (`undo.rs`), batch rename (`batch.rs`), fingerprints (`print.rs`), Empty Trash and Put Back (`trashed.rs`) |
+| | `ops/` | The operation worker (`worker.rs`), undo and redo (`undo.rs`), batch rename (`batch.rs`), fingerprints (`print.rs`), Empty Trash and Put Back (`trashed.rs`), New File and Make Symbolic Link with their undo and Windows' shortcut fallback (`links.rs`) |
 | | `noclobber.rs` | Renames, copies and file ids that never replace anything |
 | | `trash/` | Each platform's trash, and telling a disk with none (`win.rs`: the Recycle Bin); what's in the trashes, their count for Empty Trash's dialog, `.trashinfo` records (`contents.rs`) |
 | | `delete.rs` | Permanent delete without following links |
@@ -124,6 +124,9 @@ Nothing runs in the background unless the user did something, and nothing polls.
   search walk, `std` metadata). *Is it unchanged?* is `ops::Print` (`ops/print.rs`: identity,
   type, size, mtime, and a tree for folders): undo, redo, batch rename (from its preview, and its
   rollback) and a cancelled copy's cleanup refuse if anything differs.
+  A *folder's* identity, links followed (`noclobber::DirId`: a listing's `dir_id`, where a
+  paste, drop, New File or New Folder goes), has its birth time or Linux's handle the same way,
+  but never its ctime.
 - **Mount boundaries** (`mounts.rs`). `Mounts` (Linux's mount table, read once per operation)
   and `volume` (macOS's volume per folder) decide what's "another disk"; `Fence` bundles them
   for a walk. Used by permanent delete, cleanup of cancelled copies, cross-disk

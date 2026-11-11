@@ -53,7 +53,7 @@ pub(crate) struct Clip {
 pub(crate) struct PasteReq {
     pub id: u64,
     pub dest: PathBuf,
-    pub dest_id: Option<crate::noclobber::FileId>,
+    pub dest_id: Option<crate::noclobber::DirId>,
     pub mv: bool,
 }
 
@@ -107,6 +107,9 @@ pub struct State {
     /// while `note` still says it.
     pub alert: Option<String>,
     pub rename: Option<Rename>,
+    /// The item New File or New Folder just made, and its identity when it could be read: its
+    /// rename starts once a reload lists it selected, and only on it (`State::rename_made`).
+    pub(crate) made: Option<(PathBuf, Option<fs::Ident>)>,
     /// The running file operation, if any.
     pub job: Option<ops::Running>,
     pub(crate) clip: Option<Clip>,
@@ -260,6 +263,59 @@ pub(crate) enum PathKind {
     Folder,
     File,
     Missing,
+    /// Show Original: the item a symbolic link points at, there to select.
+    Original,
+    /// Show Original: the same, a hidden item (a dot name, or Windows' hidden attribute).
+    HiddenOriginal,
+    /// Show Original: the link points at nothing (or couldn't be read).
+    Broken,
+}
+
+/// Where the symbolic link at `link` points: the original's path, and whether something is
+/// there. Spelled as written (Arbor's own links are absolute) unless it has `.` or `..` in it:
+/// then those are resolved, on Unix through the folders' real paths, as the system follows a
+/// link (kept in the link's own spelling when that lands in the link's folder), and on Windows
+/// by their spelling, as Windows resolves them. The original itself is kept as it is, a link
+/// too perhaps (Show Original on it goes on).
+pub(crate) fn original(link: &Path) -> (PathBuf, PathKind) {
+    use std::path::Component;
+    let Ok(target) = std::fs::read_link(link) else { return (link.to_path_buf(), PathKind::Broken) };
+    let here = link.parent().unwrap_or(Path::new(""));
+    let abs = if target.is_absolute() { target } else { here.join(target) };
+    let resolved = if !abs.components().any(|c| matches!(c, Component::CurDir | Component::ParentDir)) {
+        Some(abs.clone())
+    } else if cfg!(unix) {
+        match (abs.parent(), abs.file_name()) {
+            (Some(dir), Some(name)) => std::fs::canonicalize(dir)
+                .ok()
+                .map(|d| if std::fs::canonicalize(here).is_ok_and(|h| h == d) { here.join(name) } else { d.join(name) }),
+            _ => std::fs::canonicalize(&abs).ok(),
+        }
+    } else {
+        Some(lexical(&abs))
+    };
+    let Some((p, m)) = resolved.and_then(|p| p.symlink_metadata().ok().map(|m| (p, m))) else { return (abs, PathKind::Broken) };
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let kind = if fs::is_hidden(&name, Some(&m)) { PathKind::HiddenOriginal } else { PathKind::Original };
+    (p, kind)
+}
+
+/// `p` with `.` and `..` taken out by their spelling.
+fn lexical(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(c);
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Test only: holds a go-to's look at one path until told.
@@ -334,6 +390,7 @@ impl State {
             note: config.summary().or(note),
             alert: None,
             rename: None,
+            made: None,
             job: None,
             clip: None,
             paste_reqs: Vec::new(),
@@ -904,7 +961,7 @@ impl State {
                     }
                     tx.set_title(title(&self.cur().cwd));
                     if p.rename {
-                        self.start_rename();
+                        self.rename_made();
                     }
                 }
             }
@@ -925,6 +982,18 @@ impl State {
         let on = self.show_hidden;
         for p in &mut self.panes {
             p.f.set_hidden(on);
+        }
+    }
+
+    /// Starts the inline rename of what New File or New Folder made, now that a reload has
+    /// listed it: only when the selected row is that item, by name and identity. Nothing else
+    /// is ever renamed in its place (it was moved away, or something else took its name).
+    fn rename_made(&mut self) {
+        let Some((path, id)) = self.made.take() else { return };
+        let f = self.cur();
+        let ours = f.selected().is_some_and(|e| f.cwd.join(&e.os) == path && (id.is_none() || e.id.is_none() || e.id == id));
+        if ours {
+            self.start_rename();
         }
     }
 
@@ -986,6 +1055,46 @@ impl State {
                 }
             }
             PathKind::Missing => self.note = Some(format!("No such folder: {}", path.display())),
+            PathKind::Original | PathKind::HiddenOriginal => {
+                // Nothing on screen may hide it: a filter goes (a navigation clears it too),
+                // and a hidden original turns hidden files on.
+                if kind == PathKind::HiddenOriginal && !self.show_hidden {
+                    self.toggle_hidden();
+                    self.note = Some(format!(
+                        "Showing hidden files: the original, “{}”, is hidden",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    ));
+                }
+                let f = self.cur_mut();
+                f.filter.clear();
+                f.goto = false;
+                match (path.parent(), path.file_name()) {
+                    (Some(dir), Some(name)) if dir == self.cur().cwd && !self.cur().searching() => {
+                        self.reload_selecting(vec![name.to_os_string()], false);
+                    }
+                    (Some(dir), Some(name)) => self.go(dir.to_path_buf(), Nav::New, Some(name.to_os_string())),
+                    _ => self.go(path, Nav::New, None),
+                }
+            }
+            PathKind::Broken => self.note = Some(format!("The original isn't there: {}", fs::pretty(&path))),
+        }
+    }
+
+    /// Show Original: the item the cursor's symbolic link points at, selected in its folder in
+    /// this pane (⌘[ comes back). The link is read on a worker, as a go-to's path is (it may be on
+    /// a slow disk), waiting here at most a frame.
+    pub fn show_original(&mut self) {
+        let f = self.cur();
+        let Some(link) = f.selected().filter(|e| e.is_link).map(|e| f.cwd.join(&e.os)) else { return };
+        let id = crate::folder::next_request();
+        self.going_to = Some(id);
+        let wait = self.show_wait;
+        let answer = crate::bounded::read_waiting(&self.path_check, wait, move || {
+            let (path, kind) = original(&link);
+            Some((id, path, kind))
+        });
+        if let Some(a) = answer {
+            self.went_path(a);
         }
     }
 

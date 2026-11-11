@@ -198,7 +198,7 @@ fn redo_after_undo_and_a_new_operation_clears_it() {
     s.run(Cmd::Redo, &mut tx);
     finish_job(&mut s);
     assert!(d.join("a copy.txt").exists(), "redone");
-    assert_eq!(s.note.as_deref(), Some("Redid 1 item"));
+    assert_eq!(s.note.as_deref(), Some("Made “a copy.txt” again"));
     assert_eq!((s.undo.len(), s.redo.len()), (1, 0));
     // Undo it again, then a new operation: nothing to redo any more.
     s.run(Cmd::Undo, &mut tx);
@@ -842,5 +842,329 @@ fn a_new_tab_starts_with_no_go_to_field() {
     assert!(s.cur().filter.is_empty() && !s.cur().goto, "no field in the new tab");
     s.on_key(&KeyEvent { key: Key::Backspace, mods: rune::Mods::default() }, &mut tx);
     assert_eq!(s.pending_path(), d.parent(), "Backspace goes to the parent folder");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ---- New File, Make Link, Show Original ------------------------------------------------------
+
+/// New File makes "untitled.txt" on the worker and, once it's listed, renames it inline with
+/// the name before its extension selected, in each view: list, icons, tiles, and in the
+/// column view in the active column's folder.
+#[test]
+fn new_file_starts_its_rename_in_every_view() {
+    for (i, view) in [Cmd::AsList, Cmd::AsIcons, Cmd::AsTiles, Cmd::AsColumns].into_iter().enumerate() {
+        let d = folder(&format!("new-file-view-{i}"), 2);
+        std::fs::create_dir(d.join("Docs")).unwrap();
+        std::fs::write(d.join("Docs/readme"), "x").unwrap();
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        let mut tx = Tx::default();
+        if view != Cmd::AsList {
+            s.run(view, &mut tx);
+            settle_all(&mut s);
+        }
+        let here = if view == Cmd::AsColumns {
+            // Into Docs: the active column.
+            let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "Docs").unwrap();
+            s.cur_mut().select(i);
+            s.run(Cmd::Into, &mut tx);
+            settle_all(&mut s);
+            assert!(s.cur().cols.is_some() && s.cur().cwd == d.join("Docs"), "{view:?}");
+            d.join("Docs")
+        } else {
+            d.clone()
+        };
+        assert_eq!(s.unavailable(Cmd::NewFile), None);
+        s.run(Cmd::NewFile, &mut tx);
+        assert!(s.job.is_some(), "made on the worker ({view:?})");
+        finish_job(&mut s);
+        assert_eq!(std::fs::read(here.join("untitled.txt")).unwrap(), b"", "{view:?}");
+        let r = s.rename.as_ref().unwrap_or_else(|| panic!("renaming the new file in {view:?}"));
+        assert_eq!(r.os, "untitled.txt");
+        assert_eq!((r.edit.anchor.min(r.edit.focus), r.edit.anchor.max(r.edit.focus)), (0, "untitled".len()), "the stem is selected");
+        assert_eq!(s.note, None, "nothing to say ({view:?})");
+        // Typing a name renames it; undo of that, then of the new file, leaves nothing.
+        s.rename.as_mut().unwrap().edit.text = "notes.md".into();
+        s.commit_rename(&mut tx);
+        finish_job(&mut s);
+        assert!(here.join("notes.md").exists() && !here.join("untitled.txt").exists(), "{view:?}");
+        assert_eq!(s.undo.len(), 2);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// The folder on screen was replaced since it was listed: New File (and New Folder) make
+/// nothing, in either folder, and say why.
+#[test]
+fn new_file_refuses_a_folder_replaced_since_it_was_listed() {
+    let root = folder("new-file-replaced", 0);
+    let d = root.join("here");
+    std::fs::create_dir(&d).unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    std::fs::rename(&d, root.join("moved")).unwrap();
+    std::fs::create_dir(&d).unwrap();
+    for cmd in [Cmd::NewFile, Cmd::NewFolder] {
+        s.run(cmd, &mut Tx::default());
+        finish_job(&mut s);
+        let note = s.note.clone().unwrap_or_default();
+        assert!(note.starts_with("Nothing was made: “here” is another folder now"), "{cmd:?}: {note}");
+        assert!(s.rename.is_none());
+    }
+    assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(root.join("moved")).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Make Symbolic Link: a link beside each selected item, selected once listed; one undo
+/// removes them; Show Original on a link selects its item, in another folder too.
+#[cfg(unix)]
+#[test]
+fn make_link_selects_the_links_and_show_original_finds_the_item() {
+    let d = folder("make-link", 0);
+    std::fs::write(d.join("a.txt"), "a").unwrap();
+    std::fs::write(d.join("b.txt"), "b").unwrap();
+    std::fs::create_dir(d.join("sub")).unwrap();
+    std::fs::write(d.join("sub/deep.txt"), "d").unwrap();
+    std::os::unix::fs::symlink("../a.txt", d.join("sub/rel")).unwrap();
+    std::os::unix::fs::symlink(d.join("gone"), d.join("broken")).unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let mut tx = Tx::default();
+    assert_eq!(s.unavailable(Cmd::MakeLink), None, "the cursor's item");
+    let pick = |s: &mut State, name: &str| {
+        let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == name).unwrap();
+        s.cur_mut().select(i);
+    };
+    pick(&mut s, "a.txt");
+    s.cur_mut().select_all();
+    s.cur_mut().marked.retain(|n| n == "a.txt" || n == "b.txt");
+    assert_eq!(s.cur().target_paths().len(), 2);
+    assert!(s.menu_items(true).iter().flatten().any(|(_, t, on)| t == "Make Symbolic Link (2 items)" && *on));
+    s.run(Cmd::MakeLink, &mut tx);
+    finish_job(&mut s);
+    assert_eq!(s.note.as_deref(), Some("Made 2 links"));
+    assert_eq!(std::fs::read_link(d.join("a link.txt")).unwrap(), d.join("a.txt"));
+    let mut picked: Vec<PathBuf> = s.cur().target_paths();
+    picked.sort();
+    assert_eq!(picked, [d.join("a link.txt"), d.join("b link.txt")], "the links are selected");
+    // Show Original: only on a link.
+    pick(&mut s, "a.txt");
+    assert!(s.unavailable(Cmd::ShowOriginal).is_some());
+    assert!(!s.menu_items(true).iter().flatten().any(|(a, ..)| *a == crate::menu::Act::Cmd(Cmd::ShowOriginal)));
+    pick(&mut s, "b link.txt");
+    assert!(s.menu_items(true).iter().flatten().any(|(a, ..)| *a == crate::menu::Act::Cmd(Cmd::ShowOriginal)));
+    s.run(Cmd::ShowOriginal, &mut tx);
+    settle_all(&mut s);
+    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("b.txt"), "selected in place");
+    // A relative link in another folder: its item, in its own folder (⌘[ comes back).
+    s.go(d.join("sub"), Nav::New, None);
+    settle_all(&mut s);
+    pick(&mut s, "rel");
+    s.run(Cmd::ShowOriginal, &mut tx);
+    settle_all(&mut s);
+    assert_eq!(s.cur().cwd, std::fs::canonicalize(&d).unwrap());
+    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("a.txt"));
+    assert_eq!(s.cur().back.last(), Some(&d.join("sub")));
+    // A link to nothing says so.
+    pick(&mut s, "broken");
+    s.run(Cmd::ShowOriginal, &mut tx);
+    settle_all(&mut s);
+    assert_eq!(s.note.as_deref(), Some(format!("The original isn't there: {}", fs::pretty(&d.join("gone"))).as_str()));
+    // Undo the links.
+    s.run(Cmd::Undo, &mut tx);
+    finish_job(&mut s);
+    assert!(d.join("a link.txt").symlink_metadata().is_err() && d.join("b link.txt").symlink_metadata().is_err());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Where a link points, as Show Original reads it: `..` resolved, a missing target broken.
+#[cfg(unix)]
+#[test]
+fn originals_resolve_relative_targets() {
+    let d = folder("originals", 0);
+    std::fs::create_dir_all(d.join("x/y")).unwrap();
+    std::fs::write(d.join("x/t"), "t").unwrap();
+    std::os::unix::fs::symlink("../t", d.join("x/y/up")).unwrap();
+    std::os::unix::fs::symlink("y/../t", d.join("x/mid")).unwrap();
+    std::os::unix::fs::symlink("nowhere", d.join("x/none")).unwrap();
+    std::os::unix::fs::symlink("t", d.join("x/plain")).unwrap();
+    std::os::unix::fs::symlink(d.join("x/t"), d.join("abs")).unwrap();
+    let canon = std::fs::canonicalize(&d).unwrap();
+    assert_eq!(original(&d.join("x/y/up")), (canon.join("x/t"), PathKind::Original), "`..` through the real folders");
+    assert_eq!(original(&d.join("x/mid")), (d.join("x/t"), PathKind::Original), "back in the link's folder: its spelling");
+    assert_eq!(original(&d.join("x/plain")), (d.join("x/t"), PathKind::Original), "as written");
+    assert_eq!(original(&d.join("abs")), (d.join("x/t"), PathKind::Original), "as written");
+    assert_eq!(original(&d.join("x/none")), (d.join("x/nowhere"), PathKind::Broken));
+    assert_eq!(original(&d.join("x/t")).1, PathKind::Broken, "not a link");
+    assert_eq!(lexical(Path::new("/a/b/../c/./d")), Path::new("/a/c/d"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The review's case: with a filter that hides "untitled.txt" ("rep" shows report.txt), New
+/// File used to open the rename on report.txt. The filter is cleared so the new file shows,
+/// and the rename starts on it, in every view.
+#[test]
+fn new_file_under_a_filter_renames_the_new_file_not_another() {
+    for (i, view) in [Cmd::AsList, Cmd::AsIcons, Cmd::AsTiles, Cmd::AsColumns].into_iter().enumerate() {
+        let d = folder(&format!("new-file-filter-{i}"), 0);
+        std::fs::write(d.join("report.txt"), "r").unwrap();
+        std::fs::write(d.join("notes.md"), "n").unwrap();
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        let mut tx = Tx::default();
+        if view != Cmd::AsList {
+            s.run(view, &mut tx);
+            settle_all(&mut s);
+        }
+        s.cur_mut().type_filter("rep");
+        assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("report.txt"));
+        s.run(Cmd::NewFile, &mut tx);
+        finish_job(&mut s);
+        assert!(d.join("untitled.txt").is_file());
+        assert_eq!(s.cur().filter, "", "the filter that hid it is cleared ({view:?})");
+        assert_eq!(s.rename.as_ref().map(|r| r.os.clone()), Some("untitled.txt".into()), "{view:?}");
+        assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("untitled.txt"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// The new file moved away before the reload lands: no rename starts at all (it used to open
+/// on whatever row was selected instead).
+#[test]
+fn new_file_starts_no_rename_on_a_row_that_isnt_it() {
+    let d = folder("new-file-gone", 0);
+    std::fs::write(d.join("a.txt"), "a").unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    // The disk changes after the file is made and before the operation lands (which asks for
+    // the reload), so the reload reads the change.
+    let made_then = |s: &mut State, change: &dyn Fn()| {
+        s.run(Cmd::NewFile, &mut Tx::default());
+        let until = Instant::now() + Duration::from_secs(10);
+        while !s.job.as_ref().is_some_and(|j| j.finished()) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        change();
+        wait_job(s);
+        assert!(s.is_loading(), "the reload is on its way");
+        settle_all(s);
+    };
+    made_then(&mut s, &|| std::fs::rename(d.join("untitled.txt"), d.join("moved.txt")).unwrap());
+    assert!(s.rename.is_none(), "renaming {:?}", s.rename.as_ref().map(|r| r.os.clone()));
+    // Another file at its name meanwhile isn't it either (made past the clock tick the new
+    // file was made in, so its birth time is its own).
+    made_then(&mut s, &|| {
+        std::fs::remove_file(d.join("untitled.txt")).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(d.join("untitled.txt"), "someone else's").unwrap();
+    });
+    assert!(s.rename.is_none(), "renaming {:?}", s.rename.as_ref().map(|r| r.os.clone()));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The review's case: Show Original under a filter that hides the original ("rl" shows the
+/// link alone) left the link selected. The filter is cleared and the original selected; a
+/// hidden original turns hidden files on (and says so), in this folder or another.
+#[cfg(unix)]
+#[test]
+fn show_original_clears_a_filter_and_shows_a_hidden_original() {
+    let d = folder("original-filter", 0);
+    std::fs::write(d.join("report.txt"), "r").unwrap();
+    std::fs::write(d.join(".secret"), "s").unwrap();
+    std::fs::create_dir(d.join("sub")).unwrap();
+    std::fs::write(d.join("sub/.deep"), "d").unwrap();
+    std::os::unix::fs::symlink(d.join("report.txt"), d.join("rlink")).unwrap();
+    std::os::unix::fs::symlink(d.join(".secret"), d.join("slink")).unwrap();
+    std::os::unix::fs::symlink(d.join("sub/.deep"), d.join("dlink")).unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let mut tx = Tx::default();
+    assert!(!s.show_hidden);
+    s.cur_mut().type_filter("rl");
+    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("rlink"));
+    s.run(Cmd::ShowOriginal, &mut tx);
+    settle_all(&mut s);
+    assert_eq!(s.cur().filter, "", "the filter that hid it is cleared");
+    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("report.txt"));
+    // Hidden, here.
+    let pick = |s: &mut State, name: &str| {
+        let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == name).unwrap();
+        s.cur_mut().select(i);
+    };
+    pick(&mut s, "slink");
+    s.run(Cmd::ShowOriginal, &mut tx);
+    settle_all(&mut s);
+    assert!(s.show_hidden, "hidden files are shown to show it");
+    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some(".secret"));
+    assert!(s.note.as_deref().is_some_and(|n| n.contains("hidden")), "{:?}", s.note);
+    // Hidden, in another folder.
+    s.toggle_hidden();
+    settle_all(&mut s);
+    pick(&mut s, "dlink");
+    s.run(Cmd::ShowOriginal, &mut tx);
+    settle_all(&mut s);
+    assert_eq!(s.cur().cwd, d.join("sub"));
+    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some(".deep"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Undo and redo say what they did (the real-Mac QA: undoing New File or Make Link said
+/// "Restored 1 item").
+#[cfg(unix)]
+#[test]
+fn undo_and_redo_say_what_they_did() {
+    let d = folder("undo-words", 0);
+    std::fs::write(d.join("a.txt"), "a").unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let mut tx = Tx::default();
+    let mut step = |s: &mut State, cmd: Cmd| {
+        s.rename = None;
+        s.run(cmd, &mut tx);
+        finish_job(s);
+        s.note.clone().unwrap_or_default()
+    };
+    step(&mut s, Cmd::NewFile);
+    let bin = crate::trash::BIN;
+    assert_eq!(step(&mut s, Cmd::Undo), format!("Moved “untitled.txt” to the {bin}"));
+    assert_eq!(step(&mut s, Cmd::Redo), "Made “untitled.txt” again");
+    step(&mut s, Cmd::Undo);
+    let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "a.txt").unwrap();
+    s.cur_mut().select(i);
+    assert_eq!(step(&mut s, Cmd::MakeLink), "Made 1 link");
+    assert_eq!(step(&mut s, Cmd::Undo), "Removed 1 link");
+    assert_eq!(step(&mut s, Cmd::Redo), "Made 1 link again");
+    step(&mut s, Cmd::Undo);
+    let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "a.txt").unwrap();
+    s.cur_mut().select(i);
+    step(&mut s, Cmd::Duplicate);
+    assert_eq!(step(&mut s, Cmd::Undo), format!("Moved “a copy.txt” to the {bin}"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The column view: with a folder selected (its contents open in the next column), New File and
+/// New Folder go into the column holding the selection, the selected folder's parent, as in
+/// Finder; into the folder only once its column is the active one.
+#[test]
+fn in_columns_new_items_go_where_the_selection_is() {
+    let d = folder("cols-new-here", 0);
+    std::fs::create_dir(d.join("sub")).unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let mut tx = Tx::default();
+    s.run(Cmd::AsColumns, &mut tx);
+    settle_all(&mut s);
+    let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "sub").unwrap();
+    s.cur_mut().select(i);
+    s.flush_columns(&mut tx);
+    settle_all(&mut s);
+    for cmd in [Cmd::NewFile, Cmd::NewFolder] {
+        s.rename = None;
+        s.run(cmd, &mut tx);
+        finish_job(&mut s);
+    }
+    assert!(d.join("untitled.txt").is_file() && d.join("untitled folder").is_dir(), "beside the selected folder");
+    assert_eq!(std::fs::read_dir(d.join("sub")).unwrap().count(), 0, "not inside it");
     let _ = std::fs::remove_dir_all(&d);
 }

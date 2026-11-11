@@ -2072,3 +2072,559 @@ fn put_back_checks_each_item_is_still_the_one_listed() {
     assert!(item.exists() && !d.join("docs/a.txt").exists());
     let _ = fs::remove_dir_all(&d);
 }
+
+// ---- new file -----------------------------------------------------------------------------
+
+/// Runs `op` as `ops::start` does with a destination identity (`run_into`).
+fn run_into_now(op: Op, dest: Option<(DestId, &'static str)>) -> Outcome {
+    let p = Progress::default();
+    Worker::new(&p, None, fake_trash).run_into(op, dest)
+}
+
+#[test]
+fn new_file_is_untitled_then_a_free_name_and_empty() {
+    let d = tmp("nfile");
+    let o = run_now(Op::NewFile { dir: d.clone() });
+    assert!(o.refused.is_none() && o.quiet, "{:?}", o.refused);
+    assert_eq!(o.results, [d.join("untitled.txt")]);
+    assert_eq!(fs::read(d.join("untitled.txt")).unwrap(), b"");
+    fs::write(d.join("untitled.txt"), "keep me").unwrap();
+    let o = run_now(Op::NewFile { dir: d.clone() });
+    assert_eq!(o.results, [d.join("untitled 2.txt")]);
+    assert_eq!(fs::read_to_string(d.join("untitled.txt")).unwrap(), "keep me", "never overwritten");
+    assert_eq!(Op::NewFile { dir: d.clone() }.verb(), NEW_FILE);
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// Another app makes "untitled.txt" between the free-name look and the create: `create_new`
+/// fails, and the next free name is used. The other app's file is untouched.
+#[test]
+fn new_file_never_overwrites_a_file_made_between_the_look_and_the_create() {
+    let d = tmp("nfile-race");
+    let o = run_hooked(Op::NewFile { dir: d.clone() }, fake_trash, hooked(intruder(), false));
+    assert!(o.refused.is_none(), "{:?}", o.refused);
+    assert_eq!(o.results, [d.join("untitled 2.txt")]);
+    assert_eq!(fs::read_to_string(d.join("untitled.txt")).unwrap(), "intruder");
+    assert_eq!(fs::read(d.join("untitled 2.txt")).unwrap(), b"");
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// Undo trashes the new file; redo takes it back out; once edited, undo refuses and keeps it.
+#[test]
+fn new_file_undo_and_redo_and_refusal_once_edited() {
+    let d = tmp("nfile-undo");
+    let u = take(run_now(Op::NewFile { dir: d.clone() }));
+    assert_eq!(u.what, What::NewFile);
+    let redo = reverse(u);
+    assert!(!d.join("untitled.txt").exists() && d.join(".trash/untitled.txt").exists(), "trashed, not deleted");
+    let undo = reverse(redo);
+    assert!(d.join("untitled.txt").exists(), "redone");
+    fs::write(d.join("untitled.txt"), "my notes").unwrap();
+    let why = undo_refused(undo);
+    assert!(why.starts_with("Can't undo the new file: “untitled.txt” was edited"), "{why}");
+    assert_eq!(fs::read_to_string(d.join("untitled.txt")).unwrap(), "my notes");
+    // Replaced by another file of the same name (and size): refused too.
+    let d = tmp("nfile-undo-repl");
+    let u = take(run_now(Op::NewFile { dir: d.clone() }));
+    fs::remove_file(d.join("untitled.txt")).unwrap();
+    let keep = d.join("keep");
+    fs::write(&keep, "").unwrap(); // holds the freed inode so the new file can't reuse it
+    fs::write(d.join("untitled.txt"), "").unwrap();
+    let why = undo_refused(u);
+    assert!(why.contains("replaced") || why.contains("edited"), "{why}");
+    assert!(d.join("untitled.txt").exists());
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// The folder New File was asked in was replaced since it was listed (renamed away, another
+/// made at its path): nothing is made in either. One still there goes ahead; so does New
+/// Folder, under the same check.
+#[test]
+fn new_file_refuses_a_folder_replaced_since_it_was_listed() {
+    let d = tmp("nfile-dest");
+    let here = d.join("here");
+    fs::create_dir(&here).unwrap();
+    let listed = noclobber::dir_id(&here).unwrap();
+    fs::rename(&here, d.join("moved")).unwrap();
+    fs::create_dir(&here).unwrap();
+    for op in [Op::NewFile { dir: here.clone() }, Op::NewFolder { dir: here.clone() }] {
+        let o = run_into_now(op, Some((DestId::Folder(listed), "made")));
+        let why = o.refused.expect("refused");
+        assert!(why.starts_with("Nothing was made: “here” is another folder now"), "{why}");
+    }
+    assert_eq!(fs::read_dir(&here).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(d.join("moved")).unwrap().count(), 0);
+    let now = noclobber::dir_id(&here).unwrap();
+    let o = run_into_now(Op::NewFile { dir: here.clone() }, Some((DestId::Folder(now), "made")));
+    assert_eq!(o.results, [here.join("untitled.txt")]);
+    let _ = fs::remove_dir_all(&d);
+}
+
+// ---- links --------------------------------------------------------------------------------
+
+#[test]
+fn link_names_keep_the_type_and_count_up() {
+    let n = |name: &str, dir: bool, n: usize, lnk: bool| link_name(OsStr::new(name), dir, n, lnk).into_string().unwrap();
+    assert_eq!(n("photo.jpg", false, 1, false), "photo link.jpg");
+    assert_eq!(n("photo.jpg", false, 2, false), "photo link 2.jpg");
+    assert_eq!(n("archive.tar.gz", false, 1, false), "archive.tar link.gz");
+    assert_eq!(n("Projects", true, 1, false), "Projects link");
+    assert_eq!(n("v1.2", true, 3, false), "v1.2 link 3", "a folder's dot isn't an extension");
+    assert_eq!(n(".bashrc", false, 1, false), ".bashrc link");
+    assert_eq!(n("Makefile", false, 1, false), "Makefile link");
+    assert_eq!(n("photo.jpg", false, 1, true), "photo link.jpg.lnk");
+    assert_eq!(n("Projects", true, 2, true), "Projects link 2.lnk");
+}
+
+/// When a failed symbolic link becomes a Windows shortcut, and when it's an error.
+#[test]
+fn shortcut_fallback_decides_on_windows_errors() {
+    assert!(shortcut_fallback(Some(1314)).is_some_and(|w| w.contains("Developer Mode")), "no privilege");
+    assert!(shortcut_fallback(Some(1)).is_some_and(|w| w.contains("drive")), "FAT: invalid function");
+    assert!(shortcut_fallback(Some(50)).is_some_and(|w| w.contains("drive")), "not supported");
+    assert_eq!(shortcut_fallback(Some(5)), None, "access denied is an error");
+    assert_eq!(shortcut_fallback(Some(183)), None, "a taken name is never a reason");
+    assert_eq!(shortcut_fallback(None), None);
+}
+
+#[cfg(unix)]
+mod links {
+    use super::*;
+
+    fn link_steps(u: &Undo) -> Vec<(PathBuf, PathBuf)> {
+        u.steps.iter().map(|s| (s.at.clone(), s.link.as_ref().unwrap().target.clone())).collect()
+    }
+
+    /// A link beside each item, named "name link" (before a file's extension), pointing at the
+    /// item's absolute path; again, a free name. Nothing is ever replaced.
+    #[test]
+    fn links_point_at_the_items_absolute_path_beside_them() {
+        let d = tmp("links");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::create_dir(d.join("Docs")).unwrap();
+        let o = run_now(Op::MakeLinks { items: vec![d.join("a.txt"), d.join("Docs")] });
+        assert!(o.errors.is_empty() && o.notes.is_empty(), "{:?} {:?}", o.errors, o.notes);
+        assert_eq!(o.results, [d.join("a link.txt"), d.join("Docs link")]);
+        assert_eq!(fs::read_link(d.join("a link.txt")).unwrap(), d.join("a.txt"), "absolute");
+        assert!(fs::read_link(d.join("a link.txt")).unwrap().is_absolute());
+        assert_eq!(fs::read_link(d.join("Docs link")).unwrap(), d.join("Docs"));
+        assert_eq!(fs::read_to_string(d.join("a link.txt")).unwrap(), "a", "it leads to the item");
+        // Moved alone, it still leads there.
+        fs::create_dir(d.join("elsewhere")).unwrap();
+        fs::rename(d.join("a link.txt"), d.join("elsewhere/a link.txt")).unwrap();
+        assert_eq!(fs::read_to_string(d.join("elsewhere/a link.txt")).unwrap(), "a");
+        fs::write(d.join("a link.txt"), "someone's file").unwrap();
+        let o = run_now(Op::MakeLinks { items: vec![d.join("a.txt")] });
+        assert_eq!(o.results, [d.join("a link 2.txt")]);
+        assert_eq!(fs::read_to_string(d.join("a link.txt")).unwrap(), "someone's file");
+        assert_eq!(Op::MakeLinks { items: vec![] }.verb(), MAKING_LINKS);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Another app takes the link's name between the look and the link call: the next name.
+    #[test]
+    fn a_link_never_replaces_a_name_taken_after_the_look() {
+        let d = tmp("links-race");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        let o = run_hooked(Op::MakeLinks { items: vec![d.join("a.txt")] }, fake_trash, hooked(intruder(), false));
+        assert!(o.errors.is_empty(), "{:?}", o.errors);
+        assert_eq!(o.results, [d.join("a link 2.txt")]);
+        assert_eq!(fs::read_to_string(d.join("a link.txt")).unwrap(), "intruder");
+        assert_eq!(fs::read_link(d.join("a link 2.txt")).unwrap(), d.join("a.txt"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Undo removes the links (not what they point at, not to the Trash); redo makes them
+    /// again with the same targets; undo again removes them again.
+    #[test]
+    fn undo_removes_the_links_and_redo_makes_them_again() {
+        let d = tmp("links-undo");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::create_dir(d.join("Docs")).unwrap();
+        fs::write(d.join("Docs/inside"), "x").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt"), d.join("Docs")] }));
+        assert_eq!(u.what, What::Link);
+        let made = link_steps(&u);
+        let redo = reverse(u);
+        assert!(d.join("a link.txt").symlink_metadata().is_err() && d.join("Docs link").symlink_metadata().is_err());
+        assert!(!d.join(".trash").exists(), "removed, not trashed");
+        assert_eq!(fs::read_to_string(d.join("Docs/inside")).unwrap(), "x", "the original is untouched");
+        assert_eq!(Op::Undo(redo.clone()).verb(), "Redoing");
+        let undo = reverse(redo);
+        assert_eq!(link_steps(&undo), made);
+        assert_eq!(fs::read_link(d.join("a link.txt")).unwrap(), d.join("a.txt"), "made again, same target");
+        assert_eq!(fs::read_link(d.join("Docs link")).unwrap(), d.join("Docs"));
+        reverse(undo);
+        assert!(d.join("a link.txt").symlink_metadata().is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Undo refuses, changing nothing, when a link isn't the one Arbor made: replaced by
+    /// another link of the same name (elsewhere), by a file, or gone. Redo refuses when its
+    /// name has been taken since.
+    #[test]
+    fn link_undo_and_redo_refuse_when_the_disk_changed() {
+        let d = tmp("links-refuse");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::write(d.join("b.txt"), "b").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt"), d.join("b.txt")] }));
+        fs::remove_file(d.join("b link.txt")).unwrap();
+        std::os::unix::fs::symlink(d.join("a.txt"), d.join("b link.txt")).unwrap();
+        let why = undo_refused(u.clone());
+        // Which check sees it depends on the disk: "replaced" (another inode, or the same one
+        // with its own birth time), "edited" (the freed inode back, another time), or, made in
+        // the same tick of ext4's clock at the freed inode with a target as long, only its
+        // target ("points somewhere else"). Always refused.
+        assert!(
+            why.starts_with("Can't undo the link: “b link.txt” ")
+                && ["was replaced", "was edited", "points somewhere else"].iter().any(|w| why.contains(w)),
+            "{why}"
+        );
+        assert!(d.join("a link.txt").symlink_metadata().is_ok(), "all or nothing: the other link stays");
+        fs::remove_file(d.join("b link.txt")).unwrap();
+        fs::write(d.join("b link.txt"), "a file now").unwrap();
+        let why = undo_refused(u.clone());
+        assert!(why.contains("replaced by a file"), "{why}");
+        fs::remove_file(d.join("b link.txt")).unwrap();
+        let why = undo_refused(u);
+        assert!(why.contains("“b link.txt” was moved or deleted"), "{why}");
+        // Redo: its name taken since the undo.
+        let d = tmp("links-redo-taken");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        let redo = reverse(take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] })));
+        fs::write(d.join("a link.txt"), "mine").unwrap();
+        let o = run_now(Op::Undo(redo));
+        let why = o.refused.expect("refused");
+        assert!(why.starts_with("Can't redo the link: “a link.txt” is already taken"), "{why}");
+        assert!(o.undo.is_some_and(|u| u.redo), "it stays a redo");
+        assert_eq!(fs::read_to_string(d.join("a link.txt")).unwrap(), "mine");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Sets the link `p`'s own modified time (not its target's), as `cp -a` does.
+    fn set_link_mtime(p: &Path, t: std::time::SystemTime) {
+        let d = t.duration_since(std::time::UNIX_EPOCH).unwrap();
+        let ts = libc::timespec { tv_sec: d.as_secs() as libc::time_t, tv_nsec: d.subsec_nanos() as _ };
+        let c = crate::ffi::cstr(p).unwrap();
+        // SAFETY: a NUL-terminated path and two timespecs.
+        assert_eq!(unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), [ts, ts].as_ptr(), libc::AT_SYMLINK_NOFOLLOW) }, 0);
+    }
+
+    /// The reviewer's case: the link copied with `cp -a`, removed, and the copy put back. The
+    /// newcomer got the freed inode, and has the same size, modified time and target: the
+    /// fingerprint can't tell it from Arbor's link, but its birth time (or handle) can. Undo
+    /// refuses and the newcomer stays.
+    #[test]
+    fn undo_never_removes_a_link_put_back_at_the_same_inode() {
+        use std::os::unix::fs::MetadataExt;
+        if !crate::fs::inode_reuse_shows("link-put-back") {
+            return;
+        }
+        let d = tmp("links-put-back");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+        let at = d.join("a link.txt");
+        let was = at.symlink_metadata().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let back = (0..200).any(|_| {
+            fs::remove_file(&at).unwrap();
+            std::os::unix::fs::symlink(d.join("a.txt"), &at).unwrap();
+            at.symlink_metadata().unwrap().ino() == was.ino()
+        });
+        if !back {
+            eprintln!("link-put-back: skipped (the inode never came back)");
+            return;
+        }
+        set_link_mtime(&at, was.modified().unwrap());
+        let now = at.symlink_metadata().unwrap();
+        assert_eq!((now.ino(), now.len(), now.modified().unwrap()), (was.ino(), was.len(), was.modified().unwrap()), "a perfect copy");
+        let why = undo_refused(u);
+        assert!(why.contains("“a link.txt” was replaced"), "{why}");
+        assert!(at.symlink_metadata().is_ok(), "the newcomer stays");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Another link put at the name after undo's check, right before the removal: it's checked
+    /// again through the open folder at the removal itself, and stays.
+    #[test]
+    fn undo_never_removes_a_link_put_there_after_the_check() {
+        let d = tmp("links-swap");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+        // Past the clock tick it was made in (ext4: a few ms), so the newcomer's birth time is
+        // its own: one made in the same tick at the freed inode is the documented limit.
+        std::thread::sleep(Duration::from_millis(20));
+        let target = d.join("a.txt");
+        let swap: PathHook = Box::new(move |at: &Path| {
+            fs::remove_file(at).unwrap();
+            std::os::unix::fs::symlink(&target, at).unwrap();
+        });
+        let o = run_hooked(Op::Undo(u), fake_trash, hooked(swap, false));
+        assert!(o.errors.first().is_some_and(|e| e.contains("“a link.txt” was replaced just now")), "{:?} {:?}", o.errors, o.refused);
+        assert!(d.join("a link.txt").symlink_metadata().is_ok(), "the newcomer stays");
+        assert!(o.undo.is_some(), "the record stays to try again");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    fn removing(stage: links::Removal, f: impl FnMut(&Path) + 'static) -> Hooks {
+        let mut f = f;
+        Hooks {
+            removing: Some(Box::new(move |at, p| {
+                if at == stage {
+                    f(p)
+                }
+            })),
+            ..Hooks::default()
+        }
+    }
+
+    /// The reviewer's case, without a shim: a link put at the name at the instant of the
+    /// removal, after every check (another app swapping it then). Arbor's link was moved aside
+    /// before that instant, so what's removed is Arbor's own, and the newcomer stays.
+    #[test]
+    fn a_link_swapped_in_at_the_instant_of_removal_stays() {
+        let d = tmp("links-instant");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::write(d.join("other.txt"), "o").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+        let other = d.join("other.txt");
+        let swap = move |at: &Path| {
+            let _ = fs::remove_file(at);
+            std::os::unix::fs::symlink(&other, at).unwrap();
+        };
+        let o = run_hooked(Op::Undo(u), fake_trash, removing(links::Removal::BeforeUnlink, swap));
+        assert!(o.errors.is_empty() && o.refused.is_none(), "{:?} {:?}", o.errors, o.refused);
+        assert_eq!(fs::read_link(d.join("a link.txt")).unwrap(), d.join("other.txt"), "the newcomer stays");
+        assert_eq!(fs::read_dir(&d).unwrap().count(), 3, "nothing left aside: {:?}", fs::read_dir(&d).unwrap().collect::<Vec<_>>());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A link swapped in after the check at its name, before the move aside: the newcomer is
+    /// what's moved aside, the check there refuses it, and it goes back to its name. When
+    /// something took the name while it was aside, it stays aside and the error says where.
+    #[test]
+    fn a_link_swapped_in_before_the_move_aside_goes_back() {
+        let d = tmp("links-aside");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::write(d.join("other.txt"), "o").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+        let other = d.join("other.txt");
+        let swap = move |at: &Path| {
+            fs::remove_file(at).unwrap();
+            std::os::unix::fs::symlink(&other, at).unwrap();
+        };
+        let o = run_hooked(Op::Undo(u.clone()), fake_trash, removing(links::Removal::BeforeAside, swap));
+        assert!(o.errors.first().is_some_and(|e| e.contains("“a link.txt” was replaced just now")), "{:?}", o.errors);
+        assert_eq!(fs::read_link(d.join("a link.txt")).unwrap(), d.join("other.txt"), "back at its name");
+        assert_eq!(fs::read_dir(&d).unwrap().count(), 3, "nothing left aside");
+        assert!(o.undo.is_some(), "the record stays");
+        // The name taken while the newcomer was aside: it stays aside, and the error says where.
+        let d = tmp("links-aside-taken");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::write(d.join("other.txt"), "o").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+        let other = d.join("other.txt");
+        let mut hooks = removing(links::Removal::BeforeAside, move |at: &Path| {
+            fs::remove_file(at).unwrap();
+            std::os::unix::fs::symlink(&other, at).unwrap();
+        });
+        let mut stage = hooks.removing.take().unwrap();
+        hooks.removing = Some(Box::new(move |at, p| {
+            stage(at, p);
+            if at == links::Removal::Aside {
+                fs::write(p, "took the name").unwrap();
+            }
+        }));
+        let o = run_hooked(Op::Undo(u), fake_trash, hooks);
+        let e = o.errors.first().cloned().unwrap_or_default();
+        assert!(e.contains("couldn't go back to its name") && e.contains("now named “.arbor-"), "{e}");
+        assert_eq!(fs::read_to_string(d.join("a link.txt")).unwrap(), "took the name", "nothing replaced");
+        let aside: Vec<PathBuf> = fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(".arbor-"))
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(fs::read_link(&aside[0]).unwrap(), d.join("other.txt"), "the newcomer, kept whole");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The items are checked to be the ones listed: one replaced since gets no link.
+    #[test]
+    fn a_link_is_made_only_to_the_item_chosen() {
+        let d = tmp("links-checked");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::write(d.join("b.txt"), "b").unwrap();
+        let ids: Vec<_> = ["a.txt", "b.txt"].iter().map(|n| (d.join(n), crate::fs::ident_at(&d.join(n)))).collect();
+        fs::remove_file(d.join("b.txt")).unwrap();
+        fs::create_dir(d.join("b.txt")).unwrap();
+        let op = Op::Checked {
+            expect: Checks::new(Chosen::Listing, ids),
+            op: Box::new(Op::MakeLinks { items: vec![d.join("a.txt"), d.join("b.txt")] }),
+        };
+        let o = run_now(op);
+        assert_eq!(o.results, [d.join("a link.txt")]);
+        assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
+        assert!(d.join("b.txt link").symlink_metadata().is_err() && d.join("b link.txt").symlink_metadata().is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+}
+
+/// Windows: a symbolic link where Windows allows one (Developer Mode, an administrator, as on
+/// CI), else a shortcut; and a shortcut made directly, which never replaces what's at its name.
+#[cfg(windows)]
+#[test]
+fn windows_links_and_shortcuts() {
+    let d = tmp("win-links");
+    fs::write(d.join("a.txt"), "a").unwrap();
+    fs::create_dir(d.join("Docs")).unwrap();
+    let o = run_now(Op::MakeLinks { items: vec![d.join("a.txt"), d.join("Docs")] });
+    assert!(o.errors.is_empty(), "{:?}", o.errors);
+    let u = o.undo.expect("undoable");
+    for s in &u.steps {
+        let link = s.link.as_ref().unwrap();
+        if link.shortcut {
+            assert!(s.at.extension().is_some_and(|e| e == "lnk") && o.notes.iter().any(|n| n.contains("shortcuts")));
+        } else {
+            assert_eq!(fs::read_link(&s.at).unwrap(), link.target);
+        }
+    }
+    let redo = reverse(u);
+    assert!(fs::read_dir(&d).unwrap().count() == 2, "only the originals are left");
+    assert_eq!(fs::read_to_string(d.join("a.txt")).unwrap(), "a");
+    reverse(redo);
+    assert_eq!(fs::read_dir(&d).unwrap().count(), 4);
+    // A shortcut, directly: a .lnk file (header size 0x4C), and never over a taken name.
+    let link = Link { target: d.join("a.txt"), dir: false, shortcut: true };
+    let at = d.join("short.lnk");
+    make_link_at(&at, &link).unwrap();
+    let bytes = fs::read(&at).unwrap();
+    assert_eq!(bytes.get(..4), Some(&[0x4c, 0, 0, 0][..]), "a shell link");
+    fs::write(d.join("taken.lnk"), "mine").unwrap();
+    let e = make_link_at(&d.join("taken.lnk"), &link).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(fs::read_to_string(d.join("taken.lnk")).unwrap(), "mine");
+    assert!(!fs::read_dir(&d).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".arbor-")), "no staging file left");
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// A folder removed and made again at its path takes the inode it freed (ext4): its device and
+/// inode are the listed folder's, but it isn't that folder. New File and New Folder refuse it,
+/// told apart by the birth time, and where there's none by the file system's handle.
+#[cfg(unix)]
+#[test]
+fn new_file_and_folder_refuse_a_folder_made_again_at_its_freed_inode() {
+    use std::os::unix::fs::MetadataExt;
+    if !crate::fs::inode_reuse_shows("folder-made-again") {
+        return;
+    }
+    for no_birth in [false, true] {
+        let _pretend = no_birth.then(|| crate::fs::pretend::without_birth_times(false));
+        let d = tmp(&format!("nfile-reuse-{no_birth}"));
+        let here = d.join("here");
+        fs::create_dir(&here).unwrap();
+        let listed = noclobber::dir_id(&here).unwrap();
+        let ino = here.metadata().unwrap().ino();
+        // Past the clock tick the first was made in, so the new one's birth time is its own.
+        std::thread::sleep(Duration::from_millis(20));
+        let again = (0..50).any(|_| {
+            fs::remove_dir(&here).unwrap();
+            fs::create_dir(&here).unwrap();
+            here.metadata().unwrap().ino() == ino
+        });
+        if !again {
+            eprintln!("folder-made-again: skipped (the inode never came back)");
+            return;
+        }
+        for op in [Op::NewFile { dir: here.clone() }, Op::NewFolder { dir: here.clone() }] {
+            let o = run_into_now(op, Some((DestId::Folder(listed), "made")));
+            let why = o.refused.unwrap_or_else(|| panic!("refused (no birth time: {no_birth})"));
+            assert!(why.starts_with("Nothing was made: “here” is another folder now"), "{why}");
+        }
+        assert_eq!(fs::read_dir(&here).unwrap().count(), 0, "nothing made in the new folder");
+        let _ = fs::remove_dir_all(&d);
+    }
+}
+
+/// New File's undo: a file put at its name since, even at the freed inode with the same size
+/// and modified time, isn't Arbor's (its birth time or handle says), and isn't trashed; nor is
+/// one put there right before the trash.
+#[cfg(unix)]
+#[test]
+fn new_file_undo_never_trashes_a_replacement() {
+    let d = tmp("nfile-replaced");
+    let u = take(run_now(Op::NewFile { dir: d.clone() }));
+    let at = d.join("untitled.txt");
+    // Past the clock tick it was made in, so the newcomer's birth time is its own.
+    std::thread::sleep(Duration::from_millis(20));
+    let swap: PathHook = Box::new(|at: &Path| {
+        fs::remove_file(at).unwrap();
+        fs::write(at, "").unwrap();
+    });
+    let o = run_hooked(Op::Undo(u.clone()), fake_trash, hooked(swap, false));
+    assert!(o.errors.first().is_some_and(|e| e.contains("was replaced just now")), "{:?} {:?}", o.errors, o.refused);
+    assert!(at.exists() && !d.join(".trash").exists(), "not trashed");
+    if crate::fs::inode_reuse_shows("new-file-put-back") {
+        let d = tmp("nfile-put-back");
+        let u = take(run_now(Op::NewFile { dir: d.clone() }));
+        let at = d.join("untitled.txt");
+        let t = fs::metadata(&at).unwrap().modified().unwrap();
+        crate::fs::reuse_inode(&at, "").unwrap();
+        fs::File::options().write(true).open(&at).unwrap().set_modified(t).unwrap();
+        let why = undo_refused(u);
+        assert!(why.contains("replaced"), "{why}");
+        assert!(at.exists() && !d.join(".trash").exists());
+    }
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// Windows (CI): a link put at the name right before the removal (after undo's check) isn't
+/// the one Arbor made, by its file id through the held handle, and stays.
+#[cfg(windows)]
+#[test]
+fn windows_undo_leaves_a_replacement_link_alone() {
+    let d = tmp("win-links-swap");
+    fs::write(d.join("a.txt"), "a").unwrap();
+    fs::write(d.join("other.txt"), "o").unwrap();
+    let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+    let made = u.steps[0].link.clone().unwrap();
+    let at = u.steps[0].at.clone();
+    let newcomer = Link { target: d.join("other.txt"), ..made };
+    let swap: PathHook = Box::new(move |at: &Path| {
+        fs::remove_file(at).unwrap();
+        make_link_at(at, &newcomer).unwrap();
+    });
+    let o = run_hooked(Op::Undo(u), fake_trash, hooked(swap, false));
+    assert!(o.errors.first().is_some_and(|e| e.contains("was replaced just now")), "{:?} {:?}", o.errors, o.refused);
+    assert!(at.symlink_metadata().is_ok(), "the newcomer stays");
+    if !made.shortcut {
+        assert_eq!(fs::read_link(&at).unwrap(), d.join("other.txt"));
+    }
+    assert!(o.undo.is_some(), "the record stays");
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// Every kind of undo and redo says what it did, in its own words.
+#[test]
+fn undo_and_redo_notes_name_what_they_did() {
+    let one = [PathBuf::from("/d/a.txt")];
+    let two = [PathBuf::from("/d/a"), PathBuf::from("/d/b")];
+    let bin = crate::trash::BIN;
+    let say = |w, redo, r: &[PathBuf]| undone_note(w, redo, r);
+    assert_eq!(say(What::Rename, false, &one), "Renamed “a.txt” back");
+    assert_eq!(say(What::BatchRename, true, &two), "Renamed 2 items again");
+    assert_eq!(say(What::Move, false, &two), "Moved 2 items back");
+    assert_eq!(say(What::Move, true, &one), "Moved “a.txt” again");
+    assert_eq!(say(What::Copy, false, &two), format!("Moved 2 copies to the {bin}"));
+    assert_eq!(say(What::Duplicate, true, &one), "Made “a.txt” again");
+    assert_eq!(say(What::NewFolder, false, &one), format!("Moved “a.txt” to the {bin}"));
+    assert_eq!(say(What::NewFile, true, &one), "Made “a.txt” again");
+    assert_eq!(say(What::Link, false, &one), "Removed 1 link");
+    assert_eq!(say(What::Link, false, &two), "Removed 2 links");
+    assert_eq!(say(What::Link, true, &two), "Made 2 links again");
+    assert_eq!(say(What::Trash, false, &one), format!("Put back “a.txt” from the {bin}"));
+    assert_eq!(say(What::Trash, true, &two), format!("Moved 2 items to the {bin} again"));
+    assert_eq!(say(What::PutBack, false, &one), format!("Moved “a.txt” back to the {bin}"));
+    assert_eq!(say(What::PutBack, true, &two), "Put back 2 items again");
+}

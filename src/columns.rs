@@ -78,7 +78,7 @@ pub(crate) fn next_uid() -> u64 {
 pub struct Column {
     pub path: PathBuf,
     pub uid: u64,
-    pub dir_id: Option<crate::noclobber::FileId>,
+    pub dir_id: Option<crate::noclobber::DirId>,
     /// The whole folder, sorted (empty unless [`Load::Ready`]).
     pub entries: Vec<Entry>,
     /// Indices into `entries` the hidden-file rule shows.
@@ -133,7 +133,7 @@ impl Column {
     pub(crate) fn ready(
         path: PathBuf,
         entries: Vec<Entry>,
-        dir_id: Option<crate::noclobber::FileId>,
+        dir_id: Option<crate::noclobber::DirId>,
         (sort, hidden): (Sort, bool),
         uid: Option<u64>,
         rows: Option<(Vec<u32>, u64)>,
@@ -296,7 +296,7 @@ pub(crate) struct Hit {
     pub rect: [f32; 4],
     pub uid: u64,
     pub path: PathBuf,
-    pub dir_id: Option<crate::noclobber::FileId>,
+    pub dir_id: Option<crate::noclobber::DirId>,
 }
 
 impl Columns {
@@ -357,7 +357,7 @@ impl Columns {
 
     /// The columns showing one of `folders` (by identity when both are known, else by path)
     /// are read again, as the active folder is (`State::refresh`); every column with `all`.
-    pub(crate) fn reread(&mut self, folders: &[(PathBuf, Option<crate::noclobber::FileId>)], all: bool) {
+    pub(crate) fn reread(&mut self, folders: &[(PathBuf, Option<crate::noclobber::DirId>)], all: bool) {
         for c in self.left.iter_mut().chain(self.right.as_mut()) {
             let hit = all
                 || folders.iter().any(|(p, id)| match (c.dir_id, id) {
@@ -711,11 +711,13 @@ impl State {
         if !self.activate_id(id, tx) {
             return false;
         }
-        // A press elsewhere ends an inline rename by committing it, as in the list; that press
-        // does nothing more.
+        // A press elsewhere ends an inline rename by committing it, as in the list, then goes on
+        // (unless the rename couldn't go yet, its field staying open).
         if self.rename.is_some() {
             self.commit_rename(tx);
-            return false;
+            if self.rename.is_some() {
+                return false;
+            }
         }
         // Already the active column (a press queued behind the one that made it so): the item
         // pressed is still the one to select, now or when its listing lands.
@@ -798,7 +800,7 @@ impl State {
         let hit = hits.iter().find(|h| inside(h.rect))?;
         let row = |scroll: f32| ((at[1] - hit.rect[1] + scroll) / crate::view::ROW_H).floor();
         // The column it was, wherever its listing is now, while it's still that folder.
-        let same = |path: &Path, id: Option<crate::noclobber::FileId>| {
+        let same = |path: &Path, id: Option<crate::noclobber::DirId>| {
             path == hit.path && (hit.dir_id.is_none() || id.is_none() || id == hit.dir_id)
         };
         if f.col_uid == Some(hit.uid) {
@@ -882,8 +884,8 @@ impl Folder {
         path: PathBuf,
         nav: Nav,
         select: Vec<OsString>,
-        dir_id: Option<crate::noclobber::FileId>,
-    ) -> (PathBuf, Vec<Entry>, Option<crate::noclobber::FileId>) {
+        dir_id: Option<crate::noclobber::DirId>,
+    ) -> (PathBuf, Vec<Entry>, Option<crate::noclobber::DirId>) {
         let old = std::mem::replace(&mut self.cwd, path.clone());
         match nav {
             Nav::New => {

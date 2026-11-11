@@ -21,6 +21,7 @@ use crate::noclobber;
 use crate::trash::TrashError;
 
 mod batch;
+mod links;
 mod print;
 #[cfg(test)]
 mod tests;
@@ -28,6 +29,8 @@ mod trashed;
 mod undo;
 mod worker;
 
+use links::*;
+pub use links::{MAKING_LINKS, NEW_FILE};
 pub use print::Seen;
 use print::*;
 pub use undo::Undo;
@@ -80,6 +83,15 @@ pub enum Op {
     /// New Folder: "untitled folder" (or a free variant) in `dir`.
     NewFolder {
         dir: PathBuf,
+    },
+    /// New File: an empty "untitled.txt" (or a free variant) in `dir`, made with `create_new`.
+    NewFile {
+        dir: PathBuf,
+    },
+    /// Make Symbolic Link: for each item, a link beside it ("name link", free), pointing at the
+    /// item's absolute path; on Windows without the right to make one, a shortcut (`.lnk`).
+    MakeLinks {
+        items: Vec<PathBuf>,
     },
     /// Reverse an earlier operation, if the disk still looks the way it left it.
     Undo(Undo),
@@ -149,7 +161,8 @@ impl Op {
             Op::Delete { items } => items.iter().filter_map(|d| d.path.parent().map(Path::to_path_buf)).collect(),
             Op::Rename { items } => items.iter().filter_map(|r| r.from.parent().map(Path::to_path_buf)).collect(),
             Op::RenameOne { from, .. } => from.parent().map(Path::to_path_buf).into_iter().collect(),
-            Op::NewFolder { dir } => vec![dir.clone()],
+            Op::NewFolder { dir } | Op::NewFile { dir } => vec![dir.clone()],
+            Op::MakeLinks { items } => parents(items),
             Op::Checked { op, .. } => return op.folders(),
             Op::Undo(u) => u
                 .steps
@@ -174,6 +187,8 @@ impl Op {
             Op::PutBack { .. } => "Putting Back",
             Op::RenameOne { .. } => "Renaming",
             Op::NewFolder { .. } => NEW_FOLDER,
+            Op::NewFile { .. } => NEW_FILE,
+            Op::MakeLinks { .. } => MAKING_LINKS,
             Op::Rename { .. } => "Renaming",
             Op::Undo(u) if u.redo => "Redoing",
             Op::Undo(_) => "Undoing",
@@ -208,6 +223,11 @@ impl Op {
                 keep(&mut items);
                 let any = !items.is_empty();
                 (Op::PutBack { items }, any)
+            }
+            Op::MakeLinks { mut items } => {
+                keep(&mut items);
+                let any = !items.is_empty();
+                (Op::MakeLinks { items }, any)
             }
             Op::Delete { mut items } => {
                 items.retain(|d| !left_out.contains(d.path.as_path()));
@@ -261,6 +281,10 @@ pub enum What {
     Copy,
     Duplicate,
     NewFolder,
+    NewFile,
+    /// Links Arbor made: undone by removing each (only while it's still the link made, with
+    /// the same target), redone by making it again ([`Worker::undo_links`]).
+    Link,
     Trash,
     /// Put Back from the Trash: undone by trashing the items again.
     PutBack,
@@ -275,6 +299,8 @@ impl What {
             What::Copy => "copy",
             What::Duplicate => "duplicate",
             What::NewFolder => "new folder",
+            What::NewFile => "new file",
+            What::Link => "link",
             What::Trash => "move to Trash",
             What::PutBack => "put back",
         }
@@ -330,13 +356,50 @@ pub struct Outcome {
     pub canon: Vec<(PathBuf, PathBuf)>,
     /// The folders the operation may have changed, with their identities (links followed), so
     /// the panes showing them, by any path, read them again.
-    pub folders: Vec<(PathBuf, Option<noclobber::FileId>)>,
+    pub folders: Vec<(PathBuf, Option<noclobber::DirId>)>,
     /// Where identity is told by ctime alone ([`crate::fs::Ident::by_ctime`]): each identity an
     /// item had when it was chosen, and the one Arbor's own action gave it, read right after
     /// (renaming, moving or trashing an item changes its ctime, and its other names' too). Rows
     /// still showing the first take the second ([`reidentified`]), so the next action on them,
     /// before their folder is read again, doesn't take Arbor's change for a replacement.
     pub reidentified: Vec<(crate::fs::Ident, crate::fs::Ident)>,
+    /// New File and New Folder: what they made, as an identity (read right after), so the
+    /// rename starts on that item and no other row.
+    pub made: Option<crate::fs::Ident>,
+    /// An undo or a redo: what it reversed, and which way (`true`: a redo), for its words
+    /// ([`undone_note`]).
+    pub undid: Option<(What, bool)>,
+}
+
+/// What an undo (`redo` false) or a redo of a `what` that went through for `results` says:
+/// each kind in its own words ("Moved “untitled.txt” to the Trash", "Removed 1 link", "Made
+/// “untitled.txt” again"). One item is named; more are counted.
+pub fn undone_note(what: What, redo: bool, results: &[PathBuf]) -> String {
+    let n = results.len();
+    let named = |one: &str, many: &str| match (n, results.first()) {
+        (1, Some(p)) => format!("“{}”", name_of(p)),
+        _ => format!("{n} {}", if n == 1 { one } else { many }),
+    };
+    let items = || named("item", "items");
+    let bin = crate::trash::BIN;
+    match (what, redo) {
+        (What::Rename | What::BatchRename, false) => format!("Renamed {} back", items()),
+        (What::Rename | What::BatchRename, true) => format!("Renamed {} again", items()),
+        (What::Move, false) => format!("Moved {} back", items()),
+        (What::Move, true) => format!("Moved {} again", items()),
+        // Undoing what an operation made sends it to the Trash; redoing takes it back out.
+        (What::Copy | What::Duplicate, false) => format!("Moved {} to the {bin}", named("copy", "copies")),
+        (What::Copy | What::Duplicate, true) => format!("Made {} again", named("copy", "copies")),
+        (What::NewFolder, false) | (What::NewFile, false) => format!("Moved {} to the {bin}", items()),
+        (What::NewFolder, true) | (What::NewFile, true) => format!("Made {} again", items()),
+        // Links are removed for good (they hold no data) and made again.
+        (What::Link, false) => format!("Removed {n} link{}", if n == 1 { "" } else { "s" }),
+        (What::Link, true) => format!("Made {n} link{} again", if n == 1 { "" } else { "s" }),
+        (What::Trash, false) => format!("Put back {} from the {bin}", items()),
+        (What::Trash, true) => format!("Moved {} to the {bin} again", items()),
+        (What::PutBack, false) => format!("Moved {} back to the {bin}", items()),
+        (What::PutBack, true) => format!("Put back {} again", items()),
+    }
 }
 
 /// `id` as Arbor's own action left it, from an outcome's [`Outcome::reidentified`]; `id` when
@@ -360,6 +423,11 @@ impl Running {
     pub fn cancel(&self) {
         self.progress.cancel.store(true, Relaxed);
     }
+    /// Tests: whether the outcome is in, without taking it.
+    #[cfg(test)]
+    pub fn finished(&self) -> bool {
+        self.done.lock().is_ok_and(|d| d.is_some())
+    }
 }
 
 /// The trash: moves one item, checking the second argument ("stop?") during any long work
@@ -379,7 +447,7 @@ const TRASH: TrashFn = tests::fake_trash;
 pub enum DestId {
     /// The folder's own identity, links followed (`Folder::dir_id`, a column's): a paste, a drop
     /// on a list's or a column's background, on the other pane.
-    Folder(noclobber::FileId),
+    Folder(noclobber::DirId),
     /// A folder row's identity as its listing read it (not following a link): a drop on a row.
     Item(crate::fs::Ident),
 }
@@ -404,8 +472,9 @@ pub struct Dest {
 
 /// Runs `op` on a worker thread; its outcome comes back through [`Running::take`].
 ///
-/// With `dest_id`, a copy or move goes only into the folder the user chose as the one with that
-/// identity (a paste, asked for before the clipboard answered; a drop on a column): if the
+/// With `dest_id`, a copy, move, new file or new folder goes only into the folder the user chose
+/// as the one with that identity (a paste, asked for before the clipboard answered; a drop on a
+/// column; New File in the folder as it was listed): if the
 /// folder at its `dest` isn't that one when the worker starts (renamed away and another made
 /// at its path, or gone), it refuses before touching anything, saying "Nothing was" and the
 /// verb given with it ("pasted", "dropped").
@@ -488,6 +557,8 @@ fn run_hooked(op: Op, trash: TrashFn, hooks: Hooks) -> Outcome {
 type PathHook = Box<dyn FnMut(&Path)>;
 #[cfg(test)]
 type PathTest = Box<dyn Fn(&Path) -> bool>;
+#[cfg(test)]
+type RemovalHook = Box<dyn FnMut(links::Removal, &Path)>;
 
 /// Test-only ways to make the worker meet the disk at its worst. Not compiled outside tests.
 #[cfg(test)]
@@ -513,6 +584,9 @@ struct Hooks {
     copied: Option<PathHook>,
     /// The mount table, instead of the system's (a folder a test says is a mount point).
     mounts: Option<crate::mounts::Mounts>,
+    /// Called at each step of a link's removal (`links::Removal`), with the link's path: where a
+    /// test swaps the link at the instant of removal.
+    removing: Option<RemovalHook>,
 }
 
 /// A path for comparing names case aside (what a disk that ignores case sees as one name).

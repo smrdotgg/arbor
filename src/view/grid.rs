@@ -99,6 +99,7 @@ fn cell(s: &State, f: &Folder, i: usize, g: Geom, c: Ctx) -> El {
             .color(l.t.text)
             .caret(l.accent, l.accent.alpha(0.35))
             .on_edit(|s: &mut State| s.rename_edit())
+            .on_input_key(|s: &mut State, ev, tx| s.rename_field_key(ev, tx))
             .on_submit(|s: &mut State, tx| {
                 tx.instant();
                 s.commit_rename(tx);

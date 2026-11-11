@@ -14,6 +14,84 @@ Format: date · decision · why · how to undo.
   swapped just before removal), even reworded in plain terms. Rather than reword further to get
   past a safety filter, the PM gave that review to an independent Claude Opus 5.5 reviewer with
   the same scope. Sol stays the default reviewer. Undo: none needed; it's a process choice.
+- **2026-11-11 · New File, Make Symbolic Link and Show Original (`feature/new-file-links`;
+  Review: the link's name and target, the keys).**
+  - **Keys (Review): New File ⌥⌘N (Ctrl+Alt+N off macOS)**, beside New Folder's ⇧⌘N; free on
+    all three (the registry test checks), and ⌘N stays for New Window. **Make Symbolic Link: no
+    default key.** Finder's Make Alias is ⌃⌘A, but `cmd+ctrl+a` in a settings file written on a
+    Mac reads as Ctrl+A (Select All) on Windows and Linux, where ⌘ is Ctrl (macOS CI's template
+    test caught it); Explorer and Linux file managers have no conventional key. Bind
+    `file.make_link` in the settings file. **Show Original: no key** (Finder's ⌘R is Reload here).
+    Undo: `NewFile`, `MakeLink`, `ShowOriginal` in `commands.rs`.
+  - **A link points at the item's absolute path as listed (Review)**, not a relative one and not
+    resolved: a link made beside its item is for moving elsewhere (Finder's aliases work that
+    way); a relative target would survive moving the pair together instead, and break when the
+    link moves alone. Undo: `Link::target` in `ops::links::Worker::make_link` (a relative target
+    would be the item's name).
+  - **The link's name puts " link" before a file's extension (Review): `photo link.jpg`, not
+    `photo.jpg link`** as the task said: the link keeps its item's type for Arbor's icons and
+    preview, Open With, and Windows, which opens by extension. Folders and names without an
+    extension get "name link"; taken names count up ("photo link 2.jpg"). Windows' shortcut adds
+    `.lnk`. Undo: `ops::links::link_name`.
+  - **Undo of Make Link removes the links permanently, not to the Trash; redo makes them again.**
+    A link holds no data, so removing one that's still exactly the link Arbor made loses
+    nothing. "Exactly" (after review): its fingerprint, its object identity (`fs::Ident`, with
+    the birth time or Linux's handle, recorded when it was made: a `cp -a` copy put back at the
+    freed inode has the same inode, times and target) and its target, checked once with the
+    others and again at the removal itself. On Unix every call looks the name up again (even
+    `statx`, `readlinkat` and `unlinkat` relative to the folder), so the link is first moved
+    aside with the no-replace rename to a fresh hidden name in its folder, checked there, and
+    removed there; anything else found there goes back to its name (no-replace), or, when the
+    name was taken meanwhile, stays under the hidden name and the status bar says which (after
+    the second review: a swap at the instant of `unlinkat` deleted the newcomer). On Windows,
+    through a handle on the link that shares no delete access, deleted through that handle.
+    New File's undo checks the same identity when it checks and again right before the trash;
+    the trash itself goes by path, and isn't moved aside first: the Trash would then record the
+    hidden name, and Put Back or redo would restore the file under it. Removing also means redo works on Windows, where the Recycle Bin doesn't say where it
+    put an item. New File's undo trashes the file, as New Folder's does (the task's rule). Undo:
+    `Worker::undo_links`, `links::remove_if_still`.
+  - **Windows: `std`'s symbolic-link calls** (they pass
+    `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` to `CreateSymbolicLinkW`); on
+    `ERROR_PRIVILEGE_NOT_HELD`, and on `ERROR_INVALID_FUNCTION`/`ERROR_NOT_SUPPORTED` (FAT and
+    exFAT drives hold no links), a shell shortcut through `IShellLinkW` and `IPersistFile`, saved
+    to a fresh `create_new` name beside it and then given its name with the no-replace rename
+    (`IPersistFile::Save` replaces what's at its path). The status bar says "Made as shortcuts
+    (.lnk): …". No new windows-sys features. Undo: `ops::links::shortcut_fallback`.
+  - **A folder's identity (`noclobber::DirId`) has its birth time, or on Linux without one the
+    file system's handle** (after review): device and inode alone took a folder removed and
+    made again at the freed inode (ext4) for the one listed, so New File, New Folder, a paste
+    and a drop went into it. Never the ctime, which a folder's every new entry changes. Every
+    "same folder?" check uses it. Undo: `noclobber::dir_id`.
+  - **Undo and redo say what they did, per kind** (real-Mac QA: undoing New File or Make Link
+    said "Restored 1 item"): "Removed 1 link" / "Made 1 link again"; New File, New Folder and
+    copies "Moved “untitled.txt” to the Trash" / "Made “untitled.txt” again" (not the QA's
+    suggested "Removed “untitled.txt”": the file is in the Trash, not gone, and saying so tells
+    the user where to find it); moves and renames "Moved/Renamed … back" / "… again"; a trash
+    "Put back … from the Trash" / "Moved … to the Trash again". One item is named, more are
+    counted. Undo: `ops::undone_note`.
+  - **In the column view, New File and New Folder go into the column holding the selection**
+    (the active column: the parent of a selected folder, whose contents are open in the next
+    column), as Finder does; into that folder only once its column is made active (→, or a
+    click in it). The real-Mac QA noted it; it's the column view's rule that every action acts
+    on the active column. Undo: `State::here` would take the selected folder instead.
+  - **New File and New Folder clear a filter, and rename only what they made** (after review):
+    a filter hiding "untitled.txt" left another row selected, and the rename opened on it. The
+    active pane's filter (or go-to text) is cleared when the item is made, as Finder shows a new
+    item whatever the search, and the rename starts only when the selected row is the item made,
+    by name and identity; otherwise none starts. Undo: `State::rename_made`.
+  - **New Folder now checks the folder's identity too**, as New File does: one put at the
+    folder's path since it was listed makes nothing ("Nothing was made: … is another folder
+    now"). A folder whose identity isn't known yet (still being read) is used as before. Undo:
+    `State::here` in `actions.rs`.
+  - **Show Original selects the original in the same pane** (in place when it's in the same
+    folder, else navigating there, ⌘[ back), not in a new tab: it's Reveal for links. The link is
+    read on the go-to worker with the usual one-frame wait; a target is used as written unless it
+    has `.` or `..`, which are resolved through the real folders on Unix (as the kernel follows
+    them) and by spelling on Windows. Symbolic links only,
+    not `.lnk` shortcuts. It's in an item's context menu only on a link.
+    Nothing on screen may hide the original (after review): the pane's filter is cleared, and a
+    hidden original turns hidden files on (for every pane, as ⌘. does), saying so. Undo:
+    `State::show_original`, `app::original`.
 
 - **2026-11-11 · The idle list view's endless frames (since 7cd20cb): the rows hear their
   layout only while a selection rectangle is held, and never say `Tx::live_only` there.**
