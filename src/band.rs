@@ -24,7 +24,6 @@
 //! content too (the rows' layout report on each scrolled frame), selecting what scrolls in.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::ops::Range;
 
 use crate::folder::Folder;
@@ -131,6 +130,7 @@ impl Layout {
 }
 
 /// A rectangle being dragged out in one pane's list.
+#[cfg_attr(test, derive(Clone))]
 pub struct Band {
     pub pane: u64,
     /// The folder's version when it started: a listing that lands meanwhile ends it.
@@ -153,17 +153,17 @@ pub struct Band {
     pub hits: Hits,
     /// It has applied its first selection (`apply`).
     pub started: bool,
-    /// The items it touches now, by name, each with whether it was selected before the
-    /// rectangle reached it (what an item that leaves the rectangle goes back to, and what ⌘
-    /// flips), its size and whether it's a folder (for the selection's totals on Esc). Only what
-    /// it touches: a move costs what it changes, never the whole selection.
-    pub orig: HashMap<OsString, (bool, u64, bool)>,
+    /// The rows it touches now, each with whether it was selected before the rectangle reached
+    /// it: what a row that leaves the rectangle goes back to, and what ⌘ flips. Only what it
+    /// touches: a move costs what it changes, never the whole selection. (A listing landing
+    /// ends the rectangle, so rows stay put while it's dragged.)
+    pub orig: HashMap<usize, bool>,
     /// Alone (no ⇧ or ⌘): the selection it started with (and its totals), moved aside (not
     /// copied), for Esc.
     pub cleared: Option<crate::marked::Marked>,
-    /// ⇧ or ⌘ with only the cursor selected: the cursor's item, put in the selection first (it
+    /// ⇧ or ⌘ with only the cursor selected: the cursor's row, put in the selection first (it
     /// was selected, as the cursor), and taken out again on Esc.
-    pub seeded: Option<OsString>,
+    pub seeded: Option<usize>,
     /// The cursor and the anchor as they were, for Esc.
     pub before: (usize, usize),
     /// It started below the rows or in a gutter: a click there (no rectangle) clears the
@@ -213,10 +213,9 @@ impl Band {
                 Mode::Replace => self.cleared = Some(std::mem::take(&mut f.marked)),
                 // The cursor alone counts as selected: ⇧ adds to it, ⌘ toggles against it.
                 _ if f.marked.is_empty() => {
-                    if let Some(c) = f.selected().cloned() {
-                        f.marked.insert(&c);
-                        self.seeded = Some(c.os);
-                    }
+                    let c = f.sel;
+                    f.marked.set(c, true, &f.visible);
+                    self.seeded = Some(c);
                 }
                 _ => {}
             }
@@ -227,25 +226,15 @@ impl Band {
         minus(cols, &old, &self.hits, n, &mut left);
         minus(cols, &self.hits, &old, n, &mut entered);
         for i in left {
-            let e = &f.entries[f.visible[i] as usize];
-            if let Some((was, _, _)) = self.orig.remove(&e.os) {
-                if was {
-                    f.marked.insert(e);
-                } else {
-                    f.marked.remove(&e.os);
-                }
+            if let Some(was) = self.orig.remove(&i) {
+                f.marked.set(i, was, &f.visible);
             }
         }
         for i in entered {
-            let e = &f.entries[f.visible[i] as usize];
-            let was = f.marked.contains(&e.os);
-            self.orig.insert(e.os.clone(), (was, if e.is_dir { 0 } else { e.size }, e.is_dir));
+            let was = f.marked.contains(i);
+            self.orig.insert(i, was);
             let on = self.mode != Mode::Toggle || !was;
-            if on {
-                f.marked.insert(e);
-            } else {
-                f.marked.remove(&e.os);
-            }
+            f.marked.set(i, on, &f.visible);
         }
         // The cursor follows the pointer's end of the rectangle, the anchor stays at its start,
         // so ⇧-arrows afterwards carry on from there.
@@ -262,15 +251,11 @@ impl Band {
         if let Some(m) = self.cleared.take() {
             f.marked = m;
         } else {
-            for (name, (was, size, dir)) in self.orig.drain() {
-                if was {
-                    f.marked.insert_as(name, size, dir);
-                } else {
-                    f.marked.remove(&name);
-                }
+            for (row, was) in self.orig.drain() {
+                f.marked.set(row, was, &f.visible);
             }
             if let Some(c) = self.seeded.take() {
-                f.marked.remove(&c);
+                f.marked.set(c, false, &f.visible);
             }
         }
         (f.sel, f.anchor) = self.before;
@@ -644,9 +629,9 @@ mod tests {
     }
 
     /// The selection's total moves by what a change changes: a ⌘-click, a rectangle growing
-    /// and shrinking, never a look through the rest of the listing. (Every entry's size is
-    /// changed behind the selection's back; a total worked out again from the listing would
-    /// show it.)
+    /// and shrinking, never a look through the listing (the rows' running sums say each row's
+    /// size). Every entry's size is changed behind the selection's back: a total worked out
+    /// again from the listing would show it.
     #[test]
     fn a_selection_change_costs_what_it_changes() {
         let mut f = sized(1000);
@@ -657,20 +642,95 @@ mod tests {
         for e in &mut f.entries {
             e.size *= 1000;
         }
-        // Row 5 (600 bytes then, 600,000 now: what the click sees).
+        // Row 5: 600 bytes when the rows were made (600,000 now, unseen).
         f.toggle_mark(5);
-        assert_eq!(f.picked_size().unwrap(), crate::marked::Picked { count: 3, bytes: 300 + 600_000, folders: 0 });
+        assert_eq!(f.picked_size().unwrap(), crate::marked::Picked { count: 3, bytes: 900, folders: 0 });
         // A rectangle over rows 10..=19 (row 19 a folder), then back to 10..=14.
         let mut b = band(LIST, Mode::Add, &[]);
         b.start = [5.0, 10.0 * 24.0 + 1.0];
         b.end = [5.0, 19.0 * 24.0 + 1.0];
         b.apply(&mut f);
-        let rows: u64 = (11..=19).filter(|i| i % 10 != 0).map(|i| i * 100_000).sum();
-        assert_eq!(f.picked_size().unwrap(), crate::marked::Picked { count: 13, bytes: 600_300 + rows, folders: 1 });
+        let rows: u64 = (11..=19).map(|i| i * 100).sum();
+        assert_eq!(f.picked_size().unwrap(), crate::marked::Picked { count: 13, bytes: 900 + rows, folders: 1 });
         b.end = [5.0, 14.0 * 24.0 + 1.0];
         b.apply(&mut f);
-        let rows: u64 = (11..=15).map(|i| i * 100_000).sum();
-        assert_eq!(f.picked_size().unwrap(), crate::marked::Picked { count: 8, bytes: 600_300 + rows, folders: 0 });
+        let rows: u64 = (11..=15).map(|i| i * 100).sum();
+        assert_eq!(f.picked_size().unwrap(), crate::marked::Picked { count: 8, bytes: 900 + rows, folders: 0 });
+    }
+
+    /// Every selection change at 500,000 rows costs what it changes, not the folder: a click,
+    /// ⌘-click, ⇧ growing and shrinking a range by a row, ⌘A, Invert, Esc, a rectangle's move
+    /// and its Esc. None of them looks at the listing (its entries are taken away once the rows
+    /// are made: a look would panic), and in a release build each takes under 1 ms (the best
+    /// of five: a busy machine can hold up any one). They took up to 238 ms.
+    #[test]
+    fn every_selection_change_is_quick_at_500k() {
+        let n = 500_000;
+        let mut f = folder(0);
+        f.entries =
+            (0..n).map(|i| crate::fs::Entry { size: i as u64, ..crate::fs::Entry::test(&format!("f{i:06}"), i % 50 == 0) }).collect();
+        f.refilter(None);
+        let entries = std::mem::take(&mut f.entries);
+        let mut worst = Vec::new();
+        let mut time = |what: &str, f: &mut Folder, op: &dyn Fn(&mut Folder)| {
+            let best = (0..5)
+                .map(|_| {
+                    let mut g = folder(0);
+                    (g.marked, g.visible, g.sel, g.anchor) = (f.marked.clone(), f.visible.clone(), f.sel, f.anchor);
+                    let t = std::time::Instant::now();
+                    op(&mut g);
+                    let e = t.elapsed();
+                    std::hint::black_box(g.picked_size());
+                    e
+                })
+                .min()
+                .unwrap();
+            op(f);
+            worst.push((what.to_string(), best));
+        };
+        time("⌘A", &mut f, &|f| f.select_all());
+        time("a click (clears 500k)", &mut f, &|f| f.select(250_000));
+        time("⇧ to the end", &mut f, &|f| f.extend_to(n - 1));
+        time("⇧ shrinks a row", &mut f, &|f| f.extend_to(n - 2));
+        time("⇧ grows a row", &mut f, &|f| f.extend_to(n - 1));
+        time("⌘-click", &mut f, &|f| f.toggle_mark(10));
+        time("⇧ after a ⌘-click", &mut f, &|f| f.extend_to(0));
+        time("Invert", &mut f, &|f| {
+            f.invert_selection();
+        });
+        time("Esc (clears)", &mut f, &|f| f.marked.clear());
+        // A rectangle over 400k rows (made once, as it would be over many moves), then a row
+        // more and a row less at its edge, each from the same start.
+        f.marked.clear();
+        let mut b = band(LIST, Mode::Replace, &[]);
+        (b.start, b.end) = ([5.0, 1.0], [5.0, 400_000.0 * 24.0 - 10.0]);
+        b.apply(&mut f);
+        for (what, to) in [("the rectangle grows a row", 400_001.0), ("the rectangle shrinks a row", 399_999.0)] {
+            let best = (0..5)
+                .map(|_| {
+                    let (mut g, mut c) = (folder(0), b.clone());
+                    (g.marked, g.visible, g.sel, g.anchor) = (f.marked.clone(), f.visible.clone(), f.sel, f.anchor);
+                    c.end = [5.0, to * 24.0 - 10.0];
+                    let t = std::time::Instant::now();
+                    c.apply(&mut g);
+                    let e = t.elapsed();
+                    assert_eq!(g.picked_size().map(|p| p.count), Some(to as usize));
+                    e
+                })
+                .min()
+                .unwrap();
+            worst.push((what.to_string(), best));
+        }
+        assert_eq!(f.picked_size().map(|p| p.count), Some(400_000), "the rectangle's rows");
+        b.cancel(&mut f);
+        assert!(f.marked.is_empty());
+        drop(entries);
+        for (what, t) in &worst {
+            eprintln!("{what}: {:.3} ms", t.as_secs_f64() * 1e3);
+            if !cfg!(debug_assertions) {
+                assert!(*t < std::time::Duration::from_millis(1), "{what}: {t:?} at 500k rows");
+            }
+        }
     }
 
     /// Esc on a rectangle puts the selection's total back with the selection, whichever way it

@@ -1033,6 +1033,23 @@ impl State {
         if p.nav == Nav::Reload && f.picks != p.picks {
             p.select = f.picked();
             p.rename = false;
+            p.picks = f.picks;
+            // Marked on the new listing's entries on a worker (two or more; or none, where the
+            // worker marked the old selection): looking through a big folder here would hold up
+            // the window. Then it lands, unless the user picks again meanwhile.
+            if (p.select.len() > 1 || a.picked.is_some()) && a.listing.result.is_ok() {
+                let select = p.select.clone();
+                let mut a = a;
+                f.pending = Some(p);
+                f.loader.request_opt((), move |()| {
+                    if let Ok(entries) = &mut a.listing.result {
+                        crate::folder::mark_named(entries, &select);
+                    }
+                    a.picked = Some(select);
+                    Some(a)
+                });
+                return false;
+            }
         }
         // The folder on screen couldn't be read again (a reload, a tab shown): what it listed
         // before isn't shown or acted on any more, only why it can't be read. (A navigation
@@ -1138,26 +1155,26 @@ impl State {
                     self.shared.history.borrow_mut().record(&here);
                 }
                 let f = &mut self.panes[ix].f;
+                // The rows before were the old listing's.
                 f.marked.clear();
-                if p.select.len() > 1 {
-                    // Only names still here: what was trashed or deleted isn't selected. The
-                    // listing's worker found them (with their sizes, for the totals) when this is
-                    // what it was asked to select; otherwise they're found here.
-                    f.marked = match a.picked.filter(|(asked, _)| *asked == p.select) {
-                        Some((_, m)) => m,
-                        None => crate::folder::picked_in(&f.entries, &p.select),
-                    };
+                // Only names still here are selected: what was trashed or deleted isn't. The
+                // listing's worker marked them on their entries when this is what it was asked
+                // to select (a column made active, the only other way with two or more, is
+                // marked here).
+                let several = p.select.len() > 1;
+                if several && a.picked.as_ref() != Some(&p.select) {
+                    crate::folder::mark_named(&mut f.entries, &p.select);
                 }
                 match adopt_rows {
                     // A column's rows, as it showed them (same sort, no filter, the hidden-file
                     // rule it was shown with): kept, under their version.
-                    Some((visible, version)) if a.sort == f.sort && f.filter.is_empty() => {
+                    Some((visible, version)) if a.sort == f.sort && f.filter.is_empty() && !several => {
                         f.visible = visible;
                         f.version = version;
                         let pick = p.select.first();
                         f.sel = pick.and_then(|n| f.visible.iter().position(|&e| f.entries[e as usize].os == *n)).unwrap_or(0);
                     }
-                    _ => f.refilter(p.select.first().map(OsString::as_os_str)),
+                    _ => f.refilter_carried(p.select.first().map(OsString::as_os_str)),
                 }
                 f.anchor = f.sel;
                 // The folder was read: its volume's free space, now that its identity says which

@@ -28,6 +28,10 @@ pub struct Entry {
     /// attributes from the directory record. 0 when unknown. (It sits in the padding beside the
     /// flags: an entry is no bigger for it.)
     pub mode: u32,
+    /// Selected, while the folder's rows are being made again (`marked.rs`): the selection
+    /// rides on its entries through a sort or a reload, and is false otherwise. (In padding
+    /// too.)
+    pub sel: bool,
     /// What tells this item from another put at its path since it was read ([`ident`]).
     pub id: Option<Ident>,
     /// The name an inline rename is giving it, shown until the worker says how it went: only a
@@ -60,6 +64,7 @@ impl Entry {
             size: 0,
             mtime_ms: 0,
             mode: 0,
+            sel: false,
             id: None,
             pending: None,
         }
@@ -517,7 +522,7 @@ fn read_std(path: &Path, stop: &AtomicBool) -> Option<Result<Vec<Entry>, String>
         // identity's birth time).
         let mode = meta.as_ref().map_or(0, mode_of);
         let size = if is_dir { 0 } else { size };
-        out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode, id, pending: None });
+        out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode, sel: false, id, pending: None });
     }
     #[cfg(test)]
     read_hook::done(path);
@@ -639,7 +644,7 @@ pub(crate) mod win_dir {
         let lower = name.to_lowercase();
         let key = format!("f:{name}");
         let size = if is_dir { 0 } else { size };
-        Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode: attrs, id: Some(id), pending: None }
+        Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode: attrs, sel: false, id: Some(id), pending: None }
     }
 
     /// A FILETIME as ms since the Unix epoch, 0 before it (as [`mtime`] gives it).

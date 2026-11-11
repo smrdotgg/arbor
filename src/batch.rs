@@ -618,7 +618,8 @@ pub(crate) mod tests {
     }
 
     fn marked(s: &State) -> Vec<String> {
-        let mut v: Vec<String> = s.cur().marked.iter().map(|n| n.to_string_lossy().into_owned()).collect();
+        let f = s.cur();
+        let mut v: Vec<String> = f.marked.iter().map(|r| f.entries[f.visible[r] as usize].name.clone()).collect();
         v.sort();
         v
     }

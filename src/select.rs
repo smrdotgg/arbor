@@ -70,7 +70,11 @@ impl Folder {
 
     /// The selection as names: what's marked, or the cursor's row.
     pub fn selection(&self) -> HashSet<OsString> {
-        if self.marked.is_empty() { self.cursor_name().into_iter().collect() } else { self.marked.iter().cloned().collect() }
+        if self.marked.is_empty() {
+            self.cursor_name().into_iter().collect()
+        } else {
+            self.marked.iter().map(|r| self.entries[self.visible[r] as usize].os.clone()).collect()
+        }
     }
 
     /// Makes `names` the selection, moving the cursor onto it if it's off it. Nothing to select
@@ -102,9 +106,13 @@ impl Folder {
             self.sel = i;
         }
         self.anchor = self.sel;
-        // Each with its size, for the totals (a pattern or an inversion looks at every row
-        // anyway).
-        self.marked = crate::marked::Marked::of(self.entries.iter().filter(|e| names.contains(&e.os)));
+        // The rows on screen with those names (a pattern looks at every row anyway).
+        self.marked.clear();
+        for r in 0..self.visible.len() {
+            if names.contains(name(self, r)) {
+                self.marked.set(r, true, &self.visible);
+            }
+        }
         true
     }
 
@@ -124,14 +132,21 @@ impl Folder {
         n
     }
 
-    /// Selects every row on screen that isn't selected, and unselects the rest.
+    /// Selects every row on screen that isn't selected, and unselects the rest: a word per 64
+    /// rows. With nothing left (everything was selected) the cursor stays where it is.
     pub fn invert_selection(&mut self) -> usize {
-        let old = self.selection();
-        let new: HashSet<OsString> =
-            self.visible.iter().map(|&i| &self.entries[i as usize].os).filter(|n| !old.contains(*n)).cloned().collect();
-        let n = new.len();
-        self.set_selection(new, &old);
-        n
+        self.picks += 1;
+        if self.marked.is_empty() {
+            self.marked.set(self.sel, true, &self.visible);
+        }
+        self.marked.invert(&self.visible);
+        if !self.marked.contains(self.sel)
+            && let Some(r) = self.marked.iter().next()
+        {
+            self.sel = r;
+        }
+        self.anchor = self.sel;
+        self.marked.len()
     }
 
     /// Selects every row on screen of the cursor row's kind: folders for a folder, else files

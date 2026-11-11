@@ -79,6 +79,17 @@ Format: date · decision · why · how to undo.
     but its answer is dropped once nobody wants it. As listings on a hung volume behave; within
     NORTHSTAR (no work starts for a view that's gone; a blocked call uses no CPU). Undo:
     `volinfo::THREADS`.
+  - **The selection is rows on screen (second review)**: a bitset over the visible rows,
+    with running sums of the rows' sizes (`marked.rs`), replacing names with sizes. So a click,
+    ⌘-click, ⇧ growing or shrinking a range, ⌘A, Invert, Esc and a rectangle's move cost what
+    they change, a word per 64 rows at most: under 0.2 ms at 500,000 rows in a debug build
+    (⇧-shrink was 238 ms, clearing 30 ms). **An item that's hidden (hidden files off, a
+    filter) is deselected (Review)**: what's selected, what the status bar adds up and what an
+    action acts on are the same rows; Finder and Explorer deselect what a search hides too. The
+    selection rides on its entries (`Entry::sel`, in padding) through a sort or a reload; when
+    the user picks during a reload, the new pick is marked on the landed listing on a worker,
+    then lands. Select by Pattern and Select All of This Kind still look at every row (they
+    match names). Undo: `marked.rs`.
   - **Narrow panes (after review):** once every other column is gone, Size narrows to its
     least and then goes, so Name keeps its 180 pt; a search's Folder column gets only what's
     past Name's least. Only on screen: the widths kept are the user's. Undo: `ListCols::fit`.

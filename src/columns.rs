@@ -82,7 +82,7 @@ pub struct Column {
     /// The whole folder, sorted (empty unless [`Load::Ready`]).
     pub entries: Vec<Entry>,
     /// Indices into `entries` the hidden-file rule shows.
-    pub visible: Vec<u32>,
+    pub visible: crate::marked::Rows,
     /// The item highlighted: in a column left of the active one, the next folder on the way.
     pub pick: Option<OsString>,
     pub load: Load,
@@ -114,7 +114,7 @@ impl Column {
             uid: next_uid(),
             dir_id: None,
             entries: Vec::new(),
-            visible: Vec::new(),
+            visible: crate::marked::Rows::default(),
             pick: None,
             load: Load::Off,
             version: crate::folder::next_version(),
@@ -136,7 +136,7 @@ impl Column {
         dir_id: Option<crate::noclobber::DirId>,
         (sort, hidden): (Sort, bool),
         uid: Option<u64>,
-        rows: Option<(Vec<u32>, u64)>,
+        rows: Option<(crate::marked::Rows, u64)>,
         waker: Option<&rune::Waker>,
     ) -> Column {
         let mut c = Column::new(path, waker);
@@ -179,8 +179,7 @@ impl Column {
 
     fn refilter(&mut self, hidden: bool) {
         self.hidden = hidden;
-        self.visible.clear();
-        self.visible.extend(self.entries.iter().enumerate().filter(|(_, e)| hidden || !e.hidden).map(|(i, _)| i as u32));
+        self.visible = crate::marked::Rows::of(&self.entries, 0..self.entries.len(), |e| hidden || !e.hidden);
         self.version = crate::folder::next_version();
     }
 
@@ -213,7 +212,7 @@ impl Column {
         self.stop.store(true, Relaxed);
         self.loader.cancel();
         self.entries = Vec::new();
-        self.visible = Vec::new();
+        self.visible = crate::marked::Rows::default();
         self.load = Load::Off;
         self.version = crate::folder::next_version();
     }
@@ -249,7 +248,7 @@ impl Column {
             Err(e) => {
                 // An error isn't a listing: nothing from before stays behind it.
                 self.entries = Vec::new();
-                self.visible = Vec::new();
+                self.visible = crate::marked::Rows::default();
                 self.load = Load::Failed(e);
                 self.version = crate::folder::next_version();
             }

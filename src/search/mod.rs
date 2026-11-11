@@ -390,7 +390,7 @@ impl Folder {
         }
         let hidden = self.show_hidden;
         let from = std::mem::replace(&mut s.upto, to);
-        self.visible.extend((from..to).filter(|&i| hidden || !self.entries[i].hidden).map(|i| i as u32));
+        self.visible.extend(&self.entries, from..to, |e| hidden || !e.hidden);
         true
     }
 
@@ -406,6 +406,8 @@ impl Folder {
             }
         }
         let keep = self.cursor_name();
+        // The selection rides on its entries while they're renamed, removed and added.
+        self.carry_marks();
         // Results found where a change moved them: under their new path, unless a row for that
         // path is already there (read after the change), when this one goes.
         if !r.moved.is_empty() {
@@ -417,11 +419,10 @@ impl Folder {
                     r.gone.insert(e.key.clone());
                     continue;
                 }
-                let was = std::mem::replace(&mut e.os, to.clone());
+                e.os = to.clone();
                 let name = Path::new(to).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 e.lower = name.to_lowercase();
                 e.name = name;
-                self.marked.rename(&was, e.os.clone());
             }
         }
         let changed: HashMap<&str, (bool, u64, i64, Option<fs::Ident>)> =
@@ -447,18 +448,18 @@ impl Folder {
         });
         touched |= self.entries.len() != before;
         if !touched {
+            // Nothing moved: the rows are as they were.
+            self.restore_marks();
             return false;
         }
         let names: HashSet<&OsStr> = self.entries.iter().map(|e| e.os.as_os_str()).collect();
         let added: Vec<Entry> = r.added.into_iter().filter(|e| !names.contains(e.os.as_os_str())).collect();
         self.entries.extend(added);
-        let names: HashSet<OsString> = self.entries.iter().map(|e| e.os.clone()).collect();
-        self.marked.retain(|n| names.contains(n));
         if let Some(s) = self.search.as_mut() {
             // Added results join the list when it has taken in everything (else at the end).
             s.upto = if s.walking() { kept_shown } else { self.entries.len() };
         }
-        self.refilter(keep.as_deref());
+        self.refilter_carried(keep.as_deref());
         true
     }
 
@@ -668,6 +669,7 @@ fn entry_at(root: &Path, path: &Path, show_hidden: bool) -> Option<Entry> {
         size: if is_dir { 0 } else { t.len() },
         mtime_ms: fs::mtime(t),
         mode: fs::mode_of(&m),
+        sel: false,
         id: fs::ident_of(path, &m),
         pending: None,
     })

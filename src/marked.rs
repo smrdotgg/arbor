@@ -1,12 +1,20 @@
-//! A folder's multiple selection ([`Marked`]): the selected items by name, each with its size
-//! and whether it's a folder, and the totals the status bar shows ("3 selected · 4.2 MB + 2
-//! folders"), kept up to date by every change. A click, ⌘-click, an arrow or a selection
-//! rectangle moving costs what it changes, never the whole list: the totals are worked out from
-//! scratch only when the selection is made from a listing (on the listing's worker after a
-//! reload, `folder::picked_in`).
+//! A folder's rows on screen ([`Rows`]) and its multiple selection ([`Marked`]), built so that
+//! every change to the selection costs what it changes, at most a word per 64 rows, however
+//! big the folder: a click, ⌘-click, ⇧-arrow growing or shrinking a range, ⌘A, Invert, Esc,
+//! a selection rectangle's move.
+//!
+//! - **The selection is a set of rows on screen** (bits over [`Rows`]), so what's selected is
+//!   exactly what an action acts on and what the status bar adds up: an item hidden (hidden
+//!   files turned off, a filter) isn't selected any more.
+//! - **Totals** (count, the files' bytes, folders) are kept with every change; a run of rows is
+//!   added up from the rows' running sums ([`Rows`] keeps them, built with the rows, which look
+//!   at every entry anyway).
+//! - **When the rows are made again** (a listing lands, a filter, hidden files, a sort), the
+//!   selection is carried across on its entries (`Entry::sel`, set for the selected rows just
+//!   before and read as the new rows are built); a reload's selection by name is marked on its
+//!   entries on the listing's worker.
 
-use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
+use std::ops::Range;
 
 use crate::fs::Entry;
 
@@ -19,103 +27,227 @@ pub struct Picked {
     pub folders: usize,
 }
 
-/// The selected items, by name (`Entry::os`), with their totals.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// The rows on screen: each one's entry (an index into the folder's entries), and running sums
+/// of the files' sizes and of folders, so any run of rows adds up at once.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rows {
+    idx: Vec<u32>,
+    /// `bytes[r]`: the files' sizes in rows before `r` (one more than there are rows).
+    bytes: Vec<u64>,
+    /// `dirs[r]`: the folders in rows before `r`.
+    dirs: Vec<u32>,
+}
+
+impl Default for Rows {
+    fn default() -> Rows {
+        Rows { idx: Vec::new(), bytes: vec![0], dirs: vec![0] }
+    }
+}
+
+impl std::ops::Deref for Rows {
+    type Target = [u32];
+    fn deref(&self) -> &[u32] {
+        &self.idx
+    }
+}
+
+impl Rows {
+    /// The rows for `entries[range]` that `keep` keeps, in order.
+    pub fn of(entries: &[Entry], range: Range<usize>, keep: impl FnMut(&Entry) -> bool) -> Rows {
+        let mut r = Rows::default();
+        r.extend(entries, range, keep);
+        r
+    }
+
+    /// Adds rows for `entries[range]` that `keep` keeps, after the others.
+    pub fn extend(&mut self, entries: &[Entry], range: Range<usize>, mut keep: impl FnMut(&Entry) -> bool) {
+        let (mut bytes, mut dirs) = (*self.bytes.last().unwrap_or(&0), *self.dirs.last().unwrap_or(&0));
+        for i in range {
+            let e = &entries[i];
+            if keep(e) {
+                self.idx.push(i as u32);
+                if e.is_dir {
+                    dirs += 1;
+                } else {
+                    bytes += e.size;
+                }
+                self.bytes.push(bytes);
+                self.dirs.push(dirs);
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Rows::default();
+    }
+
+    /// Row `r`'s size (0 for a folder) and whether it's a folder.
+    fn row(&self, r: usize) -> (u64, bool) {
+        (self.bytes[r + 1] - self.bytes[r], self.dirs[r + 1] > self.dirs[r])
+    }
+
+    /// The files' bytes and the folders in rows `a..b`.
+    fn span(&self, a: usize, b: usize) -> (u64, usize) {
+        (self.bytes[b] - self.bytes[a], (self.dirs[b] - self.dirs[a]) as usize)
+    }
+}
+
+/// The selected rows (of a [`Rows`]), with their totals.
+#[derive(Clone, Debug, Default)]
 pub struct Marked {
-    /// Each item's size (0 for a folder) and whether it's a folder.
-    items: HashMap<OsString, (u64, bool)>,
+    bits: Vec<u64>,
+    count: usize,
     bytes: u64,
     folders: usize,
+    /// The selection is exactly rows `a..=b` (a ⇧ range): growing or shrinking it changes only
+    /// the rows between the old end and the new.
+    range: Option<(usize, usize)>,
 }
 
 impl Marked {
-    /// The items of `entries`, selected.
-    pub fn of<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Marked {
-        let mut m = Marked::default();
-        for e in entries {
-            m.insert(e);
-        }
-        m
-    }
-
     pub fn len(&self) -> usize {
-        self.items.len()
+        self.count
     }
 
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.count == 0
     }
 
-    pub fn contains(&self, name: &OsStr) -> bool {
-        self.items.contains_key(name)
+    pub fn contains(&self, row: usize) -> bool {
+        self.bits.get(row / 64).is_some_and(|w| w & (1 << (row % 64)) != 0)
     }
 
-    /// The selected items' names, in no order.
-    pub fn iter(&self) -> impl Iterator<Item = &OsString> {
-        self.items.keys()
+    /// The selected rows, in order: a word per 64 rows, then one step per selected row.
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.bits.iter().enumerate().flat_map(|(i, &w)| {
+            let mut w = w;
+            std::iter::from_fn(move || {
+                if w == 0 {
+                    return None;
+                }
+                let b = w.trailing_zeros() as usize;
+                w &= w - 1;
+                Some(i * 64 + b)
+            })
+        })
     }
 
     /// The totals, in no time.
     pub fn picked(&self) -> Picked {
-        Picked { count: self.items.len(), bytes: self.bytes, folders: self.folders }
+        Picked { count: self.count, bytes: self.bytes, folders: self.folders }
     }
 
-    /// Selects `e`. True when it wasn't selected.
-    pub fn insert(&mut self, e: &Entry) -> bool {
-        self.insert_as(e.os.clone(), if e.is_dir { 0 } else { e.size }, e.is_dir)
-    }
-
-    /// Selects the item `name`, `size` bytes (a folder: `dir`). True when it wasn't selected.
-    pub fn insert_as(&mut self, name: OsString, size: u64, dir: bool) -> bool {
-        let old = self.items.insert(name, (size, dir));
-        self.count(old, -1);
-        self.count(Some((size, dir)), 1);
-        old.is_none()
-    }
-
-    /// Deselects `name`. True when it was selected.
-    pub fn remove(&mut self, name: &OsStr) -> bool {
-        let old = self.items.remove(name);
-        self.count(old, -1);
-        old.is_some()
-    }
-
-    /// The item `old` is called `new` now (renamed): still selected, as big as it was.
-    pub fn rename(&mut self, old: &OsStr, new: OsString) {
-        if let Some((size, dir)) = self.items.remove(old) {
-            self.count(Some((size, dir)), -1);
-            self.insert_as(new, size, dir);
+    /// Selects (`on`) or deselects row `row` of `rows`. True when that changed it.
+    pub fn set(&mut self, row: usize, on: bool, rows: &Rows) -> bool {
+        if row >= rows.len() || self.contains(row) == on {
+            return false;
         }
-    }
-
-    /// Keeps the items `keep` says.
-    pub fn retain(&mut self, mut keep: impl FnMut(&OsString) -> bool) {
-        let (mut bytes, mut folders) = (0, 0);
-        self.items.retain(|n, &mut (size, dir)| {
-            let k = keep(n);
-            if k {
-                bytes += size;
-                folders += usize::from(dir);
-            }
-            k
-        });
-        (self.bytes, self.folders) = (bytes, folders);
-    }
-
-    pub fn clear(&mut self) {
-        *self = Marked::default();
-    }
-
-    /// Adds (`by` 1) or takes away (-1) an item's share of the totals.
-    fn count(&mut self, item: Option<(u64, bool)>, by: i8) {
-        let Some((size, dir)) = item else { return };
-        if by > 0 {
+        let w = row / 64;
+        if self.bits.len() <= w {
+            self.bits.resize(w + 1, 0);
+        }
+        self.bits[w] ^= 1 << (row % 64);
+        let (size, dir) = rows.row(row);
+        if on {
+            self.count += 1;
             self.bytes += size;
             self.folders += usize::from(dir);
         } else {
+            self.count -= 1;
             self.bytes -= size;
             self.folders -= usize::from(dir);
         }
+        self.range = None;
+        true
+    }
+
+    /// Selects row `row` if it isn't, else deselects it.
+    pub fn toggle(&mut self, row: usize, rows: &Rows) {
+        let on = !self.contains(row);
+        self.set(row, on, rows);
+    }
+
+    /// Nothing selected: a word per 64 rows.
+    pub fn clear(&mut self) {
+        self.bits.fill(0);
+        (self.count, self.bytes, self.folders, self.range) = (0, 0, 0, None);
+    }
+
+    /// The selection becomes exactly rows `a..=b` of `rows` (within them). Grown or shrunk from
+    /// the range it was, only the rows between change.
+    pub fn select_range(&mut self, a: usize, b: usize, rows: &Rows) {
+        let n = rows.len();
+        if n == 0 {
+            self.clear();
+            return;
+        }
+        let (a, b) = (a.min(b).min(n - 1), a.max(b).min(n - 1));
+        if self.bits.len() < n.div_ceil(64) {
+            self.bits.resize(n.div_ceil(64), 0);
+        }
+        match self.range {
+            Some((c, d)) => {
+                // Off what's no longer in it, on what's new: the rows between the two ranges.
+                for (lo, hi, on) in
+                    [(c, a.min(d + 1), false), (c.max(b + 1), d + 1, false), (a, c.min(b + 1), true), (a.max(d + 1), b + 1, true)]
+                {
+                    if lo < hi {
+                        fill(&mut self.bits, lo..hi, on);
+                    }
+                }
+            }
+            None => {
+                self.bits.fill(0);
+                fill(&mut self.bits, a..b + 1, true);
+            }
+        }
+        let (bytes, folders) = rows.span(a, b + 1);
+        (self.count, self.bytes, self.folders, self.range) = (b + 1 - a, bytes, folders, Some((a, b)));
+    }
+
+    /// Every row of `rows` that isn't selected, and none of those that are.
+    pub fn invert(&mut self, rows: &Rows) {
+        let n = rows.len();
+        if self.bits.len() < n.div_ceil(64) {
+            self.bits.resize(n.div_ceil(64), 0);
+        }
+        for (i, w) in self.bits.iter_mut().enumerate() {
+            let lo = i * 64;
+            let mask = if lo + 64 <= n {
+                u64::MAX
+            } else if lo < n {
+                (1 << (n - lo)) - 1
+            } else {
+                0
+            };
+            *w = (*w ^ mask) & mask;
+        }
+        let (bytes, folders) = rows.span(0, n);
+        (self.count, self.bytes, self.folders) = (n - self.count, bytes - self.bytes, folders - self.folders);
+        self.range = None;
+    }
+}
+
+/// The same rows selected (however they were selected).
+impl PartialEq for Marked {
+    fn eq(&self, o: &Marked) -> bool {
+        self.count == o.count && self.iter().eq(o.iter())
+    }
+}
+
+/// Sets (`on`) or clears the bits `r` in `bits`, a word at a time.
+fn fill(bits: &mut [u64], r: Range<usize>, on: bool) {
+    let mut i = r.start;
+    while i < r.end {
+        let (w, b) = (i / 64, i % 64);
+        let len = (64 - b).min(r.end - i);
+        let mask = if len == 64 { u64::MAX } else { ((1u64 << len) - 1) << b };
+        if on {
+            bits[w] |= mask;
+        } else {
+            bits[w] &= !mask;
+        }
+        i += len;
     }
 }
 
@@ -123,38 +255,64 @@ impl Marked {
 mod tests {
     use super::*;
 
-    fn e(name: &str, size: u64, dir: bool) -> Entry {
-        Entry { size, ..Entry::test(name, dir) }
+    fn rows(n: usize) -> (Vec<Entry>, Rows) {
+        let entries: Vec<Entry> = (0..n)
+            .map(|i| Entry { size: if i % 7 == 3 { 0 } else { i as u64 * 10 + 1 }, ..Entry::test(&format!("n{i}"), i % 7 == 3) })
+            .collect();
+        let r = Rows::of(&entries, 0..n, |e| !e.name.ends_with('5'));
+        (entries, r)
     }
 
-    /// Any run of selects, deselects, renames and keeps leaves the totals what adding up the
-    /// selection from scratch gives.
+    /// Any run of clicks, ⌘-clicks, ⇧ ranges, inversions and clears leaves exactly the rows a
+    /// plain set would have, with the totals adding them up from scratch gives.
     #[test]
-    fn the_totals_follow_every_change() {
-        let pool: Vec<Entry> = (0..12).map(|i| e(&format!("n{i}"), i * 1000 + 7, i % 4 == 0)).collect();
-        crate::prop::check("marked_totals", 500, |r| {
+    fn every_change_matches_a_plain_set() {
+        let (entries, r) = rows(300);
+        let n = r.len();
+        crate::prop::check("marked_rows", 400, |g| {
             let mut m = Marked::default();
-            for _ in 0..r.below(40) {
-                let x = &pool[r.below(pool.len())];
-                match r.below(5) {
+            let mut want = std::collections::BTreeSet::new();
+            for _ in 0..g.below(30) {
+                match g.below(6) {
                     0 | 1 => {
-                        m.insert(x);
+                        let x = g.below(n + 3);
+                        m.toggle(x, &r);
+                        if x < n && !want.remove(&x) {
+                            want.insert(x);
+                        }
                     }
-                    2 => {
-                        m.remove(&x.os);
+                    2 | 3 => {
+                        let (a, b) = (g.below(n), g.below(n));
+                        m.select_range(a, b, &r);
+                        want = (a.min(b)..=a.max(b)).collect();
                     }
-                    3 => {
-                        let to = OsString::from(format!("{}x", x.name));
-                        m.rename(&x.os, to);
+                    4 => {
+                        m.invert(&r);
+                        want = (0..n).filter(|x| !want.contains(x)).collect();
                     }
                     _ => {
-                        let n = r.below(12);
-                        m.retain(|name| name.len() % 3 != n % 3);
+                        m.clear();
+                        want.clear();
                     }
                 }
-                let (bytes, folders) = m.items.values().fold((0, 0), |(b, f), &(s, d)| (b + s, f + usize::from(d)));
-                assert_eq!(m.picked(), Picked { count: m.items.len(), bytes, folders });
+                assert_eq!(m.iter().collect::<Vec<_>>(), want.iter().copied().collect::<Vec<_>>());
+                let (bytes, folders) = want.iter().fold((0, 0), |(b, f), &x| {
+                    let e = &entries[r[x] as usize];
+                    if e.is_dir { (b, f + 1) } else { (b + e.size, f) }
+                });
+                assert_eq!(m.picked(), Picked { count: want.len(), bytes, folders });
             }
         });
+    }
+
+    #[test]
+    fn running_sums_add_up_any_run_of_rows() {
+        let (entries, r) = rows(200);
+        for (a, b) in [(0, 0), (0, r.len()), (17, 90), (r.len() - 1, r.len())] {
+            let (bytes, dirs) = r.span(a, b);
+            let want = r[a..b].iter().map(|&i| &entries[i as usize]);
+            assert_eq!(bytes, want.clone().filter(|e| !e.is_dir).map(|e| e.size).sum::<u64>());
+            assert_eq!(dirs, want.filter(|e| e.is_dir).count());
+        }
     }
 }

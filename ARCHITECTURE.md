@@ -52,6 +52,7 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `complete.rs` | Tab completion in go-to mode |
 | | `info.rs`, `openwith/` | Get Info (and its streaming total); Open With (per platform, `xdg.rs`) |
 | | `sidebar.rs`, `volumes.rs` | Favorites and their file; Locations and Eject |
+| | `marked.rs` | The rows on screen with running sums of their sizes, and the selection as bits over them, with its totals |
 | | `volinfo.rs` | The status bar's free space: at most four threads, one query in flight per volume |
 | | `listcols.rs` | The list's columns after the name: which show, their widths, how they fit a pane, `columns.toml` and its writer, the header's drag |
 | Platform glue | `handler/` | Making Arbor the default for folders, and restoring (`linux.rs`, `windows.rs`, `mac.rs`) |

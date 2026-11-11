@@ -944,8 +944,7 @@ fn make_link_selects_the_links_and_show_original_finds_the_item() {
         s.cur_mut().select(i);
     };
     pick(&mut s, "a.txt");
-    s.cur_mut().select_all();
-    s.cur_mut().marked.retain(|n| n == "a.txt" || n == "b.txt");
+    s.cur_mut().mark_names(&["a.txt", "b.txt"]);
     assert_eq!(s.cur().target_paths().len(), 2);
     assert!(s.menu_items(true).iter().flatten().any(|(_, t, on)| t == "Make Symbolic Link (2 items)" && *on));
     s.run(Cmd::MakeLink, &mut tx);
@@ -1447,4 +1446,26 @@ fn hung_free_space_reads_never_hold_up_listings() {
     assert_eq!(started(), 1, "one hung read per volume, not one per folder");
     assert_eq!(s.cur().free(), None, "nothing known for the folder yet");
     drop(gates);
+}
+
+/// A reload that lands after the user picked again keeps their choice, and finding its items
+/// in the new listing is done on a worker, never on the window's thread (it looks through the
+/// whole folder: 28 ms at 500,000 items).
+#[test]
+fn a_reload_after_a_new_pick_finds_it_off_the_window_thread() {
+    let d = folder("reload-race-worker", 6);
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let f = s.cur_mut();
+    f.select(0);
+    f.toggle_mark(1);
+    s.reload();
+    // Picked again before it lands: f0, f1 and f4.
+    s.cur_mut().toggle_mark(4);
+    let want = s.cur().target_paths();
+    assert_eq!(want.len(), 3);
+    settle_all(&mut s);
+    assert_eq!(s.cur().target_paths(), want);
+    assert_eq!(s.cur().picked_size().map(|p| p.count), Some(3));
+    assert!(!crate::folder::marked_on::here(), "looked through the listing on the window's thread");
 }

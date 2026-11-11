@@ -320,7 +320,7 @@ pub(crate) mod tests {
         assert_eq!(b.cur().cwd, d);
         assert_eq!(a.selected().map(|e| e.name.as_str()), Some("file.txt"));
         // Nothing went from one to the other.
-        assert!(!a.poll(&mut Tx::default()) && !b.poll(&mut Tx::default()), "no messages between windows that only navigated");
+        assert!(!a.poll_inbox(&mut Tx::default()) && !b.poll_inbox(&mut Tx::default()), "no messages between windows that only navigated");
         // The Jump history is one: a visit in either is there for both.
         assert!(a.shared.history.borrow().enabled);
         let _ = std::fs::remove_dir_all(&d);
