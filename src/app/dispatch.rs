@@ -282,9 +282,8 @@ impl State {
             MakeDefault | RestoreDefault => when(self.handler_job.is_pending(), "Already changing the default for folders"),
             Reveal | CopyPath | Info | SidebarAdd => renaming,
             GoTo | Reload | Palette | OpenSettings | ReloadSettings | Hidden | SortReverse | NewTab | NewWindow | Split | ClearJump
-            | Search | FoldersFirst | ColumnKind | ColumnExtension | ColumnSize | ColumnModified | ColumnCreated | ColumnPermissions => {
-                None
-            }
+            | Search | FoldersFirst | ColumnOptions | ColumnKind | ColumnExtension | ColumnSize | ColumnModified | ColumnCreated
+            | ColumnPermissions => None,
         }
     }
 
@@ -540,6 +539,7 @@ impl State {
                 }
             }
             ResetColumns => self.reset_columns(),
+            ColumnOptions => self.column_options(tx),
             SortReverse => {
                 let key = self.cur().sort.key;
                 self.sort_by(key, tx);

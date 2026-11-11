@@ -179,6 +179,7 @@ commands! {
     ColumnCreated "view.column_created" "Show or Hide the Date Created Column", [];
     ColumnPermissions "view.column_permissions" PERMISSIONS_COLUMN, [];
     ResetColumns "view.reset_columns" "Reset Columns", [];
+    ColumnOptions "view.column_options" "Column Options…", [];
 
     NewWindow "window.new" "New Window", ["cmd+n"];
     OpenInNewWindow "window.open_folder" "Open in New Window", [];

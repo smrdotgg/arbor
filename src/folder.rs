@@ -178,6 +178,9 @@ pub struct Folder {
     /// The list's width as last laid out, written by the view: how many columns a new icon
     /// size or a switch to the icon view gives, before it's drawn.
     pub(crate) list_w: Rc<Cell<f32>>,
+    /// Where the list's top-left corner was last laid out (window points), written by the view:
+    /// where "Column Options…" opens the header's menu, just under the header.
+    pub(crate) list_at: Rc<Cell<[f32; 2]>>,
     /// The icon view's thumbnails for the cells on screen (`tiles.rs`). Dropping it cancels
     /// what's still being decoded.
     pub tiles: Option<crate::tiles::Tiles>,
@@ -257,6 +260,7 @@ impl Folder {
             view: crate::grid::ViewMode::List,
             grid_cols: Rc::new(Cell::new(1)),
             list_w: Rc::new(Cell::new(0.0)),
+            list_at: Rc::new(Cell::new([0.0, 0.0])),
             tiles: None,
             grid_rows: None,
             tiles_for: None,

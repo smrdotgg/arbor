@@ -172,6 +172,7 @@ pub(super) fn list(f: &Folder, c: Ctx, active: Option<String>) -> El {
     }
     if c.list[2] > 0.0 {
         f.list_w.set(c.list[2]);
+        f.list_at.set([c.list[0], c.list[1]]);
     }
     // Empty space below the rows (and a grid's gutters): a press there that moves drags out a
     // selection rectangle (`band.rs`).

@@ -2347,3 +2347,34 @@ fn the_header_columns_menu_and_status_tree() {
     println!("{}", outline(counts));
     assert!(said.starts_with("3 selected · 1.5 KB + 1 folder · 3 items · ") && said.ends_with(" free"), "{said:?}");
 }
+
+/// The header's menu from the keyboard: "Column Options…" (the palette) opens it just under the
+/// header, where the arrows and Enter work it like any menu (Arbor's own menu, where Rune has no
+/// native one; elsewhere the system's, which the keyboard works the same way).
+#[test]
+fn column_options_opens_the_header_menu_from_the_keyboard() {
+    let d = folder("column-options");
+    let mut rt = runtime(&d);
+    assert!(rt.state.unavailable(Cmd::ColumnOptions).is_none());
+    run(&mut rt, Cmd::ColumnOptions);
+    if rune::popup_menu_supported() {
+        return;
+    }
+    let list = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
+    let m = rt.state.menu.as_ref().expect("the header's menu");
+    assert_eq!((m.x, m.y), (list[0] + 12.0, list[1]), "just under the header");
+    let titles: Vec<String> = m
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            crate::menu::Item::Act { title, .. } => Some(title.clone()),
+            crate::menu::Item::Separator => None,
+        })
+        .collect();
+    assert_eq!(titles[0], "Kind");
+    assert_eq!(titles.last().map(String::as_str), Some("Reset Columns"));
+    key(&mut rt, Key::Down, false);
+    key(&mut rt, Key::Enter, false);
+    assert!(!rt.state.cols().shown(crate::listcols::Field::Kind), "Enter on Kind hid it");
+    assert!(rt.state.menu.is_none());
+}

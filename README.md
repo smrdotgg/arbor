@@ -302,7 +302,8 @@ The list (and a search's results) shows **Kind**, **Size** and **Date Modified**
 to start with. **Right-click the header row** for a menu of columns, each checked while it's
 shown: Kind, **Extension**, Size, Date Modified, **Date Created** and **Permissions**
 (`drwxr-xr-x`, as `ls -l`; on Windows **Attributes**, `RHSA` as Explorer writes them), then
-Folders First and Reset Columns. The palette has the same: "Show the Date Created Column", "Hide
+Folders First and Reset Columns ("Column Options…" in the palette opens it from the
+keyboard). The palette has the same: "Show the Date Created Column", "Hide
 the Kind Column" and so on, and "Reset Columns". **Drag the line before a column's header** to
 make that column wider or narrower; the name takes what's left, and never gets narrower than
 180 pt, so a column can't be dragged past that. A pane too narrow for every column leaves out
@@ -1046,6 +1047,7 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Show or Hide the Date Created Column |  |  | `view.column_created` |
 | Show or Hide the Permissions (Windows: Attributes) Column |  |  | `view.column_permissions` |
 | Reset Columns |  |  | `view.reset_columns` |
+| Column Options… |  |  | `view.column_options` |
 | New Window | ⌘N | Ctrl+N | `window.new` |
 | Open in New Window |  |  | `window.open_folder` |
 | New Tab | ⌘T | Ctrl+T | `tab.new` |
@@ -1122,7 +1124,8 @@ Arbor gives every part a role and a name (`src/view/`; `src/a11y_tests.rs` check
 
 **Keyboard only.** Every command is in the palette (⌘K), including those with no key (Sort by
 Name, Kind, Size or Date, Batch Rename, Select All of This Kind, Open With, Add to Sidebar…),
-and every column's Show/Hide and Folders First, so nothing needs the header's menu. Widths
+and every column's Show/Hide and Folders First; "Column Options…" opens the header's menu
+itself, under the header, for the arrows and Enter. Widths
 can't be changed from the keyboard yet (Reset Columns puts them back).
 Sidebar places are ⌘1–9 and "Go to …" in the palette, ⌘I is Get Info and ⌘E ejects; the breadcrumbs are ⌘↑ (parent) and ⌘L (type a path, Tab completes).
 Tab moves focus to the list, the search field and the preview's contents (and switches panes

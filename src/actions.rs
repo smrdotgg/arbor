@@ -720,6 +720,14 @@ impl State {
         self.show_menu(items, None, press, tx);
     }
 
+    /// "Column Options…" (the keyboard's way to the header's menu): the same menu, just under
+    /// the active pane's header (or near the window's top left before the list's first layout).
+    pub fn column_options(&mut self, tx: &mut Tx) {
+        let [x, y] = self.cur().list_at.get();
+        let (x, y) = if x > 0.0 || y > 0.0 { (x + 12.0, y) } else { (180.0, 62.0) };
+        self.header_menu(PointerPress { x, y }, tx);
+    }
+
     pub(crate) fn header_menu_items(&self) -> Vec<Option<(Act, String, bool)>> {
         let mut v: Vec<Option<(Act, String, bool)>> =
             crate::listcols::Field::ALL.into_iter().map(|f| Some((Act::Cmd(f.cmd()), f.title().to_string(), true))).collect();
