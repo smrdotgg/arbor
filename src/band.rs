@@ -733,6 +733,27 @@ mod tests {
         }
     }
 
+    /// What's selected, what the status bar adds up and what an action acts on are the same
+    /// items: hiding one (hidden files turned off) takes it out of all three.
+    #[test]
+    fn hidden_items_leave_the_selection_and_its_total() {
+        let mut f = sized(10);
+        f.entries[3].hidden = true;
+        f.set_hidden(true);
+        f.select(2);
+        f.toggle_mark(3);
+        f.toggle_mark(4);
+        assert_eq!(f.picked_size().map(|p| p.count), Some(3));
+        f.set_hidden(false);
+        let targets: Vec<(String, u64)> = f.targets().iter().map(|e| (e.name.clone(), e.size)).collect();
+        assert_eq!(targets, [("f02".to_string(), 300), ("f04".to_string(), 500)]);
+        let p = f.picked_size().unwrap();
+        assert_eq!((p.count, p.bytes), (targets.len(), targets.iter().map(|t| t.1).sum::<u64>()), "the total is the targets'");
+        // Shown again, it stays out (it was deselected, not set aside).
+        f.set_hidden(true);
+        assert_eq!(f.picked_size().map(|p| p.count), Some(2));
+    }
+
     /// Esc on a rectangle puts the selection's total back with the selection, whichever way it
     /// started (alone, setting the old selection aside; ⇧ or ⌘, changing items one by one),
     /// though as many items are selected before and during it.
