@@ -577,6 +577,7 @@ fn a_listed_item_replaced_since_is_left_alone() {
     s.run(Cmd::Split, &mut Tx::default());
     settle_all(&mut s);
     s.panes[1].f.cwd = into.clone();
+    s.panes[1].f.dir_id = crate::noclobber::dir_id(&into);
     s.activate(0, &mut Tx::default());
     let at = |s: &State, n: &str| s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == n).unwrap();
     // The folder as listed, then the item replaced: what each action finds at its path.
@@ -688,6 +689,7 @@ fn a_row_listed_without_an_identity_is_never_moved_or_removed() {
     s.run(Cmd::Split, &mut Tx::default());
     settle_all(&mut s);
     s.panes[1].f.cwd = into.clone();
+    s.panes[1].f.dir_id = crate::noclobber::dir_id(&into);
     s.activate(0, &mut Tx::default());
     for n in names {
         crate::search::tests::replace(&d.join(n));

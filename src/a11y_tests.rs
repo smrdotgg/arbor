@@ -1243,6 +1243,30 @@ fn the_wheel_under_a_held_rectangle_updates_it() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Once what an input asked for has landed (listings, thumbnails, scrolls, the column view's
+/// reads), the window is idle: `poll` reports no change, no frame animates or asks for another,
+/// and nothing commits.
+fn assert_idle(rt: &mut Runtime<State>, what: &str) {
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        rt.frame(1.0 / 60.0);
+    }
+    // One read can be a large folder: the temp folder's parent is a column there.
+    until(rt, |s| !s.cur().is_loading() && !s.cur().cols.as_ref().is_some_and(|c| c.loading()));
+    for _ in 0..5 {
+        rt.frame(1.0 / 60.0);
+    }
+    // Before anything else runs (a poll's commit would hide it): nothing asks for a frame.
+    assert!(!rt.live_pending(), "{what}: asks for another frame");
+    let commits = rune::commit_generation();
+    for i in 0..20 {
+        assert!(!rt.update_if(|s, tx| s.poll(tx)), "{what}: idle poll {i} reported a change");
+        assert!(!rt.frame(1.0 / 60.0), "{what}: idle frame {i} is animating");
+        assert!(!rt.live_pending(), "{what}: idle frame {i} asks for another frame");
+    }
+    assert_eq!(rune::commit_generation(), commits, "{what}: idle frames committed");
+}
+
 /// Idle means idle (NORTHSTAR): once a switch of view, a resize (the window taking its saved
 /// size after the first frame) or a scroll has landed, the window asks for no frame, commits
 /// nothing and `poll` reports no change, in the list and the icon view, with or without
@@ -1251,20 +1275,7 @@ fn the_wheel_under_a_held_rectangle_updates_it() {
 /// which is the list view (RUNE-GAPS.md).
 #[test]
 fn an_idle_window_draws_nothing() {
-    let quiet = |rt: &mut Runtime<State>, what: &str| {
-        // Let what was asked land: listings, thumbnails, scrolls.
-        for _ in 0..30 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            rt.frame(1.0 / 60.0);
-        }
-        let commits = rune::commit_generation();
-        for i in 0..20 {
-            assert!(!rt.update_if(|s, tx| s.poll(tx)), "{what}: idle poll {i} reported a change");
-            assert!(!rt.frame(1.0 / 60.0), "{what}: idle frame {i} is animating");
-            assert!(!rt.live_pending(), "{what}: idle frame {i} asks for another frame");
-        }
-        assert_eq!(rune::commit_generation(), commits, "{what}: idle frames committed");
-    };
+    let quiet = |rt: &mut Runtime<State>, what: &str| assert_idle(rt, what);
     let shake = |rt: &mut Runtime<State>, what: &str| {
         quiet(rt, what);
         rt.set_viewport((1100.0, 700.0), 1.0);
@@ -1283,6 +1294,811 @@ fn an_idle_window_draws_nothing() {
         shake(&mut rt, &format!("{name}: list again"));
         run(&mut rt, Cmd::NewTab);
         shake(&mut rt, &format!("{name}: new tab"));
+        run(&mut rt, Cmd::AsTiles);
+        shake(&mut rt, &format!("{name}: tiles"));
+        run(&mut rt, Cmd::AsColumns);
+        shake(&mut rt, &format!("{name}: columns"));
+        // A column made active (the folder's parent, its listing on screen), and back.
+        run(&mut rt, Cmd::Parent);
+        shake(&mut rt, &format!("{name}: columns, the parent active"));
+        run(&mut rt, Cmd::Into);
+        shake(&mut rt, &format!("{name}: columns, back in"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+// ---- The column view and the tiles view (the real app's runtime) ------------------------------
+
+/// d/{Docs/{Work/{notes.md, plan.txt}, readme.txt}, Photos/, top.txt}.
+fn nested(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("arbor-a11y-cols-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("Docs/Work")).unwrap();
+    std::fs::create_dir_all(d.join("Photos")).unwrap();
+    std::fs::write(d.join("Docs/Work/notes.md"), "# Notes\n").unwrap();
+    std::fs::write(d.join("Docs/Work/plan.txt"), "plan").unwrap();
+    std::fs::write(d.join("Docs/readme.txt"), "read me").unwrap();
+    std::fs::write(d.join("top.txt"), "top").unwrap();
+    d
+}
+
+/// Frames until no column (or the preview) is loading.
+fn settle_columns(rt: &mut Runtime<State>) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let busy = |s: &State| {
+        s.cur().is_loading()
+            || s.preview.as_ref().is_some_and(|p| p.is_loading())
+            || s.cur().cols.as_ref().is_some_and(|c| c.left.iter().chain(c.right.as_ref()).any(|c| c.load == crate::columns::Load::Loading))
+    };
+    while busy(&rt.state) && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        rt.frame(0.0);
+    }
+    rt.frame(0.0);
+    rt.frame(0.0);
+}
+
+/// The column view is a group of list boxes, one per column, each named after its folder; in a
+/// column left of the active one the folder on the way is the selected option; the active
+/// column is the focusable list with the cursor as its active descendant; a file's preview is
+/// the last column. → and ← move between columns, and a click in another column makes it the
+/// active one with the item clicked.
+#[test]
+fn the_columns_are_a_group_of_named_list_boxes() {
+    let d = nested("tree");
+    let top = crate::app::title(&d);
+    let mut rt = runtime(&d);
+    // Narrower columns, so all three and the preview fit the 980 pt window.
+    rt.update(|s, _| s.col_w = 160.0);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    key(&mut rt, Key::Right, false);
+    settle_columns(&mut rt);
+    key(&mut rt, Key::Right, false);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs/Work"));
+    assert_eq!(rt.state.cur().selected().map(|e| e.name.as_str()), Some("notes.md"));
+    let tree = rt.accessibility_json();
+    let group = find(&tree, "columns-0").expect("the columns");
+    println!("{}", outline(group));
+    assert_eq!((group["role"].as_str(), group["name"].as_str()), (Some("group"), Some("Columns, 3 folders")));
+    let mut boxes = Vec::new();
+    all(group, "list-box", &mut boxes);
+    let names: Vec<&str> = boxes.iter().filter_map(|b| b["name"].as_str()).collect();
+    assert_eq!(names, [format!("Files in {top}").as_str(), "Files in Docs", "Files in Work"]);
+    let on_the_way: Vec<String> = boxes[..2]
+        .iter()
+        .map(|b| {
+            let mut opts = Vec::new();
+            all(b, "list-box-option", &mut opts);
+            let sel: Vec<&str> = opts.iter().filter(|o| states(o).contains(&"selected")).filter_map(|o| o["name"].as_str()).collect();
+            sel.join(",")
+        })
+        .collect();
+    assert_eq!(on_the_way, ["Folder Docs", "Folder Work"], "the ▸ reads as Folder, as without the Kind column");
+    assert!(find(group, "columns-back").is_none(), "nothing scrolled off");
+    assert_eq!(boxes[2]["key"].as_str(), Some(rt.state.cur().list_key().as_str()), "the active column is the pane's list");
+    assert!(rt.state.cur().list_key().starts_with("col-"), "drawn as its column's element");
+    assert!(boxes[2]["activeDescendant"].as_str().is_some_and(|a| a.ends_with("f:notes.md")));
+    let preview = find(group, "preview").expect("the preview is the last column");
+    assert_eq!(preview["role"], "complementary");
+    // The view switch: As Columns checked.
+    assert!(states(find(&tree, "view-columns").unwrap()).contains(&"checked"));
+    // ← goes back a column; a click on readme.txt in Docs' column makes Docs active with it.
+    key(&mut rt, Key::Left, false);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"));
+    assert_eq!(rt.state.cur().selected().map(|e| e.name.as_str()), Some("Work"));
+    key(&mut rt, Key::Left, false);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cwd, d);
+    let b = row_box(&mut rt, "readme.txt");
+    let at = (b[0] + 20.0, b[1] + b[3] * 0.5);
+    rt.pointer_move(at.0, at.1);
+    rt.pointer_down(at.0, at.1);
+    rt.pointer_up(at.0, at.1);
+    rt.frame(0.0);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"), "the clicked column is active");
+    assert_eq!(rt.state.cur().selected().map(|e| e.name.as_str()), Some("readme.txt"));
+    assert_eq!(rt.state.preview.as_ref().and_then(|p| p.target.as_ref()).map(|t| t.path()), Some(d.join("Docs/readme.txt")));
+    // Keys still work on it: F2 renames in the active column.
+    key(&mut rt, Key::Function(2), false);
+    assert!(rt.state.rename.is_some() && rect_of(&rt, "rename").is_some());
+    key(&mut rt, Key::Escape, false);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The tiles view: a grid of options (icon, name, kind, size) named from their texts, each with
+/// its place in the folder; ↓ moves a row, → a tile. Switching views keeps the selection.
+#[test]
+fn tiles_are_options_and_views_switch_keeping_the_selection() {
+    use crate::grid::ViewMode;
+    let d = many("tiles", 10);
+    let mut rt = runtime(&d);
+    key(&mut rt, Key::Down, false);
+    key(&mut rt, Key::Down, false);
+    run(&mut rt, Cmd::AsTiles);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cur().view, ViewMode::Tiles);
+    assert_eq!(picked(&rt), names(2..=2), "the selection stays across views");
+    let tree = rt.accessibility_json();
+    let list = find(&tree, "list-0").expect("the list");
+    println!("{}", outline(list));
+    let mut opts = Vec::new();
+    all(list, "list-box-option", &mut opts);
+    assert_eq!(opts.len(), 10);
+    assert!(opts[2]["name"].as_str().is_some_and(|n| n.starts_with("f02.txt")), "{}", opts[2]);
+    assert_eq!(opts[2]["position"].as_u64(), Some(3));
+    assert!(states(opts[2]).contains(&"selected"));
+    let cols = rt.state.cur().grid_cols.get();
+    assert!((2..=4).contains(&cols), "wide tiles, a few to a row: {cols}");
+    let tile = rect_of(&rt, "f:f02.txt").expect("the tile");
+    assert!(tile[2] >= crate::grid::TILE_W - 2.0 * crate::grid::INSET - 1.0 && tile[3] < 80.0, "wide and short: {tile:?}");
+    key(&mut rt, Key::Down, false);
+    assert_eq!(rt.state.cur().sel, 2 + cols, "↓ moves a row");
+    key(&mut rt, Key::Right, false);
+    assert_eq!(rt.state.cur().sel, 3 + cols, "→ moves a tile");
+    assert!(states(find(&tree, "view-tiles").unwrap()).contains(&"checked"));
+    assert_eq!(rt.state.unavailable(Cmd::LargerIcons), Some("Icon sizes are for the icon view (As Icons)"));
+    // Through every view and back; the cursor stays on its item.
+    let want = rt.state.cur().cursor_name();
+    for cmd in [Cmd::AsIcons, Cmd::AsColumns, Cmd::AsList, Cmd::AsTiles, Cmd::AsList] {
+        run(&mut rt, cmd);
+        rt.frame(0.0);
+        assert_eq!(rt.state.cur().cursor_name(), want, "{cmd:?}");
+        assert_eq!(
+            rt.state.unavailable(cmd),
+            Some(match cmd {
+                Cmd::AsIcons => "Already showing as icons",
+                Cmd::AsColumns => "Already showing as columns",
+                Cmd::AsTiles => "Already showing as tiles",
+                _ => "Already showing as a list",
+            })
+        );
+    }
+    assert!(rt.state.cur().cols.is_none() && rt.state.cur().tiles.is_none(), "nothing kept from the views left");
+    // view.default = "columns": a new tab opens as columns.
+    rt.update(|s, _| s.settings.view_default = ViewMode::Columns);
+    run(&mut rt, Cmd::NewTab);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().view, ViewMode::Columns);
+    assert!(rt.state.cur().cols.is_some() && find(&rt.accessibility_json(), "columns-0").is_some());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A sideways wheel over a column (each column is its own scroll view, which a wheel handler
+/// outside it never hears) scrolls the columns back by whole columns, reading the one that
+/// comes on screen; a vertical one scrolls the column itself.
+#[test]
+fn a_sideways_wheel_over_a_column_scrolls_the_columns() {
+    use rune::WheelEvent;
+    let d = nested("wheel");
+    let mut rt = runtime(&d);
+    // Room for two: the active column and the preview.
+    rt.update(|s, _| s.col_w = 400.0);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    key(&mut rt, Key::Right, false);
+    settle_columns(&mut rt);
+    key(&mut rt, Key::Right, false);
+    settle_columns(&mut rt);
+    let shown = |rt: &Runtime<State>| rt.state.cur().cols.as_ref().map(|c| c.shown());
+    assert_eq!(shown(&rt), Some(2..4), "Work and notes.md's preview");
+    assert!(rt.state.cur().cols.as_ref().unwrap().holding().is_empty(), "the root and Docs are off screen");
+    let list = rect_of(&rt, &rt.state.cur().list_key()).expect("the active column");
+    let (x, y) = (list[0] + 40.0, list[1] + 30.0);
+    rt.wheel_event(WheelEvent::new(0.0, -30.0).at(x, y));
+    rt.frame(0.0);
+    assert_eq!(shown(&rt), Some(2..4), "a vertical wheel leaves the columns alone");
+    rt.wheel_event(WheelEvent::new(120.0, 0.0).at(x, y));
+    rt.frame(0.0);
+    settle_columns(&mut rt);
+    assert_eq!(shown(&rt), Some(1..3), "back a column, as far as the active one stays on screen");
+    assert_eq!(rt.state.cur().cols.as_ref().unwrap().holding(), [d.join("Docs")], "Docs read again");
+    assert!(find(&rt.accessibility_json(), "columns-back").is_some(), "and the way back to the root");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Idle means idle: once the columns are read and drawn, no frame asks for another (Rune's
+/// `frame` says whether it's still animating), with the root's columns off screen or not, and
+/// with the list focused as it moves into the columns.
+#[test]
+fn the_column_view_at_rest_draws_nothing() {
+    let d = nested("idle");
+    for f in ["a", "b", "c"] {
+        std::fs::create_dir_all(d.join(f)).unwrap();
+    }
+    std::fs::create_dir_all(d.join("Photos/2026/Summer")).unwrap();
+    let mut rt = runtime(&d);
+    // No sidebar place above it: the columns start at the volume's root, as on most disks.
+    rt.update(|s, _| s.places.clear());
+    // The list has keyboard focus (a click or Tab put it there) when it moves into the columns.
+    key(&mut rt, Key::Tab, false);
+    assert_eq!(focused_key(&rt.accessibility_json()).as_deref(), Some("list-0"));
+    run(&mut rt, Cmd::AsColumns);
+    let mut frames = 0;
+    while rt.frame(0.016) && frames < 200 {
+        frames += 1;
+    }
+    assert!(frames < 200, "still drawing after As Columns");
+    settle_columns(&mut rt);
+    let mut busy = Vec::new();
+    let keys =
+        [Key::Right, Key::Down, Key::Down, Key::Right, Key::Left, Key::Left, Key::Down, Key::Down, Key::Down, Key::Right, Key::Right];
+    let n = keys.len();
+    for (step, k) in keys.clone().into_iter().chain(keys).enumerate() {
+        if step == n {
+            // Again with columns scrolled off to the left (and the "‹ N" button).
+            rt.update(|s, _| s.col_w = 330.0);
+            run(&mut rt, Cmd::Parent);
+            run(&mut rt, Cmd::Parent);
+        }
+        key(&mut rt, k, false);
+        settle_columns(&mut rt);
+        // The pointer resting over the columns, as a mouse does.
+        rt.pointer_move(330.0 + 37.0 * step as f32 % 600.0, 400.0);
+        rt.frame(0.016);
+        let mut frames = 0;
+        while rt.frame(0.016) && frames < 200 {
+            frames += 1;
+        }
+        if frames >= 200 {
+            busy.push((step, rt.state.cur().cwd.clone(), rt.state.cur().cursor_name()));
+        }
+    }
+    assert!(busy.is_empty(), "still drawing after: {busy:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A press in a column whose read is still on its way makes that column the active one at
+/// once, empty and loading, so nothing selected in another column stays the target: Trash has
+/// nothing to act on (it trashed the folder selected before, review of 7b3a373). The listing
+/// lands later with the item pressed selected.
+#[test]
+fn a_press_in_an_unread_column_leaves_nothing_else_actionable() {
+    let d = nested("unread-press");
+    let mut rt = runtime(&d);
+    let (started, wait_started) = std::sync::mpsc::channel();
+    let (go, wait_go) = std::sync::mpsc::channel();
+    let (done, _) = std::sync::mpsc::channel();
+    crate::fs::read_hook::GATES.lock().unwrap().push(crate::fs::read_hook::Gate {
+        path: d.join("Docs"),
+        started,
+        go: Some(wait_go),
+        done,
+        seen: 0,
+    });
+    run(&mut rt, Cmd::AsColumns);
+    wait_started.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let c = rt.state.cur().cols.as_ref().unwrap().right.as_ref().unwrap();
+    assert_eq!(c.load, crate::columns::Load::Loading);
+    let b = rect_of(&rt, &c.key()).unwrap();
+    let (x, y) = (b[0] + 50.0, b[1] + 100.0);
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"), "the pressed column is the active folder at once");
+    assert!(rt.state.cur().is_loading() && rt.state.cur().visible.is_empty());
+    assert!(rt.state.target_paths().is_empty(), "nothing from the folder before stays selected");
+    for cmd in [Cmd::Trash, Cmd::Delete, Cmd::Rename, Cmd::Duplicate, Cmd::Cut] {
+        assert!(rt.state.unavailable(cmd).is_some(), "{cmd:?} has nothing to act on");
+    }
+    assert_eq!(rt.state.cur().back, std::slice::from_ref(&d), "a navigation: ⌘[ goes back");
+    go.send(()).unwrap();
+    until(&mut rt, |s| !s.cur().is_loading());
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"));
+    assert_eq!(rt.state.cur().visible.len(), 2, "Work and readme.txt landed");
+    assert!(d.join("Docs").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Two presses in another column before a frame (Work, then readme.txt): the second selects
+/// what it pressed, though its column is already the active one by then (it stayed on Work).
+#[test]
+fn quick_presses_in_another_column_select_the_last_one() {
+    let d = nested("quick-presses");
+    let mut rt = runtime(&d);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    let a = row_box(&mut rt, "Folder Work");
+    let b = row_box(&mut rt, "readme.txt");
+    for r in [a, b] {
+        let (x, y) = (r[0] + 35.0, r[1] + r[3] * 0.5);
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+    }
+    rt.frame(0.0);
+    assert_eq!(rt.state.target_paths(), [d.join("Docs/readme.txt")]);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Files dropped on a column go into the folder that column listed, or nowhere: one put in its
+/// place since (moved away, another made with its name) is refused on the worker, as a paste
+/// into a replaced folder is, and nothing moves.
+#[test]
+fn a_drop_on_a_column_refuses_a_replaced_folder() {
+    let d = nested("replaced-dest");
+    let mut rt = runtime(&d);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    let c = rt.state.cur().cols.as_ref().unwrap().right.as_ref().unwrap();
+    assert!(c.dir_id.is_some(), "its identity, from its listing");
+    let b = rect_of(&rt, &c.key()).unwrap();
+    std::fs::rename(d.join("Docs"), d.join("Docs-away")).unwrap();
+    std::fs::create_dir(d.join("Docs")).unwrap();
+    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 50.0, b[1] + 150.0)));
+    rt.frame(0.0);
+    until(&mut rt, |s| s.job.is_none());
+    assert!(d.join("top.txt").exists(), "nothing moved");
+    assert!(!d.join("Docs/top.txt").exists() && !d.join("Docs-away/top.txt").exists());
+    assert!(
+        rt.state.note.as_deref().is_some_and(|n| n.starts_with("Nothing was dropped") && n.contains("another folder now")),
+        "{:?}",
+        rt.state.note
+    );
+    // The same drop on a column that's still its folder goes in.
+    std::fs::remove_dir(d.join("Docs")).unwrap();
+    std::fs::rename(d.join("Docs-away"), d.join("Docs")).unwrap();
+    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 50.0, b[1] + 150.0)));
+    rt.frame(0.0);
+    until(&mut rt, |s| s.job.is_none());
+    assert!(d.join("Docs/top.txt").exists(), "{:?}", rt.state.note);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A pane covered by Get Info or the preview (which take the other pane's place when split)
+/// shows no columns, so its columns hold no listing and read nothing; uncovered, they're read
+/// again.
+#[test]
+fn covered_columns_hold_nothing() {
+    let d = nested("covered");
+    let mut rt = runtime(&d);
+    rt.update(|s, _| s.col_w = 140.0);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    run(&mut rt, Cmd::Split);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    rt.update(|s, tx| s.activate(0, tx));
+    rt.frame(0.0);
+    let other = 1 - rt.state.active;
+    let holding = |rt: &Runtime<State>| rt.state.panes[other].f.cols.as_ref().map(|c| c.holding()).unwrap_or_default();
+    assert_eq!(holding(&rt), [d.join("Docs")], "Docs on the right of the other pane");
+    run(&mut rt, Cmd::Info);
+    assert!(rt.state.panel_docked());
+    let id = rt.state.panes[other].f.id;
+    assert!(find(&rt.accessibility_json(), &format!("columns-{id}")).is_none(), "covered");
+    assert!(holding(&rt).is_empty(), "nothing kept for a pane not on screen");
+    assert!(
+        rt.state.panes[other]
+            .f
+            .cols
+            .as_ref()
+            .unwrap()
+            .left
+            .iter()
+            .chain(rt.state.panes[other].f.cols.as_ref().unwrap().right.as_ref())
+            .all(|c| c.load == crate::columns::Load::Off),
+        "and nothing being read"
+    );
+    run(&mut rt, Cmd::Info);
+    until(&mut rt, |s| s.panes[other].f.cols.as_ref().is_some_and(|c| !c.holding().is_empty()));
+    assert_eq!(holding(&rt), [d.join("Docs")], "read again when it shows");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A drag from a row in another column keeps going once its press has made that column the
+/// active one: the row keeps its element (each column is one element, active or not), so the
+/// gesture reaches the other pane and moves the file there.
+#[test]
+fn a_drag_from_another_column_keeps_its_gesture() {
+    let d = nested("drag-other-column");
+    std::fs::create_dir_all(d.join("Dest")).unwrap();
+    let mut rt = runtime(&d);
+    rt.update(|s, _| s.col_w = 140.0);
+    run(&mut rt, Cmd::Split);
+    rt.update(|s, tx| s.activate(1, tx));
+    let dest = d.join("Dest");
+    rt.update(move |s, _| s.go_to(dest));
+    until(&mut rt, |s| !s.cur().is_loading());
+    rt.update(|s, tx| s.activate(0, tx));
+    run(&mut rt, Cmd::AsColumns);
+    // Docs (Dest sorts first): its contents in the column on the right.
+    key(&mut rt, Key::Down, false);
+    settle_columns(&mut rt);
+    let b = row_box(&mut rt, "readme.txt");
+    let start = (b[0] + 35.0, b[1] + b[3] * 0.5);
+    let other = rect_of(&rt, &format!("pane-{}", rt.state.panes[1].id())).unwrap();
+    let end = (other[0] + 60.0, other[1] + 150.0);
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"), "the press made Docs active");
+    rt.pointer_move(start.0 + 10.0, start.1 + 5.0);
+    rt.frame(0.0);
+    rt.pointer_move(end.0, end.1);
+    rt.frame(0.0);
+    assert_eq!(rt.state.pane_drop, Some(rt.state.panes[1].id()), "still dragging, over the other pane");
+    rt.pointer_up(end.0, end.1);
+    rt.frame(0.0);
+    until(&mut rt, |s| s.job.is_none());
+    assert!(d.join("Dest/readme.txt").exists(), "{:?}", rt.state.note);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A rectangle dragged out from the blank space of another column: its press makes that column
+/// the active one, and the same gesture goes on as the active list's rectangle, selecting the
+/// rows it touches there.
+#[test]
+fn a_rectangle_starts_in_another_columns_blank_space() {
+    let d = nested("band-other-column");
+    let mut rt = runtime(&d);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    let c = rt.state.cur().cols.as_ref().unwrap().right.as_ref().unwrap();
+    assert_eq!(c.path, d.join("Docs"));
+    let b = rect_of(&rt, &c.key()).unwrap();
+    // Below Docs' two rows, dragged up over both.
+    let start = (b[0] + b[2] - 20.0, b[1] + 150.0);
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"), "the press made Docs the active column");
+    rt.pointer_move(start.0 - 10.0, start.1 - 40.0);
+    rt.frame(0.0);
+    rt.pointer_move(start.0 - 30.0, b[1] + 10.0);
+    rt.frame(0.0);
+    assert!(rt.state.band.is_some(), "a rectangle");
+    assert_eq!(picked(&rt), ["Work".to_string(), "readme.txt".to_string()]);
+    rt.pointer_up(start.0 - 30.0, b[1] + 10.0);
+    rt.frame(0.0);
+    assert!(rt.state.band.is_none());
+    assert_eq!(picked(&rt), ["Work".to_string(), "readme.txt".to_string()], "kept on release");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Idle after each kind of input in the column and tiles views, not only at rest: sideways
+/// wheels of every size, at both ends of the columns (where they scroll nothing) and between,
+/// Shift + wheel, a vertical wheel over a column, column moves by key and by click, a row
+/// dragged and let go, a rectangle, a divider drag and view switches. A wheel that scrolled
+/// nothing said `Tx::live_only`, which left Rune drawing every frame (RUNE-GAPS.md: 0.00 s →
+/// 3.46 s of CPU per 5 s).
+#[test]
+fn the_views_are_idle_after_each_kind_of_input() {
+    use rune::WheelEvent;
+    // Straight after As Columns, every column on screen: a sideways wheel scrolls nothing.
+    for dx in [1.0, 120.0, -120.0] {
+        let d = nested("idle-wheel-first");
+        let mut rt = runtime(&d);
+        run(&mut rt, Cmd::AsColumns);
+        settle_columns(&mut rt);
+        for _ in 0..10 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(!rt.live_pending());
+        let list = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
+        rt.wheel_event(WheelEvent::new(dx, 0.0).at(list[0] + 40.0, list[1] + 80.0));
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(!rt.live_pending(), "a sideways wheel ({dx}) that scrolled nothing leaves the window drawing");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    let d = nested("idle-inputs");
+    let mut rt = runtime(&d);
+    // Wide columns, so some scroll off: the wheel has somewhere to go, and ends to stop at.
+    rt.update(|s, _| s.col_w = 330.0);
+    run(&mut rt, Cmd::AsColumns);
+    assert_idle(&mut rt, "As Columns");
+    key(&mut rt, Key::Right, false);
+    assert_idle(&mut rt, "→");
+    key(&mut rt, Key::Right, false);
+    assert_idle(&mut rt, "→ again");
+    let list = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
+    let (x, y) = (list[0] + 40.0, list[1] + 60.0);
+    for (dx, what) in [
+        (1.0, "a sideways wheel too small to scroll"),
+        (-120.0, "a sideways wheel at the right end"),
+        (120.0, "a sideways wheel back"),
+        (120.0, "a sideways wheel at the left end"),
+        (500.0, "a big sideways wheel at the left end"),
+        (-500.0, "a big sideways wheel back"),
+    ] {
+        rt.wheel_event(WheelEvent::new(dx, 0.0).at(x, y));
+        assert_idle(&mut rt, what);
+    }
+    rt.wheel_event(WheelEvent::new(0.0, 40.0).at(x, y).mods(Mods { shift: true, ..Mods::default() }));
+    assert_idle(&mut rt, "Shift + wheel");
+    rt.wheel_event(WheelEvent::new(0.0, -40.0).at(x, y));
+    assert_idle(&mut rt, "a vertical wheel over a column");
+    key(&mut rt, Key::Left, false);
+    assert_idle(&mut rt, "←");
+    key(&mut rt, Key::Down, false);
+    assert_idle(&mut rt, "↓");
+    // A click in another column (the root's), then a row dragged a little and let go.
+    key(&mut rt, Key::Right, false);
+    assert_idle(&mut rt, "→ into Work");
+    let b = row_box(&mut rt, "readme.txt");
+    let at = (b[0] + 30.0, b[1] + b[3] * 0.5);
+    rt.pointer_move(at.0, at.1);
+    rt.pointer_down(at.0, at.1);
+    rt.pointer_up(at.0, at.1);
+    assert_idle(&mut rt, "a click in another column");
+    drag_through(&mut rt, at, &[(at.0 + 20.0, at.1 + 10.0), (at.0 + 40.0, at.1 + 30.0)]);
+    assert_idle(&mut rt, "a row dragged and let go");
+    let col = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
+    let blank = (col[0] + col[2] - 20.0, col[1] + col[3] - 30.0);
+    drag_through(&mut rt, blank, &[(blank.0 - 10.0, blank.1 - 20.0), (blank.0 - 30.0, col[1] + 10.0)]);
+    assert_idle(&mut rt, "a rectangle");
+    let divider = (col[0] + col[2] + 2.0, col[1] + 100.0);
+    drag_through(&mut rt, divider, &[(divider.0 + 20.0, divider.1), (divider.0 + 40.0, divider.1)]);
+    assert_idle(&mut rt, "a divider drag");
+    for cmd in [Cmd::AsTiles, Cmd::AsColumns, Cmd::AsIcons, Cmd::AsList, Cmd::AsColumns] {
+        run(&mut rt, cmd);
+        assert_idle(&mut rt, &format!("{cmd:?}"));
+    }
+    run(&mut rt, Cmd::AsTiles);
+    rt.wheel_event(WheelEvent::new(0.0, -200.0).at(x, y));
+    assert_idle(&mut rt, "tiles, scrolled");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A read that fails shows what went wrong and nothing of the listing from before: a column's
+/// error isn't drawn over entries it keeps, and a folder whose reload fails (the list, any
+/// view) empties instead of showing what it listed last.
+#[cfg(unix)]
+#[test]
+fn a_failed_read_keeps_no_listing() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = nested("failed-read");
+    let mut rt = runtime(&d);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cols.as_ref().unwrap().right.as_ref().unwrap().visible.len(), 2);
+    std::fs::set_permissions(d.join("Docs"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    run(&mut rt, Cmd::Reload);
+    settle_columns(&mut rt);
+    let c = rt.state.cur().cols.as_ref().unwrap().right.as_ref().unwrap();
+    let (load, entries, visible) = (c.load.clone(), c.entries.len(), c.visible.len());
+    std::fs::set_permissions(d.join("Docs"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(load, crate::columns::Load::Failed(_)), "{load:?}");
+    assert_eq!((entries, visible), (0, 0), "an error isn't a listing: nothing kept behind it");
+    // The list: Docs open, then unreadable, then ⌘R.
+    run(&mut rt, Cmd::AsList);
+    let docs = d.join("Docs");
+    rt.update(move |s, _| s.go_to(docs));
+    until(&mut rt, |s| !s.cur().is_loading());
+    assert_eq!(rt.state.cur().visible.len(), 2);
+    std::fs::set_permissions(d.join("Docs"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    run(&mut rt, Cmd::Reload);
+    until(&mut rt, |s| !s.cur().is_loading());
+    let (entries, visible, targets) = (rt.state.cur().entries.len(), rt.state.cur().visible.len(), rt.state.target_paths());
+    std::fs::set_permissions(d.join("Docs"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(rt.state.note.is_some(), "it says why");
+    assert_eq!((entries, visible), (0, 0), "the listing from before isn't shown");
+    assert!(targets.is_empty(), "nor acted on");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Every drop goes into the folder the user saw, or nowhere: a folder row (in a column, the
+/// list, the icon view), the active column's or the list's background, and the other pane in a
+/// split each carry the identity the folder was listed with, and the worker refuses one put in
+/// its place since. Nothing moves.
+#[test]
+fn every_drop_refuses_a_replaced_destination() {
+    let refused = |rt: &mut Runtime<State>, d: &Path, into: &str, what: &str| {
+        until(rt, |s| s.job.is_none());
+        assert!(d.join("top.txt").exists(), "{what}: nothing moved ({:?})", rt.state.note);
+        assert!(!d.join(into).join("top.txt").exists(), "{what}: the replacement got nothing");
+        assert!(rt.state.note.as_deref().is_some_and(|n| n.starts_with("Nothing was dropped")), "{what}: {:?}", rt.state.note);
+    };
+    let replace = |d: &Path, rel: &str| {
+        std::fs::rename(d.join(rel), d.join(format!("{rel}-away"))).unwrap();
+        std::fs::create_dir(d.join(rel)).unwrap();
+    };
+    // A folder row in another column.
+    let d = nested("drop-row");
+    let mut rt = runtime(&d);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    let b = row_box(&mut rt, "Folder Work");
+    replace(&d, "Docs/Work");
+    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 40.0, b[1] + b[3] * 0.5)));
+    rt.frame(0.0);
+    refused(&mut rt, &d, "Docs/Work", "a folder row in a column");
+    // The active column's background.
+    key(&mut rt, Key::Right, false);
+    settle_columns(&mut rt);
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"));
+    let b = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
+    replace(&d, "Docs");
+    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 40.0, b[1] + 150.0)));
+    rt.frame(0.0);
+    refused(&mut rt, &d, "Docs", "the active column");
+    let _ = std::fs::remove_dir_all(&d);
+    // A folder row in the list and in the icon view, and the list's background.
+    for view in [Cmd::AsList, Cmd::AsIcons] {
+        let d = nested(&format!("drop-{view:?}"));
+        let mut rt = runtime(&d);
+        run(&mut rt, view);
+        let row = rect_of(&rt, "f:Docs").unwrap();
+        replace(&d, "Docs");
+        rt.drop_files(vec![d.join("top.txt")], Some((row[0] + 20.0, row[1] + row[3] * 0.5)));
+        rt.frame(0.0);
+        refused(&mut rt, &d, "Docs", &format!("a folder row, {view:?}"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    let d = nested("drop-list-background");
+    let mut rt = runtime(&d);
+    let docs = d.join("Docs");
+    rt.update(move |s, _| s.go_to(docs));
+    until(&mut rt, |s| !s.cur().is_loading());
+    let list = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
+    replace(&d, "Docs");
+    rt.drop_files(vec![d.join("top.txt")], Some((list[0] + 100.0, list[1] + list[3] - 40.0)));
+    rt.frame(0.0);
+    refused(&mut rt, &d, "Docs", "the list's background");
+    let _ = std::fs::remove_dir_all(&d);
+    // A row dragged onto the other pane of a split.
+    let d = nested("drop-pane");
+    let mut rt = runtime(&d);
+    run(&mut rt, Cmd::Split);
+    let docs = d.join("Docs");
+    rt.update(move |s, _| s.go_to(docs));
+    until(&mut rt, |s| !s.cur().is_loading());
+    rt.update(|s, tx| s.activate(0, tx));
+    rt.frame(0.0);
+    replace(&d, "Docs");
+    let (from, to) = (rt.state.panes[0].id(), rt.state.panes[1].id());
+    rt.update(move |s, tx| {
+        let f = &s.panes[0].f;
+        let i = f.visible.iter().position(|&e| f.entries[e as usize].name == "top.txt").unwrap();
+        let version = f.version;
+        s.drop_on_pane(from, i, version, to, tx);
+    });
+    refused(&mut rt, &d, "Docs", "the other pane");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// In the column view (one pane), a file dragged from one column onto a folder row in another
+/// moves into it, and one let go over another column's background moves into that column's
+/// folder: Arbor's own drag inside the window, as between split panes (the system's drag can't
+/// land in the window it came from), checked like any drop.
+#[test]
+fn a_drag_between_columns_moves_the_file() {
+    let d = nested("drag-columns");
+    let mut rt = runtime(&d);
+    rt.update(|s, _| s.col_w = 200.0);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    // readme.txt (Docs' column, on the right) onto Photos (the root's column, active).
+    let from = row_box(&mut rt, "readme.txt");
+    let onto = row_box(&mut rt, "Folder Photos");
+    let start = (from[0] + 30.0, from[1] + from[3] * 0.5);
+    let end = (onto[0] + 30.0, onto[1] + onto[3] * 0.5);
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.frame(0.0);
+    // The press made Docs active (on a loaded machine its read may still be landing).
+    settle_columns(&mut rt);
+    rt.pointer_move(start.0 - 10.0, start.1 + 5.0);
+    rt.frame(0.0);
+    rt.pointer_move(end.0, end.1);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cols_hover(), Some(d.join("Photos")), "Photos is where it would land");
+    rt.pointer_up(end.0, end.1);
+    rt.frame(0.0);
+    until(&mut rt, |s| s.job.is_none());
+    assert!(d.join("Photos/readme.txt").exists() && !d.join("Docs/readme.txt").exists(), "{:?}", rt.state.note);
+    assert_ne!(rt.state.note.as_deref(), Some(crate::actions::DRAG_NOT_TAKEN));
+    settle_columns(&mut rt);
+    // The press made Docs the active column: its Work onto the root column's blank space.
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"));
+    let from = row_box(&mut rt, "Folder Work");
+    let root = rt.state.cur().cols.as_ref().unwrap().left[0].key();
+    let root = rect_of(&rt, &root).unwrap();
+    let start = (from[0] + 30.0, from[1] + from[3] * 0.5);
+    let end = (root[0] + 50.0, root[1] + root[3] - 40.0);
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.frame(0.0);
+    rt.pointer_move(start.0 + 10.0, start.1 + 5.0);
+    rt.frame(0.0);
+    rt.pointer_move(end.0, end.1);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cols_hover(), Some(d.clone()), "the root's folder is where it would land");
+    rt.pointer_up(end.0, end.1);
+    rt.frame(0.0);
+    until(&mut rt, |s| s.job.is_none());
+    assert!(d.join("Work/plan.txt").exists() && !d.join("Docs/Work").exists(), "{:?}", rt.state.note);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A drag whose press, moves and release all come before the next frame: its press makes Docs
+/// the active column, so the column the release lands on was the active one when the columns
+/// were last laid out, and is a column beside it now. The target is the column the pointer is
+/// over as it was drawn (here the root's, its Docs row), never "whatever is active now" (it
+/// moved the file into Docs/Work, the row at that height in Docs).
+#[test]
+fn a_drop_lands_in_the_column_it_was_drawn_as() {
+    let d = nested("unframed-drop");
+    let mut rt = runtime(&d);
+    rt.update(|s, _| s.col_w = 200.0);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    let from = row_box(&mut rt, "readme.txt");
+    let onto = row_box(&mut rt, "Folder Docs");
+    let start = (from[0] + 30.0, from[1] + from[3] * 0.5);
+    let end = (onto[0] + 30.0, onto[1] + onto[3] * 0.5);
+    let pane = rt.state.cur().id;
+    assert_eq!(rt.state.column_drop_at(pane, [end.0, end.1]).unwrap().0.path, d.join("Docs"));
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.pointer_move(start.0 - 10.0, start.1 + 5.0);
+    rt.pointer_move(end.0, end.1);
+    rt.pointer_up(end.0, end.1);
+    rt.frame(0.0);
+    until(&mut rt, |s| s.job.is_none());
+    assert!(d.join("Docs/readme.txt").exists(), "dropped on Docs, its own folder: nothing moves ({:?})", rt.state.note);
+    assert!(!d.join("Docs/Work/readme.txt").exists(), "never into the row at that height in the folder made active");
+    // Without the drop: right after the press, the root's Docs row is still where it lands.
+    let mut rt = runtime(&d);
+    rt.update(|s, _| s.col_w = 200.0);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    let from = row_box(&mut rt, "readme.txt");
+    let start = (from[0] + 30.0, from[1] + from[3] * 0.5);
+    rt.update(move |s, tx| {
+        s.activate_column(pane, &d.join("Docs"), Some(&"readme.txt".into()), tx);
+    });
+    let at = rt.state.column_drop_at(rt.state.cur().id, [end.0, end.1]).map(|(dest, row)| (dest.path, row));
+    assert_eq!(at, Some((rt.state.cur().cwd.parent().unwrap().join("Docs"), None)), "the root's Docs row, before any frame");
+    let _ = start;
+}
+
+/// F5 and F6 go into the other pane's folder as it was listed, or nowhere: one put in its place
+/// since is refused on the worker, as a drop or a paste into it is (F6 moved the file into the
+/// replacement).
+#[test]
+fn copy_and_move_to_the_other_pane_refuse_a_replaced_folder() {
+    for key_ in [6, 5] {
+        let d = nested(&format!("f{key_}-dest"));
+        let mut rt = runtime(&d);
+        run(&mut rt, Cmd::Split);
+        let docs = d.join("Docs");
+        rt.update(move |s, _| s.go_to(docs));
+        until(&mut rt, |s| !s.cur().is_loading());
+        rt.update(|s, tx| {
+            s.activate(0, tx);
+            let f = s.cur_mut();
+            let i = f.visible.iter().position(|&k| f.entries[k as usize].name == "top.txt").unwrap();
+            f.select(i);
+        });
+        std::fs::rename(d.join("Docs"), d.join("Docs-away")).unwrap();
+        std::fs::create_dir(d.join("Docs")).unwrap();
+        key(&mut rt, Key::Function(key_), false);
+        until(&mut rt, |s| s.job.is_none());
+        let what = if key_ == 6 { "moved" } else { "copied" };
+        assert!(d.join("top.txt").exists(), "F{key_}: the source stays");
+        assert!(!d.join("Docs/top.txt").exists() && !d.join("Docs-away/top.txt").exists(), "F{key_}: nothing went in");
+        assert!(
+            rt.state.note.as_deref().is_some_and(|n| n.starts_with(&format!("Nothing was {what}")) && n.contains("another folder now")),
+            "F{key_}: {:?}",
+            rt.state.note
+        );
+        // Into the folder as it is, once read again: it goes.
+        rt.update(|s, tx| s.activate(1, tx));
+        run(&mut rt, Cmd::Reload);
+        until(&mut rt, |s| !s.cur().is_loading());
+        rt.update(|s, tx| s.activate(0, tx));
+        key(&mut rt, Key::Function(key_), false);
+        until(&mut rt, |s| s.job.is_none());
+        assert!(d.join("Docs/top.txt").exists(), "F{key_} after ⌘R: {:?}", rt.state.note);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

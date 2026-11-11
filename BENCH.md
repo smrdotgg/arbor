@@ -9,6 +9,8 @@ scripts/bench.sh 11 10 --jump 5                # plus 5 cold starts opening Jump
 scripts/bench.sh 11 10 --search 5              # plus 5 cold starts searching a 120k-file tree
 scripts/bench.sh 11 10 --rename 5              # plus 5 cold starts typing in Batch Rename over 10k items
 scripts/bench.sh 1 10 --grid 4                 # plus 4 + 4 cold starts paging the icon view (10k, and 1,000 photos)
+scripts/bench.sh 1 10 --columns 5 --tiles 4    # plus 5 cold starts moving in and out of the 10k folder as columns, 4 paging tiles
+cargo test --release -- --ignored --nocapture column_cost   # the column view's ← and → over 10k, CPU only, beside the list's own landing
 scripts/bench.sh 1 12 --jump 5 --pace 120 --gap 1000   # the same, paced as a person types (report both)
 scripts/bench.sh 1 2 --idle 3                  # 3 + 3 starts left idle (list, icons): CPU over 5 s, fails above 0.05 s
 cargo test --release -- --ignored --nocapture search_speed   # walk speed by thread count (vendor/, or ARBOR_SEARCH_TREE)
@@ -56,6 +58,81 @@ builds on the M4 (macOS, 60 Hz display):
 
 The icon view was spared while thumbnails were on screen: they're live sources, and latching
 them clears the flag that kept the list view drawing.
+## 2026-11-11, `feature/views` (As Columns and As Tiles)
+
+What could cost the list view time: a check per key and per `poll` for panes showing columns
+(`State::sync_columns`, one comparison when none does), one flag per row (`Ctx::narrow`), and
+the `preview` sync's one more call. The column and tiles views cost nothing until used.
+Measured against c3433d3 (main, the commit before the branch), on tabot-dev under load from
+other builds (load average 4–7), so every number below is noisier than usual.
+
+### tabot-dev (Xvfb, lavapipe; not representative)
+
+`bench 8 10 --bin …`, the two release binaries alternating, two passes each:
+
+| Measure (median per pass) | c3433d3 | this |
+| --- | --- | --- |
+| Cold start (spawn → first frame) | 153.7, 154.1 ms | 159.7, 151.6 ms |
+| Listing visible (10k, nav → frame) | 50.7, 52.4 ms | 53.1, 48.9 ms |
+| Key → frame (synthetic ↓) | 8.4, 8.5 ms | 8.7, 8.6 ms |
+
+`frame_cost` (Arbor's own work per key, no GPU), the two test binaries alternating: medians
+1.944, 1.968, 1.948 ms before and 1.980, 1.956, 1.949 ms after. No difference beyond noise.
+The release binary: 40,091,344 bytes before, 40,190,136 after (+0.25%).
+
+The new views, `bench 1 10 --columns 5 --tiles 4`: five cold starts in a folder of 10,000
+files as columns, each round ← to its parent (the 10k folder becomes the column on the right),
+↓ onto the next folder there and ↑ back onto the 10k folder (each read for the column on the
+right), then → back into it; and four paging the tiles view of the 10k folder with Page Down
+and ↓. A key that started a folder read (`reads=1`) is held to the listing budget; one that only
+moved listings on screen, to the key's. After review (the numbers before it were 15.0 ms ← and
+15.7 ms →, all held to 50 ms):
+
+| Measure | n | median | p95 | budget |
+| --- | --- | --- | --- | --- |
+| Tiles, 10k entries: key → frame (Page Down, ↓) | 80 | 10.3 ms | 14.1 ms | 8 ms (over) |
+| Columns: ← and → over 10k, no read (key → frame) | 100 ×3 | 8.8, 7.3, 7.2 ms | 12.8, 11.9, 12.3 ms | 8 ms (p95 over) |
+| Columns: ↓ and ↑ onto a folder, read (key → frame) | 100 ×3 | 8.0, 8.0, 8.3 ms | 12.9, 12.3, 12.8 ms | 50 ms (under) |
+
+Three passes after rebasing on 9e4f168 (load 2–3). The list's ↓ was 8.5, 8.3 and 8.9 ms in the
+same passes: lavapipe's encode is 4–6 ms of every frame here, and Arbor's own update for ← and
+→ is 2.2 and 4.1 ms (`ARBOR_TIMING`). `--idle`: list, icons, tiles and columns each 0.00 s of
+CPU in 5 s. Tiles paging
+is in line with the icon view's (milestone 16: 6.2 ms on a quiet machine, when the list's ↓ was
+6.2 too).
+
+`column_cost` (CPU only, headless, the 10k folder of `frame_cost`):
+
+| Measure | 7b3a373 | this |
+| --- | --- | --- |
+| Columns: ← out of 10k (key → committed frame) | 8.40 ms | 1.29 ms |
+| Columns: → into 10k | 8.91 ms | 2.32 ms |
+| Columns: End onto a folder (a read) | — | 2.30 ms |
+| List view: the frame landing the same 10k listing (its read left out) | 10.39 ms | 7.67 ms |
+
+After the second review, on the Mac (MacBook Pro, M4 Pro; headless over ssh, CPU only, no
+GPU: `cargo test --release -- --ignored --nocapture --test-threads=1 column_cost frame_cost`),
+which keeps Arbor's own cost apart from tabot-dev's lavapipe and its load (16 at times):
+
+| Measure (median, p95) | 1k entries | 10k | 30k |
+| --- | --- | --- | --- |
+| Columns: ← out of the folder | 0.45, 0.48 ms | 0.45, 0.47 ms | 0.45, 0.48 ms |
+| Columns: → into it | 0.81, 0.86 ms | 0.82, 0.85 ms | 0.86, 0.90 ms |
+| Columns: End onto a folder (a read) | 0.76, 0.79 ms | 0.77, 0.81 ms | 0.83, 0.87 ms |
+| List view: the frame landing the folder's listing | 1.50, 1.58 ms | 2.65, 2.73 ms | 5.37, 5.45 ms |
+
+A column move costs the same whatever the folder's size (nothing in it is per entry any more);
+the list's ↓ (`frame_cost`, 10k) is 0.68 ms there. The p95 over 8 ms on tabot-dev is that host:
+its minimums are as flat (← about 2 ms, → about 3.5 ms at every size, at load 16).
+
+What changed: each column is one element, keyed by its number, whether it's the active column
+or another, and a listing moves between a column and the folder with its rows and their
+version, so Rune doesn't build a new list or key its 10k rows (it did both on every move, 0.5 ms
+per 1,000 entries), and Arbor neither copies, sorts nor filters them again. The bench also lets
+a column's read land, in a frame of its own, before the next key: otherwise → paid for drawing
+the 10k folder read by the ↑ before it for the first time (12.9 ms of update instead of 4.1).
+The bench's folder is the columns' sidebar place: under the disk's root, `/tmp` (60,594 entries
+on this machine) was a column too.
 
 ## 2026-11-10, milestone 16 (drag-select, the icon view and its thumbnails)
 

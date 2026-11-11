@@ -194,8 +194,11 @@ text file and a 12 MP JPEG from Space to the frame showing it, and keys while it
 end of the walk, and keys pressed while results stream in, and `--rename N` adds N runs typing
 in Batch Rename over 10,000 items: each key to the frame showing its preview, and `--grid N` adds
 N runs paging the icon view of the 10k folder and N in a folder of 1,000 photos: each key, and
-the time to the first thumbnail and to a screenful, and every bench ends with `--idle N` (default 1, 0
-skips it): N starts left idle in the list and N in the icon view, after As Icons (and As List), each
+the time to the first thumbnail and to a screenful, and `--tiles N` the same paging in the
+tiles view, and `--columns N` adds N runs moving out of and back into the 10k folder in the
+column view (← and →), each key to its frame (`column_cost` times the same without a GPU),
+and every bench ends with `--idle N` (default 1, 0
+skips it): N starts left idle in each view (list, icons, tiles, columns), after switching to it, each
 failing the bench if it uses more than 0.05 s of CPU in 5 s; `--pace MS` spaces
 the steps as a person types and `--gap MS` idles between cold starts, since a cooled CPU is
 several times slower than a busy one: report both). It opens and closes windows, so leave the machine alone
@@ -244,15 +247,35 @@ or on the list: same disk moves, another disk copies, and ⌥ forces a copy.
 
 ### Views and drag-select
 
-Each tab shows its folder **as a list** (rows with Kind, Size and Modified columns) or **as
-icons** (a grid of icons with names under them): **⌥⌘1** and **⌥⌘2** (Ctrl+Alt+1 and 2 off
-macOS), "As List" and "As Icons" in the palette, or the two buttons at the right of the path bar.
-The tab remembers its view while it's hidden; new tabs (and the second pane of a split) start
-with `view.default` from the settings. In the icon view **⌘+** and **⌘-** make the icons larger
-or smaller (small, medium, large; one size for the window, starting at `view.icon_size`), the
-arrows move by cell and row (⌘↑ and ⌘↓ still go up and open, ⇧ extends), and everything else is
-the list's: typing filters, F2 renames under the icon, Space previews, ⌘I, the context menu,
-drags and drops. Column headers aren't shown in the icon view; the Sort commands still work.
+Each tab shows its folder in one of four views: **as a list** (rows with Kind, Size and
+Modified columns), **as icons** (a grid of icons with names under them), **as columns** (a
+column per folder, like Finder's column view) or **as tiles** (a grid of wide tiles: a larger
+icon beside the name, kind, size and date). **⌥⌘1** to **⌥⌘4** (Ctrl+Alt+1 to 4 off macOS),
+"As List", "As Icons", "As Columns" and "As Tiles" in the palette, or the four buttons at the
+right of the path bar. The tab remembers its view while it's hidden; new tabs (and the second
+pane of a split) start with `view.default` from the settings. In the icon view **⌘+** and
+**⌘-** make the icons larger or smaller (small, medium, large; one size for the window,
+starting at `view.icon_size`; tiles have one size). In the icon and tiles views the arrows move
+by cell and row (⌘↑ and ⌘↓ still go up and open, ⇧ extends), and everything else is the
+list's: typing filters, F2 renames in the cell, Space previews, ⌘I, the context menu, drags and
+drops. Column headers are shown only in the list view; the Sort commands work in all four.
+
+**The column view** shows the folder's path as columns, from the deepest sidebar place it's in
+(a favorite or a volume; else the disk's root) down to the folder, and on the right the selected
+folder's contents, or the selected file's preview (the quick preview's, with its rules). → opens
+the selected folder as the next column, ← goes back a column, ↑↓ move within one; selecting a
+folder in a column to the left replaces every column after it. The active column (the one with
+the accent selection) is the tab's folder: every command, the context menu, drags, drag-select,
+F2, ⌘I, F5/F6, paste and undo act on it, and a click, right-click or drag in another column
+makes that column the active one first, so an action always resolves against the folder of the
+column it was in. Each column is a fresh read of its folder (nothing is kept): only the columns
+on screen hold their listing, and one scrolled back into view is read again. The columns scroll
+whole: the deepest are shown after every move; the horizontal wheel (or Shift + wheel) and the
+"‹ N" at the left edge show the ones before, as far as the active column stays on screen. Drag
+any column's divider to change every column's width (this session). Space turns the column
+view's preview off and on. Drag a file from one column onto a folder or another column to move it
+there (Arbor's own drag in the window, as between split panes; on macOS that means rows can't be
+dragged out to Finder from the column view, as when split: another view brings it back). A search shows its results as a list.
 
 Images (PNG, JPEG, GIF, WebP, BMP) show **thumbnails** in the icon view, decoded by the quick
 preview's own decoders (with its size limits) and shrunk to the icon; on macOS (Quick Look) and
@@ -849,6 +872,8 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Close Preview |  |  | `view.close_preview` |
 | As List | ⌥⌘1 | Ctrl+Alt+1 | `view.as_list` |
 | As Icons | ⌥⌘2 | Ctrl+Alt+2 | `view.as_icons` |
+| As Columns | ⌥⌘3 | Ctrl+Alt+3 | `view.as_columns` |
+| As Tiles | ⌥⌘4 | Ctrl+Alt+4 | `view.as_tiles` |
 | Larger Icons | ⌘+, ⌘= | Ctrl++, Ctrl+= | `view.larger_icons` |
 | Smaller Icons | ⌘- | Ctrl+- | `view.smaller_icons` |
 | New Tab | ⌘T | Ctrl+T | `tab.new` |
@@ -889,7 +914,12 @@ Arbor gives every part a role and a name (`src/view/`; `src/a11y_tests.rs` check
   5 KB, Today 10:30"; a folder says "Folder" when the Kind column is hidden), selected when it
   is, with its place in the whole folder ("2 of 120", not of the rows built). The list's active
   descendant is the cursor's row, so a reader follows ↑↓, typing and every other key. In a
-  split window both lists point at the active pane's cursor row.
+  split window both lists point at the active pane's cursor row. In the icon and tiles views
+  each cell is an option the same way (a tile named from its name, kind and size). **The
+  column view** is a group ("Columns, 3 folders") of list boxes, one per column, each named for
+  its folder; in the columns to the left the folder on the way is the selected option, the
+  active column is the focusable list with the cursor as its active descendant, and the
+  preview is its complementary region.
 - **The sidebar** is a list box of places, favorites then volumes (the folder on screen
   selected, ⌘1–9 as each one's shortcut, a volume's ⏏ a button named "Eject …"); **the path bar** a toolbar of named buttons (Go Back, Go Forward, Go to Parent
   Folder, dimmed when they can't) and the breadcrumbs as links; **the tab strip** a tab list
@@ -969,7 +999,7 @@ case_sensitive = false     # Select by Pattern; default true on Linux, false on 
 cross_devices = false      # Search in This Folder also walks file systems mounted inside it
 
 [view]
-default = "list"           # how new tabs show their folder: "list" or "icons"
+default = "list"           # how new tabs show their folder: "list", "icons", "columns" or "tiles"
 icon_size = "medium"       # the icon view's icons to start with: "small", "medium" or "large"
 
 [keys]
@@ -1103,9 +1133,10 @@ one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine
 File watching (use ⌘R), Open With's "Other…" on macOS and Linux, Put Back on macOS and
 Windows, emptying the trashes of network shares, the
 sidebar's Locations refreshing by themselves on Linux (right-click or ⌘R), changing attributes
-in Get Info, the Tiles and Columns views (BACKLOG.md), rich previews and icon-view thumbnails
+in Get Info, rich previews and icon-view thumbnails
 (PDF, video, documents) on Linux and
 new (uncached) thumbnails on Windows (see Quick preview), syntax highlighting in the text
 preview, regular expressions in Select by Pattern, more than one operation
 at a time, dragging a tab out into a window of its own, notarized and signed packages, and
-dragging rows out to Finder while the window is split on macOS (see `RUNE-GAPS.md`).
+dragging rows out to Finder while the window is split or in the column view on macOS (see
+`RUNE-GAPS.md`).

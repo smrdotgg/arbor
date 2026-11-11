@@ -39,14 +39,15 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `jump/` | Jump to Folder: frecency and ranking, the history and its writer, the box |
 | | `select.rs`, `pattern.rs` | Select by Pattern and other selection commands; globs |
 | | `band.rs` | Drag-select: the selection rectangle, its hits from layout geometry, its edge scrolling |
-| | `grid.rs`, `tiles.rs` | The icon view: view modes, icon sizes and cell geometry; thumbnails for the cells on screen and their workers |
+| | `grid.rs`, `tiles.rs` | The grid views (icons, tiles): view modes, icon sizes and cell geometry; thumbnails for the cells on screen and their workers |
+| | `columns.rs` | The column view: the columns beside the active folder (which is the tab's `Folder`), their reads, scroll and the root; making a column active from its listing |
 | | `batch.rs`, `rename.rs` | Batch Rename's dialog; its rules (pure functions) |
 | | `complete.rs` | Tab completion in go-to mode |
 | | `info.rs`, `openwith/` | Get Info (and its streaming total); Open With (per platform, `xdg.rs`) |
 | | `sidebar.rs`, `volumes.rs` | Favorites and their file; Locations and Eject |
 | Platform glue | `handler/` | Making Arbor the default for folders, and restoring (`linux.rs`, `windows.rs`, `mac.rs`) |
 | | `incoming/` | Folders other apps send (`mac.rs` Apple events, `linux.rs` D-Bus, `windows.rs` a pipe) |
-| UI | `view/` | Every element: root and status bar (`mod.rs`), `sidebar`, `pane` (path bar, tabs, view switch), `list` (rows, item presses and drags, the selection rectangle), `grid` (the icon view, type icons), `panels`, `overlays`, `batch` |
+| UI | `view/` | Every element: root and status bar (`mod.rs`), `sidebar`, `pane` (path bar, tabs, view switch), `list` (rows, item presses and drags, the selection rectangle), `grid` (the icon and tiles views, type icons), `columns` (the column view), `panels`, `overlays`, `batch` |
 | Shared | `bounded.rs`, `persist.rs`, `mounts.rs`, `dirfd.rs`, `ffi.rs`, `fs.rs` | See [Patterns](#patterns-to-reuse); folder reads, sorting, formatting |
 | Tooling | `timing.rs` | Opt-in speed logs (`ARBOR_TIMING`, the bench) |
 | Tests only | `a11y_tests.rs`, `frame_bench.rs`, `packaging_tests.rs`, `prop.rs` | Accessibility tree, per-key cost, install scripts, seeded property tests (a PRNG and a runner) |
@@ -59,7 +60,7 @@ Nothing runs in the background unless the user did something, and nothing polls.
   `config.toml`, `sidebar.toml`, then the first folder. The first window waits at most
   `FIRST_PAINT_WAIT` (8 ms) for it, then lands it in `poll`.
 - **`rune::Latest` workers**: Rune's shared pool (≤ 4 threads) runs every latest-wins request:
-  folder listings (`Folder::loader`), settings reload, typed-path checks, completion, Get
+  folder listings (`Folder::loader`, and each column's of the column view), settings reload, typed-path checks, completion, Get
   Info's metadata, Open With's list, batch rename's reads and plans, search rechecks, volume
   lists, eject, launching apps. An older answer never lands over a newer one.
 - **Preview worker** (`arbor-preview`, `preview::Worker`): one thread, started by the first
@@ -96,6 +97,8 @@ Nothing runs in the background unless the user did something, and nothing polls.
   `Latest` and waits up to `wait` (usually ≤ one frame) for it: in time, the answer comes back
   from the call; late, it lands in `poll` through the loader. Never both, never neither. Used
   by listings, tab switches, typed paths, completion, Get Info, Open With and batch rename.
+  `bounded::start` and `Waiting::until` do the same for several requests sharing one deadline
+  (the column view's columns).
   The startup read and Jump's load do the same over their own channels.
 - **Request numbers.** Every listing request takes `folder::next_request()` (one process-wide
   counter); an answer lands only if it carries the number its folder is still waiting for.

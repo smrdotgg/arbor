@@ -65,7 +65,7 @@ pub(super) fn header(f: &Folder, c: Ctx) -> El {
 pub(super) fn active_row(s: &State) -> Option<String> {
     let f = s.cur();
     let e = f.selected()?;
-    if f.view == crate::grid::ViewMode::Icons {
+    if f.view.is_grid() {
         // A cell is inside its grid row, which is keyed by the row's first item.
         let cols = f.grid_cols.get().max(1);
         let first = &f.entries[f.visible[f.sel / cols * cols] as usize];
@@ -100,8 +100,8 @@ pub(super) fn list(f: &Folder, c: Ctx, active: Option<String>) -> El {
                     s.note = Some("Drop onto a folder in the results, or leave the search (Esc) to drop here".into());
                     return;
                 }
-                let here = p.f.cwd.clone();
-                s.drop_files(files, here, tx);
+                let here = p.f.dest();
+                s.drop_into(files, here, Default::default(), tx);
             }
         })
         .on_secondary_press(move |s: &mut State, press, tx| {
@@ -139,8 +139,12 @@ pub(super) fn list(f: &Folder, c: Ctx, active: Option<String>) -> El {
     let layout = band_layout(f, c);
     base = base.on_drag(band_on(c, layout, true));
     let scroll = f.scroll.clone();
-    let base = base.scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(move |at: ScrollPos| scroll.set(at.offset[1]));
-    if f.view == crate::grid::ViewMode::Icons {
+    let mut base = base.scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(move |at: ScrollPos| scroll.set(at.offset[1]));
+    if c.narrow {
+        // The column view's active column: a sideways wheel scrolls the columns.
+        base = base.on_wheel(super::columns::column_wheel(id));
+    }
+    if f.view.is_grid() {
         return super::grid::cells(f, c, base);
     }
     base.child(follow_band(
@@ -188,9 +192,10 @@ pub(super) fn follow_band(rows: El, c: Ctx) -> El {
 
 /// How pane `c`'s items lie, for drag-select.
 pub(super) fn band_layout(f: &Folder, c: Ctx) -> crate::band::Layout {
-    match f.view {
-        crate::grid::ViewMode::List => crate::band::Layout::List { row_h: ROW_H },
-        crate::grid::ViewMode::Icons => crate::band::Layout::Grid(crate::grid::Geom::new(c.icons, c.list[2])),
+    match f.view.geom(c.icons, c.list[2]) {
+        Some(g) => crate::band::Layout::Grid(g),
+        // A list, or the column view's active column.
+        None => crate::band::Layout::List { row_h: ROW_H },
     }
 }
 
@@ -258,6 +263,8 @@ pub(super) fn press_item(s: &mut State, tx: &mut rune::Tx, id: u64, i: usize, ve
         f.sel = i;
     }
     s.sync_preview();
+    // The column view: the clicked folder's contents open on the right.
+    s.flush_columns(tx);
 }
 
 /// A double press on item `i`: open it.
@@ -265,6 +272,8 @@ pub(super) fn open_item(s: &mut State, tx: &mut rune::Tx, id: u64, i: usize, ver
     if in_pane(s, id, tx) && s.cur().version == version && s.rename.is_none() {
         s.cur_mut().select(i);
         s.open_selected();
+        s.sync_preview();
+        s.flush_columns(tx);
     }
 }
 
@@ -279,35 +288,11 @@ pub(super) fn item_drags(e: El, c: Ctx, i: usize, version: u64) -> El {
     let row_name = move |s: &State| -> String {
         s.pane(id).and_then(|p| p.f.visible.get(i).map(|&e| p.f.entries[e as usize].name.clone())).unwrap_or_default()
     };
-    let inside = move |s: &mut State, d: &mut Drag, tx: &mut rune::Tx| {
-        tx.instant();
-        let far = d.dx.hypot(d.dy) > DRAG_START;
-        let at = d.window_point();
-        let side = far && at[0] < SIDEBAR_W;
-        let over = split.and_then(|p| p.at(at)).filter(|&p| p != id && far);
-        if d.phase == Phase::Up {
-            s.pane_drop = None;
-            s.side.drop_hover = false;
-            if d.cancelled() {
-                return;
-            }
-            if side {
-                s.drop_rows_on_sidebar(id, i, version);
-            } else if let Some(to) = over {
-                s.drop_on_pane(id, i, version, to, tx);
-            } else if far && split.is_none() {
-                // Unsplit, off macOS (where the row's drag is the system's): let go on a
-                // folder row or nowhere, as macOS's drag nothing took, it says how.
-                s.note = Some(crate::actions::DRAG_NOT_TAKEN.into());
-            }
-        } else if s.pane_drop != over || s.side.drop_hover != side {
-            s.pane_drop = over;
-            s.side.drop_hover = side;
-        } else {
-            tx.live_only();
-        }
-    };
+    let inside = move |s: &mut State, d: &mut Drag, tx: &mut rune::Tx| inside_drag(s, d, tx, id, i, version, split);
     match c.split {
+        // The column view's columns are one window: there the drag is Arbor's own, onto
+        // another column, as between split panes (below).
+        None if c.narrow => e.on_drag(inside),
         // Out to other apps (macOS: Rune starts no system drag elsewhere, so there the
         // drag stays in the window).
         None => {
@@ -342,18 +327,58 @@ pub(super) fn item_drags(e: El, c: Ctx, i: usize, version: u64) -> El {
     }
 }
 
+/// Arbor's own drag of item `i` (of pane `id`'s folder at `version`) inside the window: onto
+/// the other pane (split), the sidebar, or in the column view a folder row or a column.
+pub(super) fn inside_drag(s: &mut State, d: &mut Drag, tx: &mut rune::Tx, id: u64, i: usize, version: u64, split: Option<Panes>) {
+    tx.instant();
+    let far = d.dx.hypot(d.dy) > DRAG_START;
+    let at = d.window_point();
+    let side = far && at[0] < SIDEBAR_W;
+    let over = split.and_then(|p| p.at(at)).filter(|&p| p != id && far);
+    // The column view: the folder row or column under the pointer (none outside the columns).
+    let column = if far && !side && over.is_none() { s.column_drop_at(id, at) } else { None };
+    let hover = column.as_ref().map(|(dest, row)| (dest.path.clone(), row.clone()));
+    if d.phase == Phase::Up {
+        s.pane_drop = None;
+        s.side.drop_hover = false;
+        s.set_cols_hover(id, None);
+        if d.cancelled() {
+            return;
+        }
+        if side {
+            s.drop_rows_on_sidebar(id, i, version);
+        } else if let Some(to) = over {
+            s.drop_on_pane(id, i, version, to, tx);
+        } else if let Some((dest, _)) = column {
+            s.drop_rows_into(id, i, version, dest, tx);
+        } else if far && split.is_none() {
+            // Unsplit, off macOS (where the row's drag is the system's): let go on a
+            // folder row or nowhere, as macOS's drag nothing took, it says how.
+            s.note = Some(crate::actions::DRAG_NOT_TAKEN.into());
+        }
+    } else if s.pane_drop != over || s.side.drop_hover != side {
+        s.pane_drop = over;
+        s.side.drop_hover = side;
+        s.set_cols_hover(id, hover);
+    } else if !s.set_cols_hover(id, hover) {
+        // A drag's move: its release commits.
+        tx.live_only();
+    }
+}
+
 /// Item `i`'s drop target, when it's a folder: files dropped on it go in.
 pub(super) fn folder_drop(e: El, f: &Folder, c: Ctx, entry: &crate::fs::Entry) -> El {
     if !entry.is_dir {
         return e;
     }
     let id = c.id;
-    let target = f.cwd.join(&entry.os);
+    // Into the folder this row lists, as its listing read it (checked on the worker).
+    let target = f.row_dest(entry);
     let os = entry.os.clone();
     e.on_drop_files(move |s: &mut State, files, tx| {
         tx.instant();
-        crate::draglog::log(|| format!("drop on={:?} files={}", target.display(), files.len()));
-        s.drop_files(files, target.clone(), tx);
+        crate::draglog::log(|| format!("drop on={:?} files={}", target.path.display(), files.len()));
+        s.drop_into(files, target.clone(), Default::default(), tx);
     })
     .on_drop_hover(move |s: &mut State, over, tx| {
         tx.instant();
@@ -380,8 +405,10 @@ pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
     // A selected row drags its files from anywhere in it, except while a rectangle is being
     // dragged out here: the rows it selects keep the handlers the gesture started with.
     let whole = selected && !s.band.as_ref().is_some_and(|b| b.pane == id);
-    let glyph =
-        folder_mark(text(glyph).font(BODY).color(if selected && c.focused { fg } else { l.accent }).w(10.0), e.is_dir && !cols.kind);
+    let glyph = folder_mark(
+        text(glyph).font(BODY).color(if selected && c.focused { fg } else { l.accent }).w(10.0),
+        e.is_dir && (!cols.kind || c.narrow),
+    );
     let name = match renaming {
         Some(r) => row().grow(1.0).min_w(0.0).gap(6.0).center_y().child(glyph).child(
             text_input(&r.edit, BODY)
@@ -430,7 +457,7 @@ pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
         .focus_selected(selected)
         .w_full()
         .h(ROW_H)
-        .px(12.0)
+        .px(if c.narrow { 10.0 } else { 12.0 })
         .gap(12.0)
         .center_y()
         .radius(4.0)
@@ -456,7 +483,9 @@ pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
         r = if whole { item_drags(r, c, i, version) } else { r.on_drag(band_on(c, crate::band::Layout::List { row_h: ROW_H }, false)) };
     }
     r = folder_drop(r, f, c, e);
-    if f.searching() {
+    if c.narrow {
+        // A column of the column view: the name alone (its ▸ says folder).
+    } else if f.searching() {
         // Where it is: its folder below the search's root (the root itself shows as "—").
         let at = std::path::Path::new(&e.os).parent().filter(|p| !p.as_os_str().is_empty());
         let at = at.map_or_else(|| "—".to_string(), |p| p.display().to_string());
@@ -471,11 +500,13 @@ pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
     } else if cols.kind {
         r = r.child(text(fs::kind(e).to_string()).font(NUM).color(dim).truncate().w(KIND_W));
     }
-    let size = text(if e.is_dir { "—".to_string() } else { fs::fmt_size(e.size) }).font(NUM).color(dim).align(Align::End).w(SIZE_W);
-    // A folder's "—" says nothing to a reader.
-    r = r.child(if e.is_dir { size.a11y_hidden() } else { size });
-    if cols.date {
-        r = r.child(text(fs::fmt_time(e.mtime_ms, f.now)).font(NUM).color(dim).w(DATE_W));
+    if !c.narrow {
+        let size = text(if e.is_dir { "—".to_string() } else { fs::fmt_size(e.size) }).font(NUM).color(dim).align(Align::End).w(SIZE_W);
+        // A folder's "—" says nothing to a reader.
+        r = r.child(if e.is_dir { size.a11y_hidden() } else { size });
+        if cols.date {
+            r = r.child(text(fs::fmt_time(e.mtime_ms, f.now)).font(NUM).color(dim).w(DATE_W));
+        }
     }
     r = if drop_here {
         r.fill(l.accent.alpha(0.25)).border(1.5, l.accent)

@@ -34,13 +34,49 @@ Newest first.
 - **What we did instead:** the rows have an `on_layout_tx` only while a selection rectangle is
   held in their pane (`list::follow_band` in `src/view/list.rs`, `Ctx::banding`), and it never
   says `live_only`: a report that changed nothing commits a cheap view instead, and the press
-  and release around it commit anyway. No other `live_only` in Arbor is unbounded: each is in a
-  drag's `Move`, and the drag's release commits. Guarded by `an_idle_window_draws_nothing`
+  and release around it commit anyway. The column view's sideways wheel said it too when a delta
+  scrolled nothing (too small, or at an end): 3.46 s of CPU per 5 s after one such wheel, until
+  the next key; it now lets Rune commit instead. No other `live_only` in Arbor is unbounded: each
+  is in a drag's `Move` (rows, tabs, favorites, the rectangle), and the drag's release commits.
+  Guarded by `an_idle_window_draws_nothing`, `the_views_are_idle_after_each_kind_of_input`
   (`src/a11y_tests.rs`) and `bench --idle`.
 - **What users lose:** nothing now. The rows no longer hear their layout outside a rectangle
   drag. A future live-only handler outside a drag would bring the loop back.
 - **Suggested Rune change:** clear `live_dirty` in `latch_live` when there are no live
   subscriptions (or don't set it in `skip_view` then): nothing is left to latch.
+## Column view: a horizontal scroll can't tell the app which children are on screen
+
+- **Feature:** the column view (As Columns): only the columns on screen may hold their folder's
+  listing (NORTHSTAR: no caching), so a column scrolled off drops its entries and one scrolled
+  back is read again.
+- **What Rune is missing:** for a `scroll_x` viewport, a handler with state access when the set
+  of children on screen changes (as `on_visible_rows` gives a virtual list, rows of children
+  laid out along x). Its offset reaches the app only through `on_scroll_offset`, which runs
+  with no state and no commit, so scrolling can't start or stop anything.
+- **What we did instead:** the columns scroll by whole columns under Arbor's control
+  (`Columns::first`, `src/columns.rs`): as many as fit the pane at the column width, the deepest
+  after every move, the horizontal wheel (and Shift + wheel) taken by an `on_wheel` on the strip
+  and turned into a column at a time (`State::columns_wheel`), and a "‹ N" button at the left
+  edge (`src/view/columns.rs`).
+- **What users lose:** smooth sideways scrolling of the column strip (a trackpad swipe moves it
+  a column at a time, not with the fingers), and partly visible columns at either edge.
+- **Suggested Rune change:** `on_visible_children(|s, range|)` on a `scroll_x` viewport (or
+  horizontal `virtual_rows`), called when the range of children intersecting it changes.
+
+## Column view: a new scroll viewport can't open scrolled to a row
+
+- **Feature:** the column view: a column that comes on screen (moving left or right, scrolling
+  back) shows its highlighted folder, which may be far down a long folder.
+- **What Rune is missing:** a declarative initial scroll target for a viewport (`El::scroll_to_key`
+  on its first frame), or a way to queue `Tx::scroll_into_view_in` outside a handler. Columns
+  come and go in `State::sync_columns`, which runs from places with no `Tx` (after a listing
+  lands in a column's read, in the middle of the preview's sync).
+- **What we did instead:** `State::col_reveals` queues them, and `State::flush_columns` sends
+  them with the next `Tx`: every key, command and press handler calls it, and `poll` does for
+  reads that land later.
+- **What users lose:** nothing seen so far; a column that lands in a frame no handler or `poll`
+  runs in would show its top until the next one (no case found).
+- **Suggested Rune change:** `El::initial_scroll_to(row_key)` for a viewport's first frame.
 
 ## Drag-select: no pointer events while the pointer holds still outside the list
 
@@ -441,14 +477,22 @@ Newest first.
 - **The sidebar, too (milestone 12):** rows dragged onto the sidebar add their folders through
   the same in-window drag, which now runs unsplit as well; on macOS, unsplit, the row's drag is
   the system's, so it can't land on the sidebar of its own window (folders from Finder can).
+- **The column view, too:** its columns are one pane of one window, so a file dragged from one
+  column onto a folder or another column would be a drop in its own window, which the system's
+  drag can't make ("Nothing took the drop" on the Mac). In the column view rows always use
+  Arbor's in-window drag, as when split: the column and row under the pointer come from each
+  column's laid-out rect and scroll (`State::column_drop_at` in `src/columns.rs`), the folder
+  row (or column) gets a drop highlight, and the release goes through the checked drop
+  (`State::drop_rows_into`). So, as when split, a row can't be dragged out to Finder or another
+  app from the column view on macOS; another view brings that back.
 - **Tabs, too (milestone 14):** a tab dragged along its strip or onto the other pane is the same
   in-window drag. A handler can't ask which element is under the pointer, so where it lands in
   the other pane's strip is worked out from the strip's layout constants and the pane's rect
   (`strip_slot` in `src/view/pane.rs`), as Rune draws it; a layout change there has to update it.
   No drag image follows the pointer, only the landing place's highlight. Dragging a tab out
   into a window of its own isn't offered.
-- **What users lose:** on macOS, while split, a row can't be dragged out to Finder or another
-  app; closing the split (⌘\\) brings that back. The in-window drag shows no drag image under the
+- **What users lose:** on macOS, while split or in the column view, a row can't be dragged out to
+  Finder or another app; closing the split (⌘\\) or another view brings that back. The in-window drag shows no drag image under the
   pointer, only the target pane's highlight, and can't drop on a folder row in the other pane
   (only into its folder).
 - **Suggested Rune change:** at the least, pass where a `drag_out` ended to `on_drag_end` (window

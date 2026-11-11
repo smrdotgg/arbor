@@ -18,6 +18,77 @@ Format: date · decision · why · how to undo.
   default, about 15 s; `--idle 0` skips it) that fails above 0.05 s of CPU in 5 s. Undo:
   `list::follow_band` and `Ctx::banding` (`src/view/`), `--idle`'s default in
   `examples/bench.rs`.
+- **2026-11-11 · More views: As Columns and As Tiles (Review: the root, the keys, the
+  preview).**
+  - **Keys (Review): ⌥⌘3 As Columns, ⌥⌘4 As Tiles** (Ctrl+Alt+3/4 off macOS), next to ⌥⌘1/⌥⌘2;
+    Finder's ⌘3/⌘4 stay the sidebar's places, as ⌘1/⌘2 did. No default-key conflict (the
+    registry test checks). `view.default` takes "columns" and "tiles". Undo: `AsColumns`,
+    `AsTiles` in `commands.rs`.
+  - **The columns' root (Review): the deepest sidebar place the folder is in (a favorite or a
+    volume), else its volume's root** (`/`, `C:\`), and it **stays while the folder is under it**
+    (a folder outside picks a new one). From the volume root, a folder in ~/Projects/arbor/src
+    would be six columns; from the place, Home's three. ← at the root column goes to the parent
+    anyway (the root moves up), where Finder stops. Undo: `columns::root_for`.
+  - **The active column is the tab's `Folder`; the other columns are plain listings.** So every
+    action resolves against the active column's folder with no code of its own, and a press,
+    right-click or drag in another column first makes it active from the listing on screen, in
+    the same frame and without a read (`State::adopt_column`), then acts. ←, →, Enter, ⌘↑/⌘↓,
+    Back and a crumb all do that when the folder is a column on screen. Each move is a
+    navigation (⌘[ goes back through them), and → selects the new column's first item, as
+    Finder does. Undo: the `adopt_column` call in `State::go_full`.
+  - **The folder just left becomes a column in the same frame from its own listing** (on the
+    right after ←, on the left after →), never kept past that sync (`Columns::spare`); I read
+    it as "on screen, moved", not a cache. A press in a column whose listing isn't in makes it
+    the active folder at once, empty and reading, rather than leaving the folder before (and its
+    selection) as what actions act on until it lands (after review). A file operation that changes a column's folder, and
+    ⌘R, read it again, its rows staying until the new listing lands. Undo: the `spare` push in
+    `State::land`.
+  - **Columns scroll by whole columns, the deepest after every move or resize; the wheel
+    scrolls back only as far as the active column stays on screen** (RUNE-GAPS: Rune's
+    horizontal scroll can't say which children are on screen, which "no entries off screen"
+    needs). One width for every column, 220 pt, its dividers drag it (140 to 520, this
+    session). Undo: `Columns::bounds`, `COL_W`.
+  - **A column waits at most 4 ms for its read (`columns::WAIT`), shared by every column one
+    change needs**, not a full frame: ↑↓ through big folders keeps the key within a frame; a
+    slower read lands through `poll`, the column empty until then (no "Loading…" flash).
+    Undo: `WAIT`.
+  - **The preview (Review): the selected file's preview is the last column, opened and closed
+    with the selection** (Finder's column view), the quick preview's own panel and worker and
+    rules (on demand: the user chose this view). Space turns it off and on for the session; Esc
+    doesn't close it. A docked preview open when the tab switches moves into the columns. In a
+    split window only the active pane's columns have it. Undo: `State::sync_column_preview`.
+  - **Rows in a column show the name alone** (with the ▸ for a folder), the active column too;
+    a search in the column view shows its results as a list. Undo: `Ctx::narrow`.
+  - **A column move that only moves listings already on screen is a key: 8 ms; one that reads
+    a folder is a listing: 50 ms** (corrected after review: the first version held every move
+    to 50 ms, and ← and → over 10k took 8.4 and 8.9 ms of CPU). Each column is one element
+    keyed by its number, active or not, and a listing moves between a column and the folder
+    with its rows and their version (`folder::Adopted`, `Column::ready`), so Rune keys nothing
+    and the rows aren't sorted, filtered or copied again: ← and → over 10k now take 1.8 and
+    2.3 ms of CPU (`column_cost`). The bench tells the two kinds apart by whether the key started
+    a read (`reads=` on a `key` line) and waits for a column's read to land before the next key.
+    Undo: the budgets in `examples/bench.rs`.
+  - **Idle, all four views: zero frames.** The redraw found here on Xvfb after As Icons, As List
+    or → (main too) was the rows' `live_only` layout handler, fixed on main (9e4f168, above).
+    Its idle test and `bench --idle` now cover the tiles and column views too, a column move
+    included: 0.00 s of CPU in 5 s for each view on tabot-dev.
+  - **Every drop is checked against the folder the user saw (second review).** One path
+    (`State::drop_into`, an `ops::Dest`): a folder row carries the identity its listing read
+    (`fs::Ident`, not following a link), a background (list, grid, column) or the other pane the
+    folder's own (`FileId`), and the worker refuses either if what's at the path differs, as a
+    paste does. A destination whose identity isn't known (a folder not read yet, a row whose
+    identity couldn't be read) takes nothing ("Nothing was dropped: … isn't read yet"), rather
+    than going ahead unchecked. The sidebar's favorites take no file drops (dropping folders on
+    the sidebar adds them as favorites), so there's nothing to check there. Undo: `drop_into`'s
+    `None` arm.
+  - **The column view drags rows in the window, never the system's way (second review)**, as
+    split view does: a file dragged onto a folder row or another column moves there; on macOS a
+    row can't then be dragged out to Finder from the column view (README, RUNE-GAPS). Undo: the
+    `None if c.narrow` arm in `view/list.rs::item_drags`, `column_drags`.
+  - **Tiles: one size** (48 pt icon in 248 × 72 pt tiles, widened to fill the row), the kind in
+    words then the extension ("Image · PNG"), then size and date; ⌘+/⌘- stay the icon view's.
+    It's the icon view's machinery (virtual rows, thumbnails at 48 pt, 2-D arrows, the
+    rectangle) with another cell. Undo: `Geom::tiles`, `tile_kind` in `view/grid.rs`.
 
 - **2026-11-10 · Milestone 16 review fixes: three judgment calls.**
   - **An emptied Go To field stays open** (real-Mac QA: Backspace held to clear ⌘L's path went

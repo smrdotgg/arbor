@@ -302,6 +302,15 @@ impl Preview {
 impl State {
     /// Space: opens the preview on the active pane's selection, or closes it.
     pub fn toggle_preview(&mut self) {
+        // The column view shows the selected file's preview as its last column: Space turns
+        // that on and off.
+        let f = self.cur();
+        if f.view == crate::grid::ViewMode::Columns && !f.searching() {
+            self.col_preview_off = !self.col_preview_off;
+            self.note = self.col_preview_off.then(|| "Previews are off in the column view: Space shows them again".to_string());
+            self.sync_preview();
+            return;
+        }
         if self.preview.is_some() {
             self.close_preview();
         } else {
@@ -318,6 +327,10 @@ impl State {
     /// Closes the panel: the read in flight stops, one waiting never starts, and no answer
     /// lands.
     pub fn close_preview(&mut self) {
+        if std::mem::take(&mut self.col_preview) {
+            // The column view's: it stays closed until Space.
+            self.col_preview_off = true;
+        }
         self.preview = None;
         if let Some(w) = &self.preview_worker {
             w.cancel();
@@ -331,27 +344,57 @@ impl State {
     /// earlier wake's poll already asked for, so a key handled in that frame would go
     /// unfollowed. Closed, it's one `None` check. True when the panel changed.
     pub(crate) fn sync_preview(&mut self) -> bool {
-        // Thumbnails follow what's on screen from the same places (`tiles.rs`).
+        // The column view's columns, and thumbnails, follow what's on screen from the same
+        // places (`columns.rs`, `tiles.rs`).
+        let cols = self.sync_columns();
         let tiles = self.sync_tiles();
-        self.sync_panels() | tiles
+        self.sync_panels() | tiles | cols
+    }
+
+    /// The column view's preview opens while the cursor is on a file and its column is on
+    /// screen, and closes otherwise (`State::column_preview_wanted`). True when it opened or
+    /// closed.
+    fn sync_column_preview(&mut self) -> bool {
+        let want = self.column_preview_wanted() && self.column_preview_on_screen();
+        if want && self.preview.is_none() {
+            if self.preview_worker.is_none() {
+                self.preview_worker = Some(Worker::spawn(self.waker.clone()));
+            }
+            self.preview = Some(Preview::new());
+            self.col_preview = true;
+            true
+        } else if want && !self.col_preview {
+            // The docked panel, open when the tab switched to columns: it moves into them.
+            self.col_preview = true;
+            true
+        } else if !want && self.col_preview {
+            self.col_preview = false;
+            self.preview = None;
+            if let Some(w) = &self.preview_worker {
+                w.cancel();
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// The preview and Get Info's panel, for [`sync_preview`](Self::sync_preview).
     fn sync_panels(&mut self) -> bool {
         // Get Info's panel follows the selection the same way.
-        let info = self.sync_info();
+        let info = self.sync_info() | self.sync_column_preview();
         let Some(p) = &mut self.preview else { return info };
         let f = &self.panes[self.active].f;
         let target = match (f.selected(), &p.target) {
-            (Some(e), Some(t)) if t.is(f.id, &f.cwd, e) => return false,
-            (None, None) if p.body == Body::Empty => return false,
+            (Some(e), Some(t)) if t.is(f.id, &f.cwd, e) => return info,
+            (None, None) if p.body == Body::Empty => return info,
             (e, _) => e.map(|e| Target::of(f.id, &f.cwd, e)),
         };
         if target.is_some() {
             self.preview_reads += 1;
         }
         let fit = self.preview_fit.get();
-        let Some(w) = &self.preview_worker else { return false };
+        let Some(w) = &self.preview_worker else { return info };
         p.retarget(w, target, fit);
         true
     }

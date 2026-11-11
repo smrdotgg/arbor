@@ -1091,6 +1091,7 @@ fn every_action_on_an_edited_result_goes_ahead() {
     s.run(Cmd::Split, &mut tx());
     settle_all(&mut s);
     s.panes[1].f.cwd = into.clone();
+    s.panes[1].f.dir_id = crate::noclobber::dir_id(&into);
     s.activate(0, &mut tx());
     assert!(s.cur().searching());
     pick(&mut s, "c/report-f6.txt");
@@ -1134,6 +1135,7 @@ fn every_action_refuses(name: &str, replace: fn(&Path)) {
     s.run(Cmd::Split, &mut tx());
     settle_all(&mut s);
     s.panes[1].f.cwd = into.clone();
+    s.panes[1].f.dir_id = crate::noclobber::dir_id(&into);
     s.activate(0, &mut tx());
     assert!(s.cur().searching());
     pick(&mut s, "a/report.txt");

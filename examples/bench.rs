@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! bench [RUNS] [ROUNDS] [--bin PATH] [--keep] [--tabs N] [--preview N] [--jump N] [--search N] [--rename N] [--grid N]
-//!       [--idle N] [--pace MS] [--gap MS]
+//!       [--tiles N] [--columns N] [--idle N] [--pace MS] [--gap MS]
 //! ```
 //!
 //! Makes a folder of 10,000 entries in the temp dir, then cold-starts Arbor on it RUNS times
@@ -69,9 +69,24 @@
 //! run counts only with 2 × ROUNDS keys after As Icons, and in the image folder a first
 //! thumbnail and a screenful.
 //!
+//! `--tiles N` adds N cold starts with `ARBOR_BENCH_GRID=3` in the 10k folder: As Tiles, then
+//! ROUNDS times Page Down and ↓, each timed. Such a run counts only with 2 × ROUNDS keys after
+//! As Tiles.
+//!
+//! `--columns N` adds N cold starts with `ARBOR_BENCH_COLUMNS=1` in a folder of 10,000 files
+//! (no folders, which sort first: → would select one and read it): As Columns, then ROUNDS
+//! times ← (to the parent: the 10k folder becomes the column on its right), ↓ (onto the next
+//! folder there, read for the column on the right), ↑ (back onto the 10k folder, read again)
+//! and → (into it: its 10k entries become the active column), each timed from the key to its
+//! frame. Keys that only move listings already on screen (← and →) are held to the key budget,
+//! 8 ms; keys that start a folder read (`reads=1`: ↓ and ↑) to the listing budget, 50 ms. The
+//! bench's temp folder is a sidebar place in these runs, so the columns start there (not at the
+//! disk's root, through a temp folder of any size). Such a run counts only with 4 × ROUNDS keys
+//! after As Columns, 2 × ROUNDS of them reading.
+//!
 //! `--idle N` (default 1; 0 skips it) checks NORTHSTAR's "idle means idle": N starts in a folder
-//! of a few JPEGs, PNGs and text files with `ARBOR_BENCH_IDLE=list`, and N with `=icons` (see
-//! `src/timing.rs`). Once a run says it's idle, the bench lets it settle for [`IDLE_SETTLE`],
+//! of a few JPEGs, PNGs and text files with each of `ARBOR_BENCH_IDLE=list`, `=icons`, `=tiles`
+//! and `=columns` (see `src/timing.rs`). Once a run says it's idle, the bench lets it settle for [`IDLE_SETTLE`],
 //! measures the CPU time Arbor uses over [`IDLE_WINDOW`] (from outside: `/proc` on Linux, `ps`
 //! on macOS, `GetProcessTimes` on Windows) and kills it. More than [`IDLE_MAX_CPU`] fails the
 //! bench (exit status 1): an idle window draws nothing, so it should be zero.
@@ -121,6 +136,8 @@ fn main() {
     let mut rename_runs = 0;
     let mut grid_runs = 0;
     let mut idle_runs = 1;
+    let mut tile_runs = 0;
+    let mut column_runs = 0;
     let (mut pace, mut gap) = (0u64, 0u64);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -134,6 +151,8 @@ fn main() {
             "--rename" => rename_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--rename N"),
             "--grid" => grid_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--grid N"),
             "--idle" => idle_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--idle N"),
+            "--tiles" => tile_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--tiles N"),
+            "--columns" => column_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--columns N"),
             "--pace" => pace = args.next().and_then(|n| n.parse::<u64>().ok()).expect("--pace MS"),
             "--gap" => gap = args.next().and_then(|n| n.parse::<u64>().ok()).expect("--gap MS"),
             n => nums.push(n.parse::<u32>().unwrap_or_else(|_| panic!("not a number: {n}"))),
@@ -293,8 +312,8 @@ fn main() {
     if idle_runs > 0 {
         let dir = root.join("idle");
         make_idle_folder(&dir);
-        for run in 0..idle_runs * 2 {
-            let view = if run % 2 == 0 { "list" } else { "icons" };
+        for run in 0..idle_runs * 4 {
+            let view = ["list", "icons", "tiles", "columns"][run as usize % 4];
             match idle_once(&bin, &dir, view) {
                 Ok(cpu) => {
                     if cpu > IDLE_MAX_CPU {
@@ -306,6 +325,43 @@ fn main() {
                     eprintln!("idle run {run} ({view}): INVALID: {e}");
                     idle_failed.push(format!("{view} invalid"));
                 }
+            }
+        }
+    }
+    let before = runs + tab_runs + preview_runs + jump_runs + search_runs + rename_runs + grid_runs * 2;
+    let mut tiles_key = Vec::new();
+    for run in 0..tile_runs {
+        match run_once(&bin, &big, rounds, Mode::Tiles) {
+            Ok(r) => tiles_key.extend(r.grid_key),
+            Err(e) => {
+                eprintln!("tiles run {run}: INVALID: {e}");
+                invalid.push(before + run);
+            }
+        }
+    }
+    let (mut col_moves, mut col_reads) = (Vec::new(), Vec::new());
+    let colbig = root.join("colbig");
+    if column_runs > 0 {
+        let _ = std::fs::remove_dir_all(&colbig);
+        std::fs::create_dir_all(&colbig).expect("temp dir");
+        for i in 0..ENTRIES {
+            std::fs::write(colbig.join(format!("IMG_{i:05}.jpg")), b"x").expect("a file");
+        }
+        // Its own settings: the bench's folder as the sidebar's one place (a literal string,
+        // so a Windows path needs no escaping).
+        let dir = root.join("dirs-columns").join("config").join(if cfg!(any(target_os = "macos", windows)) { "Arbor" } else { "arbor" });
+        std::fs::create_dir_all(&dir).expect("settings folder");
+        std::fs::write(dir.join("config.toml"), format!("[general]\nplaces = ['{}']\n", root.display())).expect("settings");
+    }
+    for run in 0..column_runs {
+        match run_once(&bin, &colbig, rounds, Mode::Columns) {
+            Ok(r) => {
+                col_moves.extend(r.col_moves);
+                col_reads.extend(r.col_reads);
+            }
+            Err(e) => {
+                eprintln!("columns run {run}: INVALID: {e}");
+                invalid.push(before + tile_runs + run);
             }
         }
     }
@@ -321,7 +377,7 @@ fn main() {
     let searches = search_runs > 0;
     let renames = rename_runs > 0;
     let grids = grid_runs > 0;
-    let rows: [(&str, &mut Vec<f64>, Option<f64>); 23] = [
+    let rows: [(&str, &mut Vec<f64>, Option<f64>); 26] = [
         ("cold start (spawn → first frame)*", &mut cold, Some(100.0)),
         ("  of which main → first frame", &mut main, None),
         ("listing visible (10k, nav → frame)", &mut nav, Some(50.0)),
@@ -345,6 +401,10 @@ fn main() {
         ("grid photos: key → frame, streaming", &mut grid_img_key, Some(8.0)),
         ("grid 1k photos: first thumbnail", &mut thumb_first, None),
         ("grid 1k photos: screen of thumbnails", &mut thumb_screen, None),
+        ("tiles 10k: key → frame (PgDn, ↓)", &mut tiles_key, Some(8.0)),
+        // Moving listings already on screen is a key; reading a folder, a listing.
+        ("columns: ←/→ over 10k, no read", &mut col_moves, Some(8.0)),
+        ("columns: ↓/↑ onto a folder (reads)", &mut col_reads, Some(50.0)),
     ];
     for (name, v, budget) in rows {
         let off = (name.starts_with("tab") && !tabs)
@@ -352,7 +412,9 @@ fn main() {
             || (name.contains("ump") && !jumps)
             || ((name.contains("search") || name.contains("stream") || name.contains("query")) && !searches)
             || (name.contains("rename") && !renames)
-            || (name.starts_with("grid") && !grids);
+            || (name.starts_with("grid") && !grids)
+            || (name.starts_with("tiles") && tile_runs == 0)
+            || (name.starts_with("columns") && column_runs == 0);
         if v.is_empty() && off {
             continue;
         }
@@ -415,7 +477,7 @@ fn main() {
     if idle_runs > 0 {
         let each: Vec<String> = idle.iter().map(|(v, cpu)| format!("{v} {cpu:.2} s")).collect();
         println!(
-            "idle CPU over {} s, after As Icons (and As List for list): {} (at most {IDLE_MAX_CPU} s){}",
+            "idle CPU over {} s, after As Icons (and As List for list), As Tiles, As Columns and ↓: {} (at most {IDLE_MAX_CPU} s){}",
             IDLE_WINDOW.as_secs(),
             each.join(", "),
             if idle_failed.is_empty() { String::new() } else { format!("  OVER: {}", idle_failed.join(", ")) }
@@ -542,6 +604,8 @@ enum Mode {
     Rename,
     Grid,
     GridImages,
+    Tiles,
+    Columns,
 }
 
 struct Run {
@@ -581,6 +645,9 @@ struct Run {
     thumb_first: Vec<f64>,
     thumb_screen: Vec<f64>,
     thumbs: Vec<usize>,
+    /// The column view: keys that only moved listings on screen, and keys that read a folder.
+    col_moves: Vec<f64>,
+    col_reads: Vec<f64>,
 }
 
 static PACE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -604,8 +671,13 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
     }
     let spawned = SystemTime::now();
     let mut cmd = Command::new(bin);
-    // Its own settings folder: the Jump history for `--jump`, an empty one otherwise.
-    let dirs = dir.parent().unwrap_or(dir).join(if mode == Mode::Jump { "dirs-jump" } else { "dirs" });
+    // Its own settings folder: the Jump history for `--jump`, the one place for `--columns`, an
+    // empty one otherwise.
+    let dirs = dir.parent().unwrap_or(dir).join(match mode {
+        Mode::Jump => "dirs-jump",
+        Mode::Columns => "dirs-columns",
+        _ => "dirs",
+    });
     cmd.env("RUNE_DIRS_ROOT", dirs);
     for (var, on) in [
         ("ARBOR_BENCH_TABS", mode == Mode::Tabs),
@@ -613,10 +685,13 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         ("ARBOR_BENCH_JUMP", mode == Mode::Jump),
         ("ARBOR_BENCH_SEARCH", mode == Mode::Search),
         ("ARBOR_BENCH_RENAME", mode == Mode::Rename),
-        ("ARBOR_BENCH_GRID", matches!(mode, Mode::Grid | Mode::GridImages)),
+        ("ARBOR_BENCH_GRID", matches!(mode, Mode::Grid | Mode::GridImages | Mode::Tiles)),
+        ("ARBOR_BENCH_COLUMNS", mode == Mode::Columns),
     ] {
         if on && mode == Mode::GridImages {
             cmd.env(var, "2");
+        } else if on && mode == Mode::Tiles {
+            cmd.env(var, "3");
         } else if on {
             cmd.env(var, "1");
         } else {
@@ -700,6 +775,8 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         thumb_first: Vec::new(),
         thumb_screen: Vec::new(),
         thumbs: Vec::new(),
+        col_moves: Vec::new(),
+        col_reads: Vec::new(),
     };
     let mut keys = 0;
     let mut streaming = false;
@@ -765,10 +842,21 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
                     run.rename_plain.extend(field("ms"));
                 }
             }
-            Some("key") if matches!(mode, Mode::Grid | Mode::GridImages) => {
+            Some("key") if mode == Mode::Columns => {
+                // As Columns, then ←, ↓, ↑ and → each round, split by whether they read.
+                if keys > 0 {
+                    if field("reads") == Some(1.0) {
+                        run.col_reads.extend(field("ms"));
+                    } else {
+                        run.col_moves.extend(field("ms"));
+                    }
+                }
+                keys += 1;
+            }
+            Some("key") if matches!(mode, Mode::Grid | Mode::GridImages | Mode::Tiles) => {
                 // As Icons, then Page Down and ↓ each round; in the image folder only the keys
                 // handled while thumbnails were decoding count (the rest are icons only).
-                if keys > 0 && (mode == Mode::Grid || field("thumbs").is_some_and(|n| n > 0.0)) {
+                if keys > 0 && (mode != Mode::GridImages || field("thumbs").is_some_and(|n| n > 0.0)) {
                     run.grid_key.extend(field("ms"));
                 }
                 keys += 1;
@@ -797,8 +885,20 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         return Err(format!("no first frame logged:\n{}", lines.join("\n")));
     }
     let want = rounds as usize;
-    if matches!(mode, Mode::Grid | Mode::GridImages) {
-        let thumbs_ok = mode == Mode::Grid || (run.thumb_first.len() == 1 && run.thumb_screen.len() == 1);
+    if mode == Mode::Columns {
+        if keys != want * 4 + 1 || run.col_reads.len() != want * 2 {
+            return Err(format!(
+                "expected {} keys, {} of them reading, got {keys} and {}:\n{}",
+                want * 4 + 1,
+                want * 2,
+                run.col_reads.len(),
+                lines.join("\n")
+            ));
+        }
+        return Ok(run);
+    }
+    if matches!(mode, Mode::Grid | Mode::GridImages | Mode::Tiles) {
+        let thumbs_ok = mode != Mode::GridImages || (run.thumb_first.len() == 1 && run.thumb_screen.len() == 1);
         if keys != want * 2 + 1 || !thumbs_ok {
             return Err(format!(
                 "expected {} keys (and in the photos a first thumbnail and a screenful), got {keys}, {} and {}:\n{}",

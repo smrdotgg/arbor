@@ -8,6 +8,8 @@
 //! `Latest` in `poll` like any other background answer. A newer request on the same `Latest`
 //! makes an older one's answer drop, as usual.
 
+use std::sync::{Arc, Condvar, Mutex};
+
 use rune::Latest;
 
 /// Runs `work` on `loader`'s worker and waits here up to `wait` for it. If it's done in time,
@@ -20,12 +22,28 @@ pub(crate) fn read_waiting<T: Send + 'static>(
     wait: std::time::Duration,
     work: impl FnOnce() -> Option<T> + Send + 'static,
 ) -> Option<T> {
-    use std::sync::{Arc, Condvar, Mutex};
-    struct Hand<T> {
-        waiting: bool,
-        got: Option<T>,
+    let w = start(loader, !wait.is_zero(), work);
+    if wait.is_zero() {
+        return None;
     }
-    let hand = Arc::new((Mutex::new(Hand { waiting: !wait.is_zero(), got: None }), Condvar::new()));
+    w.until(std::time::Instant::now() + wait)
+}
+
+/// One request started by [`start`], to be waited for until a deadline shared with others (the
+/// column view starts every column it needs, then waits for them all within one bound).
+pub(crate) struct Waiting<T> {
+    hand: Arc<(Mutex<Hand<T>>, Condvar)>,
+}
+
+struct Hand<T> {
+    waiting: bool,
+    got: Option<T>,
+}
+
+/// Starts `work` on `loader`'s worker. With `waiting`, its answer is held for
+/// [`Waiting::until`]; without, it lands through the loader as any request's.
+pub(crate) fn start<T: Send + 'static>(loader: &Latest<T>, waiting: bool, work: impl FnOnce() -> Option<T> + Send + 'static) -> Waiting<T> {
+    let hand = Arc::new((Mutex::new(Hand { waiting, got: None }), Condvar::new()));
     let worker = hand.clone();
     loader.request_opt((), move |()| {
         let listing = work()?;
@@ -39,21 +57,33 @@ pub(crate) fn read_waiting<T: Send + 'static>(
             Some(listing)
         }
     });
-    if wait.is_zero() {
-        return None;
+    Waiting { hand }
+}
+
+impl<T> Drop for Waiting<T> {
+    /// Never waited for: the answer lands through the loader.
+    fn drop(&mut self) {
+        self.hand.0.lock().unwrap_or_else(|e| e.into_inner()).waiting = false;
     }
-    let deadline = std::time::Instant::now() + wait;
-    let (lock, cv) = &*hand;
-    let mut h = lock.lock().unwrap_or_else(|e| e.into_inner());
-    while h.got.is_none() {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            break;
+}
+
+impl<T> Waiting<T> {
+    /// The answer if it comes by `deadline` (then it never lands through the loader); else
+    /// `None`, and it lands through the loader when it comes.
+    pub(crate) fn until(self, deadline: std::time::Instant) -> Option<T> {
+        let hand = self.hand.clone();
+        let (lock, cv) = &*hand;
+        let mut h = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while h.got.is_none() {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            h = cv.wait_timeout(h, left).unwrap_or_else(|e| e.into_inner()).0;
         }
-        h = cv.wait_timeout(h, left).unwrap_or_else(|e| e.into_inner()).0;
+        h.waiting = false;
+        h.got.take()
     }
-    h.waiting = false;
-    h.got.take()
 }
 
 #[cfg(test)]

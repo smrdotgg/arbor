@@ -95,7 +95,7 @@ impl State {
         let expect = ours.map(|c| c.expect.clone()).unwrap_or_default();
         let op = if move_requested || was_cut { Op::Move { sources: files, dest } } else { Op::Copy { sources: files, dest } };
         let op = checked(op, expect);
-        if self.start_into(op, dest_id) && was_cut {
+        if self.start_into(op, dest_id.map(|id| (ops::DestId::Folder(id), "pasted"))) && was_cut {
             self.clip = None;
         }
     }
@@ -266,8 +266,8 @@ impl State {
     }
 
     /// [`State::start`], for a copy or move into a folder that must still be the one with
-    /// identity `dest_id` when the worker starts.
-    pub fn start_into(&mut self, op: Op, dest_id: Option<crate::noclobber::FileId>) -> bool {
+    /// identity `dest_id` when the worker starts (with the verb its refusal says).
+    pub fn start_into(&mut self, op: Op, dest_id: Option<(ops::DestId, &'static str)>) -> bool {
         if self.job.is_some() {
             self.note = Some("Still working on the last operation (Esc cancels it)".into());
             return false;
@@ -408,6 +408,10 @@ impl State {
                 f.recheck_results(&changed, &landed);
                 continue;
             }
+            // The column view's other columns showing a changed folder read it again too.
+            if let Some(cols) = f.cols.as_mut() {
+                cols.reread(folders, false);
+            }
             let going = f.pending.as_ref().is_some_and(|p| matches!(p.nav, Nav::New | Nav::Back | Nav::Forward));
             let (at, at_id) = match &f.pending {
                 // Not listed yet: its identity isn't known.
@@ -463,25 +467,41 @@ impl State {
         Some(item)
     }
 
-    /// Files dropped on a folder (or on the list, for the current folder). Same disk moves,
-    /// another disk copies, as in Finder; ⌥ always copies.
-    pub fn drop_files(&mut self, files: &[PathBuf], into: PathBuf, tx: &mut Tx) {
-        self.drop_checked(files, into, ops::Checks::default(), tx);
-    }
-
-    /// [`State::drop_files`] for rows dragged from a pane, each checked against the identity
-    /// its listing or the walk saw.
-    pub(crate) fn drop_checked(&mut self, files: &[PathBuf], into: PathBuf, expect: ops::Checks, tx: &mut Tx) {
+    /// Files dropped on a folder: every drop, from other apps or Arbor's own rows (each of
+    /// those checked against the identity its listing or the walk saw, `expect`), on any view's
+    /// folder row or background, a column, or the other pane. Same disk moves, another disk
+    /// copies, as in Finder; ⌥ always copies. The folder goes with the identity it was listed
+    /// with, and the worker refuses one put in its place since, as a paste does; one whose
+    /// identity wasn't known (not read yet, or unreadable) takes nothing.
+    pub(crate) fn drop_into(&mut self, files: &[PathBuf], dest: ops::Dest, expect: ops::Checks, tx: &mut Tx) {
         for p in &mut self.panes {
             p.f.drop_target = None;
+            if let Some(cols) = p.f.cols.as_mut() {
+                cols.drop_target = None;
+            }
         }
-        let files: Vec<PathBuf> = files.iter().filter(|f| f.parent() != Some(into.as_path()) || tx.mods().alt).cloned().collect();
+        let alt = tx.mods().alt;
+        let files: Vec<PathBuf> = files.iter().filter(|f| f.parent() != Some(dest.path.as_path()) || alt).cloned().collect();
         if files.is_empty() {
             return;
         }
-        let copy = tx.mods().alt || !files.iter().all(|f| same_disk(f, &into));
-        let op = if copy { Op::Copy { sources: files, dest: into } } else { Op::Move { sources: files, dest: into } };
-        self.start(checked(op, expect));
+        let copy = alt || !files.iter().all(|f| same_disk(f, &dest.path));
+        self.send_into(files, dest, expect, !copy, "dropped");
+    }
+
+    /// What every copy or move into a folder the user chose on screen goes through (a drop,
+    /// F5 and F6 into the other pane): into `dest` as it was listed, the worker refusing a
+    /// folder put in its place since, and one whose identity wasn't known taking nothing, each
+    /// item checked against `expect`. `verb` is what its refusal says wasn't done.
+    pub(crate) fn send_into(&mut self, files: Vec<PathBuf>, dest: ops::Dest, expect: ops::Checks, mv: bool, verb: &'static str) {
+        let ops::Dest { path: into, id } = dest;
+        let Some(id) = id else {
+            let name = into.file_name().map_or_else(|| into.display().to_string(), |n| n.to_string_lossy().into_owned());
+            self.note = Some(format!("Nothing was {verb}: “{name}” isn't read yet, so Arbor can't tell it's the folder shown"));
+            return;
+        };
+        let op = if mv { Op::Move { sources: files, dest: into } } else { Op::Copy { sources: files, dest: into } };
+        self.start_into(checked(op, expect), Some((id, verb)));
     }
 
     // ---- context menu -----------------------------------------------------------------------

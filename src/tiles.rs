@@ -275,13 +275,20 @@ impl State {
     /// not covered by the preview or Get Info (which take the other pane's place when split).
     pub(crate) fn grid_on_screen(&self, ix: usize) -> bool {
         let f = &self.panes[ix].f;
-        let covered = self.split() && ix != self.active && (self.preview.is_some() || self.info.is_some());
-        f.view == crate::grid::ViewMode::Icons && !f.visible.is_empty() && !covered
+        let covered = self.split() && ix != self.active && self.panel_docked();
+        f.view.is_grid() && !f.visible.is_empty() && !covered
     }
 
-    /// The icon's side in device pixels: what thumbnails decode to.
-    pub(crate) fn tile_fit(&self) -> u32 {
-        (self.icon_size.icon() * self.ui_scale.get().max(1.0)).round() as u32
+    /// Whether the preview or Get Info is open as the docked panel (taking the other pane's
+    /// place when split); the column view's preview is drawn in its columns instead.
+    pub(crate) fn panel_docked(&self) -> bool {
+        (self.preview.is_some() && !self.col_preview) || self.info.is_some()
+    }
+
+    /// The icon's side in pane `ix`'s grid (icons or tiles) in device pixels: what its
+    /// thumbnails decode to.
+    pub(crate) fn tile_fit(&self, ix: usize) -> u32 {
+        (self.panes[ix].f.view.icon(self.icon_size) * self.ui_scale.get().max(1.0)).round() as u32
     }
 
     /// Keeps thumbnails to grids on screen: a pane whose grid isn't (another tab shown, the
@@ -293,8 +300,8 @@ impl State {
     /// from `poll`, never left to a grid's own callbacks. True when anything changed.
     pub(crate) fn sync_tiles(&mut self) -> bool {
         let mut changed = false;
-        let fit = self.tile_fit();
         for ix in 0..self.panes.len() {
+            let fit = self.tile_fit(ix);
             if !self.grid_on_screen(ix) {
                 let f = &mut self.panes[ix].f;
                 changed |= f.tiles.take().is_some();
@@ -318,7 +325,7 @@ impl State {
     /// dropped or cancelled. True when the view changed (a thumbnail went).
     pub(crate) fn tiles_visible(&mut self, id: u64, rows: Range<usize>) -> bool {
         let Some(ix) = self.pane_ix(id) else { return false };
-        let fit = self.tile_fit().max(1);
+        let fit = self.tile_fit(ix).max(1);
         if !self.grid_on_screen(ix) {
             return self.panes[ix].f.tiles.take().is_some();
         }

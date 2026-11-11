@@ -163,9 +163,14 @@ impl<'a> Worker<'a> {
 
     /// [`Worker::run`], first checking that a copy's or move's destination is still the folder
     /// with identity `dest_id`.
-    pub(super) fn run_into(&mut self, op: Op, dest_id: Option<noclobber::FileId>) -> Outcome {
-        if let (Some(want), Op::Copy { dest, .. } | Op::Move { dest, .. }) = (dest_id, &op)
-            && noclobber::dir_id(dest) != Some(want)
+    pub(super) fn run_into(&mut self, op: Op, dest_id: Option<(super::DestId, &'static str)>) -> Outcome {
+        // Through the identity checks of the items (a paste of what Arbor cut, rows dragged).
+        let inner = match &op {
+            Op::Checked { op, .. } => op.as_ref(),
+            op => op,
+        };
+        if let (Some((want, verb)), Op::Copy { dest, .. } | Op::Move { dest, .. }) = (dest_id, inner)
+            && !want.holds(dest)
         {
             let why = if dest.symlink_metadata().is_ok() {
                 "is another folder now (the one there was moved or replaced)"
@@ -177,7 +182,7 @@ impl<'a> Worker<'a> {
                 undo: None,
                 inverse: None,
                 errors: Vec::new(),
-                refused: Some(format!("Nothing was pasted: “{}” {why}", name_of(dest))),
+                refused: Some(format!("Nothing was {verb}: “{}” {why}", name_of(dest))),
                 cancelled: false,
                 moved: Vec::new(),
                 removed: Vec::new(),

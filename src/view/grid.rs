@@ -1,5 +1,5 @@
-//! The icon view: a virtual grid of fixed cells, an icon (or a thumbnail, once one lands) over
-//! each item's name. Only the rows on screen (and Rune's mounted window around them) are built;
+//! The grid views: a virtual grid of fixed cells, an icon (or a thumbnail, once one lands) over
+//! each item's name (As Icons), or a larger one beside its name, kind and size (As Tiles). Only the rows on screen (and Rune's mounted window around them) are built;
 //! which rows are visible drives the thumbnails (`tiles.rs`). Everything else, presses, drags,
 //! drops, the context menu and the inline rename, is the list's, through the same functions.
 
@@ -9,7 +9,7 @@ use crate::grid::{Geom, INSET, PAD};
 /// The icon view's body inside the list's scroll viewport `base`.
 pub(super) fn cells(f: &Folder, c: Ctx, base: El) -> El {
     let id = c.id;
-    let g = grid_geom(c);
+    let g = grid_geom(f, c);
     // The arrows and revealing the cursor need the columns (geometry, written as drawn).
     f.grid_cols.set(g.cols);
     let n = f.visible.len();
@@ -43,8 +43,8 @@ pub(super) fn cells(f: &Folder, c: Ctx, base: El) -> El {
     ))
 }
 
-/// The grid's layout in pane `c`: its icon size, in the list's width as last laid out.
-pub(super) fn grid_geom(c: Ctx) -> Geom {
+/// The grid's layout in pane `c`: its view and icon size, in the list's width as last laid out.
+pub(super) fn grid_geom(f: &Folder, c: Ctx) -> Geom {
     let w = if c.list[2] > 0.0 {
         c.list[2]
     } else if c.w < f32::MAX {
@@ -52,7 +52,7 @@ pub(super) fn grid_geom(c: Ctx) -> Geom {
     } else {
         800.0
     };
-    Geom::new(c.icons, w)
+    f.view.geom(c.icons, w).unwrap_or_else(|| Geom::new(c.icons, w))
 }
 
 fn grid_row(s: &State, f: &Folder, r: usize, g: Geom, c: Ctx) -> El {
@@ -74,7 +74,8 @@ fn cell(s: &State, f: &Folder, i: usize, g: Geom, c: Ctx) -> El {
     let cursor = !selected && i == f.sel && !f.marked.is_empty();
     let drop_here = f.drop_target.as_ref() == Some(&e.os);
     let version = f.version;
-    let size = c.icons.icon();
+    let tiles = f.view == crate::grid::ViewMode::Tiles;
+    let size = f.view.icon(c.icons);
     let renaming = s.rename.as_ref().filter(|r| r.os == e.os && c.focused);
     let (w, h) = (g.cell[0] - 2.0 * INSET, g.cell[1] - 2.0 * INSET);
     let picture = match f.tiles.as_ref().and_then(|t| t.shown.get(&e.os)) {
@@ -112,25 +113,41 @@ fn cell(s: &State, f: &Folder, i: usize, g: Geom, c: Ctx) -> El {
             if e.is_link {
                 name.push_str(" ↗");
             }
-            let t = text(name).font(SMALL).color(fg).align(Align::Center).max_lines(2).px(4.0).py(1.0).radius(4.0).min_w(0.0);
+            let t = if tiles {
+                text(name).font(BODY).color(fg).truncate_middle().px(4.0).py(1.0).radius(4.0).min_w(0.0)
+            } else {
+                text(name).font(SMALL).color(fg).align(Align::Center).max_lines(2).px(4.0).py(1.0).radius(4.0).min_w(0.0)
+            };
             match label_fill {
                 Some(fill) => t.fill(fill),
                 None => t,
             }
         }
     };
-    let mut item = col()
-        .key(e.key.clone())
+    let item = if tiles {
+        // The icon on the left; the name, then its kind, then its size and date (what fits).
+        let dim = if selected && c.focused { l.t.text } else { l.t.text_secondary };
+        let size_line = if e.is_dir {
+            fs::fmt_time(e.mtime_ms, f.now)
+        } else {
+            format!("{} · {}", fs::fmt_size(e.size), fs::fmt_time(e.mtime_ms, f.now))
+        };
+        let details = col()
+            .grow(1.0)
+            .min_w(0.0)
+            .gap(1.0)
+            .child(row().w_full().child(label.shrink()))
+            .child(text(tile_kind(e)).font(SMALL).color(dim).truncate().px(4.0).min_w(0.0))
+            .child(text(size_line).font(NUM).color(dim).truncate().px(4.0).min_w(0.0));
+        row().key(e.key.clone()).w(w).h(h).gap(8.0).px(6.0).center_y().child(picture).child(details)
+    } else {
+        col().key(e.key.clone()).w(w).h(h).gap(4.0).items_center().child(picture).child(label)
+    };
+    let mut item = item
         .role("option")
         .focus_selected(selected)
         .position_in_set(i + 1, f.visible.len())
-        .w(w)
-        .h(h)
-        .gap(4.0)
-        .items_center()
         .radius(6.0)
-        .child(picture)
-        .child(label)
         .on_press_tx(move |s: &mut State, tx| press_item(s, tx, id, i, version))
         .on_double_press_tx(move |s: &mut State, tx| open_item(s, tx, id, i, version))
         .on_secondary_press(move |s: &mut State, press, tx| {
@@ -188,6 +205,27 @@ pub(crate) fn kind(e: &crate::fs::Entry) -> Kind {
         }
         "exe" | "msi" | "deb" | "rpm" | "appimage" | "apk" | "pkg" => Kind::App,
         _ => Kind::Other,
+    }
+}
+
+/// A tile's kind line: the broad kind in words, then the extension ("Image · PNG").
+fn tile_kind(e: &crate::fs::Entry) -> String {
+    let word = match kind(e) {
+        Kind::Folder => return "Folder".into(),
+        Kind::App if e.is_dir => return "Application".into(),
+        Kind::Image => "Image",
+        Kind::Video => "Video",
+        Kind::Audio => "Audio",
+        Kind::Text => "Text",
+        Kind::Code => "Code",
+        Kind::Archive => "Archive",
+        Kind::Document => "Document",
+        Kind::App => "Application",
+        Kind::Other => "File",
+    };
+    match fs::ext(&e.lower) {
+        "" => word.into(),
+        x => format!("{word} · {}", x.to_uppercase()),
     }
 }
 

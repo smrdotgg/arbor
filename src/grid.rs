@@ -1,4 +1,6 @@
-//! The icon view's geometry: a tab's view mode, the icon sizes, and where each item's cell is.
+//! The grid views' geometry: a tab's view mode, the icon sizes, and where each item's cell is.
+//! The icon view and the tiles view are both grids (the tiles' cells are wider, with the
+//! icon beside the details instead of over the name).
 //!
 //! The grid is fixed-size cells laid out left to right, top to bottom, as many to a row as the
 //! pane's width takes. Everything here is arithmetic on that layout, so keyboard movement,
@@ -14,6 +16,11 @@ pub enum ViewMode {
     List,
     /// A grid of icons (and thumbnails) with names under them.
     Icons,
+    /// Finder's column browser: a column per folder from a root down to this one, the
+    /// selected folder's contents (or the selected file's preview) to the right (`columns.rs`).
+    Columns,
+    /// A grid of wide tiles: a larger icon (or thumbnail) beside the name, kind and size.
+    Tiles,
 }
 
 impl ViewMode {
@@ -22,10 +29,42 @@ impl ViewMode {
         match s {
             "list" => Some(ViewMode::List),
             "icons" | "grid" => Some(ViewMode::Icons),
+            "columns" => Some(ViewMode::Columns),
+            "tiles" => Some(ViewMode::Tiles),
             _ => None,
         }
     }
+
+    /// Laid out as a grid of cells (the icon view's machinery: 2-D arrows, cell hits,
+    /// thumbnails for the rows on screen).
+    pub fn is_grid(self) -> bool {
+        matches!(self, ViewMode::Icons | ViewMode::Tiles)
+    }
+
+    /// The grid this view lays out in a list `width` points wide (`None`: not a grid).
+    pub fn geom(self, size: IconSize, width: f32) -> Option<Geom> {
+        match self {
+            ViewMode::Icons => Some(Geom::new(size, width)),
+            ViewMode::Tiles => Some(Geom::tiles(width)),
+            ViewMode::List | ViewMode::Columns => None,
+        }
+    }
+
+    /// The side of a cell's icon (and its thumbnail), in points.
+    pub fn icon(self, size: IconSize) -> f32 {
+        match self {
+            ViewMode::Tiles => TILE_ICON,
+            _ => size.icon(),
+        }
+    }
 }
+
+/// A tile's icon side, its cell's size and the narrowest it gets, in points. Tiles have one
+/// size (⌘+ and ⌘- are the icon view's): wide enough for a name, its kind and its size beside
+/// a 48 pt icon, and they widen to fill the row (as many columns as fit at the narrowest).
+pub const TILE_ICON: f32 = 48.0;
+pub const TILE_W: f32 = 248.0;
+pub const TILE_H: f32 = 72.0;
 
 /// The icon view's size. One for the window (⌘+ and ⌘- change it); `view.icon_size` in the
 /// settings is where it starts.
@@ -99,6 +138,17 @@ impl Geom {
         let cell = size.cell();
         let cols = ((width - 2.0 * PAD) / cell[0]).floor();
         Geom { cols: if cols.is_finite() && cols >= 1.0 { cols as usize } else { 1 }, cell }
+    }
+
+    /// The tiles view's grid in a list `width` points wide: as many [`TILE_W`] columns as fit,
+    /// each widened to share what's left over (so the tiles line up with both edges).
+    pub fn tiles(width: f32) -> Geom {
+        let room = width - 2.0 * PAD;
+        let cols = (room / TILE_W).floor();
+        let cols = if cols.is_finite() && cols >= 1.0 { cols as usize } else { 1 };
+        // An absurd width (before the first layout, `f32::MAX`) keeps the plain tile.
+        let w = if room > TILE_W && room < 100_000.0 { (room / cols as f32).floor() } else { TILE_W };
+        Geom { cols, cell: [w, TILE_H] }
     }
 
     /// Rows for `n` items.
@@ -201,6 +251,25 @@ mod tests {
         assert_eq!(IconSize::Small.step(-1), None);
         assert_eq!(IconSize::named("large"), Some(IconSize::Large));
         assert_eq!(ViewMode::named("icons"), Some(ViewMode::Icons));
-        assert_eq!(ViewMode::named("columns"), None);
+        assert_eq!(ViewMode::named("columns"), Some(ViewMode::Columns));
+        assert_eq!(ViewMode::named("tiles"), Some(ViewMode::Tiles));
+        assert_eq!(ViewMode::named("gallery"), None);
+        assert!(ViewMode::Tiles.is_grid() && ViewMode::Icons.is_grid());
+        assert!(!ViewMode::Columns.is_grid() && !ViewMode::List.is_grid());
+    }
+
+    #[test]
+    fn tiles_fill_the_row() {
+        // 2 × 248 fits in 600 less the padding; each tile takes half of what's there.
+        let g = Geom::tiles(600.0);
+        assert_eq!(g.cols, 2);
+        assert_eq!(g.cell, [((600.0 - 2.0 * PAD) / 2.0f32).floor(), TILE_H]);
+        assert_eq!(Geom::tiles(100.0).cols, 1, "always one column");
+        assert_eq!(Geom::tiles(100.0).cell[0], TILE_W, "too narrow: the tile keeps its width (the list clips)");
+        assert_eq!(Geom::tiles(f32::MAX).cell[0], TILE_W);
+        assert_eq!(ViewMode::Tiles.geom(IconSize::Large, 600.0), Some(g), "one size whatever the icon size");
+        assert_eq!(ViewMode::Columns.geom(IconSize::Large, 600.0), None);
+        // The 2-D arrows work on it as on the icon view's.
+        assert_eq!(step(0, g.cols, 5, 0, 1), 2);
     }
 }
