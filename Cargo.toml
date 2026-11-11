@@ -58,6 +58,11 @@ serde_json = "1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# Only for the type `rune::warm_gpu` takes (src/main.rs): the wgpu Rune already builds, with
+# Rune's features.
+wgpu = { version = "30", default-features = false }
+
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # org.freedesktop.FileManager1 on the session bus, served only while Arbor is the default for
 # folders (src/incoming/linux.rs). The same zbus and Tokio Rune's `dbus` feature already builds, so no

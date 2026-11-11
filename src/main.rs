@@ -93,6 +93,13 @@ fn main() {
     // Both overlap the platform's app launch (about 80 ms on macOS before the window is made):
     // the GPU device and shaders, and the first folder's read.
     rune::prewarm_gpu();
+    // Windows and Linux (where `prewarm_gpu` does nothing): the same on Rune's other path, the
+    // window's GPU device and renderer made on a thread while Rune builds its event loop and
+    // window, which take them as soon as the window exists. Headless runs make no window.
+    #[cfg(not(target_os = "macos"))]
+    if rune::tooling::headless_run().is_none() {
+        rune::warm_gpu(wgpu::Features::empty());
+    }
     app::read_first_folder();
     // Linux: the window's app id (Wayland) and WM_CLASS (X11), matching arbor.desktop.
     rune::set_app_id("arbor");
