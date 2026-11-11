@@ -1492,3 +1492,27 @@ fn a_reload_never_brings_back_an_item_hiding_deselected() {
     settle_all(&mut s);
     assert_eq!(s.cur().target_paths(), want, "the reload didn't bring it back");
 }
+
+/// A hidden tab keeps its selection exactly, and its cursor apart: one item selected with the
+/// cursor on another (⌘-click on, ⌘-click off) comes back as that item, not the cursor's.
+#[test]
+fn a_hidden_tab_keeps_its_selection_exactly() {
+    let d = folder("memo-exact", 0);
+    for n in ["a", "b", "c"] {
+        std::fs::write(d.join(n), n).unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let f = s.cur_mut();
+    f.select(0);
+    f.toggle_mark(1);
+    f.toggle_mark(1);
+    let want = vec![d.join("a")];
+    assert_eq!(s.cur().target_paths(), want);
+    // Hidden and shown again (as a tab switch does), its folder read fresh.
+    s.new_tab(&mut Tx::default());
+    s.run(Cmd::PrevTab, &mut Tx::default());
+    settle_all(&mut s);
+    assert_eq!(s.cur().target_paths(), want, "the selection");
+    assert_eq!(s.cur().cursor_name().as_deref(), Some(std::ffi::OsStr::new("b")), "the cursor, apart");
+}

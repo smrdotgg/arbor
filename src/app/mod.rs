@@ -423,6 +423,7 @@ impl State {
                     path: f.cwd.clone(),
                     nav: Nav::Reload,
                     select: Vec::new(),
+                    cursor: None,
                     rename: false,
                     scroll: 0.0,
                     picks: 0,
@@ -584,6 +585,7 @@ impl State {
             path,
             nav: Nav::Fresh,
             select: Vec::new(),
+            cursor: None,
             rename: false,
             scroll: 0.0,
             picks: 0,
@@ -1031,21 +1033,21 @@ impl State {
         // made; if the user picked something else meanwhile, their choice stands, so a ⌘C right
         // after a click copies what was clicked.
         if p.nav == Nav::Reload && f.picks != p.picks {
-            p.select = f.picked();
+            (p.select, p.cursor) = f.selection_names();
             p.rename = false;
             p.picks = f.picks;
-            // Marked on the new listing's entries on a worker (two or more; or none, where the
-            // worker marked the old selection): looking through a big folder here would hold up
-            // the window. Then it lands, unless the user picks again meanwhile.
-            if (p.select.len() > 1 || a.picked.is_some()) && a.listing.result.is_ok() {
-                let select = p.select.clone();
+            // Marked on the new listing's entries on a worker (when there are marks; or none,
+            // where the worker marked the old selection): looking through a big folder here
+            // would hold up the window. Then it lands, unless the user picks again meanwhile.
+            if (p.marks() || a.picked.is_some()) && a.listing.result.is_ok() {
+                let select = if p.marks() { p.select.clone() } else { Vec::new() };
                 let mut a = a;
                 f.pending = Some(p);
                 f.loader.request_opt((), move |()| {
                     if let Ok(entries) = &mut a.listing.result {
                         crate::folder::mark_named(entries, &select);
                     }
-                    a.picked = Some(select);
+                    a.picked = Some(select).filter(|s| !s.is_empty());
                     Some(a)
                 });
                 return false;
@@ -1090,7 +1092,7 @@ impl State {
                 if a.sort != f.sort {
                     fs::sort_entries(&mut entries, f.sort);
                 }
-                let old = std::mem::replace(&mut f.cwd, p.path);
+                let old = std::mem::replace(&mut f.cwd, p.path.clone());
                 let old_id = std::mem::replace(&mut f.dir_id, a.listing.dir_id);
                 let moved = old != f.cwd;
                 let left_from = (moved && f.cols.is_some()).then(|| old.clone());
@@ -1161,7 +1163,7 @@ impl State {
                 // listing's worker marked them on their entries when this is what it was asked
                 // to select (a column made active, the only other way with two or more, is
                 // marked here).
-                let several = p.select.len() > 1;
+                let several = p.marks();
                 if several && a.picked.as_ref() != Some(&p.select) {
                     crate::folder::mark_named(&mut f.entries, &p.select);
                 }
@@ -1171,10 +1173,10 @@ impl State {
                     Some((visible, version)) if a.sort == f.sort && f.filter.is_empty() && !several => {
                         f.visible = visible;
                         f.version = version;
-                        let pick = p.select.first();
+                        let pick = p.cursor_name();
                         f.sel = pick.and_then(|n| f.visible.iter().position(|&e| f.entries[e as usize].os == *n)).unwrap_or(0);
                     }
-                    _ => f.refilter_carried(p.select.first().map(OsString::as_os_str)),
+                    _ => f.refilter_carried(p.cursor_name().map(OsString::as_os_str)),
                 }
                 f.anchor = f.sel;
                 // The folder was read: its volume's free space, now that its identity says which
@@ -1484,15 +1486,16 @@ pub(crate) const IN_OTHER_SEARCH: &str = "The other pane is showing search resul
 /// the read that shows it reads again, still restoring its selection and scroll.
 pub(crate) fn reload_folder(f: &mut Folder, names: Vec<OsString>, rename: bool) {
     if let Some(p) = f.pending.as_ref().filter(|p| p.nav == Nav::Show) {
-        let (keep, scroll) = (if names.is_empty() { p.select.clone() } else { names }, p.scroll);
-        f.request(f.cwd.clone(), Nav::Show, keep, false);
+        let (keep, cursor) = if names.is_empty() { (p.select.clone(), p.cursor.clone()) } else { (names, None) };
+        let scroll = p.scroll;
+        f.request_chosen(f.cwd.clone(), Nav::Show, keep, cursor, false);
         if let Some(p) = &mut f.pending {
             p.scroll = scroll;
         }
         return;
     }
-    let keep = if names.is_empty() { f.targets().iter().map(|e| e.os.clone()).collect() } else { names };
-    f.request(f.cwd.clone(), Nav::Reload, keep, rename);
+    let (keep, cursor) = if names.is_empty() { f.selection_names() } else { (names, None) };
+    f.request_chosen(f.cwd.clone(), Nav::Reload, keep, cursor, rename);
 }
 
 pub fn is_path_like(s: &str) -> bool {

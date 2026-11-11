@@ -36,8 +36,12 @@ pub(crate) struct Pending {
     pub req: u64,
     pub path: PathBuf,
     pub nav: Nav,
-    /// Names to select once the listing lands; the first gets the cursor.
+    /// Names to select once the listing lands (the selection, exactly: those still there);
+    /// the cursor goes on `cursor`, else the first. Only the cursor's name: just it selected,
+    /// as after a click.
     pub select: Vec<OsString>,
+    /// Where the cursor goes, when not on the first of `select` (it may be deselected).
+    pub cursor: Option<OsString>,
     /// Start renaming the first selected name once it lands (a new folder).
     pub rename: bool,
     /// Where to scroll the list once it lands ([`Nav::Show`]).
@@ -47,14 +51,29 @@ pub(crate) struct Pending {
     pub picks: u64,
 }
 
+impl Pending {
+    /// Where the cursor goes once it lands.
+    pub fn cursor_name(&self) -> Option<&OsString> {
+        self.cursor.as_ref().or(self.select.first())
+    }
+
+    /// Whether it lands with items marked (two or more, or one the cursor isn't on), rather
+    /// than the cursor alone selected.
+    pub fn marks(&self) -> bool {
+        self.select.len() > 1 || (self.select.len() == 1 && self.cursor.as_ref().is_some_and(|c| *c != self.select[0]))
+    }
+}
+
 /// What a hidden tab keeps. No entries: its folder is read again when it's shown.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabMemo {
     pub path: PathBuf,
     pub back: Vec<PathBuf>,
     pub fwd: Vec<PathBuf>,
-    /// The cursor's name first, then the rest of a multiple selection.
+    /// The selection, exactly, in display order (only the cursor's name: just it).
     pub select: Vec<OsString>,
+    /// The cursor's item (which may be deselected).
+    pub cursor: Option<OsString>,
     /// How far the list was scrolled, in points.
     pub scroll: f32,
     pub filter: String,
@@ -75,7 +94,7 @@ pub struct Answer {
     pub req: u64,
     pub sort: Sort,
     pub listing: Listing,
-    /// The names it was asked to select (two or more): those it lists are marked on their
+    /// The names it was asked to mark (`Pending::marks`): those it lists are marked on their
     /// entries (`Entry::sel`) on the worker, so landing a reload of a big folder with a big
     /// selection doesn't look through it on the window's thread.
     pub picked: Option<Vec<OsString>>,
@@ -89,7 +108,7 @@ impl Answer {
     /// The listing's read of `path`, selecting `select` once it lands (on the worker).
     fn read(req: u64, sort: Sort, path: PathBuf, select: Vec<OsString>, stop: &AtomicBool) -> Option<Answer> {
         let mut listing = fs::list_until(path, sort, stop)?;
-        let picked = match (&mut listing.result, select.len() > 1) {
+        let picked = match (&mut listing.result, !select.is_empty()) {
             (Ok(entries), true) => {
                 mark_named(entries, &select);
                 Some(select)
@@ -372,6 +391,12 @@ impl Folder {
 
     /// Asks for a fresh read of `path`; it lands in `State::poll` (a newer request wins).
     pub(crate) fn request(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, rename: bool) {
+        self.request_chosen(path, nav, select, None, rename);
+    }
+
+    /// [`Folder::request`] with the cursor's item apart from the selection
+    /// ([`Pending::cursor`]).
+    pub(crate) fn request_chosen(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, cursor: Option<OsString>, rename: bool) {
         // Going anywhere ends a search (its walk stops), and the thumbnails being decoded. The
         // go-to field stays as it is (a reload keeps it; a navigation that lands clears its text
         // and closes it together).
@@ -381,11 +406,11 @@ impl Folder {
         self.adopted = None;
         let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
         let picks = self.picks;
-        self.pending = Some(Pending { req, path: path.clone(), nav, select, rename, scroll: 0.0, picks });
+        self.pending = Some(Pending { req, path: path.clone(), nav, select, cursor, rename, scroll: 0.0, picks });
         // An answer about the folder's volume asked before isn't wanted: the new listing asks
         // again when it lands (`State::land`), with the volume its identity names.
         self.free_inbox.forget();
-        let select = self.pending.as_ref().map(|p| p.select.clone()).unwrap_or_default();
+        let select = self.pending.as_ref().filter(|p| p.marks()).map(|p| p.select.clone()).unwrap_or_default();
         self.loader.request_opt(path, move |p| Answer::read(req, sort, p, select, &stop));
     }
 
@@ -395,7 +420,7 @@ impl Folder {
     pub(crate) fn request_now(&mut self, wait: std::time::Duration) -> Option<Answer> {
         let req = self.pending.as_ref()?.req;
         let (path, sort, stop) = (self.cwd.clone(), self.sort, self.stop_read());
-        let select = self.pending.as_ref().map(|p| p.select.clone()).unwrap_or_default();
+        let select = self.pending.as_ref().filter(|p| p.marks()).map(|p| p.select.clone()).unwrap_or_default();
         crate::bounded::read_waiting(&self.loader, wait, move || Answer::read(req, sort, path, select, &stop))
     }
 
@@ -433,6 +458,7 @@ impl Folder {
                 back,
                 fwd,
                 select: p.select.clone(),
+                cursor: p.cursor.clone(),
                 scroll: 0.0,
                 filter: String::new(),
                 goto: false,
@@ -449,6 +475,7 @@ impl Folder {
                 back: self.back.clone(),
                 fwd: self.fwd.clone(),
                 select: p.select.clone(),
+                cursor: p.cursor.clone(),
                 scroll: p.scroll,
                 filter: self.filter.clone(),
                 goto: self.goto,
@@ -458,17 +485,15 @@ impl Folder {
                 view: self.view,
             };
         }
-        let cursor = self.cursor_name();
-        let mut select: Vec<OsString> = cursor.clone().into_iter().collect();
-        if self.marked.len() > 1 {
-            // In display order, so it reads back the same.
-            select.extend(self.targets().into_iter().map(|e| e.os.clone()).filter(|n| Some(n) != cursor.as_ref()));
-        }
+        // The selection exactly (in display order, so it reads back the same), and the cursor
+        // apart: it may be off the selection.
+        let (select, cursor) = self.selection_names();
         TabMemo {
             path: self.cwd.clone(),
             back: self.back.clone(),
             fwd: self.fwd.clone(),
             select,
+            cursor,
             scroll: self.scroll.get(),
             filter: self.filter.clone(),
             goto: self.goto,
@@ -515,6 +540,7 @@ impl Folder {
             path: self.cwd.clone(),
             nav: Nav::Show,
             select: m.select,
+            cursor: m.cursor,
             rename: false,
             scroll: m.scroll,
             picks: self.picks,
@@ -611,19 +637,17 @@ impl Folder {
         self.version = next_version();
     }
 
-    /// The selection by name, for a reload to put back: the cursor first when it's selected (or
-    /// nothing is marked), then the rest, sorted. A cursor the user deselected (⌘-click) isn't
-    /// in it: the first selected item takes the cursor when it lands, so what an action acts on
-    /// stays exactly what it was.
-    pub fn picked(&self) -> Vec<OsString> {
+    /// The selection by name, exactly, in display order (with nothing marked, the cursor's
+    /// item), and the cursor's item apart (it may be off the selection): what a hidden tab
+    /// keeps, and what a reload puts back ([`Pending::select`], [`Pending::cursor`]).
+    pub fn selection_names(&self) -> (Vec<OsString>, Option<OsString>) {
         let cursor = self.cursor_name();
-        if self.marked.is_empty() {
-            return cursor.into_iter().collect();
-        }
-        let names = self.marked.iter().filter_map(|r| self.visible.get(r)).map(|&i| &self.entries[i as usize].os);
-        let mut rest: Vec<OsString> = names.filter(|n| Some(*n) != cursor.as_ref()).cloned().collect();
-        rest.sort();
-        cursor.filter(|_| self.marked.contains(self.sel)).into_iter().chain(rest).collect()
+        let items = if self.marked.is_empty() {
+            cursor.clone().into_iter().collect()
+        } else {
+            self.targets().into_iter().map(|e| e.os.clone()).collect()
+        };
+        (items, cursor)
     }
 
     pub fn cursor_name(&self) -> Option<OsString> {
