@@ -306,8 +306,8 @@ Folders First and Reset Columns. The palette has the same: "Show the Date Create
 the Kind Column" and so on, and "Reset Columns". **Drag the line before a column's header** to
 make that column wider or narrower; the name takes what's left, and never gets narrower than
 180 pt, so a column can't be dragged past that. A pane too narrow for every column leaves out
-the least needed first (Permissions, Date Created, Extension, Kind, then Date Modified; Size
-stays). A click on a header sorts by it (Extension sorts as Kind does, by extension; Permissions
+the least needed first (Permissions, Date Created, Extension, Kind, then Date Modified; then
+Size narrows, and goes last), only on screen: the widths you set are kept. A click on a header sorts by it (Extension sorts as Kind does, by extension; Permissions
 doesn't sort), and "Sort by Date Created" is in the palette. Every column comes from what the
 listing reads anyway (one `lstat`/`statx` per item, or Windows' directory record), so showing
 one costs nothing more per item; Date Created shows "—" where the disk keeps no creation time

@@ -62,7 +62,7 @@ impl Ctx {
         if self.w == f32::MAX {
             return None;
         }
-        Some(((self.w - self.cols.fixed()) * FOLDER_GROW / (1.0 + FOLDER_GROW)).floor().max(24.0))
+        Some(self.cols.folder_w(self.w, FOLDER_GROW / (1.0 + FOLDER_GROW)))
     }
 }
 

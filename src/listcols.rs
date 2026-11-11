@@ -12,7 +12,7 @@
 //! - **Widths:** a column's left edge in the header drags its width; the name takes what's
 //!   left, never less than [`NAME_MIN`]. A pane too narrow for every shown column leaves out
 //!   the least needed first (Permissions, Date Created, Extension, Kind, then Date Modified),
-//!   as it left out Kind and then the date before; Size always stays while it's shown.
+//!   as it left out Kind and then the date before; then Size narrows, and goes last.
 //! - **No file:** the defaults. **Read** once at startup by the startup read, with the
 //!   settings (never the window's thread); a file that can't be read or isn't valid gives the
 //!   defaults and a note, and the next change replaces it. **Written** by one thread of its
@@ -235,7 +235,9 @@ impl ListCols {
 
     /// The shown columns that fit a pane `pane_w` wide, with their widths: what's left after
     /// them is the name's (and a search's Folder column's, `folder`), at least [`NAME_MIN`]
-    /// (and [`FOLDER_MIN`]). Before the pane's first layout (`f32::MAX`) all of them.
+    /// (and [`FOLDER_MIN`]). The least needed go first; then Size narrows to its least, then
+    /// goes too, so the name always keeps its room. For display only: the widths kept (and
+    /// saved) don't change. Before the pane's first layout (`f32::MAX`) all of them.
     pub fn fit(&self, pane_w: f32, folder: bool) -> Fit {
         let mut fit = Fit { w: [None; 6], folder };
         for f in Field::ALL {
@@ -243,7 +245,7 @@ impl ListCols {
                 fit.w[f.ix()] = Some(self.width(f));
             }
         }
-        // The least needed go first; Size stays whatever the width (as it always has).
+        // The least needed go first, Size last.
         let mut order: Vec<Field> = Field::ALL.into_iter().filter(|&f| self.shown(f) && f != Field::Size).collect();
         order.sort_by_key(|f| f.keep_rank());
         let mut drop = order.into_iter();
@@ -252,6 +254,14 @@ impl ListCols {
                 Some(f) => fit.w[f.ix()] = None,
                 None => break,
             }
+        }
+        // Still too narrow: Size gives what it can down to its least, then goes.
+        let slack = fit.slack(pane_w);
+        if slack < 0.0
+            && let Some(w) = fit.get(Field::Size)
+        {
+            let narrower = (w + slack).floor();
+            fit.w[Field::Size.ix()] = (narrower >= Field::Size.min_w()).then_some(narrower);
         }
         fit
     }
@@ -286,6 +296,14 @@ impl Fit {
     /// Room the columns after the name take, with the gap before each and the row's padding.
     pub fn fixed(&self) -> f32 {
         2.0 * PAD + self.iter().map(|(_, w)| w + GAP).sum::<f32>() + if self.folder { GAP } else { 0.0 }
+    }
+
+    /// A search's Folder column's width in a pane `pane_w` wide: `share` of what the other
+    /// columns leave (the name has the rest), but never so much that the name gets less than
+    /// [`NAME_MIN`] (none at all in a pane too narrow for even that).
+    pub fn folder_w(&self, pane_w: f32, share: f32) -> f32 {
+        let room = pane_w - self.fixed();
+        (room * share).floor().min(room - NAME_MIN).max(0.0)
     }
 
     /// How much room past the least the name (and Folder) need is left in a pane `pane_w`
@@ -645,7 +663,7 @@ mod tests {
         assert!(said[0].starts_with("Couldn't save the columns"), "{said:?}");
     }
 
-    /// A narrow pane leaves out the least needed columns first; Size stays; the name always
+    /// A narrow pane leaves out the least needed columns first, Size last; the name always
     /// keeps its room once something was left out.
     #[test]
     fn a_narrow_pane_leaves_out_the_least_needed_first() {
@@ -660,10 +678,11 @@ mod tests {
         let order = |w: f32| c.fit(w, false).iter().map(|(f, _)| f).collect::<Vec<_>>();
         assert_eq!(order(full - 1.0), [Field::Kind, Field::Extension, Field::Size, Field::Modified, Field::Created]);
         assert_eq!(order(full - c.width(Field::Permissions) - GAP - 1.0), [Field::Kind, Field::Extension, Field::Size, Field::Modified]);
-        assert_eq!(order(300.0), [Field::Size], "Size stays");
-        for w in [200.0, 400.0, 500.0, 700.0, full - 1.0, full] {
+        assert_eq!(order(300.0), [Field::Size], "Size stays last");
+        assert_eq!(order(200.0), [], "and goes when even it leaves the name too little");
+        for w in [200.0, 300.0, 400.0, 500.0, 700.0, full - 1.0, full] {
             let fit = c.fit(w, false);
-            assert!(fit.slack(w) >= 0.0 || fit.iter().map(|(f, _)| f).eq([Field::Size]), "{w}: {fit:?}");
+            assert!(fit.slack(w) >= 0.0 || fit.iter().count() == 0, "{w}: {fit:?}");
         }
         // The defaults as the list had them: Kind goes first, then the date.
         let d = ListCols::default();
@@ -673,6 +692,35 @@ mod tests {
         assert_eq!(d.fit(base + 2.0 * GAP + 132.0 + 72.0, false).iter().count(), 3);
         // A search's Folder column needs its room too.
         assert!(d.fit(base + 2.0 * GAP + 132.0 + 72.0, true).iter().count() < 3);
+    }
+
+    /// However narrow the pane, the name keeps its 180 pt while there's room for it at all:
+    /// Size narrows, then goes, for display only (the width kept stays), and a search's Folder
+    /// column takes only what's past the name's least.
+    #[test]
+    fn the_name_keeps_its_least_in_any_pane() {
+        let mut c = ListCols::default();
+        for f in Field::ALL {
+            c.set_shown(f, true);
+        }
+        c.set_width(Field::Size, 200.0);
+        for folder in [false, true] {
+            for w in (100..1400).step_by(7).map(|w| w as f32) {
+                let fit = c.fit(w, folder);
+                let room = w - fit.fixed();
+                let name = if folder { room - fit.folder_w(w, 0.6 / 1.6) } else { room };
+                if w >= 2.0 * PAD + NAME_MIN + if folder { GAP } else { 0.0 } {
+                    assert!(name >= NAME_MIN, "{w} folder={folder}: name {name}, {fit:?}");
+                } else {
+                    assert_eq!(fit.iter().count(), 0, "{w}: no room for any column");
+                }
+            }
+        }
+        // 2 × 12 + 180 + 12 + 100: Size narrows to 100 rather than squeezing the name.
+        let only_size = |w: f32| c.fit(w, false).iter().collect::<Vec<_>>();
+        assert_eq!(only_size(316.0), [(Field::Size, 100.0)]);
+        assert_eq!(only_size(2.0 * PAD + NAME_MIN + GAP + Field::Size.min_w() - 1.0), [], "then goes");
+        assert_eq!(c.width(Field::Size), 200.0, "the width kept doesn't change");
     }
 
     /// A drag keeps a column within its limits and never takes the name below its least.
