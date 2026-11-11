@@ -1427,7 +1427,22 @@ mod tests {
     /// mode sits in padding; Date Created is its identity's birth time).
     #[test]
     fn an_entry_is_no_bigger_for_the_columns() {
-        // 256 bytes before (and still) on 64-bit targets.
-        assert!(std::mem::size_of::<Entry>() <= 256, "{}", std::mem::size_of::<Entry>());
+        /// `Entry` as it was before the columns (256 bytes on 64-bit Linux and macOS, 272 on
+        /// Windows, whose `OsString` is bigger).
+        #[allow(dead_code)]
+        struct Before {
+            os: OsString,
+            name: String,
+            lower: String,
+            key: String,
+            is_dir: bool,
+            is_link: bool,
+            hidden: bool,
+            size: u64,
+            mtime_ms: i64,
+            id: Option<Ident>,
+            pending: Option<String>,
+        }
+        assert_eq!(std::mem::size_of::<Entry>(), std::mem::size_of::<Before>());
     }
 }
