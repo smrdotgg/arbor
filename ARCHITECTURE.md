@@ -52,7 +52,7 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `complete.rs` | Tab completion in go-to mode |
 | | `info.rs`, `openwith/` | Get Info (and its streaming total); Open With (per platform, `xdg.rs`) |
 | | `sidebar.rs`, `volumes.rs` | Favorites and their file; Locations and Eject |
-| | `volinfo.rs` | The status bar's free space: a thread per volume, one query in flight each |
+| | `volinfo.rs` | The status bar's free space: at most four threads, one query in flight per volume |
 | | `listcols.rs` | The list's columns after the name: which show, their widths, how they fit a pane, `columns.toml` and its writer, the header's drag |
 | Platform glue | `handler/` | Making Arbor the default for folders, and restoring (`linux.rs`, `windows.rs`, `mac.rs`) |
 | | `incoming/` | Folders other apps send (`mac.rs` Apple events, `linux.rs` D-Bus, `windows.rs` a pipe) |
@@ -90,10 +90,10 @@ Nothing runs in the background unless the user did something, and nothing polls.
   (the operation's waker is moved to its new owner, `Shared::own_job`). Each registers with
   `persist::at_exit` and gets up to 100 ms when Arbor quits (`persist::drain_at_exit`).
 - **Free space** (`arbor-volume`, `volinfo.rs`): the status bar's `statvfs`, never on Rune's
-  pool (it can't be stopped, and a dead network volume never answers). A thread per volume with
-  a query in flight, below the window's priority, ending when that volume has nothing waiting;
-  one query in flight per volume (a stuck one gets no second thread), newer ones superseding a
-  folder's older ones. Asked when a listing lands and after a file operation.
+  pool (it can't be stopped, and a dead network volume never answers). At most four threads in
+  the whole app, below the window's priority, ending when nothing waits; volumes by device, one
+  query in flight per volume (its answer goes to every folder that asked about it); while all
+  four are stuck nothing new starts. Asked when a listing lands and after a file operation.
 - **Get Info's total** (`arbor-info`): one walk per request, waking the window at most every
   30 ms.
 - **Listeners** (not in tests or the bench): `incoming::listen` (macOS open-documents events,

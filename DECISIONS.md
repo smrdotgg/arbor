@@ -72,6 +72,13 @@ Format: date · decision · why · how to undo.
     changes (a scan of a 500k list per change was 33 ms); a pattern, an inversion and ⌘A look
     at every row anyway; a reload's selection is found on the listing's worker. ⇧-click still
     makes its range afresh, as it did. Undo: `view::status`, `volinfo.rs`, `marked.rs`.
+  - **Free space: at most four threads in all (PM, 2026-11-11, second review)**: volumes keyed
+    by device (`st_dev`, the volume serial number), never by path (a folder whose identity
+    isn't known isn't asked about); when all four are stuck, nothing new starts and the status
+    bar shows no free space (not a figure that may be stale); a stuck thread can't be killed,
+    but its answer is dropped once nobody wants it. As listings on a hung volume behave; within
+    NORTHSTAR (no work starts for a view that's gone; a blocked call uses no CPU). Undo:
+    `volinfo::THREADS`.
   - **Narrow panes (after review):** once every other column is gone, Size narrows to its
     least and then goes, so Name keeps its 180 pt; a search's Folder column gets only what's
     past Name's least. Only on screen: the widths kept are the user's. Undo: `ListCols::fit`.

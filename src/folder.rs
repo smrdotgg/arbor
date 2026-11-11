@@ -629,13 +629,18 @@ impl Folder {
         (self.marked.len() >= 2).then(|| self.marked.picked())
     }
 
-    /// Asks for the free space of the volume the folder on screen is on (`volinfo.rs`: its own
-    /// thread per volume, never the listings' workers): when its listing lands and after a file
+    /// Asks for the free space of the volume the folder on screen is on (`volinfo.rs`: at most
+    /// four threads of its own, never the listings' workers): when its listing lands and after a file
     /// operation, never on a timer. A newer query supersedes this folder's older one; the
     /// answer lands in `State::poll`.
     pub(crate) fn ask_free(&mut self) {
-        let volume = crate::volinfo::Volume::of(&self.cwd, self.dir_id);
-        crate::volinfo::ask(&self.free_inbox, volume, self.cwd.clone());
+        let device = self.dir_id.map(|d| d.volume());
+        match crate::volinfo::ask(&self.free_inbox, device, self.cwd.clone()) {
+            crate::volinfo::Started::Yes => {}
+            // Every reader is stuck, or the volume isn't known: no free space shown (not a
+            // figure that may be out of date).
+            crate::volinfo::Started::Waiting | crate::volinfo::Started::Unknown => self.free = None,
+        }
     }
 
     /// The free space read for the folder on screen, if it's in.

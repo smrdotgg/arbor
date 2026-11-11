@@ -1421,6 +1421,7 @@ fn free_space_is_read_off_the_window_thread_and_not_while_idle() {
 /// listing after them).
 #[test]
 fn hung_free_space_reads_never_hold_up_listings() {
+    let _one_at_a_time = crate::volinfo::hanging();
     let dirs: Vec<PathBuf> = (0..7).map(|i| folder(&format!("hung-free-{i}"), 1)).collect();
     let gates: Vec<_> = dirs.iter().map(|d| crate::fs::free_reads::hold(d)).collect();
     let mut s = state_in(&dirs[0]);

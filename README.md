@@ -332,9 +332,9 @@ free"). With two or more items selected it adds their number and the files' tota
 ("3 selected · 4.2 MB · 120 items"); folders are counted, not measured ("5 selected · 4.2 MB +
 2 folders"), since nothing walks them. The free space is one `statvfs` (Windows:
 `GetDiskFreeSpaceExW`) read when a folder's listing lands and after a file operation, never on a
-timer, on a thread of its own per volume (never the listings' workers): a disk that doesn't
-answer (a dead network share) holds up only its own free space, which then shows the last
-amount known or nothing, and is never asked twice at once. It's left out while a note or an
+timer, on at most four threads of its own (never the listings' workers), one question at a time
+per disk: a disk that doesn't answer (a dead network share) holds up only its own free space,
+and while four don't answer, no free space is shown for the others either. It's left out while a note or an
 operation's progress is showing on the left.
 
 ### Tabs and split view
