@@ -361,9 +361,11 @@ impl Folder {
         let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
         let picks = self.picks;
         self.pending = Some(Pending { req, path: path.clone(), nav, select, rename, scroll: 0.0, picks });
-        // Its volume's free space, alongside (one call on another worker; the listing never waits).
-        self.ask_free(path.clone());
-        self.loader.request_opt(path, move |p| Some(Answer { req, sort, listing: fs::list_until(p, sort, &stop)? }));
+        self.loader.request_opt(path.clone(), move |p| Some(Answer { req, sort, listing: fs::list_until(p, sort, &stop)? }));
+        // Its volume's free space, alongside: one call on another worker, asked after the
+        // listing so it never takes the listing's worker. It usually lands first, in time for
+        // the listing's frame.
+        self.ask_free(path);
     }
 
     /// Asks for a fresh read of the folder as it is ([`Nav::Show`]), waiting here at most `wait`
@@ -371,9 +373,17 @@ impl Folder {
     /// the path and an empty list on screen until then.
     pub(crate) fn request_now(&mut self, wait: std::time::Duration) -> Option<Answer> {
         let req = self.pending.as_ref()?.req;
-        self.ask_free(self.cwd.clone());
         let (path, sort, stop) = (self.cwd.clone(), self.sort, self.stop_read());
-        crate::bounded::read_waiting(&self.loader, wait, move || Some(Answer { req, sort, listing: fs::list_until(path, sort, &stop)? }))
+        // `bounded::read_waiting`, with the volume's free space asked between starting the
+        // listing and waiting for it (after it, as `request` does).
+        let waiting = crate::bounded::start(&self.loader, !wait.is_zero(), move || {
+            Some(Answer { req, sort, listing: fs::list_until(path, sort, &stop)? })
+        });
+        self.ask_free(self.cwd.clone());
+        if wait.is_zero() {
+            return None;
+        }
+        waiting.until(std::time::Instant::now() + wait)
     }
 
     /// This tab's lightweight state, to keep while it's hidden.
