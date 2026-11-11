@@ -790,3 +790,39 @@ fn backspace_in_an_empty_go_to_field_stays_in_the_field() {
     assert_eq!(s.pending_path(), d.parent(), "Backspace with no field: the parent folder");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Backspaces past the end of an open go-to field (`typed` characters of it): none of them
+/// goes anywhere, and the field stays open.
+fn backspace_out(s: &mut State, typed: usize, d: &Path) {
+    let mut tx = Tx::default();
+    for _ in 0..typed + 5 {
+        assert!(s.on_key(&KeyEvent { key: Key::Backspace, mods: rune::Mods::default() }, &mut tx));
+    }
+    assert_eq!((s.cur().cwd.as_path(), s.pending_path()), (d, None), "no navigation");
+    assert!(s.cur().filter.is_empty() && s.cur().goto, "the field is still open");
+}
+
+/// The go-to field keeps its mode with its text: through a reload (⌘R), and through its tab
+/// being hidden and shown again. Emptied by Backspace afterwards, it still stays open.
+#[test]
+fn an_open_go_to_field_survives_a_reload_and_a_tab_switch() {
+    let d = folder("goto-keep", 2);
+    let mut s = state_in(&d);
+    settle(&mut s);
+    let mut tx = Tx::default();
+    s.run(Cmd::GoTo, &mut tx);
+    let typed = s.cur().filter.chars().count();
+    s.run(Cmd::Reload, &mut tx);
+    settle(&mut s);
+    assert!(s.cur().goto && s.cur().filter.chars().count() == typed, "kept through the reload");
+    backspace_out(&mut s, typed, &d);
+    // Hidden and shown again.
+    s.run(Cmd::Clear, &mut tx);
+    s.run(Cmd::GoTo, &mut tx);
+    s.run(Cmd::NewTab, &mut tx);
+    s.run(Cmd::PrevTab, &mut tx);
+    settle(&mut s);
+    assert!(s.cur().goto && s.cur().filter.chars().count() == typed, "kept in the tab's memo");
+    backspace_out(&mut s, typed, &d);
+    let _ = std::fs::remove_dir_all(&d);
+}

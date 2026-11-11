@@ -56,6 +56,8 @@ pub struct TabMemo {
     /// How far the list was scrolled, in points.
     pub scroll: f32,
     pub filter: String,
+    /// The go-to field was open (`Folder::goto`), with `filter` its text (or emptied).
+    pub goto: bool,
     pub sort: Sort,
     /// The user chose this tab's sort (see [`Folder::sort_set`]).
     pub sort_set: bool,
@@ -281,10 +283,10 @@ impl Folder {
 
     /// Asks for a fresh read of `path`; it lands in `State::poll` (a newer request wins).
     pub(crate) fn request(&mut self, path: PathBuf, nav: Nav, select: Vec<OsString>, rename: bool) {
-        // Going anywhere ends a search (its walk stops), and the thumbnails being decoded, and
-        // closes the go-to field.
+        // Going anywhere ends a search (its walk stops), and the thumbnails being decoded. The
+        // go-to field stays as it is (a reload keeps it; a navigation that lands clears its text
+        // and closes it together).
         self.search = None;
-        self.goto = false;
         self.tiles = None;
         let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
         let picks = self.picks;
@@ -337,6 +339,7 @@ impl Folder {
                 select: p.select.clone(),
                 scroll: 0.0,
                 filter: String::new(),
+                goto: false,
                 sort: self.sort,
                 sort_set: self.sort_set,
                 search: None,
@@ -352,6 +355,7 @@ impl Folder {
                 select: p.select.clone(),
                 scroll: p.scroll,
                 filter: self.filter.clone(),
+                goto: self.goto,
                 sort: self.sort,
                 sort_set: self.sort_set,
                 search: None,
@@ -371,6 +375,7 @@ impl Folder {
             select,
             scroll: self.scroll.get(),
             filter: self.filter.clone(),
+            goto: self.goto,
             sort: self.sort,
             sort_set: self.sort_set,
             search: None,
@@ -384,7 +389,6 @@ impl Folder {
         // The tab that was here is hidden now: its read or search, if any, stops.
         self.stop_read();
         self.search = None;
-        self.goto = false;
         self.tiles = None;
         self.grid_rows = None;
         self.tiles_for = None;
@@ -400,6 +404,7 @@ impl Folder {
         self.back = m.back;
         self.fwd = m.fwd;
         self.filter = m.filter;
+        self.goto = m.goto;
         self.sort = m.sort;
         self.sort_set = m.sort_set;
         self.view = m.view;
