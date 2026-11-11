@@ -419,7 +419,7 @@ impl State {
     /// read before the change.
     pub(crate) fn refresh(
         &mut self,
-        folders: &[(PathBuf, Option<crate::noclobber::FileId>)],
+        folders: &[(PathBuf, Option<crate::noclobber::DirId>)],
         select: &[PathBuf],
         canon: &[(PathBuf, PathBuf)],
     ) {
@@ -444,7 +444,7 @@ impl State {
                 Some(p) if going => (p.path.clone(), None),
                 _ => (f.cwd.clone(), f.dir_id),
             };
-            let same = |(path, id): &&(PathBuf, Option<crate::noclobber::FileId>)| match (at_id, id) {
+            let same = |(path, id): &&(PathBuf, Option<crate::noclobber::DirId>)| match (at_id, id) {
                 (Some(a), Some(b)) => a == *b,
                 _ => *path == at,
             };

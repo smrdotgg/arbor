@@ -45,6 +45,11 @@ Format: date · decision · why · how to undo.
     to a fresh `create_new` name beside it and then given its name with the no-replace rename
     (`IPersistFile::Save` replaces what's at its path). The status bar says "Made as shortcuts
     (.lnk): …". No new windows-sys features. Undo: `ops::links::shortcut_fallback`.
+  - **A folder's identity (`noclobber::DirId`) has its birth time, or on Linux without one the
+    file system's handle** (after review): device and inode alone took a folder removed and
+    made again at the freed inode (ext4) for the one listed, so New File, New Folder, a paste
+    and a drop went into it. Never the ctime, which a folder's every new entry changes. Every
+    "same folder?" check uses it. Undo: `noclobber::dir_id`.
   - **New Folder now checks the folder's identity too**, as New File does: one put at the
     folder's path since it was listed makes nothing ("Nothing was made: … is another folder
     now"). A folder whose identity isn't known yet (still being read) is used as before. Undo:

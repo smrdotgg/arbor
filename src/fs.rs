@@ -384,7 +384,7 @@ pub struct Listing {
     pub result: Result<Vec<Entry>, String>,
     /// The folder's own identity (links followed), so two panes showing one folder by different
     /// paths (a symlink, a junction) are known to be the same. `None` when it can't be had.
-    pub dir_id: Option<crate::noclobber::FileId>,
+    pub dir_id: Option<crate::noclobber::DirId>,
     /// It couldn't be read because there's no folder there (checked on the worker, only after
     /// a failed read): Jump drops such a folder from its history.
     pub missing: bool,

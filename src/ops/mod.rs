@@ -356,7 +356,7 @@ pub struct Outcome {
     pub canon: Vec<(PathBuf, PathBuf)>,
     /// The folders the operation may have changed, with their identities (links followed), so
     /// the panes showing them, by any path, read them again.
-    pub folders: Vec<(PathBuf, Option<noclobber::FileId>)>,
+    pub folders: Vec<(PathBuf, Option<noclobber::DirId>)>,
     /// Where identity is told by ctime alone ([`crate::fs::Ident::by_ctime`]): each identity an
     /// item had when it was chosen, and the one Arbor's own action gave it, read right after
     /// (renaming, moving or trashing an item changes its ctime, and its other names' too). Rows
@@ -405,7 +405,7 @@ const TRASH: TrashFn = tests::fake_trash;
 pub enum DestId {
     /// The folder's own identity, links followed (`Folder::dir_id`, a column's): a paste, a drop
     /// on a list's or a column's background, on the other pane.
-    Folder(noclobber::FileId),
+    Folder(noclobber::DirId),
     /// A folder row's identity as its listing read it (not following a link): a drop on a row.
     Item(crate::fs::Ident),
 }

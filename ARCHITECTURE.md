@@ -124,6 +124,9 @@ Nothing runs in the background unless the user did something, and nothing polls.
   search walk, `std` metadata). *Is it unchanged?* is `ops::Print` (`ops/print.rs`: identity,
   type, size, mtime, and a tree for folders): undo, redo, batch rename (from its preview, and its
   rollback) and a cancelled copy's cleanup refuse if anything differs.
+  A *folder's* identity, links followed (`noclobber::DirId`: a listing's `dir_id`, where a
+  paste, drop, New File or New Folder goes), has its birth time or Linux's handle the same way,
+  but never its ctime.
 - **Mount boundaries** (`mounts.rs`). `Mounts` (Linux's mount table, read once per operation)
   and `volume` (macOS's volume per folder) decide what's "another disk"; `Fence` bundles them
   for a walk. Used by permanent delete, cleanup of cancelled copies, cross-disk

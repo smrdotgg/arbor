@@ -137,7 +137,7 @@ pub enum Root {
     Picked(PathBuf, Option<fs::Ident>),
     /// The folder on screen, reached as the user reached it (a link in its path, or the path
     /// itself, is how they navigated there), and only while it's still the folder listed.
-    Here(PathBuf, Option<crate::noclobber::FileId>),
+    Here(PathBuf, Option<crate::noclobber::DirId>),
 }
 
 impl Root {
@@ -217,7 +217,7 @@ fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) ->
     #[allow(clippy::unnecessary_cast)] // `dev_t` is i32 on macOS
     let still = |st: &libc::stat, fd: &std::os::fd::OwnedFd| match root {
         Root::Picked(_, id) => id.is_none_or(|id| crate::dirfd::ident_of_fd(fd).is_ok_and(|now| now == id)),
-        Root::Here(_, id) => id.is_none_or(|w| w == (st.st_dev as u64, st.st_ino as u64)),
+        Root::Here(_, id) => id.is_none_or(|w| w.file_id() == (st.st_dev as u64, st.st_ino as u64)),
     };
     let (st, fd) = match opened {
         Ok((st, fd)) if still(&st, &fd) => (st, fd),

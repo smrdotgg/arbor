@@ -2353,3 +2353,41 @@ fn windows_links_and_shortcuts() {
     assert!(!fs::read_dir(&d).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".arbor-")), "no staging file left");
     let _ = fs::remove_dir_all(&d);
 }
+
+/// A folder removed and made again at its path takes the inode it freed (ext4): its device and
+/// inode are the listed folder's, but it isn't that folder. New File and New Folder refuse it,
+/// told apart by the birth time, and where there's none by the file system's handle.
+#[cfg(unix)]
+#[test]
+fn new_file_and_folder_refuse_a_folder_made_again_at_its_freed_inode() {
+    use std::os::unix::fs::MetadataExt;
+    if !crate::fs::inode_reuse_shows("folder-made-again") {
+        return;
+    }
+    for no_birth in [false, true] {
+        let _pretend = no_birth.then(|| crate::fs::pretend::without_birth_times(false));
+        let d = tmp(&format!("nfile-reuse-{no_birth}"));
+        let here = d.join("here");
+        fs::create_dir(&here).unwrap();
+        let listed = noclobber::dir_id(&here).unwrap();
+        let ino = here.metadata().unwrap().ino();
+        // Past the clock tick the first was made in, so the new one's birth time is its own.
+        std::thread::sleep(Duration::from_millis(20));
+        let again = (0..50).any(|_| {
+            fs::remove_dir(&here).unwrap();
+            fs::create_dir(&here).unwrap();
+            here.metadata().unwrap().ino() == ino
+        });
+        if !again {
+            eprintln!("folder-made-again: skipped (the inode never came back)");
+            return;
+        }
+        for op in [Op::NewFile { dir: here.clone() }, Op::NewFolder { dir: here.clone() }] {
+            let o = run_into_now(op, Some((DestId::Folder(listed), "made")));
+            let why = o.refused.unwrap_or_else(|| panic!("refused (no birth time: {no_birth})"));
+            assert!(why.starts_with("Nothing was made: “here” is another folder now"), "{why}");
+        }
+        assert_eq!(fs::read_dir(&here).unwrap().count(), 0, "nothing made in the new folder");
+        let _ = fs::remove_dir_all(&d);
+    }
+}

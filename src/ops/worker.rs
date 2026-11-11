@@ -203,7 +203,7 @@ impl<'a> Worker<'a> {
 
     pub(super) fn run(&mut self, op: Op) -> Outcome {
         // Identities from before: an operation never replaces the folders it works in.
-        let folders: Vec<(PathBuf, Option<noclobber::FileId>)> = op
+        let folders: Vec<(PathBuf, Option<noclobber::DirId>)> = op
             .folders()
             .into_iter()
             .map(|p| {

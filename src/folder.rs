@@ -98,7 +98,7 @@ pub struct Folder {
     pub cwd: PathBuf,
     /// `cwd`'s identity, from the read that listed it (links followed): two panes on one folder
     /// by different paths compare equal by it (`shows`).
-    pub dir_id: Option<crate::noclobber::FileId>,
+    pub dir_id: Option<crate::noclobber::DirId>,
     /// The whole folder, sorted.
     pub entries: Vec<Entry>,
     /// Indices into `entries` that pass the hidden-file and filter rules, in display order.
@@ -310,7 +310,7 @@ impl Folder {
 
     /// Whether this folder is the one at `path` (with identity `id`): the same identity when
     /// both are known (a symlink and its target are one folder), else the same path.
-    pub fn shows(&self, path: &Path, id: Option<crate::noclobber::FileId>) -> bool {
+    pub fn shows(&self, path: &Path, id: Option<crate::noclobber::DirId>) -> bool {
         match (self.dir_id, id) {
             (Some(a), Some(b)) => a == b,
             _ => self.cwd == path,

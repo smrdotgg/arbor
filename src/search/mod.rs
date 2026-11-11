@@ -121,7 +121,7 @@ pub(crate) mod hook {
 
     pub(super) fn folder_alias(path: &Path) -> Option<crate::noclobber::FileId> {
         let of = ALIASES.lock().unwrap().iter().find(|(a, _)| a == path).map(|(_, of)| of.clone())?;
-        crate::noclobber::dir_id(&of)
+        crate::noclobber::dir_id(&of).map(|d| d.file_id())
     }
 
     /// Holds the device lookup for a root until told (or a few seconds pass).

@@ -53,7 +53,7 @@ pub(crate) struct Clip {
 pub(crate) struct PasteReq {
     pub id: u64,
     pub dest: PathBuf,
-    pub dest_id: Option<crate::noclobber::FileId>,
+    pub dest_id: Option<crate::noclobber::DirId>,
     pub mv: bool,
 }
 
