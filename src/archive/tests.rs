@@ -5,6 +5,11 @@ use std::path::PathBuf;
 
 use crate::rename::Platform::{Linux, Mac, Windows};
 
+thread_local! {
+    /// Tests: the free space [`free_space`] says, on this thread.
+    pub(crate) static PRETEND_FREE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
 pub(crate) fn tmp(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("arbor-archive-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
@@ -640,12 +645,12 @@ fn a_plain_tar_is_listed_without_reading_its_data() {
     drop(f);
     let f = fs::File::open(d.join("big.tar")).unwrap();
     let mut c = Counted { f: &f, n: 0 };
-    let entries = tar::list_from(&mut tar::Reader::seeking(&mut c, len), &|| false).unwrap();
+    let entries = tar::list_from(&mut tar::Reader::seeking(&mut c, len), &|| false, None).unwrap();
     assert_eq!(entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["big.img", "after.txt"]);
     assert!(c.n < 64 * 1024, "read {} bytes", c.n);
     (&f).seek(SeekFrom::Start(0)).unwrap();
     let mut c = Counted { f: &f, n: 0 };
-    assert!(matches!(tar::list_from(&mut tar::Reader::seeking(&mut c, size / 2), &|| false), Err(Error::Corrupt(_))));
+    assert!(matches!(tar::list_from(&mut tar::Reader::seeking(&mut c, size / 2), &|| false, None), Err(Error::Corrupt(_))));
     let _ = fs::remove_dir_all(&d);
 }
 

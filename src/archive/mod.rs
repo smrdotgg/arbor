@@ -437,6 +437,10 @@ pub fn group(n: u64) -> String {
 
 /// Free bytes for this user on the disk of folder `dir`, when the OS says.
 pub fn free_space(dir: &Path) -> Option<u64> {
+    #[cfg(test)]
+    if let Some(free) = tests::PRETEND_FREE.with(std::cell::Cell::get) {
+        return Some(free);
+    }
     #[cfg(unix)]
     {
         let c = crate::ffi::cstr(dir).ok()?;

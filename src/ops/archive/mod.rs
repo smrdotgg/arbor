@@ -432,12 +432,13 @@ impl Worker<'_> {
         let file = File::open(archive).map_err(|e| e.to_string())?;
         let len = file.metadata().map_err(|e| e.to_string())?.len();
         self.p.bytes_done.store(0, Relaxed);
-        let (entries, zl) = self.list_archive(fmt, &file, len).map_err(|e| said(&e))?;
+        let free = archive::free_space(&parent);
+        let (entries, zl) = self.list_archive(fmt, &file, len, free).map_err(|e| said(&e))?;
         if entries.is_empty() {
             return Err("it's empty: there's nothing in it to extract".into());
         }
         let plan = archive::plan(&name, &entries, crate::rename::Platform::current()).map_err(|e| said(&e))?;
-        if let Some(free) = archive::free_space(&parent) {
+        if let Some(free) = free {
             archive::room(plan.total, free)?;
         }
         self.p.bytes_total.store(plan.total, Relaxed);
@@ -509,7 +510,14 @@ impl Worker<'_> {
 
     /// The archive's list (for a ZIP, with where each entry's data is). A gzipped tar is
     /// decompressed for it, with its compressed bytes as the progress.
-    fn list_archive(&mut self, fmt: Format, file: &File, len: u64) -> Result<(Vec<archive::Entry>, Option<archive::zip::Listing>), AErr> {
+    /// `free`: the disk's free space, which a tar's running total is held to while it's listed.
+    fn list_archive(
+        &mut self,
+        fmt: Format,
+        file: &File,
+        len: u64,
+        free: Option<u64>,
+    ) -> Result<(Vec<archive::Entry>, Option<archive::zip::Listing>), AErr> {
         let p = self.p;
         let stop = || p.cancel.load(Relaxed);
         match fmt {
@@ -520,7 +528,7 @@ impl Worker<'_> {
             Format::Tar => {
                 (&*file).seek(SeekFrom::Start(0))?;
                 let mut rd = archive::tar::Reader::seeking(BufReader::with_capacity(256 * 1024, file), len);
-                Ok((archive::tar::list_from(&mut rd, &stop)?, None))
+                Ok((archive::tar::list_from(&mut rd, &stop, free)?, None))
             }
             Format::TarGz => {
                 (&*file).seek(SeekFrom::Start(0))?;
@@ -542,7 +550,7 @@ impl Worker<'_> {
                 };
                 let last = gz.last();
                 let mut rd = archive::tar::Reader::new(gz);
-                let entries = archive::tar::list_from(&mut rd, &stop)?;
+                let entries = archive::tar::list_from(&mut rd, &stop, free)?;
                 last.set(true);
                 rd.drain(&stop)?;
                 Ok((entries, None))

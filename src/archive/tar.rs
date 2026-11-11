@@ -380,11 +380,14 @@ impl<R: Read> Read for Counted<R> {
 /// goes; `stop` is asked between entries (tests: Arbor lists through [`list_from`]).
 #[cfg(test)]
 pub fn list(r: impl Read, stop: &dyn Fn() -> bool) -> Result<Vec<Entry>, Error> {
-    list_from(&mut Reader::new(r), stop)
+    list_from(&mut Reader::new(r), stop, None)
 }
 
 /// [`list`] from a reader, which then has the rest of the stream after the tar's end.
-pub fn list_from<R: Read>(rd: &mut Reader<R>, stop: &dyn Fn() -> bool) -> Result<Vec<Entry>, Error> {
+/// `free`: the bytes free on the disk it goes to, when known: the running total is held to the
+/// room there ([`super::room`]) as it goes, so a gzipped tar too big to extract is refused at
+/// the entry that makes it so, not after decompressing all of it.
+pub fn list_from<R: Read>(rd: &mut Reader<R>, stop: &dyn Fn() -> bool, free: Option<u64>) -> Result<Vec<Entry>, Error> {
     let mut v = Vec::new();
     let mut total = 0u64;
     while let Some(e) = rd.next_with(stop)? {
@@ -394,6 +397,9 @@ pub fn list_from<R: Read>(rd: &mut Reader<R>, stop: &dyn Fn() -> bool) -> Result
         if let Kind::File { size } = e.kind {
             total = total.saturating_add(size);
             super::check_size(total)?;
+            if let Some(free) = free {
+                super::room(total, free).map_err(Error::Refused)?;
+            }
         }
         v.push(e);
         if v.len() > limits::ENTRIES {

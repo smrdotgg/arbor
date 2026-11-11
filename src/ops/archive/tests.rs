@@ -505,11 +505,29 @@ fn nothing_after_the_tars_gzip_member_is_read() {
     let gz = Gz::new(std::io::BufReader::with_capacity(8 * 1024, Counted { r: &all[..], n: count.clone() }));
     let last = gz.last();
     let mut rd = Reader::new(gz);
-    assert_eq!(list_from(&mut rd, &|| false).unwrap().len(), 1);
+    assert_eq!(list_from(&mut rd, &|| false, None).unwrap().len(), 1);
     last.set(true);
     rd.drain(&|| false).unwrap();
     let read = count.load(Relaxed);
     assert!(read <= (first.len() + 16 * 1024) as u64, "read {read} of {}", all.len());
+}
+
+/// A gzipped tar too large for the disk is refused at the entry that makes it so, while it's
+/// listed, not after the whole stream is decompressed: here the stream ends right after that
+/// entry's header, which listing on would call damage.
+#[test]
+fn a_tar_gz_too_large_for_the_disk_is_refused_while_listing() {
+    let d = tmp("gz-room");
+    let mut t = Vec::new();
+    tar_entry(&mut t, "big/a.txt", b'0', b"hello", "");
+    t.extend(crate::archive::tests::tar_header("big/huge.img", b'0', 3 << 30, ""));
+    t.extend(noise(4096));
+    fs::write(d.join("big.tgz"), gz_of(&t, None)).unwrap();
+    crate::archive::tests::PRETEND_FREE.with(|f| f.set(Some(2 << 30)));
+    let o = extract(&d.join("big.tgz"));
+    crate::archive::tests::PRETEND_FREE.with(|f| f.set(None));
+    assert!(o.errors.first().is_some_and(|e| e.contains("too large to extract") && e.contains("free")), "{:?}", o.errors);
+    assert_eq!(names(&d), ["big.tgz"]);
 }
 
 #[test]
