@@ -21,6 +21,7 @@ use crate::noclobber;
 use crate::trash::TrashError;
 
 mod batch;
+mod links;
 mod print;
 #[cfg(test)]
 mod tests;
@@ -28,6 +29,8 @@ mod trashed;
 mod undo;
 mod worker;
 
+use links::*;
+pub use links::{MAKING_LINKS, NEW_FILE};
 pub use print::Seen;
 use print::*;
 pub use undo::Undo;
@@ -80,6 +83,15 @@ pub enum Op {
     /// New Folder: "untitled folder" (or a free variant) in `dir`.
     NewFolder {
         dir: PathBuf,
+    },
+    /// New File: an empty "untitled.txt" (or a free variant) in `dir`, made with `create_new`.
+    NewFile {
+        dir: PathBuf,
+    },
+    /// Make Symbolic Link: for each item, a link beside it ("name link", free), pointing at the
+    /// item's absolute path; on Windows without the right to make one, a shortcut (`.lnk`).
+    MakeLinks {
+        items: Vec<PathBuf>,
     },
     /// Reverse an earlier operation, if the disk still looks the way it left it.
     Undo(Undo),
@@ -149,7 +161,8 @@ impl Op {
             Op::Delete { items } => items.iter().filter_map(|d| d.path.parent().map(Path::to_path_buf)).collect(),
             Op::Rename { items } => items.iter().filter_map(|r| r.from.parent().map(Path::to_path_buf)).collect(),
             Op::RenameOne { from, .. } => from.parent().map(Path::to_path_buf).into_iter().collect(),
-            Op::NewFolder { dir } => vec![dir.clone()],
+            Op::NewFolder { dir } | Op::NewFile { dir } => vec![dir.clone()],
+            Op::MakeLinks { items } => parents(items),
             Op::Checked { op, .. } => return op.folders(),
             Op::Undo(u) => u
                 .steps
@@ -174,6 +187,8 @@ impl Op {
             Op::PutBack { .. } => "Putting Back",
             Op::RenameOne { .. } => "Renaming",
             Op::NewFolder { .. } => NEW_FOLDER,
+            Op::NewFile { .. } => NEW_FILE,
+            Op::MakeLinks { .. } => MAKING_LINKS,
             Op::Rename { .. } => "Renaming",
             Op::Undo(u) if u.redo => "Redoing",
             Op::Undo(_) => "Undoing",
@@ -208,6 +223,11 @@ impl Op {
                 keep(&mut items);
                 let any = !items.is_empty();
                 (Op::PutBack { items }, any)
+            }
+            Op::MakeLinks { mut items } => {
+                keep(&mut items);
+                let any = !items.is_empty();
+                (Op::MakeLinks { items }, any)
             }
             Op::Delete { mut items } => {
                 items.retain(|d| !left_out.contains(d.path.as_path()));
@@ -261,6 +281,10 @@ pub enum What {
     Copy,
     Duplicate,
     NewFolder,
+    NewFile,
+    /// Links Arbor made: undone by removing each (only while it's still the link made, with
+    /// the same target), redone by making it again ([`Worker::undo_links`]).
+    Link,
     Trash,
     /// Put Back from the Trash: undone by trashing the items again.
     PutBack,
@@ -275,6 +299,8 @@ impl What {
             What::Copy => "copy",
             What::Duplicate => "duplicate",
             What::NewFolder => "new folder",
+            What::NewFile => "new file",
+            What::Link => "link",
             What::Trash => "move to Trash",
             What::PutBack => "put back",
         }
@@ -404,8 +430,9 @@ pub struct Dest {
 
 /// Runs `op` on a worker thread; its outcome comes back through [`Running::take`].
 ///
-/// With `dest_id`, a copy or move goes only into the folder the user chose as the one with that
-/// identity (a paste, asked for before the clipboard answered; a drop on a column): if the
+/// With `dest_id`, a copy, move, new file or new folder goes only into the folder the user chose
+/// as the one with that identity (a paste, asked for before the clipboard answered; a drop on a
+/// column; New File in the folder as it was listed): if the
 /// folder at its `dest` isn't that one when the worker starts (renamed away and another made
 /// at its path, or gone), it refuses before touching anything, saying "Nothing was" and the
 /// verb given with it ("pasted", "dropped").

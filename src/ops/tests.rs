@@ -2072,3 +2072,284 @@ fn put_back_checks_each_item_is_still_the_one_listed() {
     assert!(item.exists() && !d.join("docs/a.txt").exists());
     let _ = fs::remove_dir_all(&d);
 }
+
+// ---- new file -----------------------------------------------------------------------------
+
+/// Runs `op` as `ops::start` does with a destination identity (`run_into`).
+fn run_into_now(op: Op, dest: Option<(DestId, &'static str)>) -> Outcome {
+    let p = Progress::default();
+    Worker::new(&p, None, fake_trash).run_into(op, dest)
+}
+
+#[test]
+fn new_file_is_untitled_then_a_free_name_and_empty() {
+    let d = tmp("nfile");
+    let o = run_now(Op::NewFile { dir: d.clone() });
+    assert!(o.refused.is_none() && o.quiet, "{:?}", o.refused);
+    assert_eq!(o.results, [d.join("untitled.txt")]);
+    assert_eq!(fs::read(d.join("untitled.txt")).unwrap(), b"");
+    fs::write(d.join("untitled.txt"), "keep me").unwrap();
+    let o = run_now(Op::NewFile { dir: d.clone() });
+    assert_eq!(o.results, [d.join("untitled 2.txt")]);
+    assert_eq!(fs::read_to_string(d.join("untitled.txt")).unwrap(), "keep me", "never overwritten");
+    assert_eq!(Op::NewFile { dir: d.clone() }.verb(), NEW_FILE);
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// Another app makes "untitled.txt" between the free-name look and the create: `create_new`
+/// fails, and the next free name is used. The other app's file is untouched.
+#[test]
+fn new_file_never_overwrites_a_file_made_between_the_look_and_the_create() {
+    let d = tmp("nfile-race");
+    let o = run_hooked(Op::NewFile { dir: d.clone() }, fake_trash, hooked(intruder(), false));
+    assert!(o.refused.is_none(), "{:?}", o.refused);
+    assert_eq!(o.results, [d.join("untitled 2.txt")]);
+    assert_eq!(fs::read_to_string(d.join("untitled.txt")).unwrap(), "intruder");
+    assert_eq!(fs::read(d.join("untitled 2.txt")).unwrap(), b"");
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// Undo trashes the new file; redo takes it back out; once edited, undo refuses and keeps it.
+#[test]
+fn new_file_undo_and_redo_and_refusal_once_edited() {
+    let d = tmp("nfile-undo");
+    let u = take(run_now(Op::NewFile { dir: d.clone() }));
+    assert_eq!(u.what, What::NewFile);
+    let redo = reverse(u);
+    assert!(!d.join("untitled.txt").exists() && d.join(".trash/untitled.txt").exists(), "trashed, not deleted");
+    let undo = reverse(redo);
+    assert!(d.join("untitled.txt").exists(), "redone");
+    fs::write(d.join("untitled.txt"), "my notes").unwrap();
+    let why = undo_refused(undo);
+    assert!(why.starts_with("Can't undo the new file: “untitled.txt” was edited"), "{why}");
+    assert_eq!(fs::read_to_string(d.join("untitled.txt")).unwrap(), "my notes");
+    // Replaced by another file of the same name (and size): refused too.
+    let d = tmp("nfile-undo-repl");
+    let u = take(run_now(Op::NewFile { dir: d.clone() }));
+    fs::remove_file(d.join("untitled.txt")).unwrap();
+    let keep = d.join("keep");
+    fs::write(&keep, "").unwrap(); // holds the freed inode so the new file can't reuse it
+    fs::write(d.join("untitled.txt"), "").unwrap();
+    let why = undo_refused(u);
+    assert!(why.contains("replaced") || why.contains("edited"), "{why}");
+    assert!(d.join("untitled.txt").exists());
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// The folder New File was asked in was replaced since it was listed (renamed away, another
+/// made at its path): nothing is made in either. One still there goes ahead; so does New
+/// Folder, under the same check.
+#[test]
+fn new_file_refuses_a_folder_replaced_since_it_was_listed() {
+    let d = tmp("nfile-dest");
+    let here = d.join("here");
+    fs::create_dir(&here).unwrap();
+    let listed = noclobber::dir_id(&here).unwrap();
+    fs::rename(&here, d.join("moved")).unwrap();
+    fs::create_dir(&here).unwrap();
+    for op in [Op::NewFile { dir: here.clone() }, Op::NewFolder { dir: here.clone() }] {
+        let o = run_into_now(op, Some((DestId::Folder(listed), "made")));
+        let why = o.refused.expect("refused");
+        assert!(why.starts_with("Nothing was made: “here” is another folder now"), "{why}");
+    }
+    assert_eq!(fs::read_dir(&here).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(d.join("moved")).unwrap().count(), 0);
+    let now = noclobber::dir_id(&here).unwrap();
+    let o = run_into_now(Op::NewFile { dir: here.clone() }, Some((DestId::Folder(now), "made")));
+    assert_eq!(o.results, [here.join("untitled.txt")]);
+    let _ = fs::remove_dir_all(&d);
+}
+
+// ---- links --------------------------------------------------------------------------------
+
+#[test]
+fn link_names_keep_the_type_and_count_up() {
+    let n = |name: &str, dir: bool, n: usize, lnk: bool| link_name(OsStr::new(name), dir, n, lnk).into_string().unwrap();
+    assert_eq!(n("photo.jpg", false, 1, false), "photo link.jpg");
+    assert_eq!(n("photo.jpg", false, 2, false), "photo link 2.jpg");
+    assert_eq!(n("archive.tar.gz", false, 1, false), "archive.tar link.gz");
+    assert_eq!(n("Projects", true, 1, false), "Projects link");
+    assert_eq!(n("v1.2", true, 3, false), "v1.2 link 3", "a folder's dot isn't an extension");
+    assert_eq!(n(".bashrc", false, 1, false), ".bashrc link");
+    assert_eq!(n("Makefile", false, 1, false), "Makefile link");
+    assert_eq!(n("photo.jpg", false, 1, true), "photo link.jpg.lnk");
+    assert_eq!(n("Projects", true, 2, true), "Projects link 2.lnk");
+}
+
+/// When a failed symbolic link becomes a Windows shortcut, and when it's an error.
+#[test]
+fn shortcut_fallback_decides_on_windows_errors() {
+    assert!(shortcut_fallback(Some(1314)).is_some_and(|w| w.contains("Developer Mode")), "no privilege");
+    assert!(shortcut_fallback(Some(1)).is_some_and(|w| w.contains("drive")), "FAT: invalid function");
+    assert!(shortcut_fallback(Some(50)).is_some_and(|w| w.contains("drive")), "not supported");
+    assert_eq!(shortcut_fallback(Some(5)), None, "access denied is an error");
+    assert_eq!(shortcut_fallback(Some(183)), None, "a taken name is never a reason");
+    assert_eq!(shortcut_fallback(None), None);
+}
+
+#[cfg(unix)]
+mod links {
+    use super::*;
+
+    fn link_steps(u: &Undo) -> Vec<(PathBuf, PathBuf)> {
+        u.steps.iter().map(|s| (s.at.clone(), s.link.as_ref().unwrap().target.clone())).collect()
+    }
+
+    /// A link beside each item, named "name link" (before a file's extension), pointing at the
+    /// item's absolute path; again, a free name. Nothing is ever replaced.
+    #[test]
+    fn links_point_at_the_items_absolute_path_beside_them() {
+        let d = tmp("links");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::create_dir(d.join("Docs")).unwrap();
+        let o = run_now(Op::MakeLinks { items: vec![d.join("a.txt"), d.join("Docs")] });
+        assert!(o.errors.is_empty() && o.notes.is_empty(), "{:?} {:?}", o.errors, o.notes);
+        assert_eq!(o.results, [d.join("a link.txt"), d.join("Docs link")]);
+        assert_eq!(fs::read_link(d.join("a link.txt")).unwrap(), d.join("a.txt"), "absolute");
+        assert!(fs::read_link(d.join("a link.txt")).unwrap().is_absolute());
+        assert_eq!(fs::read_link(d.join("Docs link")).unwrap(), d.join("Docs"));
+        assert_eq!(fs::read_to_string(d.join("a link.txt")).unwrap(), "a", "it leads to the item");
+        // Moved alone, it still leads there.
+        fs::create_dir(d.join("elsewhere")).unwrap();
+        fs::rename(d.join("a link.txt"), d.join("elsewhere/a link.txt")).unwrap();
+        assert_eq!(fs::read_to_string(d.join("elsewhere/a link.txt")).unwrap(), "a");
+        fs::write(d.join("a link.txt"), "someone's file").unwrap();
+        let o = run_now(Op::MakeLinks { items: vec![d.join("a.txt")] });
+        assert_eq!(o.results, [d.join("a link 2.txt")]);
+        assert_eq!(fs::read_to_string(d.join("a link.txt")).unwrap(), "someone's file");
+        assert_eq!(Op::MakeLinks { items: vec![] }.verb(), MAKING_LINKS);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Another app takes the link's name between the look and the link call: the next name.
+    #[test]
+    fn a_link_never_replaces_a_name_taken_after_the_look() {
+        let d = tmp("links-race");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        let o = run_hooked(Op::MakeLinks { items: vec![d.join("a.txt")] }, fake_trash, hooked(intruder(), false));
+        assert!(o.errors.is_empty(), "{:?}", o.errors);
+        assert_eq!(o.results, [d.join("a link 2.txt")]);
+        assert_eq!(fs::read_to_string(d.join("a link.txt")).unwrap(), "intruder");
+        assert_eq!(fs::read_link(d.join("a link 2.txt")).unwrap(), d.join("a.txt"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Undo removes the links (not what they point at, not to the Trash); redo makes them
+    /// again with the same targets; undo again removes them again.
+    #[test]
+    fn undo_removes_the_links_and_redo_makes_them_again() {
+        let d = tmp("links-undo");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::create_dir(d.join("Docs")).unwrap();
+        fs::write(d.join("Docs/inside"), "x").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt"), d.join("Docs")] }));
+        assert_eq!(u.what, What::Link);
+        let made = link_steps(&u);
+        let redo = reverse(u);
+        assert!(d.join("a link.txt").symlink_metadata().is_err() && d.join("Docs link").symlink_metadata().is_err());
+        assert!(!d.join(".trash").exists(), "removed, not trashed");
+        assert_eq!(fs::read_to_string(d.join("Docs/inside")).unwrap(), "x", "the original is untouched");
+        assert_eq!(Op::Undo(redo.clone()).verb(), "Redoing");
+        let undo = reverse(redo);
+        assert_eq!(link_steps(&undo), made);
+        assert_eq!(fs::read_link(d.join("a link.txt")).unwrap(), d.join("a.txt"), "made again, same target");
+        assert_eq!(fs::read_link(d.join("Docs link")).unwrap(), d.join("Docs"));
+        reverse(undo);
+        assert!(d.join("a link.txt").symlink_metadata().is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Undo refuses, changing nothing, when a link isn't the one Arbor made: replaced by
+    /// another link of the same name (elsewhere), by a file, or gone. Redo refuses when its
+    /// name has been taken since.
+    #[test]
+    fn link_undo_and_redo_refuse_when_the_disk_changed() {
+        let d = tmp("links-refuse");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::write(d.join("b.txt"), "b").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt"), d.join("b.txt")] }));
+        fs::remove_file(d.join("b link.txt")).unwrap();
+        std::os::unix::fs::symlink(d.join("a.txt"), d.join("b link.txt")).unwrap();
+        let why = undo_refused(u.clone());
+        // "edited" where the new link took the freed inode (ext4) and a fingerprint has no
+        // birth time: its time differs all the same.
+        assert!(why.starts_with("Can't undo the link: “b link.txt” was replaced") || why.contains("“b link.txt” was edited"), "{why}");
+        assert!(d.join("a link.txt").symlink_metadata().is_ok(), "all or nothing: the other link stays");
+        fs::remove_file(d.join("b link.txt")).unwrap();
+        fs::write(d.join("b link.txt"), "a file now").unwrap();
+        let why = undo_refused(u.clone());
+        assert!(why.contains("replaced by a file"), "{why}");
+        fs::remove_file(d.join("b link.txt")).unwrap();
+        let why = undo_refused(u);
+        assert!(why.contains("“b link.txt” was moved or deleted"), "{why}");
+        // Redo: its name taken since the undo.
+        let d = tmp("links-redo-taken");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        let redo = reverse(take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] })));
+        fs::write(d.join("a link.txt"), "mine").unwrap();
+        let o = run_now(Op::Undo(redo));
+        let why = o.refused.expect("refused");
+        assert!(why.starts_with("Can't redo the link: “a link.txt” is already taken"), "{why}");
+        assert!(o.undo.is_some_and(|u| u.redo), "it stays a redo");
+        assert_eq!(fs::read_to_string(d.join("a link.txt")).unwrap(), "mine");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The items are checked to be the ones listed: one replaced since gets no link.
+    #[test]
+    fn a_link_is_made_only_to_the_item_chosen() {
+        let d = tmp("links-checked");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        fs::write(d.join("b.txt"), "b").unwrap();
+        let ids: Vec<_> = ["a.txt", "b.txt"].iter().map(|n| (d.join(n), crate::fs::ident_at(&d.join(n)))).collect();
+        fs::remove_file(d.join("b.txt")).unwrap();
+        fs::create_dir(d.join("b.txt")).unwrap();
+        let op = Op::Checked {
+            expect: Checks::new(Chosen::Listing, ids),
+            op: Box::new(Op::MakeLinks { items: vec![d.join("a.txt"), d.join("b.txt")] }),
+        };
+        let o = run_now(op);
+        assert_eq!(o.results, [d.join("a link.txt")]);
+        assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
+        assert!(d.join("b.txt link").symlink_metadata().is_err() && d.join("b link.txt").symlink_metadata().is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+}
+
+/// Windows: a symbolic link where Windows allows one (Developer Mode, an administrator, as on
+/// CI), else a shortcut; and a shortcut made directly, which never replaces what's at its name.
+#[cfg(windows)]
+#[test]
+fn windows_links_and_shortcuts() {
+    let d = tmp("win-links");
+    fs::write(d.join("a.txt"), "a").unwrap();
+    fs::create_dir(d.join("Docs")).unwrap();
+    let o = run_now(Op::MakeLinks { items: vec![d.join("a.txt"), d.join("Docs")] });
+    assert!(o.errors.is_empty(), "{:?}", o.errors);
+    let u = o.undo.expect("undoable");
+    for s in &u.steps {
+        let link = s.link.as_ref().unwrap();
+        if link.shortcut {
+            assert!(s.at.extension().is_some_and(|e| e == "lnk") && o.notes.iter().any(|n| n.contains("shortcuts")));
+        } else {
+            assert_eq!(fs::read_link(&s.at).unwrap(), link.target);
+        }
+    }
+    let redo = reverse(u);
+    assert!(fs::read_dir(&d).unwrap().count() == 2, "only the originals are left");
+    assert_eq!(fs::read_to_string(d.join("a.txt")).unwrap(), "a");
+    reverse(redo);
+    assert_eq!(fs::read_dir(&d).unwrap().count(), 4);
+    // A shortcut, directly: a .lnk file (header size 0x4C), and never over a taken name.
+    let link = Link { target: d.join("a.txt"), dir: false, shortcut: true };
+    let at = d.join("short.lnk");
+    make_link_at(&at, &link).unwrap();
+    let bytes = fs::read(&at).unwrap();
+    assert_eq!(bytes.get(..4), Some(&[0x4c, 0, 0, 0][..]), "a shell link");
+    fs::write(d.join("taken.lnk"), "mine").unwrap();
+    let e = make_link_at(&d.join("taken.lnk"), &link).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(fs::read_to_string(d.join("taken.lnk")).unwrap(), "mine");
+    assert!(!fs::read_dir(&d).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".arbor-")), "no staging file left");
+    let _ = fs::remove_dir_all(&d);
+}

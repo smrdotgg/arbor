@@ -737,6 +737,32 @@ and named). Unix deletes a read-only file as it is (its folder's
 permission is what counts) and reports what it can't remove; Windows clears the read-only
 attribute first, as Explorer does.
 
+### New File, links and Show Original
+
+**⌥⌘N** (Ctrl+Alt+N off macOS; also in the palette and the background's context menu) makes an
+empty `untitled.txt` in the folder on screen (the active column's in the column view), or
+`untitled 2.txt` and so on when that's taken, and starts renaming it with "untitled" selected,
+as New Folder (⇧⌘N) does. It's made on the worker with `create_new`, so a file another app makes
+at the name first is never opened or replaced, and only in the folder as it was listed: one put
+at its path since makes nothing ("Nothing was made: … is another folder now"; New Folder checks
+the same). ⌘Z sends it to the Trash only while it's still exactly as made (empty, same identity
+and time); once you've written to it, undo refuses and keeps it. ⇧⌘Z takes it back out.
+
+**Make Symbolic Link** (palette and the item's context menu; ⌃⌘A on macOS, Finder's Make Alias
+key) puts a link beside each selected item: `photo link.jpg` for `photo.jpg` (" link" goes before
+the extension, so the link keeps its type for opening, icons and previews), `Projects link` for a
+folder, `… link 2` when taken; never over anything. It points at the item's **absolute** path, so
+it keeps working when you move the link alone (to another folder or the Desktop), as Finder's
+aliases do; moving or renaming the original breaks it. Each item must still be the one listed.
+⌘Z removes the links, each only while it's still the link Arbor made (same identity, time and
+target), and ⇧⌘Z makes them again. On Windows a symbolic link needs Developer Mode (or an
+administrator); without it, or on a drive with no links (FAT), Arbor makes a shortcut
+(`photo link.jpg.lnk`) instead and says so in the status bar.
+
+**Show Original** (palette, and the context menu of a symbolic link) selects what the link
+points at: in place when it's in the same folder, else in its folder in the same pane (⌘[ comes
+back). A link to nothing says the original isn't there. Not for Windows shortcuts.
+
 ### Search in This Folder
 
 **⌘F** turns the active tab into a search of its folder and everything inside it: a query field
@@ -819,6 +845,7 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Clear Jump History… |  |  | `nav.clear_jump_history` |
 | Reload | ⌘R | Ctrl+R | `nav.reload` |
 | Show in Finder / Explorer / file manager | ⌘↩ | Ctrl+Enter | `nav.reveal` |
+| Show Original |  |  | `nav.show_original` |
 | Go to the Trash / Recycle Bin |  |  | `nav.trash` |
 | Open With… |  |  | `file.open_with` |
 | Get Info | ⌘I | Ctrl+I | `file.info` |
@@ -836,9 +863,11 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Move to Other Pane | F6 | F6 | `file.move_to_other` |
 | Copy Path | ⇧⌘C, ⌥⌘C | Ctrl+Shift+C, Ctrl+Alt+C | `file.copy_path` |
 | Duplicate | ⌘D | Ctrl+D | `file.duplicate` |
+| Make Symbolic Link | ⌃⌘A |  | `file.make_link` |
 | Rename… | F2, ⇧⌘R | F2, Ctrl+Shift+R | `file.rename` |
 | Batch Rename… |  |  | `file.batch_rename` |
 | New Folder | ⇧⌘N | Ctrl+Shift+N | `file.new_folder` |
+| New File | ⌥⌘N | Ctrl+Alt+N | `file.new_file` |
 | Move to Trash | ⌘⌫, ⌦ | Ctrl+Backspace, Delete | `file.trash` |
 | Delete Permanently… | ⌥⌘⌫ | Shift+Delete | `file.delete` |
 | Put Back |  |  | `file.put_back` |
@@ -1087,6 +1116,9 @@ On the Mac, check:
 - [ ] Without Full Disk Access, the sidebar's Trash and "Empty the Trash…" say how to grant it;
       with it, the dialog counts the items and size, Cancel keeps them, Empty Trash empties
       `~/.Trash` (and a USB stick's `.Trashes`), and Finder's Trash shows empty.
+- [ ] ⌥⌘N in each view (list, icons, columns, tiles): `untitled.txt` with "untitled" selected
+      for renaming. ⌃⌘A on a file: `… link.txt` opens the file from Finder too, and moved to the
+      Desktop it still does. Show Original on it selects the file.
 - [ ] On an Intel Mac (or `arch -x86_64` with Rosetta), the universal `Arbor.app` opens.
 - [ ] Drag a tab along its strip, and onto the other pane of a split window.
 - [ ] Flick a file row a short way and let go at once (one pane), then press ⌘J: Jump opens,
@@ -1124,6 +1156,10 @@ one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine
 - [ ] "Empty the Recycle Bin…": the dialog counts the items and size; Empty Recycle Bin empties
       it with no Windows dialog, progress window or sound, and the result's count matches.
 - [ ] Get Info (Ctrl+I) shows attributes (Read-only, Hidden…) and a folder's total.
+- [ ] Make Symbolic Link on a file and a folder without Developer Mode: the status bar says
+      they're shortcuts, and double-clicking `… link.lnk` in Explorer opens the item; with
+      Developer Mode on, they're symbolic links (`dir` shows `<SYMLINK>` and `<SYMLINKD>`).
+      ⌘Z (Ctrl+Z) removes them either way; Ctrl+Y makes them again.
 - [ ] "Make Arbor the Default for Folders…": double-clicking a folder in Explorer, a drive in
       This PC and Win+E open Arbor; "Restore the System Default for Folders…" brings Explorer
       back for all three, and `reg query HKCU\Software\Classes\Directory\shell` is as before.

@@ -169,7 +169,8 @@ impl<'a> Worker<'a> {
             Op::Checked { op, .. } => op.as_ref(),
             op => op,
         };
-        if let (Some((want, verb)), Op::Copy { dest, .. } | Op::Move { dest, .. }) = (dest_id, inner)
+        if let (Some((want, verb)), Op::Copy { dest, .. } | Op::Move { dest, .. } | Op::NewFile { dir: dest } | Op::NewFolder { dir: dest }) =
+            (dest_id, inner)
             && !want.holds(dest)
         {
             let why = if dest.symlink_metadata().is_ok() {
@@ -211,7 +212,12 @@ impl<'a> Worker<'a> {
             })
             .collect();
         let canon = folders.iter().filter_map(|(p, _)| Some((p.clone(), std::fs::canonicalize(p).ok()?))).collect();
-        if let Op::Copy { sources, .. } | Op::Move { sources, .. } | Op::Trash { sources } | Op::PutBack { items: sources } = &op {
+        if let Op::Copy { sources, .. }
+        | Op::Move { sources, .. }
+        | Op::Trash { sources }
+        | Op::PutBack { items: sources }
+        | Op::MakeLinks { items: sources } = &op
+        {
             for src in sources {
                 if !self.seen.contains_key(src)
                     && let Some(id) = crate::fs::ident_at(src)
@@ -256,7 +262,7 @@ impl<'a> Worker<'a> {
                     match self.copy_one(src, &dest) {
                         Ok((to, print)) => {
                             out.results.push(to.clone());
-                            steps.push(Step { at: to, print, back: None, split: None });
+                            steps.push(Step { at: to, print, back: None, split: None, link: None });
                         }
                         Err(e) => out.errors.push(format!("{}: {e}", name_of(src))),
                     }
@@ -371,8 +377,24 @@ impl<'a> Worker<'a> {
                     Err(e) => out.refused = Some(format!("Couldn't make a folder: {e}")),
                 }
             }
+            Op::NewFile { dir } => {
+                self.p.items_total.store(1, Relaxed);
+                out.quiet = true;
+                match self.new_file(&dir) {
+                    Ok(path) => {
+                        out.undo = Undo::new_file(path.clone());
+                        if out.undo.is_none() {
+                            out.said = Some(format!("Made “{}”, but it can't be undone: it couldn't be read right after", name_of(&path)));
+                        }
+                        out.results.push(path);
+                    }
+                    Err(e) => out.refused = Some(format!("Couldn't make a file: {e}")),
+                }
+            }
+            Op::MakeLinks { items } => self.make_links(items, &mut out),
             Op::Rename { items } => self.batch_rename(items, &mut out),
             Op::Undo(undo) if undo.what == What::BatchRename => self.undo_batch_rename(undo, &mut out),
+            Op::Undo(undo) if undo.what == What::Link => self.undo_links(undo, &mut out),
             Op::Undo(undo) => self.undo(undo, &mut out),
             Op::Checked { expect, op } => return self.run_checked(&expect, *op),
         }

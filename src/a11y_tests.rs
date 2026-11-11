@@ -2102,3 +2102,29 @@ fn copy_and_move_to_the_other_pane_refuse_a_replaced_folder() {
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
+/// New File (⌥⌘N) draws its rename field on the new file in every view: the row in the list,
+/// the cell in icons and tiles, the active column's row in the column view.
+#[test]
+fn new_file_draws_its_rename_field_in_every_view() {
+    for (i, view) in [Cmd::AsList, Cmd::AsIcons, Cmd::AsTiles, Cmd::AsColumns].into_iter().enumerate() {
+        let d = folder(&format!("new-file-{i}"));
+        let mut rt = runtime(&d);
+        if view != Cmd::AsList {
+            run(&mut rt, view);
+            settle_columns(&mut rt);
+        }
+        rt.key(KeyEvent { key: Key::Command('n'), mods: Mods { cmd: true, alt: true, ..Mods::default() } });
+        rt.frame(0.0);
+        until(&mut rt, |s| s.rename.is_some() && !s.cur().is_loading());
+        rt.frame(0.0);
+        assert!(d.join("untitled.txt").is_file(), "{view:?}");
+        assert_eq!(rt.state.rename.as_ref().map(|r| r.os.clone()), Some("untitled.txt".into()), "{view:?}");
+        let field = rect_of(&rt, "rename").unwrap_or_else(|| panic!("the rename field is drawn in {view:?}"));
+        let item = rect_of(&rt, "f:untitled.txt").unwrap_or_else(|| panic!("the new file is on screen in {view:?}"));
+        let inside = |r: [f32; 4]| r[0] >= item[0] - 1.0 && r[1] >= item[1] - 1.0 && r[0] + r[2] <= item[0] + item[2] + 1.0;
+        assert!(inside(field), "the field is on the new file in {view:?}: {field:?} in {item:?}");
+        key(&mut rt, Key::Escape, false);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

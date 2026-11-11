@@ -1,4 +1,4 @@
-//! File operations from the UI: clipboard, paste, duplicate, rename, new folder, trash, undo,
+//! File operations from the UI: clipboard, paste, duplicate, rename, new folder and file, links, trash, undo,
 //! drag and drop, and the context menu. The work itself runs in `ops` on a worker thread.
 
 use std::ffi::OsString;
@@ -155,14 +155,38 @@ impl State {
         }
     }
 
-    // ---- rename and new folder --------------------------------------------------------------
+    // ---- rename, new folder, new file, links -----------------------------------------------
 
     /// Makes "untitled folder" here, on the worker (the window never touches the disk), and
     /// starts renaming it once it's listed: every pane showing this folder reads it again,
-    /// selecting the new folder (`poll_job`).
+    /// selecting the new folder (`poll_job`). Only into the folder as it was listed (`here`).
     pub fn new_folder(&mut self) {
-        let dir = self.cur().cwd.clone();
-        self.start(Op::NewFolder { dir });
+        let (dir, dest) = self.here("made");
+        self.start_into(Op::NewFolder { dir }, dest);
+    }
+
+    /// New File: an empty "untitled.txt" here (the active column's folder in the column view),
+    /// made and renamed as New Folder's folder is.
+    pub fn new_file(&mut self) {
+        let (dir, dest) = self.here("made");
+        self.start_into(Op::NewFile { dir }, dest);
+    }
+
+    /// The active folder, and its identity as it was listed for the worker to check before
+    /// making anything in it: a folder put at its path since is refused ("Nothing was made").
+    /// One whose identity isn't known yet (still being read) is used as it is, as before.
+    fn here(&self, verb: &'static str) -> (PathBuf, Option<(ops::DestId, &'static str)>) {
+        let f = self.cur();
+        (f.cwd.clone(), f.dir_id.map(|id| (ops::DestId::Folder(id), verb)))
+    }
+
+    /// Make Symbolic Link: a link beside each selected item, each checked on the worker to be
+    /// the item its listing (or the search) found. They're selected once listed.
+    pub fn make_links(&mut self) {
+        let items = self.target_paths();
+        if !items.is_empty() {
+            self.start(checked(Op::MakeLinks { items }, self.cur().target_checks()));
+        }
     }
 
     /// Starts an inline rename of the cursor's entry, with the name before its extension
@@ -350,6 +374,8 @@ impl State {
                 (0, true) => format!("Nothing was moved to the {}", crate::trash::BIN),
                 (n, _) => format!("Moved {n} item{} to the {}", plural(n), crate::trash::BIN),
             }
+        } else if verb == ops::MAKING_LINKS {
+            format!("Made {n} link{}", plural(n))
         } else {
             let done = match verb {
                 "Copying" => "Copied",
@@ -366,16 +392,16 @@ impl State {
             let more = if notes.len() > 1 { format!(" (+{} more)", notes.len() - 1) } else { String::new() };
             note.push_str(&format!(". {first}{more}"));
         }
-        // The inline rename and New Folder have nothing to say when they go well.
+        // The inline rename, New Folder and New File have nothing to say when they go well.
         if out.quiet && !failed && !said {
             self.note = None;
         }
         self.alert = if failed { self.note.clone() } else { None };
         self.rename = None;
         self.refresh(&out.folders, &out.results, &out.canon);
-        // A new folder: renamed once it's listed in the active pane, unless the user picked
-        // something else before then (`State::land`).
-        if verb == ops::NEW_FOLDER
+        // A new folder or file: renamed once it's listed in the active pane, unless the user
+        // picked something else before then (`State::land`).
+        if (verb == ops::NEW_FOLDER || verb == ops::NEW_FILE)
             && let Some(made) = out.results.first()
             && let Some(p) = self.cur_mut().pending.as_mut().filter(|p| Some(p.path.as_path()) == made.parent() && p.nav == Nav::Reload)
         {
@@ -686,6 +712,7 @@ impl State {
                     | Cmd::OpenWith
                     | Cmd::Rename
                     | Cmd::Duplicate
+                    | Cmd::MakeLink
                     | Cmd::Trash
                     | Cmd::Copy
                     | Cmd::Cut
@@ -696,25 +723,30 @@ impl State {
             let on = self.unavailable(cmd).is_none() && (!on_selection || has) && (cmd != Cmd::SidebarAdd || !on_row || folders);
             let title = match cmd {
                 Cmd::Rename if n > 1 => format!("{} ({n} items)", Cmd::BatchRename.title()),
-                Cmd::Duplicate | Cmd::Trash | Cmd::Copy | Cmd::Cut | Cmd::CopyToOther | Cmd::MoveToOther if n > 1 => {
+                Cmd::Duplicate | Cmd::MakeLink | Cmd::Trash | Cmd::Copy | Cmd::Cut | Cmd::CopyToOther | Cmd::MoveToOther if n > 1 => {
                     format!("{} ({n} items)", cmd.title())
                 }
                 _ => self.title(cmd).into_owned(),
             };
             Some((Act::Cmd(cmd), title, on))
         };
-        let mut v = vec![item(Cmd::Open), item(Cmd::OpenWith), item(Cmd::Reveal), None];
+        let mut v = vec![item(Cmd::Open), item(Cmd::OpenWith), item(Cmd::Reveal)];
+        // On a symbolic link, its original.
+        if has && self.unavailable(Cmd::ShowOriginal).is_none() {
+            v.push(item(Cmd::ShowOriginal));
+        }
+        v.push(None);
         // In a Trash Put Back can restore from (Linux), it comes first.
         if on_row && self.unavailable(Cmd::PutBack).is_none() {
             v.insert(0, item(Cmd::PutBack));
         }
-        v.extend([item(Cmd::Info), item(Cmd::Rename), item(Cmd::Duplicate), item(Cmd::Trash), None]);
+        v.extend([item(Cmd::Info), item(Cmd::Rename), item(Cmd::Duplicate), item(Cmd::MakeLink), item(Cmd::Trash), None]);
         v.extend([item(Cmd::Copy), item(Cmd::Cut), item(Cmd::Paste), item(Cmd::CopyPath), None]);
         // The commander commands only when there's another pane to send to.
         if self.split() {
             v.extend([item(Cmd::CopyToOther), item(Cmd::MoveToOther), None]);
         }
-        v.extend([item(Cmd::SidebarAdd), item(Cmd::NewFolder), item(Cmd::Undo)]);
+        v.extend([item(Cmd::SidebarAdd), item(Cmd::NewFolder), item(Cmd::NewFile), item(Cmd::Undo)]);
         v
     }
 }

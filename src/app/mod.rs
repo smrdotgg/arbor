@@ -260,6 +260,49 @@ pub(crate) enum PathKind {
     Folder,
     File,
     Missing,
+    /// Show Original: the item a symbolic link points at, there to select.
+    Original,
+    /// Show Original: the link points at nothing (or couldn't be read).
+    Broken,
+}
+
+/// Where the symbolic link at `link` points: the original's path, with `.` and `..` resolved
+/// (on Unix through the folders' real paths, as the system follows a link; Windows resolves a
+/// relative target by its spelling), and whether something is there. The original itself is
+/// kept as it is, a link too perhaps (Show Original on it goes on).
+pub(crate) fn original(link: &Path) -> (PathBuf, PathKind) {
+    let Ok(target) = std::fs::read_link(link) else { return (link.to_path_buf(), PathKind::Broken) };
+    let abs = if target.is_absolute() { target } else { link.parent().unwrap_or(Path::new("")).join(target) };
+    let resolved = if cfg!(unix) {
+        match (abs.parent(), abs.file_name()) {
+            (Some(dir), Some(name)) => std::fs::canonicalize(dir).map(|d| d.join(name)).ok(),
+            _ => std::fs::canonicalize(&abs).ok(),
+        }
+    } else {
+        Some(lexical(&abs))
+    };
+    match resolved {
+        Some(p) if p.symlink_metadata().is_ok() => (p, PathKind::Original),
+        _ => (abs, PathKind::Broken),
+    }
+}
+
+/// `p` with `.` and `..` taken out by their spelling.
+fn lexical(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(c);
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Test only: holds a go-to's look at one path until told.
@@ -986,6 +1029,32 @@ impl State {
                 }
             }
             PathKind::Missing => self.note = Some(format!("No such folder: {}", path.display())),
+            PathKind::Original => match (path.parent(), path.file_name()) {
+                (Some(dir), Some(name)) if dir == self.cur().cwd && !self.cur().searching() => {
+                    self.reload_selecting(vec![name.to_os_string()], false);
+                }
+                (Some(dir), Some(name)) => self.go(dir.to_path_buf(), Nav::New, Some(name.to_os_string())),
+                _ => self.go(path, Nav::New, None),
+            },
+            PathKind::Broken => self.note = Some(format!("The original isn't there: {}", fs::pretty(&path))),
+        }
+    }
+
+    /// Show Original: the item the cursor's symbolic link points at, selected in its folder in
+    /// this pane (⌘[ comes back). The link is read on a worker, as a go-to's path is (it may be on
+    /// a slow disk), waiting here at most a frame.
+    pub fn show_original(&mut self) {
+        let f = self.cur();
+        let Some(link) = f.selected().filter(|e| e.is_link).map(|e| f.cwd.join(&e.os)) else { return };
+        let id = crate::folder::next_request();
+        self.going_to = Some(id);
+        let wait = self.show_wait;
+        let answer = crate::bounded::read_waiting(&self.path_check, wait, move || {
+            let (path, kind) = original(&link);
+            Some((id, path, kind))
+        });
+        if let Some(a) = answer {
+            self.went_path(a);
         }
     }
 

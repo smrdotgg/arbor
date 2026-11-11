@@ -101,6 +101,7 @@ commands! {
     ClearJump "nav.clear_jump_history" "Clear Jump History…", [];
     Reload "nav.reload" "Reload", ["cmd+r"];
     Reveal "nav.reveal" REVEAL, ["cmd+enter"];
+    ShowOriginal "nav.show_original" "Show Original", [];
     GoTrash "nav.trash" GO_TRASH, [];
     OpenWith "file.open_with" "Open With…", [];
     Info "file.info" "Get Info", ["cmd+i"];
@@ -119,9 +120,11 @@ commands! {
     MoveToOther "file.move_to_other" "Move to Other Pane", ["f6"];
     CopyPath "file.copy_path" "Copy Path", ["cmd+shift+c", "cmd+alt+c"];
     Duplicate "file.duplicate" "Duplicate", ["cmd+d"];
+    MakeLink "file.make_link" "Make Symbolic Link", ["mac:cmd+ctrl+a"];
     Rename "file.rename" "Rename…", ["f2", "cmd+shift+r"];
     BatchRename "file.batch_rename" "Batch Rename…", [];
     NewFolder "file.new_folder" "New Folder", ["cmd+shift+n"];
+    NewFile "file.new_file" "New File", ["cmd+alt+n"];
     Trash "file.trash" "Move to Trash", ["cmd+backspace", "delete"];
     Delete "file.delete" "Delete Permanently…", ["mac:cmd+alt+backspace", "pc:shift+delete"];
     PutBack "file.put_back" "Put Back", [];
@@ -482,11 +485,15 @@ mod tests {
             v.into_iter().map(|(_, t)| t).collect::<Vec<_>>()
         };
         assert_eq!(rank("ren")[0], "Rename…");
-        let mut top = rank("new")[..2].to_vec();
+        let mut top = rank("new")[..3].to_vec();
         top.sort();
-        assert_eq!(top, ["New Folder", "New Tab"]);
+        assert_eq!(top, ["New File", "New Folder", "New Tab"]);
         assert_eq!(rank("folder")[0], "New Folder", "a word start beats a scatter");
-        assert_eq!(rank("nf")[0], "New Folder", "initials");
+        let mut top = rank("nf")[..2].to_vec();
+        top.sort();
+        assert_eq!(top, ["New File", "New Folder"], "initials");
+        assert_eq!(rank("nfo")[0], "New Folder");
+        assert_eq!(rank("link")[0], "Make Symbolic Link");
         // The everyday command first; "Go to the Trash" and "Empty the Trash…" follow.
         assert_eq!(rank("trash")[0], "Move to Trash");
         if !cfg!(windows) {

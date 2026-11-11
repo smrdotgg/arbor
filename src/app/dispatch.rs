@@ -250,6 +250,9 @@ impl State {
                 .or(when(self.volume_here().is_none(), "This folder isn't on a volume that can be ejected")),
             // Always available.
             NewFolder => when(busy, BUSY).or(when(searching, "Leave the search (Esc) to make a folder here")),
+            NewFile => when(busy, BUSY).or(when(searching, "Leave the search (Esc) to make a file here")),
+            MakeLink => when(busy, BUSY).or(when(nothing, "Select an item first")).or(renaming),
+            ShowOriginal => when(!f.selected().is_some_and(|e| e.is_link), "Select a symbolic link first").or(renaming),
             MakeDefault | RestoreDefault => when(self.handler_job.is_pending(), "Already changing the default for folders"),
             Reveal | CopyPath | Info | SidebarAdd => renaming,
             GoTo | Reload | Palette | OpenSettings | ReloadSettings | Hidden | SortReverse | NewTab | Split | ClearJump | Search => None,
@@ -403,6 +406,9 @@ impl State {
             Rename => self.start_rename(),
             BatchRename => self.open_batch(tx),
             NewFolder => self.new_folder(),
+            NewFile => self.new_file(),
+            MakeLink => self.make_links(),
+            ShowOriginal => self.show_original(),
             Trash => self.trash_selected(),
             // Runs from the dialog (`State::answer`), with the items it named.
             Delete => {}

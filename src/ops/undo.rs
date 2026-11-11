@@ -30,6 +30,9 @@ pub(super) struct Step {
     /// An earlier try at this step moved it back across disks (copy, then delete) and the
     /// delete didn't finish.
     pub(super) split: Option<Split>,
+    /// A link Arbor made ([`What::Link`]): what it points at, so undo removes it only while it
+    /// still does, and redo makes it again.
+    pub(super) link: Option<Link>,
 }
 
 /// A move back across disks that copied everything to `back` but couldn't remove all of the
@@ -54,7 +57,7 @@ impl Undo {
         let mut steps = Vec::new();
         for (at, back) in items {
             match at.symlink_metadata() {
-                Ok(m) => steps.push(Step { print: Print::of(&at, &m), at, back, split: None }),
+                Ok(m) => steps.push(Step { print: Print::of(&at, &m), at, back, split: None, link: None }),
                 Err(e) => errors.push(format!("“{}” can't be undone: it couldn't be read right after ({e})", name_of(&at))),
             }
         }
@@ -66,8 +69,9 @@ impl Undo {
     pub(super) fn in_trash(&self) -> bool {
         match self.what {
             What::Trash => !self.redo,
-            What::Copy | What::Duplicate | What::NewFolder | What::PutBack => self.redo,
-            What::Rename | What::BatchRename | What::Move => false,
+            What::Copy | What::Duplicate | What::NewFolder | What::NewFile | What::PutBack => self.redo,
+            // Links are removed and made again, never trashed (`Worker::undo_links`).
+            What::Rename | What::BatchRename | What::Move | What::Link => false,
         }
     }
 
@@ -92,6 +96,12 @@ impl Undo {
         let mut u = Undo::record(What::NewFolder, [(path, None)])?;
         u.steps[0].print.tree = Some(Tree::default());
         Some(u)
+    }
+
+    /// A file just made (empty): undo trashes it only while it's still exactly that (its
+    /// identity, size and modified time).
+    pub fn new_file(path: PathBuf) -> Option<Undo> {
+        Undo::record(What::NewFile, [(path, None)])
     }
 }
 
@@ -151,7 +161,7 @@ impl Worker<'_> {
     /// can't be reversed again, which loses nothing).
     pub(super) fn inverse_step(&self, at: PathBuf, back: Option<PathBuf>, deep: bool) -> Option<Step> {
         let print = if back.is_none() || deep { self.print_all(&at).ok()? } else { Print::of(&at, &at.symlink_metadata().ok()?) };
-        Some(Step { at, print, back, split: None })
+        Some(Step { at, print, back, split: None, link: None })
     }
 
     /// Undoes (or redoes) one checked step. Hands it back (updated if it got halfway) when it
