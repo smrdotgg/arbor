@@ -37,32 +37,46 @@ fn frame_cost() {
         std::fs::write(d.join(format!("file {i:05}.txt")), "x").unwrap();
     }
     DIR.with_borrow_mut(|slot| *slot = Some(d.clone()));
-    let spec = AppSpec::<State> {
-        poll: Some(|s, _, tx| s.poll(tx)),
-        on_key: Some(|s, ev, tx| s.on_key(ev, tx)),
-        ..AppSpec::new("Arbor", (980.0, 620.0), init, crate::view::view)
-    };
-    let mut rt = App::new(spec).headless_runtime((980.0, 620.0), Env::new(false, 2.0));
-    for _ in 0..3 {
-        rt.frame(0.0);
+    // As before (980 pt: the default columns); then 1,600 pt wide with the default columns,
+    // and with every column shown (Extension, Date Created and Permissions too).
+    for (w, all) in [(980.0, false), (1600.0, false), (1600.0, true)] {
+        let spec = AppSpec::<State> {
+            poll: Some(|s, _, tx| s.poll(tx)),
+            on_key: Some(|s, ev, tx| s.on_key(ev, tx)),
+            ..AppSpec::new("Arbor", (w, 620.0), init, crate::view::view)
+        };
+        let mut rt = App::new(spec).headless_runtime((w, 620.0), Env::new(false, 2.0));
+        if all {
+            rt.update(|s, _| {
+                let mut c = s.cols();
+                for f in crate::listcols::Field::ALL {
+                    c.set_shown(f, true);
+                }
+                s.shared.cols.set(c);
+            });
+        }
+        for _ in 0..3 {
+            rt.frame(0.0);
+        }
+        let shown = rt.state.cols().fit(w - 168.0, false).iter().count();
+        let mut times = Vec::new();
+        for round in 0..1200 {
+            // Down through the list, back up now and then, so rows scroll in as they would.
+            let key = if round % 300 < 250 { Key::Down } else { Key::Up };
+            let t = Instant::now();
+            rt.key(KeyEvent { key, mods: Mods::default() });
+            rt.frame(1.0 / 120.0);
+            times.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        times.sort_by(f64::total_cmp);
+        let at = |q: f64| times[((times.len() as f64 - 1.0) * q).round() as usize];
+        println!(
+            "frame_cost ({w} pt, {shown} columns after the name): key → committed frame over 10,000 entries: min {:.3} ms, median {:.3} ms, p95 {:.3} ms",
+            at(0.0),
+            at(0.5),
+            at(0.95)
+        );
     }
-    let mut times = Vec::new();
-    for round in 0..1200 {
-        // Down through the list, back up now and then, so rows scroll in as they would.
-        let key = if round % 300 < 250 { Key::Down } else { Key::Up };
-        let t = Instant::now();
-        rt.key(KeyEvent { key, mods: Mods::default() });
-        rt.frame(1.0 / 120.0);
-        times.push(t.elapsed().as_secs_f64() * 1e3);
-    }
-    times.sort_by(f64::total_cmp);
-    let at = |q: f64| times[((times.len() as f64 - 1.0) * q).round() as usize];
-    println!(
-        "frame_cost: key → committed frame over 10,000 entries: min {:.3} ms, median {:.3} ms, p95 {:.3} ms",
-        at(0.0),
-        at(0.5),
-        at(0.95)
-    );
     let _ = std::fs::remove_dir_all(&d);
 }
 

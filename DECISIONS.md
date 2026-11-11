@@ -17,6 +17,55 @@ Format: date · decision · why · how to undo.
   may be off; the owner chose to merge on CI (macOS runner included) plus the GPT-6.1 Sol review
   and run the Codex Mac pass on the next round, together with updating /Applications/Arbor.app.
 
+- **2026-11-11 · List columns, Folders First and the status bar (`feature/columns-status`;
+  Review: the file, Folders First's default and toggle, what the status bar drops).**
+  - **Columns live in `columns.toml` beside the settings (Review)**, not in `config.toml`:
+    Arbor would have to rewrite a file people edit by hand, comments and all. It's written
+    whole by a thread of its own (`arbor-columns`, started by the first change, the last of a
+    run of changes only, an atomic rewrite, a failure said once, drained at exit), like
+    `sidebar.toml`'s writer but without its read-and-merge: the file is one value, so two
+    Arbor processes are last-change-wins. A resize is saved when the drag ends. A corrupt file
+    gives the defaults and a note; unknown column names (a newer Arbor's) are skipped, widths
+    clamped. Undo: `listcols::{load, Writer}`.
+  - **One set of columns for every window, tab and folder**, Explorer's "apply to all folders"
+    rather than Finder's per-folder view options (those would be per-folder user data to keep
+    and look up on every navigation). Undo: `Shared::cols` per window instead.
+  - **New columns: Extension, Date Created, Permissions (Windows: Attributes). Date Added:
+    skipped**: macOS keeps it as a Spotlight attribute (`kMDItemDateAdded`), a call per item, and
+    Windows and Linux have nothing like it. Date Created is the birth time the listing reads
+    already (statx's btime, macOS's birthtime, the Windows record's CreationTime); Permissions
+    is the `lstat`'s `st_mode` (a link's own, as `ls -l` shows it) or the record's attributes.
+    Both are kept in every `Entry` (12 bytes) from metadata already in hand: no call more per
+    entry, so the listing pays nothing for them hidden or shown. **Extension stays though Kind
+    is the extension today** (Kind says "Folder"/"File" too); asked for, off by default, free.
+    Its header sorts as Kind does (same order); Permissions doesn't sort; Date Created adds
+    "Sort by Date Created" and `sort = "created"`. Undo: `listcols::Field`.
+  - **Resizing: the strip before a column's header drags that column's width; Name takes the
+    rest** and never goes under 180 pt (what the list kept before); a column won't widen past
+    what Name can give, 36–48 pt at least, 480 at most. A pane too narrow drops the least
+    needed first (Permissions, Created, Extension, Kind, Modified; Size stays, as before). Not
+    by keyboard (optional in the task): Reset Columns puts widths back. Undo: `listcols::{fit,
+    dragged}`, `view::list::column_edge`.
+  - **Folders First defaults on (Review)**: it's what Arbor always did, and Explorer's and
+    most Linux file managers' default; Finder's is off. **The setting is `[general]
+    folders_first`**, beside `sort` and `sort_descending` (the task's `sort.folders_first`
+    would have been a new `[sort]` section for one key). **The palette's "Turn Off/On Folders
+    First" lasts until the window closes**, as ⌘. does for hidden files; nothing is saved.
+    Off, a Kind sort puts folders among the kinds as "folder" (Finder's way). Undo:
+    `Sort::dirs_first`, `State::toggle_folders_first`.
+  - **Status bar: "3 selected · 4.2 MB + 2 folders · 120 items · 84 GB free"**, the selection
+    part only with two or more selected (one item's size is on its row). **The free space is
+    left out while a note or progress shows (Review)**: the note keeps its room; the counts
+    stay as they always did. Free space is one `statvfs`/`GetDiskFreeSpaceExW` on a `Latest`
+    worker per folder, asked when the folder's read is asked (so it usually lands before the
+    listing and shows in its frame), and again after any file operation, for every pane; never
+    on a timer. Not shown in a search's results (they can cross disks). The selection's total
+    is worked out once per selection and listing (`Folder::picked_size`), not every frame.
+    Undo: `view::status`, `Folder::{ask_free, picked_size}`.
+  - **A test fixed, not the app**: `a_drop_on_a_column_refuses_a_replaced_folder` dropped
+    right after an operation and waited one frame; the free-space read after the operation can
+    land in that frame, and Rune holds a file drop a frame when state changed since the last
+    build (`hold_files`), so the drop came a frame later. It now waits for the drop to be taken.
 - **2026-11-11 · Compress and Extract Here (`feature/archives`; Review: Open, the folder made,
   the bomb limits, the level).**
   - **No zip crate: Arbor's own ZIP reader and writer and tar reader** (`src/archive/`, about
