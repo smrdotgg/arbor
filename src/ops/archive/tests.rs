@@ -434,6 +434,47 @@ fn a_tar_gz_with_a_bad_crc_is_damaged() {
     assert_eq!(names(&d), ["bad.tgz", "len.tgz"]);
 }
 
+/// Gzipped tar bytes of `t`, in one member or split into two.
+fn gz_of(t: &[u8], split: Option<usize>) -> Vec<u8> {
+    let one = |b: &[u8]| {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+        gz.write_all(b).unwrap();
+        gz.finish().unwrap()
+    };
+    match split {
+        None => one(t),
+        Some(at) => [one(&t[..at]), one(&t[at..])].concat(),
+    }
+}
+
+/// Zero bytes after the gzip stream are padding (gzip -t, tar -tzf and Python accept them);
+/// a tar split across gzip members reads as one; data after zero padding is damage.
+#[test]
+fn a_tar_gz_with_trailing_zeros_or_several_members_extracts() {
+    let d = tmp("gz-zeros");
+    let mut t = Vec::new();
+    tar_entry(&mut t, "z/a.txt", b'0', b"hello", "");
+    tar_entry(&mut t, "z/b.txt", b'0', &noise(50_000), "");
+    t.extend([0; 1024]);
+    let mut padded = gz_of(&t, None);
+    padded.extend([0; 4096]);
+    fs::write(d.join("padded.tgz"), &padded).unwrap();
+    let o = extract(&d.join("padded.tgz"));
+    ok(&o);
+    assert_eq!(fs::read(d.join("z/a.txt")).unwrap(), b"hello");
+    fs::write(d.join("two.tgz"), gz_of(&t, Some(700))).unwrap();
+    let o = extract(&d.join("two.tgz"));
+    ok(&o);
+    assert_eq!(fs::read(d.join("z 2/b.txt")).unwrap(), noise(50_000));
+    let mut junk = gz_of(&t, Some(700));
+    let first = gz_of(&t[..700], None).len();
+    junk.splice(first..first, [0u8; 16]);
+    fs::write(d.join("junk.tgz"), &junk).unwrap();
+    let o = extract(&d.join("junk.tgz"));
+    assert!(o.errors.first().is_some_and(|e| e.contains("damaged")), "{:?}", o.errors);
+    assert!(!d.join("z 3").exists());
+}
+
 #[test]
 fn cancelling_removes_what_was_made() {
     let d = tmp("cancel");

@@ -527,7 +527,7 @@ impl Worker<'_> {
                 self.p.bytes_total.store(len, Relaxed);
                 let n = Arc::new(AtomicU64::new(0));
                 let counted = archive::tar::Counted { r: file, n: n.clone() };
-                let gz = flate2::read::MultiGzDecoder::new(BufReader::with_capacity(256 * 1024, counted));
+                let gz = archive::tar::Gz::new(BufReader::with_capacity(256 * 1024, counted));
                 let waker = self.waker;
                 let last = std::cell::Cell::new(Instant::now());
                 let stop = || {
@@ -598,8 +598,7 @@ impl Worker<'_> {
                 // The tar again, from the start, each entry matched against the list.
                 (&*file).seek(SeekFrom::Start(0))?;
                 let raw = BufReader::with_capacity(256 * 1024, file);
-                let src: Box<dyn Read + '_> =
-                    if fmt == Format::TarGz { Box::new(flate2::read::MultiGzDecoder::new(raw)) } else { Box::new(raw) };
+                let src: Box<dyn Read + '_> = if fmt == Format::TarGz { Box::new(archive::tar::Gz::new(raw)) } else { Box::new(raw) };
                 let mut rd = archive::tar::Reader::new(src);
                 let mut next = plan.items.iter().peekable();
                 let changed = || AErr::Corrupt("it changed while it was being extracted".into());

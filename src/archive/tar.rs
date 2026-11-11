@@ -298,6 +298,58 @@ fn pax(d: &[u8], p: &mut Pending) -> Result<(), Error> {
     Ok(())
 }
 
+/// A gzip stream, member after member (as `gzip -d` reads them), each member's CRC and length
+/// checked as it ends. Zero bytes after the last member are padding (tape blocks, some tools
+/// write them), the end; anything else after zero padding is damage.
+pub struct Gz<R: io::BufRead> {
+    dec: Option<flate2::bufread::GzDecoder<R>>,
+    raw: Option<R>,
+    done: bool,
+}
+
+impl<R: io::BufRead> Gz<R> {
+    pub fn new(r: R) -> Gz<R> {
+        Gz { dec: Some(flate2::bufread::GzDecoder::new(r)), raw: None, done: false }
+    }
+}
+
+impl<R: io::BufRead> Read for Gz<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if self.done || buf.is_empty() {
+                return Ok(0);
+            }
+            if let Some(d) = &mut self.dec {
+                let n = d.read(buf)?;
+                if n > 0 {
+                    return Ok(n);
+                }
+                // The member ended, its CRC and length checked.
+                self.raw = self.dec.take().map(flate2::bufread::GzDecoder::into_inner);
+            }
+            let Some(mut r) = self.raw.take() else { return Ok(0) };
+            let mut zeros = false;
+            loop {
+                let b = r.fill_buf()?;
+                if b.is_empty() {
+                    self.done = true;
+                    return Ok(0);
+                }
+                let (z, all) = (b.iter().take_while(|&&x| x == 0).count(), b.iter().all(|&x| x == 0));
+                zeros |= z > 0;
+                r.consume(z);
+                if !all {
+                    break;
+                }
+            }
+            if zeros {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "data after the gzip stream's zero padding"));
+            }
+            self.dec = Some(flate2::bufread::GzDecoder::new(r));
+        }
+    }
+}
+
 /// Counts what passes through: the compressed bytes read, for progress.
 pub struct Counted<R> {
     pub r: R,
