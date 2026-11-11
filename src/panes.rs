@@ -68,6 +68,8 @@ impl State {
         p.f.view = self.settings.view_default;
         p.f.back.clear();
         p.f.fwd.clear();
+        // No go-to field open in it, whatever the old tab had.
+        p.f.goto = false;
         if !p.f.filter.is_empty() {
             p.f.filter.clear();
             let keep = p.f.cursor_name();

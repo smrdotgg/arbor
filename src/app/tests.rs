@@ -826,3 +826,19 @@ fn an_open_go_to_field_survives_a_reload_and_a_tab_switch() {
     backspace_out(&mut s, typed, &d);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A new tab starts with no go-to field open, whatever the tab it came from had: ⌘L then ⌘T,
+/// and Backspace in the new tab goes to the parent folder, as with no field.
+#[test]
+fn a_new_tab_starts_with_no_go_to_field() {
+    let d = folder("goto-new-tab", 2);
+    let mut s = state_in(&d);
+    settle(&mut s);
+    let mut tx = Tx::default();
+    s.run(Cmd::GoTo, &mut tx);
+    s.run(Cmd::NewTab, &mut tx);
+    assert!(s.cur().filter.is_empty() && !s.cur().goto, "no field in the new tab");
+    s.on_key(&KeyEvent { key: Key::Backspace, mods: rune::Mods::default() }, &mut tx);
+    assert_eq!(s.pending_path(), d.parent(), "Backspace goes to the parent folder");
+    let _ = std::fs::remove_dir_all(&d);
+}
