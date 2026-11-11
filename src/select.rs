@@ -68,13 +68,10 @@ impl Folder {
             .count()
     }
 
-    /// The selection as names: what's marked, or the cursor's row.
+    /// The selection as names: what's marked, or the cursor's row while it's selected
+    /// (nothing, with nothing selected).
     pub fn selection(&self) -> HashSet<OsString> {
-        if self.marked.is_empty() {
-            self.cursor_name().into_iter().collect()
-        } else {
-            self.marked.iter().map(|r| self.entries[self.visible[r] as usize].os.clone()).collect()
-        }
+        self.selection_names().0.into_iter().collect()
     }
 
     /// Makes `names` the selection, moving the cursor onto it if it's off it. Nothing to select
@@ -314,6 +311,21 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Add (and Remove) work on the selection as it is: with nothing selected (the cursor
+    /// ⌘-clicked off), adding a match selects the match alone, not the cursor's item too.
+    #[test]
+    fn adding_to_nothing_selects_only_the_matches() {
+        let mut f =
+            crate::folder::Folder::new(0, std::path::PathBuf::from("/"), crate::fs::Sort::new(crate::fs::SortKey::Name, false), true, None);
+        f.entries = ["a", "b", "c"].iter().map(|n| crate::fs::Entry::test(n, false)).collect::<Vec<_>>().into();
+        f.refilter(None);
+        f.select(0);
+        f.toggle_mark(0);
+        assert!(f.targets().is_empty());
+        f.apply_matches(vec!["b".into()], How::Add);
+        assert_eq!(f.targets().iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["b"]);
+    }
     use std::path::{Path, PathBuf};
 
     fn folder(name: &str, files: &[&str]) -> PathBuf {
