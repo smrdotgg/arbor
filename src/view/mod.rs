@@ -36,7 +36,7 @@ use pane::*;
 use panels::*;
 use sidebar::*;
 
-const ROW_H: f32 = 24.0;
+pub(crate) const ROW_H: f32 = 24.0;
 /// Height of the top band (path bar, and the sidebar's traffic-light strip on macOS).
 pub const BAR_H: f32 = 38.0;
 const SIDEBAR_W: f32 = 168.0;

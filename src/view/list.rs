@@ -290,6 +290,9 @@ pub(super) fn item_drags(e: El, c: Ctx, i: usize, version: u64) -> El {
     };
     let inside = move |s: &mut State, d: &mut Drag, tx: &mut rune::Tx| inside_drag(s, d, tx, id, i, version, split);
     match c.split {
+        // The column view's columns are one window: there the drag is Arbor's own, onto
+        // another column, as between split panes (below).
+        None if c.narrow => e.on_drag(inside),
         // Out to other apps (macOS: Rune starts no system drag elsewhere, so there the
         // drag stays in the window).
         None => {
@@ -325,16 +328,20 @@ pub(super) fn item_drags(e: El, c: Ctx, i: usize, version: u64) -> El {
 }
 
 /// Arbor's own drag of item `i` (of pane `id`'s folder at `version`) inside the window: onto
-/// the other pane (split) or the sidebar.
+/// the other pane (split), the sidebar, or in the column view a folder row or a column.
 pub(super) fn inside_drag(s: &mut State, d: &mut Drag, tx: &mut rune::Tx, id: u64, i: usize, version: u64, split: Option<Panes>) {
     tx.instant();
     let far = d.dx.hypot(d.dy) > DRAG_START;
     let at = d.window_point();
     let side = far && at[0] < SIDEBAR_W;
     let over = split.and_then(|p| p.at(at)).filter(|&p| p != id && far);
+    // The column view: the folder row or column under the pointer (none outside the columns).
+    let column = if far && !side && over.is_none() { s.column_drop_at(id, at) } else { None };
+    let hover = column.as_ref().map(|(dest, row)| (dest.path.clone(), row.clone()));
     if d.phase == Phase::Up {
         s.pane_drop = None;
         s.side.drop_hover = false;
+        s.set_cols_hover(id, None);
         if d.cancelled() {
             return;
         }
@@ -342,6 +349,8 @@ pub(super) fn inside_drag(s: &mut State, d: &mut Drag, tx: &mut rune::Tx, id: u6
             s.drop_rows_on_sidebar(id, i, version);
         } else if let Some(to) = over {
             s.drop_on_pane(id, i, version, to, tx);
+        } else if let Some((dest, _)) = column {
+            s.drop_rows_into(id, i, version, dest, tx);
         } else if far && split.is_none() {
             // Unsplit, off macOS (where the row's drag is the system's): let go on a
             // folder row or nowhere, as macOS's drag nothing took, it says how.
@@ -350,7 +359,9 @@ pub(super) fn inside_drag(s: &mut State, d: &mut Drag, tx: &mut rune::Tx, id: u6
     } else if s.pane_drop != over || s.side.drop_hover != side {
         s.pane_drop = over;
         s.side.drop_hover = side;
-    } else {
+        s.set_cols_hover(id, hover);
+    } else if !s.set_cols_hover(id, hover) {
+        // A drag's move: its release commits.
         tx.live_only();
     }
 }

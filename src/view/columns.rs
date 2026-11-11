@@ -31,6 +31,22 @@ pub(super) fn columns(s: &State, f: &Folder, c: Ctx, cx: &mut Cx<State>, active:
         .on_wheel(column_wheel(id));
     let shown = cols.shown();
     let active_at = cols.active();
+    // Where each column on screen is, for a drag let go over one (geometry).
+    let hits = shown
+        .clone()
+        .filter_map(|k| {
+            let (key, uid) = if k < active_at {
+                (cols.left[k].key(), Some(cols.left[k].uid))
+            } else if k == active_at {
+                (f.list_key(), None)
+            } else {
+                let r = cols.right.as_ref()?;
+                (r.key(), Some(r.uid))
+            };
+            Some(crate::columns::Hit { rect: cx.layout_with(&key, |r| r)?, uid })
+        })
+        .collect();
+    cols.hits.replace(hits);
     for k in shown.clone() {
         let column = if k < active_at {
             let view = cx.layout_with(&cols.left[k].key(), |r| r).unwrap_or_default();
@@ -147,6 +163,10 @@ fn other_column(column: &Column, c: Ctx, w: f32, view: [f32; 4]) -> El {
             if s.activate_column(id, &menu_at, None, tx) {
                 s.context_menu(None, press, tx);
             }
+        })
+        .on_scroll_offset({
+            let at = col.scroll.clone();
+            move |p: ScrollPos| at.set(p.offset[1])
         })
         .on_drag({
             let at = path.clone();
@@ -289,43 +309,24 @@ fn column_row(f: &Folder, col: &Column, i: usize, c: Ctx) -> El {
     }
 }
 
-/// A row's drags in a column other than the active one: out to other apps (macOS, one pane:
-/// this item, from its column's folder), or Arbor's own in the window, which first makes the
-/// column active with the item selected, then drags as the list's rows do.
+/// A row's drags in a column other than the active one: Arbor's own in the window (onto another
+/// column, a folder row, the sidebar, the other pane), which first makes the column active
+/// with the item selected, then drags as the active column's rows do. Never the system's:
+/// it can't land in the window it came from (RUNE-GAPS.md), and the columns are one window.
 fn column_drags(r: El, c: Ctx, path: PathBuf, name: std::ffi::OsString) -> El {
     let id = c.id;
     let split = c.split;
-    let (p1, n1) = (path.clone(), name.clone());
-    let inside = move |s: &mut State, d: &mut Drag, tx: &mut rune::Tx| {
-        if d.phase == Phase::Down && !s.activate_column(id, &p1, Some(&n1), tx) {
+    r.on_drag(move |s: &mut State, d: &mut Drag, tx: &mut rune::Tx| {
+        if d.phase == Phase::Down && !s.activate_column(id, &path, Some(&name), tx) {
             return;
         }
         // Where the item is now, in the folder that's active.
         let f = s.cur();
-        if f.cwd != p1 {
+        if f.cwd != path {
             return;
         }
-        let Some(i) = f.visible.iter().position(|&k| f.entries[k as usize].os == n1) else { return };
+        let Some(i) = f.visible.iter().position(|&k| f.entries[k as usize].os == name) else { return };
         let version = f.version;
         inside_drag(s, d, tx, id, i, version, split);
-    };
-    match split {
-        None => {
-            let r = r
-                .drag_out(move |s: &State| {
-                    let col = column_of(s, id, &path)?;
-                    col.entries.iter().find(|e| e.os == name)?;
-                    Some(rune::DragItem::new().allow_move().file(path.join(&name)))
-                })
-                .on_drag_end(move |s: &mut State, outcome, tx| {
-                    tx.instant();
-                    s.drag_out_ended(outcome);
-                })
-                .on_drag(inside);
-            // As the list's rows: a session that started after the button came up is given
-            // its release (macOS only; elsewhere Rune starts no system drag).
-            if cfg!(any(target_os = "macos", test)) { r.on_drag_start(|s: &mut State, _| s.drag_out_started()) } else { r }
-        }
-        Some(_) => r.on_drag(inside),
-    }
+    })
 }

@@ -1964,3 +1964,57 @@ fn every_drop_refuses_a_replaced_destination() {
     refused(&mut rt, &d, "Docs", "the other pane");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// In the column view (one pane), a file dragged from one column onto a folder row in another
+/// moves into it, and one let go over another column's background moves into that column's
+/// folder: Arbor's own drag inside the window, as between split panes (the system's drag can't
+/// land in the window it came from), checked like any drop.
+#[test]
+fn a_drag_between_columns_moves_the_file() {
+    let d = nested("drag-columns");
+    let mut rt = runtime(&d);
+    rt.update(|s, _| s.col_w = 200.0);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    // readme.txt (Docs' column, on the right) onto Photos (the root's column, active).
+    let from = row_box(&mut rt, "readme.txt");
+    let onto = row_box(&mut rt, "Folder Photos");
+    let start = (from[0] + 30.0, from[1] + from[3] * 0.5);
+    let end = (onto[0] + 30.0, onto[1] + onto[3] * 0.5);
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.frame(0.0);
+    // The press made Docs active (on a loaded machine its read may still be landing).
+    settle_columns(&mut rt);
+    rt.pointer_move(start.0 - 10.0, start.1 + 5.0);
+    rt.frame(0.0);
+    rt.pointer_move(end.0, end.1);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cols_hover(), Some(d.join("Photos")), "Photos is where it would land");
+    rt.pointer_up(end.0, end.1);
+    rt.frame(0.0);
+    until(&mut rt, |s| s.job.is_none());
+    assert!(d.join("Photos/readme.txt").exists() && !d.join("Docs/readme.txt").exists(), "{:?}", rt.state.note);
+    assert_ne!(rt.state.note.as_deref(), Some(crate::actions::DRAG_NOT_TAKEN));
+    settle_columns(&mut rt);
+    // The press made Docs the active column: its Work onto the root column's blank space.
+    assert_eq!(rt.state.cur().cwd, d.join("Docs"));
+    let from = row_box(&mut rt, "Folder Work");
+    let root = rt.state.cur().cols.as_ref().unwrap().left[0].key();
+    let root = rect_of(&rt, &root).unwrap();
+    let start = (from[0] + 30.0, from[1] + from[3] * 0.5);
+    let end = (root[0] + 50.0, root[1] + root[3] - 40.0);
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.frame(0.0);
+    rt.pointer_move(start.0 + 10.0, start.1 + 5.0);
+    rt.frame(0.0);
+    rt.pointer_move(end.0, end.1);
+    rt.frame(0.0);
+    assert_eq!(rt.state.cols_hover(), Some(d.clone()), "the root's folder is where it would land");
+    rt.pointer_up(end.0, end.1);
+    rt.frame(0.0);
+    until(&mut rt, |s| s.job.is_none());
+    assert!(d.join("Work/plan.txt").exists() && !d.join("Docs/Work").exists(), "{:?}", rt.state.note);
+    let _ = std::fs::remove_dir_all(&d);
+}

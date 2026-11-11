@@ -855,6 +855,8 @@ impl State {
                         old_rows,
                         self.waker.as_ref(),
                     );
+                    // Its element keeps its scroll; so does the folder, drawn as the column's.
+                    col.scroll.set(f.scroll.get());
                     cols.spare.push(col);
                 }
                 f.now = crate::folder::now();

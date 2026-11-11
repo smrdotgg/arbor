@@ -273,7 +273,9 @@ on screen hold their listing, and one scrolled back into view is read again. The
 whole: the deepest are shown after every move; the horizontal wheel (or Shift + wheel) and the
 "‹ N" at the left edge show the ones before, as far as the active column stays on screen. Drag
 any column's divider to change every column's width (this session). Space turns the column
-view's preview off and on. A search shows its results as a list.
+view's preview off and on. Drag a file from one column onto a folder or another column to move it
+there (Arbor's own drag in the window, as between split panes; on macOS that means rows can't be
+dragged out to Finder from the column view, as when split: another view brings it back). A search shows its results as a list.
 
 Images (PNG, JPEG, GIF, WebP, BMP) show **thumbnails** in the icon view, decoded by the quick
 preview's own decoders (with its size limits) and shrunk to the icon; on macOS (Quick Look) and
@@ -1136,4 +1138,5 @@ in Get Info, rich previews and icon-view thumbnails
 new (uncached) thumbnails on Windows (see Quick preview), syntax highlighting in the text
 preview, regular expressions in Select by Pattern, more than one operation
 at a time, dragging a tab out into a window of its own, notarized and signed packages, and
-dragging rows out to Finder while the window is split on macOS (see `RUNE-GAPS.md`).
+dragging rows out to Finder while the window is split or in the column view on macOS (see
+`RUNE-GAPS.md`).

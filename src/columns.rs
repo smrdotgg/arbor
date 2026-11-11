@@ -93,6 +93,8 @@ pub struct Column {
     req: u64,
     stop: Arc<AtomicBool>,
     loader: Latest<Answer>,
+    /// Where its rows are scrolled to, written by the view (geometry, for an in-window drop).
+    pub(crate) scroll: std::rc::Rc<Cell<f32>>,
 }
 
 impl Drop for Column {
@@ -121,6 +123,7 @@ impl Column {
             req: 0,
             stop: Arc::default(),
             loader,
+            scroll: std::rc::Rc::new(Cell::new(0.0)),
         }
     }
 
@@ -278,6 +281,17 @@ pub struct Columns {
     wheel: Cell<f32>,
     /// The folder a file drag hovers over in a column other than the active one.
     pub drop_target: Option<PathBuf>,
+    /// The folder an in-window drag in this pane would land in now (a row's or a column's).
+    pub(crate) drag_over: Option<PathBuf>,
+    /// Where each column on screen is (window points), as last laid out: the view writes it,
+    /// an in-window drop reads it (geometry, not file data).
+    pub(crate) hits: std::cell::RefCell<Vec<Hit>>,
+}
+
+/// A column on screen: its rect, and which it is (`None`: the active one, the folder's list).
+pub(crate) struct Hit {
+    pub rect: [f32; 4],
+    pub uid: Option<u64>,
 }
 
 impl Columns {
@@ -293,6 +307,8 @@ impl Columns {
             spare: Vec::new(),
             wheel: Cell::new(0.0),
             drop_target: None,
+            drag_over: None,
+            hits: Default::default(),
         }
     }
 
@@ -643,8 +659,11 @@ impl State {
                 && let Some(cols) = f.cols.as_mut()
             {
                 let spare = Column::ready(old, entries, old_id, (f.sort, f.show_hidden), old_uid, None, waker.as_ref());
+                spare.scroll.set(f.scroll.get());
                 cols.spare.push(spare);
             }
+            // The folder is drawn as the column's element now, scrolled as that was.
+            f.scroll.set(col.scroll.get());
             self.history.record(path);
             self.note = None;
             self.col_reads += 1;
@@ -760,6 +779,68 @@ impl State {
         self.sync_preview();
         self.flush_columns(tx);
         true
+    }
+
+    /// Where a drag in pane `id`'s columns let go at window point `at` would land: the folder
+    /// row under it, else the folder of the column under it, as that column listed it; with
+    /// the row's name when it's in the active column (its highlight). From geometry: each
+    /// column's rect and scroll as last laid out, the rows a fixed height.
+    pub(crate) fn column_drop_at(&self, id: u64, at: [f32; 2]) -> Option<(crate::ops::Dest, Option<OsString>)> {
+        let f = &self.pane(id)?.f;
+        let cols = f.cols.as_ref()?;
+        let hits = cols.hits.borrow();
+        let inside = |[x, y, w, h]: [f32; 4]| at[0] >= x && at[0] < x + w && at[1] >= y && at[1] < y + h;
+        let hit = hits.iter().find(|h| inside(h.rect))?;
+        let row = |scroll: f32| ((at[1] - hit.rect[1] + scroll) / crate::view::ROW_H).floor();
+        match hit.uid {
+            None => {
+                let r = row(f.scroll.get());
+                let e = (r >= 0.0).then(|| f.visible.get(r as usize)).flatten().map(|&k| &f.entries[k as usize]);
+                Some(match e {
+                    Some(e) if e.is_dir => (f.row_dest(e), Some(e.os.clone())),
+                    _ => (f.dest(), None),
+                })
+            }
+            Some(uid) => {
+                let c = cols.by_uid(uid)?;
+                let r = row(c.scroll.get());
+                let e = (r >= 0.0 && c.listed()).then(|| c.entry(r as usize)).flatten();
+                Some(match e {
+                    Some(e) if e.is_dir => (c.row_dest(e), None),
+                    _ => (c.dest(), None),
+                })
+            }
+        }
+    }
+
+    /// Highlights where an in-window drag in pane `id`'s columns would land (`None`: nowhere).
+    /// True when that changed.
+    pub(crate) fn set_cols_hover(&mut self, id: u64, over: Option<(PathBuf, Option<OsString>)>) -> bool {
+        let Some(ix) = self.pane_ix(id) else { return false };
+        let f = &mut self.panes[ix].f;
+        let Some(cols) = f.cols.as_mut() else { return false };
+        let (path, row) = over.map_or((None, None), |(p, r)| (Some(p), r));
+        if cols.drag_over == path && f.drop_target == row {
+            return false;
+        }
+        cols.drop_target = path.clone();
+        cols.drag_over = path;
+        f.drop_target = row;
+        true
+    }
+
+    /// Where an in-window drag in the active pane's columns would land now (tests).
+    #[cfg(test)]
+    pub(crate) fn cols_hover(&self) -> Option<PathBuf> {
+        self.cur().cols.as_ref()?.drag_over.clone()
+    }
+
+    /// Rows `i` (drawn at `version`) of pane `id` dragged in the window onto `dest` (a folder
+    /// row or column in the column view): into it, as a file drop, each item checked.
+    pub(crate) fn drop_rows_into(&mut self, id: u64, i: usize, version: u64, dest: crate::ops::Dest, tx: &mut Tx) {
+        let Some(src) = self.pane(id).filter(|p| p.f.version == version) else { return };
+        let (files, expect) = (src.f.drag_paths(i), src.f.drag_checks(i));
+        self.drop_into(&files, dest, expect, tx);
     }
 
     /// Scrolls pane `id`'s columns one to the left (the "‹" at their edge).

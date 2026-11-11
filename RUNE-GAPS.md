@@ -477,14 +477,22 @@ Newest first.
 - **The sidebar, too (milestone 12):** rows dragged onto the sidebar add their folders through
   the same in-window drag, which now runs unsplit as well; on macOS, unsplit, the row's drag is
   the system's, so it can't land on the sidebar of its own window (folders from Finder can).
+- **The column view, too:** its columns are one pane of one window, so a file dragged from one
+  column onto a folder or another column would be a drop in its own window, which the system's
+  drag can't make ("Nothing took the drop" on the Mac). In the column view rows always use
+  Arbor's in-window drag, as when split: the column and row under the pointer come from each
+  column's laid-out rect and scroll (`State::column_drop_at` in `src/columns.rs`), the folder
+  row (or column) gets a drop highlight, and the release goes through the checked drop
+  (`State::drop_rows_into`). So, as when split, a row can't be dragged out to Finder or another
+  app from the column view on macOS; another view brings that back.
 - **Tabs, too (milestone 14):** a tab dragged along its strip or onto the other pane is the same
   in-window drag. A handler can't ask which element is under the pointer, so where it lands in
   the other pane's strip is worked out from the strip's layout constants and the pane's rect
   (`strip_slot` in `src/view/pane.rs`), as Rune draws it; a layout change there has to update it.
   No drag image follows the pointer, only the landing place's highlight. Dragging a tab out
   into a window of its own isn't offered.
-- **What users lose:** on macOS, while split, a row can't be dragged out to Finder or another
-  app; closing the split (⌘\\) brings that back. The in-window drag shows no drag image under the
+- **What users lose:** on macOS, while split or in the column view, a row can't be dragged out to
+  Finder or another app; closing the split (⌘\\) or another view brings that back. The in-window drag shows no drag image under the
   pointer, only the target pane's highlight, and can't drop on a folder row in the other pane
   (only into its folder).
 - **Suggested Rune change:** at the least, pass where a `drag_out` ended to `on_drag_end` (window
