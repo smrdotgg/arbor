@@ -243,9 +243,14 @@ pub(super) fn press_item(s: &mut State, tx: &mut rune::Tx, id: u64, i: usize, ve
         return;
     }
     let f = s.cur();
+    // A press on another item ends an inline rename by committing it, then does what it does
+    // (the rename shows the new name at once, so the rows don't move). Only while the rename
+    // can't go (another operation running) does the press stop there, the field staying open.
     if s.rename.as_ref().is_some_and(|r| f.visible.get(i).is_none_or(|&e| f.entries[e as usize].os != r.os)) {
         s.commit_rename(tx);
-        return;
+        if s.rename.is_some() {
+            return;
+        }
     }
     let m = tx.mods();
     // The results take the keys from the search field.
@@ -417,6 +422,7 @@ pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
                 .color(l.t.text)
                 .caret(l.accent, l.accent.alpha(0.35))
                 .on_edit(|s: &mut State| s.rename_edit())
+                .on_input_key(|s: &mut State, ev, tx| s.rename_field_key(ev, tx))
                 .on_submit(|s: &mut State, tx| {
                     tx.instant();
                     s.commit_rename(tx);

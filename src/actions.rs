@@ -205,6 +205,24 @@ impl State {
         self.rename = Some(Rename { os, edit });
     }
 
+    /// Esc: the inline rename ends with nothing renamed.
+    pub fn cancel_rename(&mut self, tx: &mut Tx) {
+        self.rename = None;
+        tx.blur();
+    }
+
+    /// A key in the focused rename field, before the field's editor sees it. Esc cancels in one
+    /// press: left to the editor, Rune's field only blurs itself on Esc and keeps the key, which
+    /// left the field on screen until a second Esc.
+    pub fn rename_field_key(&mut self, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
+        if ev.key != rune::Key::Escape {
+            return false;
+        }
+        tx.instant();
+        self.cancel_rename(tx);
+        true
+    }
+
     /// Return in the rename field. Renames on the worker (the window never touches the disk,
     /// which may be slow), never over an existing name. Each pane showing the folder shows the
     /// item under its new name at once, its selection following it, and reads the folder again

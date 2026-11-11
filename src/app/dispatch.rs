@@ -31,11 +31,14 @@ impl State {
         if self.menu.is_some() {
             return self.menu_key(ev, tx);
         }
-        // While renaming, the field has the keys; only Escape (which it passes on) gets here.
+        // While renaming, the focused field has the keys (its own `rename_field_key` takes Esc).
+        // Keys get here when it isn't focused (a click elsewhere blurred it): Esc still cancels
+        // and Enter still commits, so the field never stays on screen with no way out.
         if self.rename.is_some() {
-            if ev.key == Key::Escape {
-                self.rename = None;
-                tx.blur();
+            match ev.key {
+                Key::Escape => self.cancel_rename(tx),
+                Key::Enter => self.commit_rename(tx),
+                _ => {}
             }
             return true;
         }

@@ -956,6 +956,54 @@ fn the_grid_is_a_list_box_of_named_options() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// The inline rename closes as it should in every view (the real-Mac QA: Esc left the field on
+/// screen, so did Enter after it, and a click elsewhere closed it but was lost). Rune's focused
+/// field took Escape to blur itself, so the first Esc left a field nobody was typing in, and
+/// every key after it but Esc was swallowed. One Esc cancels; Enter on the unchanged name closes
+/// it, focused or not; a click on another item closes it and selects that item.
+#[test]
+fn the_inline_rename_closes_in_one_press_in_every_view() {
+    for (i, view) in [Cmd::AsList, Cmd::AsIcons, Cmd::AsTiles, Cmd::AsColumns].into_iter().enumerate() {
+        for close in ["esc", "enter", "enter-unfocused", "click"] {
+            let d = folder(&format!("rename-close-{i}-{close}"));
+            let mut rt = runtime(&d);
+            if view != Cmd::AsList {
+                run(&mut rt, view);
+                settle_columns(&mut rt);
+            }
+            let pick = rt.state.cur().visible.iter().position(|&e| rt.state.cur().entries[e as usize].name == "notes.txt").unwrap();
+            rt.update(move |s, _| s.cur_mut().select(pick));
+            rt.frame(0.0);
+            key(&mut rt, Key::Function(2), false);
+            assert!(rt.state.rename.is_some() && rect_of(&rt, "rename").is_some(), "{view:?}: renaming");
+            match close {
+                "esc" => key(&mut rt, Key::Escape, false),
+                "enter" => key(&mut rt, Key::Enter, false),
+                "enter-unfocused" => {
+                    rt.update(|_, tx| tx.blur());
+                    rt.frame(0.0);
+                    key(&mut rt, Key::Enter, false);
+                }
+                _ => {
+                    let b = rect_of(&rt, "f:todo.md").unwrap_or_else(|| panic!("{view:?}: todo.md on screen"));
+                    let at = (b[0] + b[2] * 0.5, b[1] + b[3] * 0.5);
+                    rt.pointer_move(at.0, at.1);
+                    rt.pointer_down(at.0, at.1);
+                    rt.pointer_up(at.0, at.1);
+                    rt.frame(0.0);
+                }
+            }
+            rt.frame(0.0);
+            assert!(rt.state.rename.is_none() && rect_of(&rt, "rename").is_none(), "{view:?} {close}: the field is gone");
+            if close == "click" {
+                assert_eq!(rt.state.cur().selected().map(|e| e.name.as_str()), Some("todo.md"), "{view:?}: the click selected");
+            }
+            assert!(d.join("notes.txt").exists(), "nothing renamed");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+}
+
 /// The view is the tab's: a new tab gets the default (`view.default`), and showing a tab again
 /// brings its own back. Icon sizes change with ⌘+ and ⌘- and only in the icon view.
 #[test]

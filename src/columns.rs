@@ -711,11 +711,13 @@ impl State {
         if !self.activate_id(id, tx) {
             return false;
         }
-        // A press elsewhere ends an inline rename by committing it, as in the list; that press
-        // does nothing more.
+        // A press elsewhere ends an inline rename by committing it, as in the list, then goes on
+        // (unless the rename couldn't go yet, its field staying open).
         if self.rename.is_some() {
             self.commit_rename(tx);
-            return false;
+            if self.rename.is_some() {
+                return false;
+            }
         }
         // Already the active column (a press queued behind the one that made it so): the item
         // pressed is still the one to select, now or when its listing lands.
