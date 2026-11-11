@@ -166,8 +166,20 @@ pub struct Folder {
     /// (`columns::next_uid`). It moves with the listing when a column becomes the active one
     /// and back, so a column keeps its element, its scroll and any gesture in it.
     pub(crate) col_uid: Option<u64>,
-    /// The column element a read that's landing came from (`State::adopt_column`).
-    pub(crate) adopt_uid: Option<u64>,
+    /// A column made the active folder, landing (`State::adopt_column`): for its request only.
+    pub(crate) adopted: Option<Adopted>,
+}
+
+/// What a column made the active folder brings besides its listing.
+pub(crate) struct Adopted {
+    /// The request its listing lands as.
+    pub req: u64,
+    /// The column element it was drawn as, which the folder is drawn as from then on.
+    pub uid: u64,
+    /// Its rows as the column showed them (indices into its entries, and their version), when
+    /// they're what the folder shows too (same sort and hidden-file rule): kept rather than
+    /// worked out again, under the same version, so Rune looks at no key.
+    pub rows: Option<(Vec<u32>, u64)>,
 }
 
 impl Drop for Folder {
@@ -216,7 +228,7 @@ impl Folder {
             cols: None,
             cols_w: Rc::new(Cell::new(0.0)),
             col_uid: None,
-            adopt_uid: None,
+            adopted: None,
         }
     }
 
@@ -310,6 +322,8 @@ impl Folder {
         // and closes it together).
         self.search = None;
         self.tiles = None;
+        // A column being made active (`State::adopt_column`) is superseded.
+        self.adopted = None;
         let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
         let picks = self.picks;
         self.pending = Some(Pending { req, path: path.clone(), nav, select, rename, scroll: 0.0, picks });
@@ -416,6 +430,7 @@ impl Folder {
         self.tiles_for = None;
         self.cols = None;
         self.col_uid = None;
+        self.adopted = None;
         self.entries = Vec::new();
         self.visible.clear();
         self.marked.clear();

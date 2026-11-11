@@ -38,7 +38,9 @@ Format: date · decision · why · how to undo.
     Finder does. Undo: the `adopt_column` call in `State::go_full`.
   - **The folder just left becomes a column in the same frame from its own listing** (on the
     right after ←, on the left after →), never kept past that sync (`Columns::spare`); I read
-    it as "on screen, moved", not a cache. A file operation that changes a column's folder, and
+    it as "on screen, moved", not a cache. A press in a column whose listing isn't in makes it
+    the active folder at once, empty and reading, rather than leaving the folder before (and its
+    selection) as what actions act on until it lands (after review). A file operation that changes a column's folder, and
     ⌘R, read it again, its rows staying until the new listing lands. Undo: the `spare` push in
     `State::land`.
   - **Columns scroll by whole columns, the deepest after every move or resize; the wheel
@@ -57,11 +59,15 @@ Format: date · decision · why · how to undo.
     split window only the active pane's columns have it. Undo: `State::sync_column_preview`.
   - **Rows in a column show the name alone** (with the ▸ for a folder), the active column too;
     a search in the column view shows its results as a list. Undo: `Ctx::narrow`.
-  - **A column move is held to the listing budget (50 ms), not the key's (8 ms) (Review).**
-    → into a 10k folder opens it, as Enter does in the list; it lands in the key's own frame
-    from the listing on screen, 15.7 ms on tabot-dev's lavapipe and 9.0 ms of CPU, against
-    12.4 ms of CPU for the list view's own frame landing that listing (BENCH.md). Most of it is
-    Rune keying the rows that move. Undo: the budgets in `examples/bench.rs`.
+  - **A column move that only moves listings already on screen is a key: 8 ms; one that reads
+    a folder is a listing: 50 ms** (corrected after review: the first version held every move
+    to 50 ms, and ← and → over 10k took 8.4 and 8.9 ms of CPU). Each column is one element
+    keyed by its number, active or not, and a listing moves between a column and the folder
+    with its rows and their version (`folder::Adopted`, `Column::ready`), so Rune keys nothing
+    and the rows aren't sorted, filtered or copied again: ← and → over 10k now take 1.8 and
+    2.3 ms of CPU (`column_cost`). The bench tells the two kinds apart by whether the key started
+    a read (`reads=` on a `key` line) and waits for a column's read to land before the next key.
+    Undo: the budgets in `examples/bench.rs`.
   - **Not fixed here, found while checking idle (Review): on Xvfb, main (c3433d3) also keeps
     redrawing after As Icons, As List, or → into a folder, until the next key** (100–240% CPU,
     lavapipe's threads busy). Rune's headless runtime reports those frames idle, and Arbor's

@@ -80,36 +80,42 @@ other builds (load average 4–7), so every number below is noisier than usual.
 1.944, 1.968, 1.948 ms before and 1.980, 1.956, 1.949 ms after. No difference beyond noise.
 The release binary: 40,091,344 bytes before, 40,190,136 after (+0.25%).
 
-The new views, `bench 1 10 --columns 5 --tiles 4` (five cold starts in the 10k folder as
-columns, each round ← to its parent, where the 10k folder becomes the column on the right,
-then → back into it; four paging the tiles view with Page Down and ↓):
+The new views, `bench 1 10 --columns 5 --tiles 4`: five cold starts in a folder of 10,000
+files as columns, each round ← to its parent (the 10k folder becomes the column on the right),
+↓ onto the next folder there and ↑ back onto the 10k folder (each read for the column on the
+right), then → back into it; and four paging the tiles view of the 10k folder with Page Down
+and ↓. A key that started a folder read (`reads=1`) is held to the listing budget; one that only
+moved listings on screen, to the key's. After review (the numbers before it were 15.0 ms ← and
+15.7 ms →, all held to 50 ms):
 
 | Measure | n | median | p95 | budget |
 | --- | --- | --- | --- | --- |
-| Tiles, 10k entries: key → frame (Page Down, ↓) | 80 | 10.8 ms | 15.1 ms | 8 ms (over) |
-| Columns: → into the 10k folder (key → frame) | 50 | 15.7 ms | 22.6 ms | 50 ms (under) |
-| Columns: ← out of the 10k folder (key → frame) | 50 | 15.0 ms | 21.8 ms | 50 ms (under) |
+| Tiles, 10k entries: key → frame (Page Down, ↓) | 80 | 10.2 ms | 14.1 ms | 8 ms (over) |
+| Columns: ← and → over 10k, no read (key → frame) | 100 | 6.7 ms | 12.0 ms | 8 ms (p95 over) |
+| Columns: ↓ and ↑ onto a folder, read (key → frame) | 100 | 7.2 ms | 11.8 ms | 50 ms (under) |
 
-The list's ↓ was 9.0 ms in the same session, so tiles paging is in line with the icon view's
-(milestone 16: 6.2 ms on a quiet machine, when the list's ↓ was 6.2 too). A column move opens a
-folder, so it's held to the listing budget, as a navigation in the list view is; it lands in
-the key's own frame, without a read (the 10k listing on screen moves between the active column
-and the one beside it, `State::adopt_column`). The first version of the bench put the 10k
-folder's columns under the disk's root, through `/tmp`, which holds 60,594 entries on this
-machine: ← then also read a 60k column (26.9 ms median); the columns runs now have the bench's
-folder as their sidebar place.
+The list's ↓ was 8.3 ms (p95 9.6) in the same session: lavapipe's encode is 4–6 ms of every
+frame here, and Arbor's own update for ← and → is 2.2 and 4.1 ms (`ARBOR_TIMING`). Tiles paging
+is in line with the icon view's (milestone 16: 6.2 ms on a quiet machine, when the list's ↓ was
+6.2 too).
 
-`column_cost` (CPU only, headless, the 10k folder of `frame_cost`), one pass:
+`column_cost` (CPU only, headless, the 10k folder of `frame_cost`):
 
-| Measure | median | p95 |
+| Measure | 7b3a373 | this |
 | --- | --- | --- |
-| Columns: ← out of 10k (key → committed frame) | 8.4 ms | 10.6 ms |
-| Columns: → into 10k | 9.0 ms | 11.0 ms |
-| List view: the frame landing the same 10k listing (its read left out) | 12.4 ms | 20.4 ms |
+| Columns: ← out of 10k (key → committed frame) | 8.40 ms | 1.72 ms |
+| Columns: → into 10k | 8.91 ms | 2.34 ms |
+| Columns: End onto a folder (a read) | — | 2.29 ms |
+| List view: the frame landing the same 10k listing (its read left out) | 10.39 ms | 8.81 ms |
 
-Most of a column move is Rune keying the 10k rows that move between columns (0.5 ms per 1,000
-entries on top of about 4 ms: 3.8 ms for a folder of 250, 22.9 ms for one of 30,000); the list
-view pays the same, and more, when a 10k listing lands.
+What changed: each column is one element, keyed by its number, whether it's the active column
+or another, and a listing moves between a column and the folder with its rows and their
+version, so Rune doesn't build a new list or key its 10k rows (it did both on every move, 0.5 ms
+per 1,000 entries), and Arbor neither copies, sorts nor filters them again. The bench also lets
+a column's read land, in a frame of its own, before the next key: otherwise → paid for drawing
+the 10k folder read by the ↑ before it for the first time (12.9 ms of update instead of 4.1).
+The bench's folder is the columns' sidebar place: under the disk's root, `/tmp` (60,594 entries
+on this machine) was a column too.
 
 ## 2026-11-10, milestone 16 (drag-select, the icon view and its thumbnails)
 

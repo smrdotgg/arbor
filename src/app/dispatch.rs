@@ -10,6 +10,7 @@ impl State {
         let cmd = crate::draglog::on().then(|| self.keymap.find(|c| c.matches_tx(ev, tx))).flatten();
         let handled = self.key(ev, tx);
         if handled {
+            self.flush_columns(tx);
             self.sync_preview();
             self.flush_columns(tx);
         }
@@ -286,6 +287,8 @@ impl State {
             return;
         }
         self.run_cmd(cmd, tx);
+        // A column made active lands first, so the sync sees it in place.
+        self.flush_columns(tx);
         self.sync_preview();
         self.flush_columns(tx);
     }
@@ -293,6 +296,7 @@ impl State {
     /// Runs a permanent command, confirmed in the dialog.
     pub(crate) fn run_permanent(&mut self, cmd: Cmd, tx: &mut Tx) {
         self.run_cmd(cmd, tx);
+        self.flush_columns(tx);
         self.sync_preview();
         self.flush_columns(tx);
     }

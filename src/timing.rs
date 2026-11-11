@@ -64,7 +64,10 @@
 //! thumbnails, then pages while the next screens' stream in; `ARBOR_BENCH_GRID=3` does the
 //! same in the tiles view (As Tiles). With `ARBOR_BENCH_COLUMNS=1` the first step switches to
 //! the column view (As Columns) in the 10k folder; then each round presses ← (to its parent,
-//! the 10k folder becoming the column on the right) and → (back into it). With `ARBOR_BENCH_TABS=1` it opens a second tab on the
+//! the 10k folder becoming the column on the right), ↓ (onto the next folder, read for the
+//! column on the right), ↑ (back onto the 10k folder, read again) and → (into it). A `key` line has
+//! `reads=1` when the key started a folder read in the column view (a column's, or the folder's
+//! own). With `ARBOR_BENCH_TABS=1` it opens a second tab on the
 //! parent folder instead, then does N rounds of "previous tab (the start folder), next tab".
 //! A step starts only once the previous step's frame was drawn: a frame that wasn't (the window
 //! covered or not yet visible, no drawable in time) asks for nothing, and Rune draws again when
@@ -163,6 +166,8 @@ thread_local! {
     static TILE_DONE: Cell<Option<(Instant, usize)>> = const { Cell::new(None) };
     /// Thumbnails waiting or decoding when the handled key came.
     static KEY_THUMBS: Cell<usize> = const { Cell::new(0) };
+    /// The handled key started a folder read in the column view.
+    static KEY_READS: Cell<bool> = const { Cell::new(false) };
     /// A Batch Rename plan being worked out on a worker: the key that changed the rule.
     static RENAME_ASKED: Cell<Option<Instant>> = const { Cell::new(None) };
     /// A Batch Rename plan lands in the frame being built: its key, items, same frame, regex.
@@ -223,7 +228,9 @@ pub fn init() -> bool {
         rounds * PREVIEW_STEPS
     } else if JUMP.get() {
         rounds * JUMP_STEPS
-    } else if TABS.get() || GRID.get() || COLUMNS.get() {
+    } else if COLUMNS.get() {
+        rounds * 4 + 1
+    } else if TABS.get() || GRID.get() {
         rounds * 2 + 1
     } else {
         rounds * 3
@@ -288,6 +295,7 @@ fn measured(s: &mut State, tx: &mut Tx, t: Instant, f: impl FnOnce(&mut State, &
     let (no_jump, cold) = (s.jump.is_none(), s.history.loads == 0);
     let generation = search_generation(s);
     let (had_batch, plans) = (s.batch.is_some(), s.batch_plans);
+    let col_reads = s.col_reads;
     let handled = f(s, tx);
     if handled
         && had_batch
@@ -316,6 +324,7 @@ fn measured(s: &mut State, tx: &mut Tx, t: Instant, f: impl FnOnce(&mut State, &
     if handled {
         KEY.set(Some(t));
         KEY_THUMBS.set(s.cur().tiles.as_ref().map_or(0, crate::tiles::Tiles::waiting));
+        KEY_READS.set(s.col_reads != col_reads || (s.cur().cols.is_some() && s.cur().is_loading()));
         KEY_PREVIEW.set(s.preview.is_some());
         KEY_SEARCH.set(searching(s));
         if s.preview_reads != reads {
@@ -356,6 +365,7 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     let previews = s.preview_lands;
     let jump_loads = s.history.loads;
     let plans = s.batch_plans;
+    let col_lands = s.col_lands;
     let mut changed = s.poll(tx);
     if let Some((t, seen)) = TILE_ASKED.get()
         && let Some(tiles) = s.cur().tiles.as_ref()
@@ -402,9 +412,16 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     {
         PREVIEW_LANDED.set(Some((t, opened, preview_kind(s))));
     }
-    // One step per drawn frame: a frame that landed a listing, a preview or Jump's history is
-    // that step's frame, and a step whose frame wasn't drawn yet waits for it.
-    if !loading && !FIRST.get() && s.preview_lands == previews && s.history.loads == jump_loads && STEP_SHOWN.get() && paced() {
+    // One step per drawn frame: a frame that landed a listing, a preview, a column's listing or
+    // Jump's history is that step's frame, and a step whose frame wasn't drawn yet waits for it.
+    if !loading
+        && !FIRST.get()
+        && s.preview_lands == previews
+        && s.history.loads == jump_loads
+        && s.col_lands == col_lands
+        && STEP_SHOWN.get()
+        && paced()
+    {
         let stepped = bench_step(s, tx);
         if stepped {
             STEP_SHOWN.set(false);
@@ -501,6 +518,12 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
     if RENAME.get() && s.batch.as_ref().is_some_and(|b| !b.known() || b.stale()) {
         return false;
     }
+    // The column bench lets a column's read land before the next key, as a person would see
+    // it: a key then moves listings on screen, or reads, by what it does, not by how quickly
+    // it followed the last.
+    if COLUMNS.get() && (s.cur().is_loading() || s.cur().cols.as_ref().is_some_and(|c| c.loading())) {
+        return false;
+    }
     // The grid bench lets the first screen's thumbnails land before paging (that's the
     // time to the first thumbnail); later pages stream theirs while the keys go on.
     if GRID_PHOTOS.get() && n == 1 && TILE_ASKED.get().is_some() {
@@ -591,11 +614,9 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
             0 => {
                 measured(s, tx, now, |s, tx| run(s, Cmd::AsColumns, tx));
             }
-            n if n % 2 == 1 => {
-                keyed(s, &key(Key::Left), tx, now);
-            }
-            _ => {
-                keyed(s, &key(Key::Right), tx, now);
+            n => {
+                let k = [Key::Right, Key::Left, Key::Down, Key::Up][n as usize % 4].clone();
+                keyed(s, &key(k), tx, now);
             }
         }
         return true;
@@ -725,11 +746,12 @@ pub fn frame(f: &FrameEncoded) {
     } else {
         if let Some(t) = key {
             eprintln!(
-                "arbor-timing key ms={:.2} {split} preview={} search={} thumbs={}",
+                "arbor-timing key ms={:.2} {split} preview={} search={} thumbs={} reads={}",
                 ms(t),
                 u8::from(KEY_PREVIEW.get()),
                 u8::from(KEY_SEARCH.get()),
-                KEY_THUMBS.get()
+                KEY_THUMBS.get(),
+                u8::from(KEY_READS.get())
             );
         }
         if let Some(t) = tile_first {

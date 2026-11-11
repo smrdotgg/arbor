@@ -68,7 +68,9 @@ fn frame_cost() {
 
 /// The column view's per-key cost, as `frame_cost` (CPU only, no GPU): ← out of a 10,000-entry
 /// folder (it becomes the column on the right) and → back into it (its entries become the
-/// active column), each from the key to the committed frame.
+/// active column), which only move listings on screen (the key budget, 8 ms), and End onto a
+/// folder, whose contents are read for the column on the right (a read: the listing budget),
+/// each from the key to the committed frame.
 ///
 /// `cargo test --release -- --ignored --nocapture column_cost`
 #[test]
@@ -97,9 +99,14 @@ fn column_cost() {
     for _ in 0..3 {
         rt.frame(0.0);
     }
-    let (mut out, mut into) = (Vec::new(), Vec::new());
-    for round in 0..400 {
-        let (key, times) = if round % 2 == 0 { (Key::Left, &mut out) } else { (Key::Right, &mut into) };
+    let (mut out, mut into, mut read, mut back) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for round in 0..800 {
+        let (key, times) = match round % 4 {
+            0 => (Key::Left, &mut out),
+            1 => (Key::Right, &mut into),
+            2 => (Key::End, &mut read),
+            _ => (Key::Home, &mut back),
+        };
         let t = Instant::now();
         rt.key(KeyEvent { key, mods: Mods::default() });
         rt.frame(1.0 / 120.0);
@@ -110,6 +117,7 @@ fn column_cost() {
         }
     }
     assert!(rt.state.cur().cwd == d, "ended in the 10k folder");
+    drop(back);
     // The list view's own frame landing the same listing after ← or → (the read itself, on a
     // worker, left out): what a navigation into a 10k folder costs the window anyway.
     rt.update(|s, tx| s.run(crate::commands::Cmd::AsList, tx));
@@ -130,7 +138,12 @@ fn column_cost() {
             }
         }
     }
-    for (name, times) in [("← out of 10k", &mut out), ("→ into 10k", &mut into), ("list view: 10k listing lands", &mut list)] {
+    for (name, times) in [
+        ("← out of 10k", &mut out),
+        ("→ into 10k", &mut into),
+        ("End onto a folder (a read)", &mut read),
+        ("list view: 10k listing lands", &mut list),
+    ] {
         times.sort_by(f64::total_cmp);
         let at = |q: f64| times[((times.len() as f64 - 1.0) * q).round() as usize];
         println!("column_cost: {name}: min {:.3} ms, median {:.3} ms, p95 {:.3} ms", at(0.0), at(0.5), at(0.95));

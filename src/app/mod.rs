@@ -247,6 +247,11 @@ pub struct State {
     pub col_preview: bool,
     /// Space (or Close Preview) turned the column view's preview off, this session.
     pub col_preview_off: bool,
+    /// Folder reads the column view started (its columns', and a column made active before its
+    /// listing was in), for timing: a key that started one is a move that reads.
+    pub col_reads: u64,
+    /// Column reads that landed through `poll` (timing: their frame is no key's).
+    pub col_lands: u64,
 }
 
 /// What's at a typed path.
@@ -403,6 +408,8 @@ impl State {
             col_reveals: Vec::new(),
             col_preview: false,
             col_preview_off: false,
+            col_reads: 0,
+            col_lands: 0,
         };
         let f = &mut s.panes[0].f;
         match listing {
@@ -750,6 +757,9 @@ impl State {
         let active = ix == self.active;
         let f = &mut self.panes[ix].f;
         let Some(mut p) = f.pending.take_if(|p| p.req == a.req && p.path == a.listing.path) else { return false };
+        // A column made active brings its element and rows, for its own request only.
+        let adopted = f.adopted.take().filter(|d| d.req == p.req);
+        let (adopt_uid, adopt_rows) = adopted.map_or((None, None), |d| (Some(d.uid), d.rows));
         // A reload (after a rename, a copy, a new folder) asked to select what the operation
         // made; if the user picked something else meanwhile, their choice stands, so a ⌘C right
         // after a click copies what was clicked.
@@ -811,6 +821,9 @@ impl State {
                     }
                     Nav::Reload | Nav::Show => {}
                 }
+                // The rows the folder showed, for the column it becomes (when they're its whole
+                // listing, no filter): kept with their version rather than worked out again.
+                let old_rows = (left_from.is_some() && f.filter.is_empty()).then(|| (std::mem::take(&mut f.visible), f.version));
                 let old_entries = std::mem::replace(&mut f.entries, entries);
                 // The column view: the folder just left can be a column in the same frame (on
                 // the right after going up, on the left after going in), from this listing.
@@ -820,11 +833,18 @@ impl State {
                 {
                     // The column left takes the element the folder was drawn as; the folder, the
                     // one of the column it came from (`adopt_column`), or a new one.
-                    let uid = f.col_uid.replace(f.adopt_uid.take().unwrap_or_else(crate::columns::next_uid));
-                    let col = crate::columns::Column::ready(old, old_entries, old_id, f.sort, f.show_hidden, uid, self.waker.as_ref());
+                    let uid = f.col_uid.replace(adopt_uid.unwrap_or_else(crate::columns::next_uid));
+                    let col = crate::columns::Column::ready(
+                        old,
+                        old_entries,
+                        old_id,
+                        (f.sort, f.show_hidden),
+                        uid,
+                        old_rows,
+                        self.waker.as_ref(),
+                    );
                     cols.spare.push(col);
                 }
-                f.adopt_uid = None;
                 f.now = crate::folder::now();
                 let navigated = matches!(p.nav, Nav::New | Nav::Back | Nav::Forward | Nav::Fresh);
                 if navigated {
@@ -841,7 +861,17 @@ impl State {
                     let here: std::collections::HashSet<&OsString> = f.entries.iter().map(|e| &e.os).collect();
                     f.marked.extend(p.select.iter().filter(|n| here.contains(n)).cloned());
                 }
-                f.refilter(p.select.first().map(OsString::as_os_str));
+                match adopt_rows {
+                    // A column's rows, as it showed them (same sort, no filter, the hidden-file
+                    // rule it was shown with): kept, under their version.
+                    Some((visible, version)) if a.sort == f.sort && f.filter.is_empty() => {
+                        f.visible = visible;
+                        f.version = version;
+                        let pick = p.select.first();
+                        f.sel = pick.and_then(|n| f.visible.iter().position(|&e| f.entries[e as usize].os == *n)).unwrap_or(0);
+                    }
+                    _ => f.refilter(p.select.first().map(OsString::as_os_str)),
+                }
                 f.anchor = f.sel;
                 if p.nav == Nav::Show {
                     // Where it was when it was hidden (clamped if the folder shrank since).

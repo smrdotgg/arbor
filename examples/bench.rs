@@ -73,12 +73,16 @@
 //! ROUNDS times Page Down and ↓, each timed. Such a run counts only with 2 × ROUNDS keys after
 //! As Tiles.
 //!
-//! `--columns N` adds N cold starts with `ARBOR_BENCH_COLUMNS=1` in the 10k folder: As
-//! Columns, then ROUNDS times ← (to the parent: the 10k folder becomes the column on its
-//! right) and → (back into it: its 10k entries become the active column), each timed from the
-//! key to its frame. The bench's temp folder is a sidebar place in these runs, so the columns
-//! start there (not at the disk's root, through a temp folder of any size). Such a run counts
-//! only with 2 × ROUNDS keys after As Columns.
+//! `--columns N` adds N cold starts with `ARBOR_BENCH_COLUMNS=1` in a folder of 10,000 files
+//! (no folders, which sort first: → would select one and read it): As Columns, then ROUNDS
+//! times ← (to the parent: the 10k folder becomes the column on its right), ↓ (onto the next
+//! folder there, read for the column on the right), ↑ (back onto the 10k folder, read again)
+//! and → (into it: its 10k entries become the active column), each timed from the key to its
+//! frame. Keys that only move listings already on screen (← and →) are held to the key budget,
+//! 8 ms; keys that start a folder read (`reads=1`: ↓ and ↑) to the listing budget, 50 ms. The
+//! bench's temp folder is a sidebar place in these runs, so the columns start there (not at the
+//! disk's root, through a temp folder of any size). Such a run counts only with 4 × ROUNDS keys
+//! after As Columns, 2 × ROUNDS of them reading.
 //!
 //! `--idle N` (default 1; 0 skips it) checks NORTHSTAR's "idle means idle": N starts in a folder
 //! of a few JPEGs, PNGs and text files with `ARBOR_BENCH_IDLE=list`, and N with `=icons` (see
@@ -335,8 +339,14 @@ fn main() {
             }
         }
     }
-    let (mut col_in, mut col_out) = (Vec::new(), Vec::new());
+    let (mut col_moves, mut col_reads) = (Vec::new(), Vec::new());
+    let colbig = root.join("colbig");
     if column_runs > 0 {
+        let _ = std::fs::remove_dir_all(&colbig);
+        std::fs::create_dir_all(&colbig).expect("temp dir");
+        for i in 0..ENTRIES {
+            std::fs::write(colbig.join(format!("IMG_{i:05}.jpg")), b"x").expect("a file");
+        }
         // Its own settings: the bench's folder as the sidebar's one place (a literal string,
         // so a Windows path needs no escaping).
         let dir = root.join("dirs-columns").join("config").join(if cfg!(any(target_os = "macos", windows)) { "Arbor" } else { "arbor" });
@@ -344,10 +354,10 @@ fn main() {
         std::fs::write(dir.join("config.toml"), format!("[general]\nplaces = ['{}']\n", root.display())).expect("settings");
     }
     for run in 0..column_runs {
-        match run_once(&bin, &big, rounds, Mode::Columns) {
+        match run_once(&bin, &colbig, rounds, Mode::Columns) {
             Ok(r) => {
-                col_in.extend(r.col_in);
-                col_out.extend(r.col_out);
+                col_moves.extend(r.col_moves);
+                col_reads.extend(r.col_reads);
             }
             Err(e) => {
                 eprintln!("columns run {run}: INVALID: {e}");
@@ -392,10 +402,9 @@ fn main() {
         ("grid 1k photos: first thumbnail", &mut thumb_first, None),
         ("grid 1k photos: screen of thumbnails", &mut thumb_screen, None),
         ("tiles 10k: key → frame (PgDn, ↓)", &mut tiles_key, Some(8.0)),
-        // Each opens a folder (the 10k one, or its parent with the 10k one beside it): the
-        // listing budget, as for a navigation in the list view (which also reads).
-        ("columns: → into 10k (key → frame)", &mut col_in, Some(50.0)),
-        ("columns: ← out of 10k (key → frame)", &mut col_out, Some(50.0)),
+        // Moving listings already on screen is a key; reading a folder, a listing.
+        ("columns: ←/→ over 10k, no read", &mut col_moves, Some(8.0)),
+        ("columns: ↓/↑ onto a folder (reads)", &mut col_reads, Some(50.0)),
     ];
     for (name, v, budget) in rows {
         let off = (name.starts_with("tab") && !tabs)
@@ -636,9 +645,9 @@ struct Run {
     thumb_first: Vec<f64>,
     thumb_screen: Vec<f64>,
     thumbs: Vec<usize>,
-    /// The column view: → into the 10k folder, ← out of it.
-    col_in: Vec<f64>,
-    col_out: Vec<f64>,
+    /// The column view: keys that only moved listings on screen, and keys that read a folder.
+    col_moves: Vec<f64>,
+    col_reads: Vec<f64>,
 }
 
 static PACE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -766,8 +775,8 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         thumb_first: Vec::new(),
         thumb_screen: Vec::new(),
         thumbs: Vec::new(),
-        col_in: Vec::new(),
-        col_out: Vec::new(),
+        col_moves: Vec::new(),
+        col_reads: Vec::new(),
     };
     let mut keys = 0;
     let mut streaming = false;
@@ -834,11 +843,13 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
                 }
             }
             Some("key") if mode == Mode::Columns => {
-                // As Columns, then ← and → each round.
-                match keys {
-                    0 => {}
-                    k if k % 2 == 1 => run.col_out.extend(field("ms")),
-                    _ => run.col_in.extend(field("ms")),
+                // As Columns, then ←, ↓, ↑ and → each round, split by whether they read.
+                if keys > 0 {
+                    if field("reads") == Some(1.0) {
+                        run.col_reads.extend(field("ms"));
+                    } else {
+                        run.col_moves.extend(field("ms"));
+                    }
                 }
                 keys += 1;
             }
@@ -875,8 +886,14 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
     }
     let want = rounds as usize;
     if mode == Mode::Columns {
-        if keys != want * 2 + 1 {
-            return Err(format!("expected {} keys, got {keys}:\n{}", want * 2 + 1, lines.join("\n")));
+        if keys != want * 4 + 1 || run.col_reads.len() != want * 2 {
+            return Err(format!(
+                "expected {} keys, {} of them reading, got {keys} and {}:\n{}",
+                want * 4 + 1,
+                want * 2,
+                run.col_reads.len(),
+                lines.join("\n")
+            ));
         }
         return Ok(run);
     }

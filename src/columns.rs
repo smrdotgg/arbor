@@ -124,15 +124,16 @@ impl Column {
         }
     }
 
-    /// A column of a listing on screen this frame (the folder just left), sorted by `sort`,
-    /// drawn as element `uid` (the one it was drawn as) when there was one.
+    /// A column of a listing on screen this frame (the folder just left), sorted and shown as
+    /// `shown` says (sort, hidden files), drawn as element `uid` (the one it was drawn as) when
+    /// there was one, with its `rows` as they were shown when they're its whole listing.
     pub(crate) fn ready(
         path: PathBuf,
         entries: Vec<Entry>,
         dir_id: Option<crate::noclobber::FileId>,
-        sort: Sort,
-        hidden: bool,
+        (sort, hidden): (Sort, bool),
         uid: Option<u64>,
+        rows: Option<(Vec<u32>, u64)>,
         waker: Option<&rune::Waker>,
     ) -> Column {
         let mut c = Column::new(path, waker);
@@ -143,7 +144,15 @@ impl Column {
         c.dir_id = dir_id;
         c.sort = sort;
         c.load = Load::Ready;
-        c.refilter(hidden);
+        match rows {
+            // The rows the folder showed (no filter): the same, under the same version.
+            Some((visible, version)) => {
+                c.hidden = hidden;
+                c.visible = visible;
+                c.version = version;
+            }
+            None => c.refilter(hidden),
+        }
         c
     }
 
@@ -327,6 +336,11 @@ impl Columns {
         }
     }
 
+    /// Whether a column's read is on its way (the bench waits for it).
+    pub fn loading(&self) -> bool {
+        self.left.iter().chain(self.right.as_ref()).any(|c| c.load == Load::Loading)
+    }
+
     /// Every column holding entries (tests: nothing off screen holds any).
     #[cfg(test)]
     pub fn holding(&self) -> Vec<PathBuf> {
@@ -399,6 +413,7 @@ impl State {
             changed |= self.sync_columns_in(ix, &mut reads);
         }
         if !reads.is_empty() {
+            self.col_reads += reads.len() as u64;
             let deadline = Instant::now() + self.column_wait;
             for (ix, path, w) in reads {
                 let Some(a) = w.until(deadline) else { continue };
@@ -425,6 +440,11 @@ impl State {
             let f = &mut self.panes[ix].f;
             f.col_uid = None;
             return f.cols.take().is_some();
+        }
+        // A column being made active, its listing in hand: the columns change once it lands
+        // (`State::flush_columns`), not before (the column taken out would look missing).
+        if f.adopted.is_some() {
+            return false;
         }
         if covered {
             let Some(cols) = self.panes[ix].f.cols.as_mut() else { return false };
@@ -477,8 +497,8 @@ impl State {
             let next = wanted.get(k + 1).map_or(&f.cwd, |p| p).file_name().map(|n| n.to_os_string());
             let c = &mut cols.left[k];
             if c.pick != next {
+                // The highlight only: the rows and their keys are as they were (no new version).
                 c.pick = next;
-                c.version = crate::folder::next_version();
                 if c.load == Load::Ready
                     && let Some(r) = reveal_of(c)
                 {
@@ -573,6 +593,7 @@ impl State {
                     && c.land(a)
                 {
                     changed = true;
+                    self.col_lands += 1;
                     if let Some(r) = reveal_of(c) {
                         self.col_reveals.push(r);
                     }
@@ -608,17 +629,19 @@ impl State {
             if !entries.is_empty()
                 && let Some(cols) = f.cols.as_mut()
             {
-                let spare = Column::ready(old, entries, old_id, f.sort, f.show_hidden, old_uid, waker.as_ref());
+                let spare = Column::ready(old, entries, old_id, (f.sort, f.show_hidden), old_uid, None, waker.as_ref());
                 cols.spare.push(spare);
             }
             self.history.record(path);
             self.note = None;
+            self.col_reads += 1;
             return true;
         }
         let req = f.pending_for(path.to_path_buf(), nav, select.to_vec());
-        f.adopt_uid = Some(col.uid);
         let sort = col.sort;
         let mut col = col;
+        let rows = (col.sort == f.sort && col.hidden == f.show_hidden).then(|| (std::mem::take(&mut col.visible), col.version));
+        f.adopted = Some(crate::folder::Adopted { req, uid: col.uid, rows });
         let listing = Listing { path: col.path.clone(), result: Ok(std::mem::take(&mut col.entries)), dir_id: col.dir_id, missing: false };
         self.col_ready = Some((id, Answer { req, sort, listing }));
         // Landed by the next handler with a `Tx` (a key's, a command's, a press's), or else by
@@ -1086,6 +1109,45 @@ mod tests {
         assert!(cols(&s).right.as_ref().unwrap().listed(), "still showing its rows while it's read again");
         settle(&mut s);
         assert_eq!(rows(&s), ["new.txt", "o.txt", "top.txt"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    /// Moving between columns whose listings are on screen moves those listings, nothing
+    /// more: no copy, no filtering or sorting again, the same rows under the same version (so
+    /// Rune looks at no key) and the same element. That's what keeps such a move within a
+    /// frame over a large folder (BENCH.md).
+    #[test]
+    fn a_move_between_listed_columns_keeps_their_rows() {
+        let d = tree("keep-rows");
+        for i in 0..300 {
+            std::fs::write(d.join(format!("a/f{i:03}.txt")), "x").unwrap();
+        }
+        let mut s = columns_in(&d);
+        select(&mut s, "a");
+        settle(&mut s);
+        let r = cols(&s).right.as_ref().unwrap();
+        let (entries, rows, version, key) = (r.entries.as_ptr(), r.visible.as_ptr(), r.version, r.rows_key());
+        run(&mut s, Cmd::Into);
+        let f = s.cur();
+        assert_eq!(f.cwd, d.join("a"));
+        assert_eq!((f.entries.as_ptr(), f.visible.as_ptr()), (entries, rows), "moved, not copied or worked out again");
+        assert_eq!((f.version, f.rows_key()), (version, key), "the same rows' version, the same element");
+        let (entries, rows, version, key) = (f.entries.as_ptr(), f.visible.as_ptr(), f.version, f.rows_key());
+        settle(&mut s);
+        let reads = s.col_reads;
+        run(&mut s, Cmd::Parent);
+        assert_eq!(s.col_reads, reads, "nothing read: both listings were on screen");
+        let r = cols(&s).right.as_ref().unwrap();
+        assert_eq!(r.path, d.join("a"));
+        assert_eq!((r.entries.as_ptr(), r.visible.as_ptr()), (entries, rows), "back on the right, as it was");
+        assert_eq!((r.version, r.rows_key()), (version, key));
+        // A filter in the folder left means its rows aren't the whole listing: worked out again.
+        run(&mut s, Cmd::Into);
+        s.cur_mut().type_filter("f0");
+        let filtered = s.cur().version;
+        run(&mut s, Cmd::Parent);
+        let r = cols(&s).right.as_ref().unwrap();
+        assert_eq!(r.visible.len(), 303, "the whole folder: b, x.txt, y.txt and the 300");
+        assert_ne!(r.version, filtered);
         let _ = std::fs::remove_dir_all(&d);
     }
 }
