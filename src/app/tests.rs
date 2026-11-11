@@ -12,7 +12,7 @@ fn folder(name: &str, files: usize) -> PathBuf {
 }
 
 fn settings_for(dir: PathBuf, settings: Settings) -> Start {
-    Start { config: Config { settings, ..Config::default() }, start: dir, places: Vec::new(), note: None, custom: false }
+    Start { config: Config { settings, ..Config::default() }, start: dir, places: Vec::new(), note: None, custom: false, leftovers: None }
 }
 
 /// Polls as frames would until nothing is loading (or 10 s pass).
@@ -112,7 +112,7 @@ fn a_reload_keeps_a_selection_made_while_it_was_on_its_way() {
     let mut s = state_in(&d);
     settle_all(&mut s);
     s.new_folder();
-    assert!(s.job.is_some(), "made on the worker, not on the window's thread");
+    assert!(s.owns_job(), "made on the worker, not on the window's thread");
     wait_job(&mut s);
     assert!(s.is_loading(), "the reload is on its way");
     let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "delete-me-1.txt").unwrap();
@@ -121,7 +121,7 @@ fn a_reload_keeps_a_selection_made_while_it_was_on_its_way() {
     assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("delete-me-1.txt"));
     assert!(s.rename.is_none(), "no rename started on a folder the user moved away from");
     s.copy_selected(false, &mut Tx::default());
-    assert_eq!(s.clip.as_ref().map(|c| c.paths.clone()), Some(vec![d.join("delete-me-1.txt")]));
+    assert_eq!(s.shared.clip.borrow().as_ref().map(|c| c.paths.clone()), Some(vec![d.join("delete-me-1.txt")]));
     // With nothing picked meanwhile, the reload still selects the new folder, renaming it.
     s.new_folder();
     finish_job(&mut s);
@@ -160,21 +160,21 @@ fn a_reload_never_selects_an_item_the_user_deselected() {
 /// what a frame's `poll_job` does, alone.
 pub(crate) fn wait_job(s: &mut State) {
     let until = Instant::now() + Duration::from_secs(10);
-    while s.job.is_some() && Instant::now() < until {
+    while s.owns_job() && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(1));
         s.poll_job();
     }
-    assert!(s.job.is_none(), "the operation never finished");
+    assert!(!s.owns_job(), "the operation never finished");
 }
 
 /// Polls as frames would until the file operation lands (or 10 s pass).
 pub(crate) fn finish_job(s: &mut State) {
     let until = Instant::now() + Duration::from_secs(10);
-    while s.job.is_some() && Instant::now() < until {
+    while s.owns_job() && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(2));
         s.poll(&mut Tx::default());
     }
-    assert!(s.job.is_none(), "the operation never finished");
+    assert!(!s.owns_job(), "the operation never finished");
     settle_all(s);
 }
 
@@ -193,28 +193,28 @@ fn redo_after_undo_and_a_new_operation_clears_it() {
     s.run(Cmd::Undo, &mut tx);
     finish_job(&mut s);
     assert!(!d.join("a copy.txt").exists());
-    assert_eq!((s.undo.len(), s.redo.len()), (0, 1));
+    assert_eq!((s.shared.undo.borrow().len(), s.shared.redo.borrow().len()), (0, 1));
     assert_eq!(s.unavailable(Cmd::Redo), None);
     s.run(Cmd::Redo, &mut tx);
     finish_job(&mut s);
     assert!(d.join("a copy.txt").exists(), "redone");
     assert_eq!(s.note.as_deref(), Some("Made “a copy.txt” again"));
-    assert_eq!((s.undo.len(), s.redo.len()), (1, 0));
+    assert_eq!((s.shared.undo.borrow().len(), s.shared.redo.borrow().len()), (1, 0));
     // Undo it again, then a new operation: nothing to redo any more.
     s.run(Cmd::Undo, &mut tx);
     finish_job(&mut s);
-    assert_eq!(s.redo.len(), 1);
+    assert_eq!(s.shared.redo.borrow().len(), 1);
     s.new_folder();
-    assert!(s.redo.is_empty(), "a new folder ends the redo");
+    assert!(s.shared.redo.borrow().is_empty(), "a new folder ends the redo");
     finish_job(&mut s);
     s.rename = None;
     s.run(Cmd::Undo, &mut tx);
     finish_job(&mut s);
-    assert_eq!(s.redo.len(), 1);
+    assert_eq!(s.shared.redo.borrow().len(), 1);
     let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "a.txt").unwrap();
     s.cur_mut().select(i);
     s.run(Cmd::Duplicate, &mut tx);
-    assert!(s.redo.is_empty(), "so does a copy");
+    assert!(s.shared.redo.borrow().is_empty(), "so does a copy");
     finish_job(&mut s);
 }
 
@@ -224,7 +224,7 @@ fn file_operations_are_unavailable_while_one_runs() {
     let mut s = state_in(&d);
     assert_eq!(s.unavailable(Cmd::Duplicate), None);
     assert_eq!(s.unavailable(Cmd::Cancel), Some("No file operation is running"));
-    s.job = Some(ops::start(ops::Op::Copy { sources: Vec::new(), dest: d.clone() }, None, None));
+    s.set_job(crate::ops::start(crate::ops::Op::Copy { sources: Vec::new(), dest: d.clone() }, None, None));
     for cmd in [Cmd::Duplicate, Cmd::Trash, Cmd::Paste, Cmd::PasteMove, Cmd::Undo] {
         assert_eq!(s.unavailable(cmd), Some(BUSY), "{cmd:?}");
     }
@@ -455,7 +455,7 @@ fn a_pending_rename_never_points_the_row_at_another_item() {
     s.start_rename();
     s.rename.as_mut().unwrap().edit.text = "b".into();
     s.commit_rename(&mut Tx::default());
-    assert!(s.job.is_some());
+    assert!(s.owns_job());
     assert_eq!(s.cur().target_paths(), [d.join("a")], "still the item being renamed");
     assert_eq!(s.cur().selected().and_then(|e| e.pending.as_deref()), Some("b"), "its new name, as a label");
     for cmd in [Cmd::Open, Cmd::Copy, Cmd::Cut, Cmd::Rename, Cmd::OpenWith, Cmd::CopyPath, Cmd::Trash, Cmd::Delete] {
@@ -483,17 +483,17 @@ fn rename_and_new_folder_run_on_the_worker() {
     s.start_rename();
     s.rename.as_mut().unwrap().edit.text = "b.txt".into();
     s.commit_rename(&mut tx);
-    assert!(s.job.is_some(), "on the worker");
+    assert!(s.owns_job(), "on the worker");
     assert_eq!(s.cur().selected().and_then(|e| e.pending.as_deref()), Some("b.txt"), "shown at once");
     finish_job(&mut s);
     assert!(d.join("b.txt").exists() && !d.join("a.txt").exists());
-    assert_eq!((s.note.as_deref(), s.undo.len()), (None, 1), "nothing to say; undoable");
+    assert_eq!((s.note.as_deref(), s.shared.undo.borrow().len()), (None, 1), "nothing to say; undoable");
     s.new_folder();
-    assert!(s.job.is_some(), "on the worker");
+    assert!(s.owns_job(), "on the worker");
     finish_job(&mut s);
     assert!(d.join("untitled folder").is_dir());
     assert!(s.rename.is_some(), "renaming the new folder once it's listed");
-    assert_eq!(s.undo.len(), 2);
+    assert_eq!(s.shared.undo.borrow().len(), 2);
     s.rename = None;
     // A refused rename says why, and the list shows what's on disk again.
     std::fs::write(d.join("c.txt"), "c").unwrap();
@@ -509,7 +509,7 @@ fn rename_and_new_folder_run_on_the_worker() {
     assert!(s.cur().entries.iter().any(|e| e.name == "b.txt"), "the list put right");
     assert_eq!(std::fs::read_to_string(d.join("c.txt")).unwrap(), "c", "never over it");
     // Busy: the field stays open.
-    s.job = Some(ops::start(ops::Op::Copy { sources: Vec::new(), dest: d.clone() }, None, None));
+    s.set_job(crate::ops::start(crate::ops::Op::Copy { sources: Vec::new(), dest: d.clone() }, None, None));
     s.start_rename();
     s.commit_rename(&mut tx);
     assert!(s.rename.is_some() && s.note.as_deref() == Some(BUSY));
@@ -606,7 +606,7 @@ fn a_listed_item_replaced_since_is_left_alone() {
     assert!(!d.join("b-renamed").exists());
     replaced(&mut s, "c-cut");
     s.run(Cmd::Cut, &mut Tx::default());
-    let content = rune::ClipboardContent::new("").with_files(s.clip.as_ref().unwrap().paths.clone());
+    let content = rune::ClipboardContent::new("").with_files(s.shared.clip.borrow().as_ref().unwrap().paths.clone());
     s.paste_reqs.push(PasteReq { id: 0, dest: into.clone(), dest_id: None, mv: false });
     s.paste_reply(0, &content);
     finish_job(&mut s);
@@ -716,7 +716,7 @@ fn a_row_listed_without_an_identity_is_never_moved_or_removed() {
     untouched(&s, "b-rename");
     pick(&mut s, "c-cut");
     s.run(Cmd::Cut, &mut Tx::default());
-    let content = rune::ClipboardContent::new("").with_files(s.clip.as_ref().unwrap().paths.clone());
+    let content = rune::ClipboardContent::new("").with_files(s.shared.clip.borrow().as_ref().unwrap().paths.clone());
     s.paste_reqs.push(PasteReq { id: 0, dest: into.clone(), dest_id: None, mv: false });
     s.paste_reply(0, &content);
     finish_job(&mut s);
@@ -876,7 +876,7 @@ fn new_file_starts_its_rename_in_every_view() {
         };
         assert_eq!(s.unavailable(Cmd::NewFile), None);
         s.run(Cmd::NewFile, &mut tx);
-        assert!(s.job.is_some(), "made on the worker ({view:?})");
+        assert!(s.owns_job(), "made on the worker ({view:?})");
         finish_job(&mut s);
         assert_eq!(std::fs::read(here.join("untitled.txt")).unwrap(), b"", "{view:?}");
         let r = s.rename.as_ref().unwrap_or_else(|| panic!("renaming the new file in {view:?}"));
@@ -888,7 +888,7 @@ fn new_file_starts_its_rename_in_every_view() {
         s.commit_rename(&mut tx);
         finish_job(&mut s);
         assert!(here.join("notes.md").exists() && !here.join("untitled.txt").exists(), "{view:?}");
-        assert_eq!(s.undo.len(), 2);
+        assert_eq!(s.shared.undo.borrow().len(), 2);
         let _ = std::fs::remove_dir_all(&d);
     }
 }
@@ -1042,7 +1042,7 @@ fn new_file_starts_no_rename_on_a_row_that_isnt_it() {
     let made_then = |s: &mut State, change: &dyn Fn()| {
         s.run(Cmd::NewFile, &mut Tx::default());
         let until = Instant::now() + Duration::from_secs(10);
-        while !s.job.as_ref().is_some_and(|j| j.finished()) && Instant::now() < until {
+        while !s.shared.job.borrow().as_ref().is_some_and(|j| j.run.finished()) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(1));
         }
         change();
@@ -1167,4 +1167,53 @@ fn in_columns_new_items_go_where_the_selection_is() {
     assert!(d.join("untitled.txt").is_file() && d.join("untitled folder").is_dir(), "beside the selected folder");
     assert_eq!(std::fs::read_dir(d.join("sub")).unwrap().count(), 0, "not inside it");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The next launch says what the last quit left, with a way to show it; the record stays
+/// until that frame has been shown (a crash before then keeps it for the launch after), then
+/// what was read leaves it. An item removed or replaced since isn't mentioned.
+#[test]
+fn the_next_launch_shows_the_leftovers_then_forgets_them() {
+    let d = folder("leftovers", 0);
+    std::fs::create_dir_all(d.join("into/payload")).unwrap();
+    let file = d.join("leftovers.txt");
+    std::fs::write(
+        &file,
+        format!(
+            "{}\t{}\tArbor quit before it could remove it\n{}\tf:1:2:3:4\tgone\n",
+            d.join("into/payload").display(),
+            crate::ops::mark_of(&d.join("into/payload")).expect("a mark"),
+            d.join("nowhere").display()
+        ),
+    )
+    .unwrap();
+    let launch = || {
+        let (dir, seen) = (d.clone(), crate::leftovers::look(&file));
+        let boot = Booting::spawn(Duration::ZERO, move || Start { leftovers: seen, ..settings_for(dir, Settings::default()) });
+        let mut s = State::boot(boot, Duration::from_secs(5));
+        settle_all(&mut s);
+        s
+    };
+    // A launch that crashes before its first frame is shown: the record is still there.
+    let s = launch();
+    assert!(s.note.as_deref().is_some_and(|n| n.contains("“payload”")), "{:?}", s.note);
+    drop(s);
+    assert!(file.exists(), "kept: never shown");
+    // The next shows it.
+    let mut s = launch();
+    let note = s.note.clone().expect("said");
+    assert!(note.starts_with("Arbor quit during a file operation and left “payload” partly done in"), "{note}");
+    assert!(note.ends_with("Arbor quit before it could remove it"), "{note}");
+    assert!(file.exists(), "kept until its frame is on screen");
+    s.first_frame_shown();
+    let until = Instant::now() + Duration::from_secs(5);
+    while file.exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!file.exists(), "forgotten once shown");
+    s.show_leftover();
+    settle_all(&mut s);
+    assert_eq!(s.cur().cwd, d.join("into"));
+    assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("payload"));
+    assert!(s.leftover.is_none() && s.note.is_none(), "said once");
 }

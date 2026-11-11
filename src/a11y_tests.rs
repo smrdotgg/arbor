@@ -1682,7 +1682,7 @@ fn a_drop_on_a_column_refuses_a_replaced_folder() {
     std::fs::create_dir(d.join("Docs")).unwrap();
     rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 50.0, b[1] + 150.0)));
     rt.frame(0.0);
-    until(&mut rt, |s| s.job.is_none());
+    until(&mut rt, |s| !s.owns_job());
     assert!(d.join("top.txt").exists(), "nothing moved");
     assert!(!d.join("Docs/top.txt").exists() && !d.join("Docs-away/top.txt").exists());
     assert!(
@@ -1695,7 +1695,7 @@ fn a_drop_on_a_column_refuses_a_replaced_folder() {
     std::fs::rename(d.join("Docs-away"), d.join("Docs")).unwrap();
     rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 50.0, b[1] + 150.0)));
     rt.frame(0.0);
-    until(&mut rt, |s| s.job.is_none());
+    until(&mut rt, |s| !s.owns_job());
     assert!(d.join("Docs/top.txt").exists(), "{:?}", rt.state.note);
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -1775,7 +1775,7 @@ fn a_drag_from_another_column_keeps_its_gesture() {
     assert_eq!(rt.state.pane_drop, Some(rt.state.panes[1].id()), "still dragging, over the other pane");
     rt.pointer_up(end.0, end.1);
     rt.frame(0.0);
-    until(&mut rt, |s| s.job.is_none());
+    until(&mut rt, |s| !s.owns_job());
     assert!(d.join("Dest/readme.txt").exists(), "{:?}", rt.state.note);
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -1941,7 +1941,7 @@ fn a_failed_read_keeps_no_listing() {
 #[test]
 fn every_drop_refuses_a_replaced_destination() {
     let refused = |rt: &mut Runtime<State>, d: &Path, into: &str, what: &str| {
-        until(rt, |s| s.job.is_none());
+        until(rt, |s| !s.owns_job());
         assert!(d.join("top.txt").exists(), "{what}: nothing moved ({:?})", rt.state.note);
         assert!(!d.join(into).join("top.txt").exists(), "{what}: the replacement got nothing");
         assert!(rt.state.note.as_deref().is_some_and(|n| n.starts_with("Nothing was dropped")), "{what}: {:?}", rt.state.note);
@@ -2042,7 +2042,7 @@ fn a_drag_between_columns_moves_the_file() {
     assert_eq!(rt.state.cols_hover(), Some(d.join("Photos")), "Photos is where it would land");
     rt.pointer_up(end.0, end.1);
     rt.frame(0.0);
-    until(&mut rt, |s| s.job.is_none());
+    until(&mut rt, |s| !s.owns_job());
     assert!(d.join("Photos/readme.txt").exists() && !d.join("Docs/readme.txt").exists(), "{:?}", rt.state.note);
     assert_ne!(rt.state.note.as_deref(), Some(crate::actions::DRAG_NOT_TAKEN));
     settle_columns(&mut rt);
@@ -2063,7 +2063,7 @@ fn a_drag_between_columns_moves_the_file() {
     assert_eq!(rt.state.cols_hover(), Some(d.clone()), "the root's folder is where it would land");
     rt.pointer_up(end.0, end.1);
     rt.frame(0.0);
-    until(&mut rt, |s| s.job.is_none());
+    until(&mut rt, |s| !s.owns_job());
     assert!(d.join("Work/plan.txt").exists() && !d.join("Docs/Work").exists(), "{:?}", rt.state.note);
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -2092,7 +2092,7 @@ fn a_drop_lands_in_the_column_it_was_drawn_as() {
     rt.pointer_move(end.0, end.1);
     rt.pointer_up(end.0, end.1);
     rt.frame(0.0);
-    until(&mut rt, |s| s.job.is_none());
+    until(&mut rt, |s| !s.owns_job());
     assert!(d.join("Docs/readme.txt").exists(), "dropped on Docs, its own folder: nothing moves ({:?})", rt.state.note);
     assert!(!d.join("Docs/Work/readme.txt").exists(), "never into the row at that height in the folder made active");
     // Without the drop: right after the press, the root's Docs row is still where it lands.
@@ -2131,7 +2131,7 @@ fn copy_and_move_to_the_other_pane_refuse_a_replaced_folder() {
         std::fs::rename(d.join("Docs"), d.join("Docs-away")).unwrap();
         std::fs::create_dir(d.join("Docs")).unwrap();
         key(&mut rt, Key::Function(key_), false);
-        until(&mut rt, |s| s.job.is_none());
+        until(&mut rt, |s| !s.owns_job());
         let what = if key_ == 6 { "moved" } else { "copied" };
         assert!(d.join("top.txt").exists(), "F{key_}: the source stays");
         assert!(!d.join("Docs/top.txt").exists() && !d.join("Docs-away/top.txt").exists(), "F{key_}: nothing went in");
@@ -2146,7 +2146,7 @@ fn copy_and_move_to_the_other_pane_refuse_a_replaced_folder() {
         until(&mut rt, |s| !s.cur().is_loading());
         rt.update(|s, tx| s.activate(0, tx));
         key(&mut rt, Key::Function(key_), false);
-        until(&mut rt, |s| s.job.is_none());
+        until(&mut rt, |s| !s.owns_job());
         assert!(d.join("Docs/top.txt").exists(), "F{key_} after ⌘R: {:?}", rt.state.note);
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -2176,4 +2176,86 @@ fn new_file_draws_its_rename_field_in_every_view() {
         key(&mut rt, Key::Escape, false);
         let _ = std::fs::remove_dir_all(&d);
     }
+}
+
+/// Two windows idle as one does (NORTHSTAR: a second window must not slow the first), in every
+/// pair of views (list, icons, tiles, columns; each window's view its own, and its thumbnails
+/// and columns too): once each has landed what it showed, neither polls a change, asks for a
+/// frame or commits. Keys in one send nothing to the other; a file operation in one sends the
+/// other one message (its refresh, which re-reads its list or its column on the folder, by
+/// identity), which lands, and then both are idle again. ⌘W on the last tab of either asks Rune
+/// to close that window.
+#[test]
+fn two_idle_windows_draw_nothing() {
+    use crate::grid::ViewMode;
+    // Whatever the other window sent lands first (`poll`), then the window is idle.
+    let quiet = |rt: &mut Runtime<State>, what: &str| {
+        rt.update_if(|s, tx| s.poll(tx));
+        assert_idle(rt, what);
+    };
+    let made = |rt: &Runtime<State>| rt.state.cur().entries.iter().filter(|e| e.name.starts_with("untitled folder")).count();
+    let d = images("idle-two", 40);
+    let mut a = runtime(&d);
+    run(&mut a, Cmd::NewWindow);
+    let second = crate::window::tests::take_opened().expect("⌘N opened a window");
+    let spec = AppSpec::<State> {
+        poll: Some(|s, _, tx| s.poll(tx)),
+        on_key: Some(|s, ev, tx| s.on_key(ev, tx)),
+        ..AppSpec::new("Arbor", (980.0, 620.0), init, crate::view::view)
+    };
+    let mut b = App::new(spec).init(move || second).headless_runtime((980.0, 620.0), Env::new(false, 1.0));
+    b.frame(0.0);
+    b.frame(0.0);
+    quiet(&mut a, "first");
+    quiet(&mut b, "second");
+    let views = [
+        (ViewMode::List, Cmd::AsList),
+        (ViewMode::Icons, Cmd::AsIcons),
+        (ViewMode::Tiles, Cmd::AsTiles),
+        (ViewMode::Columns, Cmd::AsColumns),
+    ];
+    for (i, &(va, ca)) in views.iter().enumerate() {
+        // The second window in another view than the first: each window's own.
+        let (vb, cb) = views[(i + 1) % views.len()];
+        let what = format!("{va:?} and {vb:?}");
+        if a.state.cur().view != va {
+            run(&mut a, ca);
+        }
+        if b.state.cur().view != vb {
+            run(&mut b, cb);
+        }
+        quiet(&mut a, &format!("{what}: first"));
+        quiet(&mut b, &format!("{what}: second"));
+        assert_eq!((a.state.cur().view, b.state.cur().view), (va, vb), "{what}: each window's view");
+        for (rt, v) in [(&a, va), (&b, vb)] {
+            let grid = matches!(v, ViewMode::Icons | ViewMode::Tiles);
+            assert_eq!(rt.state.cur().tiles.is_some(), grid, "{what}: thumbnails only where a grid shows");
+            assert_eq!(rt.state.cur().cols.is_some(), v == ViewMode::Columns, "{what}: columns only where they show");
+        }
+        // Keys in the first: the second hears nothing.
+        key(&mut a, Key::Down, false);
+        key(&mut a, Key::Up, false);
+        quiet(&mut a, &format!("{what}: first, after keys"));
+        assert!(!b.update_if(|s, tx| s.poll(tx)), "{what}: the second window got nothing from the first's keys");
+        // A file operation in the first: one refresh for the second, then quiet.
+        let before = made(&b);
+        run(&mut a, Cmd::NewFolder);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while (a.state.owns_job() || a.state.is_loading()) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            a.update_if(|s, tx| s.poll(tx));
+            a.frame(1.0 / 60.0);
+        }
+        a.update(|s, tx| s.close_overlays(tx));
+        a.update(|s, _| s.rename = None);
+        a.frame(0.0);
+        quiet(&mut a, &format!("{what}: first, after its operation"));
+        assert!(b.update_if(|s, tx| s.poll(tx)), "{what}: the second window is told");
+        quiet(&mut b, &format!("{what}: second, after the refresh"));
+        assert_eq!(made(&b), before + 1, "{what}: the second window read the folder again");
+    }
+    // ⌘W on the second's only tab closes it (Rune runs its `on_close`).
+    b.update(|s, tx| s.run(Cmd::CloseTab, tx));
+    assert_eq!(b.shell_request, Some(rune::Shell::Close));
+    let _ = std::fs::remove_dir_all(&d);
 }

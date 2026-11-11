@@ -586,10 +586,12 @@ fn win_eject(path: &Path) -> Result<(), EjectError> {
 // ---- notifications ------------------------------------------------------------------------
 
 /// Starts listening for volumes coming and going, where the OS tells without polling: macOS's
-/// NSWorkspace notifications and Windows' `WM_DEVICECHANGE`. Each refreshes the list.
-pub fn watch(handle: rune::AppHandle<State>) {
+/// NSWorkspace notifications and Windows' `WM_DEVICECHANGE`. Each refreshes the list, in the
+/// window focused last, which tells the others.
+pub fn watch() {
     let refresh: Refresh = std::sync::Arc::new(move || {
-        handle.update(|s, tx| {
+        // One window reads the list, and tells the others (`poll_volumes`).
+        crate::window::route(|s, tx| {
             tx.instant();
             s.refresh_volumes();
         });
@@ -745,7 +747,7 @@ impl State {
             self.note = Some("Already ejecting a volume".into());
             return;
         }
-        if self.job.is_some() {
+        if self.busy() {
             self.note = Some(format!("{EJECT_BUSY} “{}”", vol.name));
             return;
         }
@@ -790,6 +792,12 @@ impl State {
         if let Some(v) = self.volume_loader.take()
             && v != self.volumes
         {
+            // The other windows show the same list, without reading it themselves.
+            let list = std::rc::Rc::new(v.clone());
+            self.shared.tell_others(self.win, || {
+                let list = list.clone();
+                Box::new(move |s, _| s.volumes.clone_from(&list))
+            });
             self.volumes = v;
             changed = true;
         }
@@ -936,15 +944,15 @@ systemd-1 /mnt/auto autofs rw 0 0
         }
         for src in sources {
             let dest = elsewhere.join("out");
-            s.job = Some(crate::ops::start(crate::ops::Op::Copy { sources: src.clone(), dest }, None, None));
+            s.set_job(crate::ops::start(crate::ops::Op::Copy { sources: src.clone(), dest }, None, None));
             s.eject(vols[0].clone());
             assert!(s.ejecting.is_none(), "{src:?}: not started");
             assert!(s.note.as_deref().is_some_and(|n| n.starts_with(EJECT_BUSY)), "{src:?}: {:?}", s.note);
             assert!(s.unavailable(crate::commands::Cmd::Eject).is_some(), "{src:?}: and dimmed");
-            while s.job.as_ref().is_some_and(|j| j.take().is_none()) {
+            while s.shared.job.borrow().as_ref().is_some_and(|j| j.run.take().is_none()) {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
-            s.job = None;
+            *s.shared.job.borrow_mut() = None;
         }
         let _ = std::fs::remove_dir_all(&elsewhere);
     }

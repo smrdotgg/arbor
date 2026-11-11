@@ -91,6 +91,25 @@ impl Print {
     }
 }
 
+/// What identifies an item as the one a copy made, as text for the leftovers record, taken the
+/// moment it was created (before any of its bytes): its kind, its file id and its birth time
+/// where the file system keeps one. Not its size or time of change, which a copy cut short
+/// mid-file leaves anywhere. `None` without a file id: then it can't be told from another later.
+pub(super) fn creation_mark(m: &Metadata, id: Option<(u64, u64)>) -> Option<String> {
+    let (dev, ino) = id?;
+    let kind = match Kind::of(m) {
+        Kind::File => 'f',
+        Kind::Folder => 'd',
+        Kind::Link => 'l',
+    };
+    let born = m
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map_or_else(|| "-".into(), |d| d.as_nanos().to_string());
+    Some(format!("{kind}:{dev}:{ino}:{born}"))
+}
+
 /// How an item differs from its fingerprint.
 pub(super) enum Diff {
     Gone,

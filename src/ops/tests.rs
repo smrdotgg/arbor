@@ -2498,14 +2498,20 @@ fn windows_links_and_shortcuts() {
     // A shortcut, directly: a .lnk file (header size 0x4C), and never over a taken name.
     let link = Link { target: d.join("a.txt"), dir: false, shortcut: true };
     let at = d.join("short.lnk");
-    make_link_at(&at, &link).unwrap();
+    make_link_at(&at, &link, &mut |_, _| {}).unwrap();
     let bytes = fs::read(&at).unwrap();
     assert_eq!(bytes.get(..4), Some(&[0x4c, 0, 0, 0][..]), "a shell link");
     fs::write(d.join("taken.lnk"), "mine").unwrap();
-    let e = make_link_at(&d.join("taken.lnk"), &link).unwrap_err();
+    let e = make_link_at(&d.join("taken.lnk"), &link, &mut |_, _| {}).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::AlreadyExists);
     assert_eq!(fs::read_to_string(d.join("taken.lnk")).unwrap(), "mine");
     assert!(!fs::read_dir(&d).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".arbor-")), "no staging file left");
+    // Its staging file is told of while it exists, and gone when it's in place (what the
+    // leftovers record names if Arbor quits mid-write).
+    let mut told = Vec::new();
+    make_link_at(&d.join("again.lnk"), &link, &mut |tmp, there| told.push((tmp.to_path_buf(), there, tmp.exists()))).unwrap();
+    assert_eq!(told.len(), 2, "{told:?}");
+    assert!(told[0].1 && told[0].2 && !told[1].1 && !told[1].2 && told[0].0 == told[1].0, "{told:?}");
     let _ = fs::remove_dir_all(&d);
 }
 
@@ -2593,7 +2599,7 @@ fn windows_undo_leaves_a_replacement_link_alone() {
     let newcomer = Link { target: d.join("other.txt"), ..made };
     let swap: PathHook = Box::new(move |at: &Path| {
         fs::remove_file(at).unwrap();
-        make_link_at(at, &newcomer).unwrap();
+        make_link_at(at, &newcomer, &mut |_, _| {}).unwrap();
     });
     let o = run_hooked(Op::Undo(u), fake_trash, hooked(swap, false));
     assert!(o.errors.first().is_some_and(|e| e.contains("was replaced just now")), "{:?} {:?}", o.errors, o.refused);

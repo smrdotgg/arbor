@@ -216,7 +216,7 @@ pub(super) fn jump_view(s: &State, l: Look, card_w: f32) -> El {
         |m: &str| col().key("jump-list").child(text(m.to_string()).role("status").font(BODY).color(l.t.text_secondary).px(16.0).py(10.0));
     let list = if count == 0 && j.loading {
         msg("Loading history…")
-    } else if count == 0 && s.history.agg.as_ref().is_none_or(|a| a.is_empty()) {
+    } else if count == 0 && s.shared.history.borrow().agg.as_ref().is_none_or(|a| a.is_empty()) {
         msg("No folders yet: the folders you open show up here. Type a path to go there.")
     } else if count == 0 {
         msg("No folders match")

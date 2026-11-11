@@ -172,11 +172,18 @@ pub struct Made {
 
 /// Copies the file (or its clone) at `from` to a new file `to`, with its permissions, and says
 /// what it made ([`Made`]). Fails with `AlreadyExists` if anything is at `to`; a destination it
-/// made itself is removed on failure.
+/// made itself is removed on failure. `opened` hears of the new file, read off its handle, the
+/// moment it exists and before any of its bytes are written, so a copy cut short mid-file (the
+/// app quitting) still knows what it made.
 #[cfg(target_vendor = "apple")]
-pub fn copy_file(from: &Path, to: &Path) -> io::Result<Made> {
+pub fn copy_file(from: &Path, to: &Path, opened: &mut dyn FnMut(&Made)) -> io::Result<Made> {
     // `<sys/clonefile.h>`; not in the libc crate.
     const CLONE_NOFOLLOW: u32 = 0x0001;
+    // Tests that stall a copy mid-file take the byte copy (a clone is whole in one call).
+    #[cfg(test)]
+    if gate::has(to) {
+        return copy_bytes(from, to, opened);
+    }
     // On APFS a clone: instant and no extra space. Fails if `to` exists.
     let (f, t) = (cstr(from)?, cstr(to)?);
     if unsafe { libc::clonefile(f.as_ptr(), t.as_ptr(), CLONE_NOFOLLOW) } == 0 {
@@ -184,33 +191,66 @@ pub fn copy_file(from: &Path, to: &Path) -> io::Result<Made> {
         // O_EVTONLY needs no read permission (a clone keeps the source's mode).
         use std::os::unix::fs::OpenOptionsExt;
         let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_EVTONLY | libc::O_NOFOLLOW).open(to)?;
-        return made(&f);
+        let m = made(&f)?;
+        opened(&m);
+        return Ok(m);
     }
     let e = io::Error::last_os_error();
     match e.raw_os_error() {
         // Not APFS, or another volume: copy the bytes.
-        Some(libc::ENOTSUP | libc::EXDEV | libc::EINVAL) => copy_bytes(from, to),
+        Some(libc::ENOTSUP | libc::EXDEV | libc::EINVAL) => copy_bytes(from, to, opened),
         _ => Err(e),
     }
 }
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
-pub fn copy_file(from: &Path, to: &Path) -> io::Result<Made> {
-    copy_bytes(from, to)
+pub fn copy_file(from: &Path, to: &Path, opened: &mut dyn FnMut(&Made)) -> io::Result<Made> {
+    copy_bytes(from, to, opened)
 }
 
 #[cfg(windows)]
-pub fn copy_file(from: &Path, to: &Path) -> io::Result<Made> {
+pub fn copy_file(from: &Path, to: &Path, opened: &mut dyn FnMut(&Made)) -> io::Result<Made> {
     use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::{
-        CopyFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        CALLBACK_STREAM_SWITCH, CopyFileExW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
     };
+    /// What the progress routine tells: `opened`, once, with the new file read off the handle
+    /// CopyFileExW writes through, at its first stream, before that stream's bytes.
+    struct Told<'a> {
+        opened: &'a mut dyn FnMut(&Made),
+        told: bool,
+    }
+    unsafe extern "system" fn progress(
+        _total: i64,
+        _done: i64,
+        _stream: i64,
+        _stream_done: i64,
+        _number: u32,
+        reason: u32,
+        _src: HANDLE,
+        dst: HANDLE,
+        data: *const core::ffi::c_void,
+    ) -> u32 {
+        // SAFETY: `data` is the `Told` below, alive for the whole CopyFileExW call, on this thread.
+        let told = unsafe { &mut *(data as *mut Told<'_>) };
+        if reason == CALLBACK_STREAM_SWITCH && !told.told {
+            told.told = true;
+            if let Ok(m) = made_handle(dst) {
+                (told.opened)(&m);
+            }
+        }
+        0 // PROGRESS_CONTINUE
+    }
     let (f, t) = (wide(from), wide(to));
-    // bFailIfExists: fails with ERROR_FILE_EXISTS rather than replacing. Copies attributes and
-    // alternate streams like Explorer. It holds the new file open while it writes, so the name
-    // can't be taken over meanwhile; it's opened again at once, with no access rights, to know
-    // it by handle.
-    if unsafe { CopyFileW(f.as_ptr(), t.as_ptr(), 1) } == 0 {
+    let mut told = Told { opened, told: false };
+    // COPY_FILE_FAIL_IF_EXISTS (1): fails with ERROR_FILE_EXISTS rather than replacing. Copies
+    // attributes and alternate streams like Explorer. It holds the new file open while it
+    // writes, so the name can't be taken over meanwhile; it's opened again at once, with no
+    // access rights, to know it by handle.
+    let data = &mut told as *mut Told<'_> as *const core::ffi::c_void;
+    if unsafe { CopyFileExW(f.as_ptr(), t.as_ptr(), Some(progress), data, std::ptr::null_mut(), 1) } == 0 {
         return Err(io::Error::last_os_error());
     }
     let f = std::fs::OpenOptions::new()
@@ -229,6 +269,15 @@ fn made(f: &std::fs::File) -> io::Result<Made> {
     Ok(Made { id: Some((meta.dev(), meta.ino())), meta })
 }
 
+/// [`made`], for a handle someone else owns (CopyFileExW's), left open.
+#[cfg(windows)]
+fn made_handle(h: windows_sys::Win32::Foundation::HANDLE) -> io::Result<Made> {
+    use std::os::windows::io::FromRawHandle;
+    // SAFETY: a valid handle for the length of the call; ManuallyDrop never closes it.
+    let f = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(h as _) });
+    made(&f)
+}
+
 #[cfg(windows)]
 fn made(f: &std::fs::File) -> io::Result<Made> {
     use std::os::windows::io::AsRawHandle;
@@ -242,11 +291,17 @@ fn made(f: &std::fs::File) -> io::Result<Made> {
 
 /// `O_CREAT | O_EXCL`, then the bytes (`copy_file_range` on Linux, which clones on Btrfs and XFS).
 #[cfg(unix)]
-fn copy_bytes(from: &Path, to: &Path) -> io::Result<Made> {
+fn copy_bytes(from: &Path, to: &Path, opened: &mut dyn FnMut(&Made)) -> io::Result<Made> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut src = std::fs::File::open(from)?;
     let perm = src.metadata()?.permissions();
     let mut dst = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(to)?;
+    // Before any byte: what it made, by handle.
+    if let Ok(m) = made(&dst) {
+        opened(&m);
+    }
+    #[cfg(test)]
+    gate::first_byte(to, &mut src, &mut dst)?;
     let done = io::copy(&mut src, &mut dst).and_then(|_| dst.set_permissions(perm)).and_then(|_| made(&dst));
     if done.is_err() {
         // Only the file this made: if another app replaced it at `to` meanwhile, that stays.
@@ -258,6 +313,40 @@ fn copy_bytes(from: &Path, to: &Path) -> io::Result<Made> {
         }
     }
     done
+}
+
+/// Test only: a copy that stops after its new file's first byte until told to go on (a source
+/// that stalls mid-file), keyed by the destination (tests run in parallel, each in its own
+/// folder).
+#[cfg(all(test, unix))]
+pub(crate) mod gate {
+    use std::io::{self, Read, Write};
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::sync::mpsc::{Receiver, Sender};
+
+    pub(crate) type Gate = (PathBuf, Sender<()>, Receiver<()>);
+    pub(crate) static FIRST_BYTE: Mutex<Vec<Gate>> = Mutex::new(Vec::new());
+
+    #[cfg(target_vendor = "apple")]
+    pub(super) fn has(to: &Path) -> bool {
+        FIRST_BYTE.lock().unwrap().iter().any(|(p, ..)| p == to)
+    }
+
+    pub(super) fn first_byte(to: &Path, src: &mut std::fs::File, dst: &mut std::fs::File) -> io::Result<()> {
+        let gate = {
+            let mut g = FIRST_BYTE.lock().unwrap();
+            g.iter().position(|(p, ..)| p == to).map(|i| g.remove(i))
+        };
+        if let Some((_, reached, go)) = gate {
+            let mut b = [0u8; 1];
+            let n = src.read(&mut b)?;
+            dst.write_all(&b[..n])?;
+            let _ = reached.send(());
+            let _ = go.recv();
+        }
+        Ok(())
+    }
 }
 
 /// An item's identity on its disk (see [`file_id`]).
@@ -539,9 +628,9 @@ mod tests {
         let d = tmp("copy");
         fs::write(d.join("a"), "new").unwrap();
         fs::write(d.join("b"), "old").unwrap();
-        assert_eq!(copy_file(&d.join("a"), &d.join("b")).unwrap_err().kind(), ErrorKind::AlreadyExists);
+        assert_eq!(copy_file(&d.join("a"), &d.join("b"), &mut |_| {}).unwrap_err().kind(), ErrorKind::AlreadyExists);
         assert_eq!(fs::read_to_string(d.join("b")).unwrap(), "old");
-        copy_file(&d.join("a"), &d.join("c")).unwrap();
+        copy_file(&d.join("a"), &d.join("c"), &mut |_| {}).unwrap();
         assert_eq!(fs::read_to_string(d.join("c")).unwrap(), "new");
     }
 

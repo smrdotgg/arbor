@@ -328,11 +328,11 @@ fn pick(s: &mut State, rel: &str) {
 /// Polls until the file operation is done and every pane has settled.
 fn finish_job(s: &mut State) {
     let until = Instant::now() + Duration::from_secs(10);
-    while s.job.is_some() && Instant::now() < until {
+    while s.owns_job() && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(2));
         s.poll(&mut tx());
     }
-    assert!(s.job.is_none(), "the operation never finished");
+    assert!(!s.owns_job(), "the operation never finished");
     settle_all(s);
 }
 
@@ -803,7 +803,7 @@ fn batch_rename_refuses_a_folder_and_something_inside_it() {
     );
     assert!(b.blocked().is_some());
     s.batch_apply(&mut tx());
-    assert!(s.job.is_none(), "nothing runs");
+    assert!(!s.owns_job(), "nothing runs");
     assert!(d.join("hit-z/hit-a/payload.txt").exists());
     // Only the inner one changing is fine.
     let b = s.batch.as_mut().unwrap();
@@ -1056,9 +1056,9 @@ fn every_action_on_an_edited_result_goes_ahead() {
     // Cut and paste elsewhere.
     pick(&mut s, "b/report-cut.txt");
     s.run(Cmd::Cut, &mut tx());
-    let clip = s.clip.as_ref().unwrap();
+    let clip = s.shared.clip.borrow().as_ref().unwrap().paths.clone();
     let req = crate::app::PasteReq { id: 0, dest: into.clone(), dest_id: None, mv: false };
-    let content = rune::ClipboardContent::new("").with_files(clip.paths.clone());
+    let content = rune::ClipboardContent::new("").with_files(clip);
     s.paste_reqs.push(req);
     s.paste_reply(0, &content);
     finish_job(&mut s);
@@ -1122,9 +1122,9 @@ fn every_action_refuses(name: &str, replace: fn(&Path)) {
     s.note = None;
     pick(&mut s, "a/report.txt");
     s.run(Cmd::Cut, &mut tx());
-    let clip = s.clip.as_ref().unwrap();
+    let clip = s.shared.clip.borrow().as_ref().unwrap().paths.clone();
     let req = crate::app::PasteReq { id: 0, dest: into.clone(), dest_id: None, mv: false };
-    let content = rune::ClipboardContent::new("").with_files(clip.paths.clone());
+    let content = rune::ClipboardContent::new("").with_files(clip);
     s.paste_reqs.push(req);
     s.paste_reply(0, &content);
     finish_job(&mut s);

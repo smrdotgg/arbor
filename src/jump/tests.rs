@@ -258,13 +258,13 @@ fn a_clear_that_fails_says_so_and_keeps_the_history_readable() {
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
     let root = std::fs::write(dir.join("probe"), "").is_ok();
     let mut s = crate::app::tests::state_in(&dir);
-    s.history = History::new(Some(log.clone()));
+    *s.shared.history.borrow_mut() = History::new(Some(log.clone()));
     let mut tx = Tx::default();
     s.run(Cmd::ClearJump, &mut tx);
     s.answer(true, &mut tx);
     assert_eq!(s.note.as_deref(), Some("Clearing Jump history…"), "not cleared until the writer says so");
     let until = std::time::Instant::now() + Duration::from_secs(5);
-    while s.history.clearing.is_some() && std::time::Instant::now() < until {
+    while s.shared.history.borrow().clearing.is_some() && std::time::Instant::now() < until {
         std::thread::sleep(Duration::from_millis(2));
         s.poll(&mut tx);
     }
@@ -274,7 +274,7 @@ fn a_clear_that_fails_says_so_and_keeps_the_history_readable() {
     }
     assert!(s.note.as_deref().unwrap().starts_with("Couldn't clear the Jump history"), "{:?}", s.note);
     assert!(log.exists());
-    assert!(s.history.agg.is_none(), "read again next time, not shown as empty");
+    assert!(s.shared.history.borrow().agg.is_none(), "read again next time, not shown as empty");
 }
 
 /// A write that fails (here the log's folder is a file) is said in the status bar, once.
@@ -423,20 +423,22 @@ fn dirs(name: &str, subs: &[&str]) -> PathBuf {
 fn startup_does_no_history_io_and_a_visit_appends() {
     let d = dirs("startup", &["a"]);
     let mut s = crate::app::tests::state_in(&d);
-    assert_eq!(s.history.io(), 0);
-    assert!(s.history.store.is_none() && s.history.agg.is_none() && !s.history.is_loading());
+    assert_eq!(s.shared.history.borrow().io(), 0);
+    assert!(
+        s.shared.history.borrow().store.is_none() && s.shared.history.borrow().agg.is_none() && !s.shared.history.borrow().is_loading()
+    );
     let log = d.join("history.log");
-    s.history.log = Some(log.clone());
+    s.shared.history.borrow_mut().log = Some(log.clone());
     s.go(d.join("a"), Nav::New, None);
     crate::app::tests::settle_all(&mut s);
-    settle_io(&s.history, 1);
+    settle_io(&s.shared.history.borrow(), 1);
     let text = std::fs::read_to_string(&log).unwrap();
     assert!(text.ends_with(&format!("\t1\t{}\n", d.join("a").display())), "{text}");
     // A reload isn't a visit.
     s.reload();
     crate::app::tests::settle_all(&mut s);
     std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(s.history.io(), 1);
+    assert_eq!(s.shared.history.borrow().io(), 1);
 }
 
 #[test]
@@ -470,7 +472,7 @@ fn jump_goes_to_the_best_match_and_drops_a_folder_thats_gone() {
     crate::app::tests::settle_all(&mut s);
     assert_eq!(s.cur().cwd, d.join("projects/arbor"), "stays put");
     assert!(s.note.as_deref().is_some_and(|n| n.contains("no longer exists")), "{:?}", s.note);
-    assert!(s.history.agg.as_ref().unwrap().get(&d.join("gone")).is_none());
+    assert!(s.shared.history.borrow().agg.as_ref().unwrap().get(&d.join("gone")).is_none());
 }
 
 /// A path typed in Jump goes there, as go-to does.
@@ -492,10 +494,10 @@ fn a_typed_path_goes_there() {
 fn jump_off_records_nothing_and_cant_open() {
     let d = dirs("off", &["a"]);
     let mut s = crate::app::tests::state_in(&d);
-    s.history.enabled = false;
+    s.shared.history.borrow_mut().enabled = false;
     s.go(d.join("a"), Nav::New, None);
     crate::app::tests::settle_all(&mut s);
-    assert!(s.history.store.is_none());
+    assert!(s.shared.history.borrow().store.is_none());
     assert!(s.unavailable(Cmd::Jump).is_some());
 }
 
@@ -537,7 +539,7 @@ fn open_speed() {
     let t = std::time::Instant::now();
     let (agg, _) = Frecency::from_log(&log);
     println!("aggregate 5k lines: {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
-    s.history.agg = Some(agg);
+    s.shared.history.borrow_mut().agg = Some(agg);
     let mut tx = Tx::default();
     for _ in 0..3 {
         let t = std::time::Instant::now();
@@ -701,4 +703,37 @@ fn a_huge_line_is_skipped_without_holding_it() {
     assert_eq!(line.len(), MAX_LINE);
     let (f, _) = Frecency::from_log(&line);
     assert_eq!(f.len(), 1);
+}
+
+/// The history's writer is every window's: once the first window closes, a clear finishing
+/// wakes a window still open (review: it held the first window's waker forever, so the clear's
+/// "cleared" waited for some other wake).
+#[test]
+fn the_history_wakes_an_open_window_after_the_first_closes() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let d = dirs("live-waker", &[]);
+    let mut a = crate::app::tests::state_in(&d);
+    crate::app::tests::settle_all(&mut a);
+    let (aw, bw) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let n = aw.clone();
+    a.setup(Arc::new(move || {
+        n.fetch_add(1, Ordering::SeqCst);
+    }));
+    let mut b = a.new_window(d.clone());
+    crate::app::tests::settle_all(&mut b);
+    b.poll(&mut Tx::default());
+    let n = bw.clone();
+    b.setup(Arc::new(move || {
+        n.fetch_add(1, Ordering::SeqCst);
+    }));
+    b.shared.history.borrow_mut().record(&d);
+    assert!(b.shared.history.borrow().drain(Duration::from_secs(5)));
+    a.leave();
+    aw.store(0, Ordering::SeqCst);
+    bw.store(0, Ordering::SeqCst);
+    b.clear_jump_history();
+    assert!(b.shared.history.borrow().drain(Duration::from_secs(5)));
+    assert!(bw.load(Ordering::SeqCst) > 0, "the open window is woken");
+    assert_eq!(aw.load(Ordering::SeqCst), 0, "the closed one isn't");
 }

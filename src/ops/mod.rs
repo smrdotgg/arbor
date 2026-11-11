@@ -314,6 +314,13 @@ pub struct Progress {
     pub items_total: AtomicUsize,
     pub items_done: AtomicUsize,
     pub cancel: AtomicBool,
+    /// What the copy in progress has made so far and not yet finished or cleaned up: each item
+    /// it confirmed it created, with its mark (`Print::mark`, read off the copy's own handle or
+    /// right after making it). What quitting mid-copy leaves when cleanup can't finish.
+    pub created: Mutex<Vec<(PathBuf, String)>>,
+    /// What a failed or cancelled copy's cleanup couldn't remove of what it made: each with its
+    /// mark and why (`unmake`). Items that changed since Arbor made them aren't Arbor's to name.
+    pub kept: Mutex<Vec<(PathBuf, String, String)>>,
 }
 
 pub struct Outcome {
@@ -413,12 +420,13 @@ pub struct Running {
     /// Esc can stop it (see [`Op::cancellable`]).
     pub cancellable: bool,
     pub progress: Arc<Progress>,
-    done: Arc<Mutex<Option<Outcome>>>,
+    /// The outcome, once the worker has one, and the bell it rings then.
+    done: Arc<(Mutex<Option<Outcome>>, std::sync::Condvar)>,
 }
 
 impl Running {
     pub fn take(&self) -> Option<Outcome> {
-        self.done.lock().ok()?.take()
+        self.done.0.lock().ok()?.take()
     }
     pub fn cancel(&self) {
         self.progress.cancel.store(true, Relaxed);
@@ -426,7 +434,31 @@ impl Running {
     /// Tests: whether the outcome is in, without taking it.
     #[cfg(test)]
     pub fn finished(&self) -> bool {
-        self.done.lock().is_ok_and(|d| d.is_some())
+        self.done.0.lock().is_ok_and(|d| d.is_some())
+    }
+
+    /// Waits up to `wait` for the outcome (the app is quitting: a cancelled operation's cleanup
+    /// gets this long to finish). `None` when it's still running then.
+    pub fn wait(&self, wait: std::time::Duration) -> Option<Outcome> {
+        let (lock, bell) = &*self.done;
+        let deadline = std::time::Instant::now() + wait;
+        let mut slot = lock.lock().ok()?;
+        while slot.is_none() {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            slot = bell.wait_timeout(slot, left).ok()?.0;
+        }
+        slot.take()
+    }
+}
+
+/// An operation nobody holds any more stops (the app is closing): nothing keeps working on
+/// files with no window to show it or land its undo.
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
@@ -480,7 +512,7 @@ pub struct Dest {
 /// verb given with it ("pasted", "dropped").
 pub fn start(op: Op, dest_id: Option<(DestId, &'static str)>, waker: Option<rune::Waker>) -> Running {
     let progress = Arc::new(Progress::default());
-    let done = Arc::new(Mutex::new(None));
+    let done = Arc::new((Mutex::new(None), std::sync::Condvar::new()));
     let verb = op.verb();
     let cancellable = op.cancellable();
     let (p, d) = (progress.clone(), done.clone());
@@ -488,13 +520,14 @@ pub fn start(op: Op, dest_id: Option<(DestId, &'static str)>, waker: Option<rune
     // they do the work inline to stay deterministic.
     if rune::tooling::headless_run().is_some() {
         let outcome = Worker::new(&p, None, TRASH).run_into(op, dest_id);
-        *done.lock().expect("fresh mutex") = Some(outcome);
+        *done.0.lock().expect("fresh mutex") = Some(outcome);
         return Running { verb, cancellable, progress, done };
     }
     std::thread::spawn(move || {
         let outcome = Worker::new(&p, waker.as_ref(), TRASH).run_into(op, dest_id);
-        if let Ok(mut slot) = d.lock() {
+        if let Ok(mut slot) = d.0.lock() {
             *slot = Some(outcome);
+            d.1.notify_all();
         }
         if let Some(wake) = &waker {
             wake();
@@ -560,6 +593,57 @@ type PathTest = Box<dyn Fn(&Path) -> bool>;
 #[cfg(test)]
 type RemovalHook = Box<dyn FnMut(links::Removal, &Path)>;
 
+/// Test-only gates every worker meets, keyed by path (tests run in parallel, each in its own
+/// folder): a copy that stops right after making a file until told to go on, and a cleanup that
+/// stalls on, or is refused, removing one.
+#[cfg(test)]
+pub(crate) mod gate {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::sync::mpsc::{Receiver, Sender};
+
+    pub(crate) enum Unmake {
+        /// Removing it fails as if permission were denied.
+        Refuse,
+        /// Removing it waits until this says go (or its sender is dropped).
+        Stall(Receiver<()>),
+    }
+
+    /// A file a copy stops after making: the path, where to say it got there, what says go on.
+    pub(crate) type Made = (PathBuf, Sender<()>, Receiver<()>);
+
+    /// After making the file at the path: say so, then wait to be told to go on.
+    pub(crate) static MADE: Mutex<Vec<Made>> = Mutex::new(Vec::new());
+    pub(crate) static UNMAKE: Mutex<Vec<(PathBuf, Unmake)>> = Mutex::new(Vec::new());
+
+    pub(super) fn made(p: &Path) {
+        let gate = {
+            let mut g = MADE.lock().unwrap();
+            g.iter().position(|(q, ..)| q == p).map(|i| g.remove(i))
+        };
+        if let Some((_, reached, go)) = gate {
+            let _ = reached.send(());
+            let _ = go.recv();
+        }
+    }
+
+    /// True when removing `p` is to be refused.
+    pub(super) fn unmaking(p: &Path) -> bool {
+        let gate = {
+            let mut g = UNMAKE.lock().unwrap();
+            g.iter().position(|(q, _)| q == p).map(|i| g.remove(i))
+        };
+        match gate {
+            Some((_, Unmake::Refuse)) => true,
+            Some((_, Unmake::Stall(go))) => {
+                let _ = go.recv();
+                false
+            }
+            None => false,
+        }
+    }
+}
+
 /// Test-only ways to make the worker meet the disk at its worst. Not compiled outside tests.
 #[cfg(test)]
 #[derive(Default)]
@@ -614,8 +698,9 @@ fn is_gone(e: &io::Error) -> bool {
 /// confirmation for data that was never the user's. Same limits as undo's checks (see
 /// [`Print`]): an edit within the timestamp granularity that keeps the size isn't seen, and
 /// there's an instant between the check and the removal.
-fn unmake(made: &[Made]) -> Option<String> {
-    let mut kept: Vec<(&Path, &str)> = Vec::new();
+fn unmake(p: &Progress, made: &[Made]) -> Option<String> {
+    let mut kept: Vec<(&Path, String)> = Vec::new();
+    let mut ours_kept: Vec<(PathBuf, String, String)> = Vec::new();
     for m in made.iter().rev() {
         let now = match m.dst.symlink_metadata() {
             Ok(now) => Print::of(&m.dst, &now),
@@ -626,18 +711,54 @@ fn unmake(made: &[Made]) -> Option<String> {
             .as_ref()
             .is_some_and(|was| if m.dir { now.kind == was.kind && now.id.is_some() && now.id == was.id } else { now == *was });
         if !ours {
-            kept.push((&m.dst, "it changed after Arbor made it"));
+            kept.push((&m.dst, "it changed after Arbor made it".into()));
             continue;
         }
-        let gone = if m.dir { std::fs::remove_dir(&m.dst) } else { std::fs::remove_file(&m.dst) };
+        #[cfg(test)]
+        let refused = gate::unmaking(&m.dst);
+        #[cfg(not(test))]
+        let refused = false;
+        let gone = if refused {
+            Err(std::io::Error::from(ErrorKind::PermissionDenied))
+        } else if m.dir {
+            std::fs::remove_dir(&m.dst)
+        } else {
+            std::fs::remove_file(&m.dst)
+        };
         // A folder holding something kept below it: that one is already said.
-        if gone.as_ref().is_err_and(|e| e.kind() != ErrorKind::NotFound) && !kept.iter().any(|(k, _)| k.starts_with(&m.dst)) {
-            kept.push((&m.dst, if m.dir { "something else is inside it" } else { "it couldn't be removed" }));
+        if let Err(e) = &gone
+            && e.kind() != ErrorKind::NotFound
+            && !kept.iter().any(|(k, _)| k.starts_with(&m.dst))
+        {
+            let why: String = if m.dir { "something else is inside it".into() } else { format!("it couldn't be removed ({e})") };
+            if let Some(mark) = &m.mark {
+                ours_kept.push((m.dst.clone(), mark.clone(), why.clone()));
+            }
+            kept.push((&m.dst, why));
         }
+    }
+    if let Ok(mut all) = p.kept.lock() {
+        all.extend(ours_kept);
+    }
+    // Everything it made is gone or in `kept` now.
+    if let Ok(mut c) = p.created.lock() {
+        c.clear();
     }
     let (at, why) = kept.last()?; // the shallowest, which holds or neighbours the rest
     let more = if kept.len() > 1 { format!(" (and {} more)", kept.len() - 1) } else { String::new() };
     Some(format!("kept “{}” in “{}”: {why}{more}", name_of(at), parent_of(at)))
+}
+
+/// Whether what's at `path` is still the item a copy made with `mark` (`Print::mark`): one
+/// `lstat`, for the next launch's look at the leftovers record.
+pub fn still_made(path: &Path, mark: &str) -> bool {
+    path.symlink_metadata().ok().and_then(|m| print::creation_mark(&m, noclobber::file_id(path, &m))).is_some_and(|now| now == mark)
+}
+
+/// The mark of what's at `path` now (tests write records with it).
+#[cfg(test)]
+pub fn mark_of(path: &Path) -> Option<String> {
+    path.symlink_metadata().ok().and_then(|m| print::creation_mark(&m, noclobber::file_id(path, &m)))
 }
 
 /// `why` an operation failed, and what its cleanup had to leave.

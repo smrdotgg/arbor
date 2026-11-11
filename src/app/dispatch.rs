@@ -7,6 +7,8 @@ use crate::grid::ViewMode;
 
 impl State {
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        // A key after the leftover note came: it's been seen.
+        self.forget_leftovers();
         let cmd = crate::draglog::on().then(|| self.keymap.find(|c| c.matches_tx(ev, tx))).flatten();
         let handled = self.key(ev, tx);
         if handled {
@@ -90,7 +92,7 @@ impl State {
                 cmd = Cmd::Info;
             }
             // Then a running file operation; then in a search, it stops the walk or leaves.
-            if cmd == Cmd::Clear && self.job.is_none() && self.cur().searching() {
+            if cmd == Cmd::Clear && !self.owns_job() && self.cur().searching() {
                 self.search_escape(self.active, tx);
                 return true;
             }
@@ -98,6 +100,12 @@ impl State {
                 // Closing the last tab does nothing, the same on every platform: passed on, ⌘W
                 // would close the window on macOS (Rune's standard Close item).
                 if cmd == Cmd::CloseTab {
+                    self.note = Some(why.into());
+                    return true;
+                }
+                // A command that would start a file operation while one runs (in this window or
+                // another) says why, rather than doing nothing silently.
+                if why == BUSY || why == BUSY_ELSEWHERE {
                     self.note = Some(why.into());
                     return true;
                 }
@@ -169,8 +177,9 @@ impl State {
         let f = self.cur();
         let nothing = f.selected().is_none();
         let empty = f.visible.is_empty();
-        // File operations run one at a time (`State::start`).
-        let busy = self.job.is_some();
+        // File operations run one at a time, in the whole app (`State::start`).
+        let busy = self.busy();
+        let busy_why = self.busy_why();
         let pane = &self.panes[self.active];
         let when = |cond: bool, why: &'static str| cond.then_some(why);
         let searching = f.searching();
@@ -179,31 +188,32 @@ impl State {
         let renaming = when(renaming, "Wait for the rename to finish");
         match cmd {
             // Start a file operation.
-            Trash | Delete => when(busy, BUSY).or(when(nothing, "Select an item first")),
-            EmptyTrash => when(busy, BUSY),
+            Trash | Delete => when(busy, busy_why).or(when(nothing, "Select an item first")),
+            EmptyTrash => when(busy, busy_why),
             PutBack => when(cfg!(target_os = "macos"), "macOS has no public way for apps to put items back: use Put Back in Finder")
                 .or(when(cfg!(windows), "Restore items from the Recycle Bin in Explorer: Windows doesn't let Arbor list it"))
-                .or(when(busy, BUSY))
+                .or(when(busy, busy_why))
                 .or(when(searching, "Leave the search first (Esc)"))
                 .or(when(!crate::trash::contents::can_put_back_in(&f.cwd), "Put Back works on items in the Trash: Go to Trash first"))
                 .or(when(nothing, "Select an item first")),
             GoTrash => when(self.trash_place.is_none(), "The Recycle Bin is a shell folder Arbor can't show: open it in Explorer"),
             // A duplicate goes beside its original, so all of them must be in one folder.
-            Duplicate => when(busy, BUSY).or(when(nothing, "Select an item first")).or(when(
+            Duplicate => when(busy, busy_why).or(when(nothing, "Select an item first")).or(when(
                 searching && f.target_paths().iter().map(|p| p.parent()).collect::<std::collections::HashSet<_>>().len() > 1,
                 "Duplicate items from one folder at a time",
             )),
             CopyToOther | MoveToOther => when(!self.split(), NOT_SPLIT)
-                .or(when(busy, BUSY))
+                .or(when(busy, busy_why))
                 .or(when(nothing, "Select an item first"))
                 .or(when(self.other().is_some_and(Folder::searching), IN_OTHER_SEARCH))
                 .or(when(self.other().is_some_and(|o| o.shows(&f.cwd, f.dir_id)), "Both panes show the same folder")),
             // Paste always shows as available otherwise: Rune can't ask the clipboard what it
             // holds without reading it (RUNE-GAPS.md). Pasting nothing says so.
-            Paste | PasteMove => when(busy, BUSY).or(when(searching, "Leave the search (Esc) to paste into this folder")),
-            Undo => when(busy, BUSY).or(when(self.undo.is_empty(), "Nothing to undo")),
-            Redo => when(busy, BUSY).or(when(self.redo.is_empty(), "Nothing to redo")),
-            Cancel => when(!busy, "No file operation is running"),
+            Paste | PasteMove => when(busy, busy_why).or(when(searching, "Leave the search (Esc) to paste into this folder")),
+            Undo => when(busy, busy_why).or(when(self.shared.undo.borrow().is_empty(), "Nothing to undo")),
+            Redo => when(busy, busy_why).or(when(self.shared.redo.borrow().is_empty(), "Nothing to redo")),
+            Cancel => when(!busy, "No file operation is running")
+                .or(when(!self.owns_job(), "The file operation is running in another window: cancel it there")),
             Open | Copy | Cut | Rename | BatchRename => when(nothing, "Select an item first").or(renaming),
             Into => when(!f.selected().is_some_and(|e| e.is_dir), "Select a folder first").or(renaming),
             Parent => when(searching, "Leave the search first (Esc)").or(when(f.cwd.parent().is_none(), "Already at the top")),
@@ -211,18 +221,20 @@ impl State {
             Back => when(!searching && f.back.is_empty(), "Nothing to go back to"),
             Forward => when(f.fwd.is_empty(), "Nothing to go forward to"),
             Clear => when(
-                !busy && !searching && f.filter.is_empty() && !f.goto && self.note.is_none() && f.marked.is_empty(),
+                !self.owns_job() && !searching && f.filter.is_empty() && !f.goto && self.note.is_none() && f.marked.is_empty(),
                 "Nothing to clear",
             ),
             Up | Down | PageUp | PageDown | First | Last | ExtendUp | ExtendDown | ExtendPageUp | ExtendPageDown | ExtendFirst
             | ExtendLast | SelectAll | SelectPattern | InvertSelection => when(empty, "Nothing to select"),
             SelectKind => when(nothing, "Select an item first"),
-            Jump => when(!self.history.enabled, "Jump is turned off in the settings (jump.enabled)"),
+            Jump => when(!self.shared.history.borrow().enabled, "Jump is turned off in the settings (jump.enabled)"),
             SortName => when(f.sort.key == SortKey::Name, "Already sorted by name"),
             SortKind => when(f.sort.key == SortKey::Kind, "Already sorted by kind"),
             SortSize => when(f.sort.key == SortKey::Size, "Already sorted by size"),
             SortModified => when(f.sort.key == SortKey::Modified, "Already sorted by date modified"),
-            CloseTab => when(!self.split() && pane.tabs.len() == 1, "This is the only tab"),
+            // The last tab of a window closes the window, while there are others.
+            CloseTab => when(!self.split() && pane.tabs.len() == 1 && self.windows() < 2, "This is the only tab"),
+            OpenInNewWindow => when(self.folder_to_open().is_none(), "Select one folder first"),
             NextTab | PrevTab => when(pane.tabs.len() == 1, "There's only one tab here"),
             ReopenTab => when(self.closed.is_empty(), "No closed tabs to reopen"),
             MoveTabLeft => when(pane.tabs.len() == 1, "There's only one tab here").or(when(pane.tab == 0, "This is already the first tab")),
@@ -252,13 +264,14 @@ impl State {
                 .or(when(busy, "Wait for the file operation to finish, then eject"))
                 .or(when(self.volume_here().is_none(), "This folder isn't on a volume that can be ejected")),
             // Always available.
-            NewFolder => when(busy, BUSY).or(when(searching, "Leave the search (Esc) to make a folder here")),
-            NewFile => when(busy, BUSY).or(when(searching, "Leave the search (Esc) to make a file here")),
-            MakeLink => when(busy, BUSY).or(when(nothing, "Select an item first")).or(renaming),
+            NewFolder => when(busy, busy_why).or(when(searching, "Leave the search (Esc) to make a folder here")),
+            NewFile => when(busy, busy_why).or(when(searching, "Leave the search (Esc) to make a file here")),
+            MakeLink => when(busy, busy_why).or(when(nothing, "Select an item first")).or(renaming),
             ShowOriginal => when(!f.selected().is_some_and(|e| e.is_link), "Select a symbolic link first").or(renaming),
             MakeDefault | RestoreDefault => when(self.handler_job.is_pending(), "Already changing the default for folders"),
             Reveal | CopyPath | Info | SidebarAdd => renaming,
-            GoTo | Reload | Palette | OpenSettings | ReloadSettings | Hidden | SortReverse | NewTab | Split | ClearJump | Search => None,
+            GoTo | Reload | Palette | OpenSettings | ReloadSettings | Hidden | SortReverse | NewTab | NewWindow | Split | ClearJump
+            | Search => None,
         }
     }
 
@@ -374,8 +387,8 @@ impl State {
             MakeDefault => self.change_default(crate::handler::Change::Make),
             RestoreDefault => self.change_default(crate::handler::Change::Restore),
             Clear => {
-                if let Some(job) = &self.job {
-                    self.note = Some(cancel_job(job));
+                if self.owns_job() {
+                    self.note = self.cancel_job();
                 } else if self.cur().searching() {
                     self.search_escape(self.active, tx);
                 } else {
@@ -425,8 +438,8 @@ impl State {
             Undo => self.undo_last(),
             Redo => self.redo_last(),
             Cancel => {
-                if let Some(job) = &self.job {
-                    self.note = Some(cancel_job(job));
+                if self.owns_job() {
+                    self.note = self.cancel_job();
                 }
             }
             GoTrash => {
@@ -486,6 +499,17 @@ impl State {
                 self.sort_by(key, tx);
             }
             NewTab => self.new_tab(tx),
+            NewWindow => {
+                let here = self.cur().cwd.clone();
+                self.open_window(here);
+            }
+            OpenInNewWindow => {
+                if let Some(p) = self.folder_to_open() {
+                    self.open_window(p);
+                }
+            }
+            // The last tab of the window, with other windows open: the window goes.
+            CloseTab if !self.split() && self.panes[0].tabs.len() == 1 => tx.close_window(),
             CloseTab => {
                 let (ix, tab) = (self.active, self.panes[self.active].tab);
                 self.close_tab(ix, tab, tx);
@@ -551,11 +575,16 @@ impl State {
 }
 
 /// Asks a running operation to stop, and what the status bar says.
-fn cancel_job(job: &crate::ops::Running) -> String {
-    if job.cancellable {
-        job.cancel();
-        "Cancelling…".into()
-    } else {
-        format!("{} can't be stopped once it has started", job.verb)
+impl State {
+    /// Esc or Cancel File Operation: stops the running operation, if it can be stopped.
+    fn cancel_job(&self) -> Option<String> {
+        let slot = self.shared.job.borrow();
+        let job = &slot.as_ref()?.run;
+        Some(if job.cancellable {
+            job.cancel();
+            "Cancelling…".into()
+        } else {
+            format!("{} can't be stopped once it has started", job.verb)
+        })
     }
 }

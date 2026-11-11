@@ -182,7 +182,7 @@ pub(super) fn batch_view(s: &State, b: &crate::batch::BatchBox, l: Look) -> El {
     let h = (count as f32).min(BATCH_ROWS) * ROW_H;
     let list = col().key("batch-list").w_full().h(h).scroll(ScrollSpec { stick_bottom: false }).child(rows);
     // The summary, and Rename.
-    let blocked = b.blocked().or_else(|| s.job.is_some().then(|| crate::app::BUSY.to_string()));
+    let blocked = b.blocked().or_else(|| s.busy().then(|| s.busy_why().to_string()));
     let (summary, color) = match &b.error {
         Some(e) => (e.clone(), red()),
         None if b.plan.problems > 0 => (b.plan.summary(), red()),

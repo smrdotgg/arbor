@@ -93,6 +93,114 @@ Format: date · decision · why · how to undo.
     hidden original turns hidden files on (for every pane, as ⌘. does), saying so. Undo:
     `State::show_original`, `app::original`.
 
+- **2026-11-11 · Multiple windows (`feature/new-window`): the choices (Review: the shared undo
+  stack, ⌘W, where a new window opens).**
+  - **Real OS windows in one process**, through Rune's `open_window` (each window its own
+    `State`, retained tree and focus; one event loop). No RUNE-GAPS workaround was needed for the
+    windows themselves. Undo: `window.rs`, `app/shared.rs`.
+  - **⌘N (Ctrl+N) opens the new window on the active pane's folder**, not Home: what Explorer,
+    Nautilus and Dolphin do, and what makes a second window useful at once (drag between them).
+    Finder opens its "New Finder windows show" folder (Recents by default). Undo: the `NewWindow`
+    arm in `app/dispatch.rs` (`fs::home()` instead of `cwd`). ⌘N/Ctrl+N was free on every
+    platform (New Folder is ⇧⌘N, as in Finder); Ctrl+N in a text field isn't Arbor's (the filter
+    takes only typed text).
+  - **"Open in New Window" opens one selected folder**, with no default key (Finder's ⌥⌘O-style
+    keys differ by version; the palette and context menus reach it). With several folders
+    selected it says "Select one folder first" rather than opening a window per folder (a 500-item
+    selection would open 500). It's also on a favorite's and a volume's menu. Undo:
+    `State::folder_to_open`.
+  - **One file-operation slot and one undo/redo stack for the app (Review)**, as Finder has:
+    ⌘Z in window B undoes what A did. Per-window stacks would let B's ⌘Z skip A's newer change,
+    or leave A's change undoable only from A after A's folder is gone. The window that started an
+    operation shows its progress and is the one where Esc cancels it; the others say "Another file
+    operation is running in another window" (and Cancel there says to cancel it in that window).
+    The operation is held by `Shared`, not a window: a window closed mid-operation makes the
+    window focused last its owner at once, which lands it, its note and its undo, and a window
+    whose operation's owner is gone lands it whoever polls first; the very last window closing
+    drops it as quitting did before. Undo: `Shared::{job, undo, redo}`, `State::{busy,
+    poll_job, leave}`.
+  - **An undone operation's note goes from every window still saying it** (real-Mac QA): each
+    outcome has a number, its undo record carries it, and an undo or redo of it tells the
+    other windows; a window whose note is still that outcome's (not one said since) clears it,
+    rather than rewording it (the window that undid it says what the undo did). Undo:
+    `State::outcome_undone`, `Shared::outcomes`.
+  - **Closing the last window (or quitting) while an operation runs (PM decision,
+    2026-11-11):** the close never waits for it. The operation is cancelled and the window
+    closes at once; its usual cancel cleanup (a cancelled copy removing what it made,
+    identity-checked) goes on off the UI thread for at most 2 s (`leftovers::QUIT_WAIT`), which
+    `main` waits out after Rune's loop ends, when no window is on screen. Nothing it couldn't
+    finish is lost: a record of what was left where and why (`leftovers.txt` beside the
+    settings, user data) is written provisionally at the close (the copy being made) and made
+    exact when the cleanup ends or its time runs out; the next launch says it once in the
+    status bar ("Arbor quit during a file operation and left “Photos” partly done in
+    ~/Downloads: …", only items still there), with a Show button; only once that frame has
+    been presented (or the user typed or started an operation) is what was read removed from the
+    record, so a crash before then keeps it for the launch after. The
+    record names only what the copy confirmed it made, registered the moment each item is
+    created (a file by the handle it's written through, before any byte; a folder or link right
+    after it's made), each with its creation mark (kind, file id, birth time where the file
+    system keeps one; not its size, which a copy cut short leaves anywhere), and the next launch
+    offers only what still has that mark: never a planned destination, never something put in its place since. Past
+    the 2 s deadline the record is written from what's in memory (no look at the disk), and
+    `main` waits for that write at most 250 ms more (`leftovers::WRITE_MARGIN`): Arbor exits
+    within 2.25 s of the close even on a disk that doesn't answer, losing the record then.
+    Keeping Arbor running with no window until the operation ends was the alternative: a
+    process the user closed doing file work they can't see or cancel, with no undo afterwards.
+    The close callback does no record I/O: the quit thread writes the record (provisional,
+    then exact). On macOS, Quit (⌘Q) ends the process right after the windows' close callbacks
+    (RUNE-GAPS.md), so there even the provisional record may be lost (accepted, PM
+    2026-11-11). The callback's existing bounded drain of the Jump history's and the sidebar's
+    writers stays as it was before multiple windows. An operation nobody holds is cancelled (`Drop
+    for ops::Running`). Undo: `leftovers.rs`, `State::leave`'s last-window arm,
+    `window::closing`.
+  - **After an operation, every window showing a changed folder reads it again** (by identity,
+    `State::refresh`, as panes do); the starting window selects what was made, the others keep
+    their selection. A window on another folder reads nothing.
+  - **Settings, keys, favorites and volumes are each window's copy, kept in step by messages**
+    (Reload Settings in one window applies in all and is said only there; a favorite added in one
+    shows in all; one window reads the volumes and tells the others). The clipboard's files and
+    the Jump history are one object. The favorites have one writer for every window and a
+    revision number: each edit takes the next one, and the writer's answer or a window's message
+    about an older revision than the newest is dropped, so a slow answer never puts back a list
+    without a newer favorite. A window dragging a favorite holds a newer list until the drag
+    ends, then makes the drag's move on it as an operation (moved last means to the end, as the
+    writer merges it); a message always carries the revision of the list it holds. Shared writers wake the open window focused last
+    (`Shared::live_waker`), never one that has closed. Undo: `State::tell_favorites`,
+    `Shared::{side_writer, side_rev}`, the settings arm in `State::poll`, `poll_volumes`.
+  - **⌘W on a window's last tab closes the window while another window is open**; on the very
+    last window it still does nothing (closing it would quit Arbor). Undo: the `CloseTab` arms in
+    `app/dispatch.rs`.
+  - **Requests from other apps go to the window focused last** (the first window before any was
+    focused). "A new window if there's none" can't arise: Arbor quits with its last window, so a
+    request with no window open is dropped with the quitting app. Undo: `window::route`.
+  - **A new window copies what was already known**: the opener's settings, keys, favorites and
+    what their looks found, volumes, the hidden-files toggle and the icon size; its view starts
+    as the settings say (as a new tab's does). It reads only its folder, fresh (nothing of the
+    opener's listing is reused: no caching), and ⌘N doesn't wait for it, unlike showing a tab:
+    the native window takes longer than a frame to make anyway, so the read overlaps it and
+    lands in the new window's `setup` or first `poll`, before its first frame in every bench run
+    (⌘N's handler went from 8.2 ms, the bounded wait a 10k folder missed, to 0.2 ms). It opens 28 pt down and right of its opener at the same size (Wayland: where the
+    compositor puts it). Its title comes from its first `poll` (Rune's window title starts as a
+    `&'static str`). Undo: `State::new_window`, `window::open`.
+  - **Views, thumbnails and columns are each window's**; another window's operation re-reads
+    every column showing a changed folder (`refresh` → `Columns::reread`, by identity).
+  - **Drops between windows**: Rune's in-window drag is window-local, so Arbor's own row and tab
+    drags can't cross windows. Rows dragged out to the system (macOS) land in another window as a
+    drop from outside, through `State::drop_into`, so its destination-identity check applies;
+    the items themselves carry no listing identity then, as from any other app. Elsewhere: ⌘X, ⌘V.
+  - **With New File and Make Symbolic Link (from main, e39f626):** they run through the shared
+    operation slot and undo stack like every operation; every window on the folder re-reads it
+    and an undo clears the note in all. The inline rename of what New File or New Folder made
+    starts only in the window that asked (not another window on the folder, nor one that landed
+    it because the asking window closed: `Job::asked`). The rename's Esc and Enter are each
+    window's. New File and symbolic links are made whole in one call, so a quit leaves nothing
+    partial; a Windows shortcut's staging file is registered while it exists, so a quit
+    mid-write names it in the leftovers record.
+  - **Windows aren't remembered across launches** (later: a window list in the user's data).
+  - **Timing and the bench**: only the first window's keys are timed; `ARBOR_BENCH_WINDOW` and
+    `bench --window N` time ⌘N to the new window's first frame showing a 10k folder; `bench
+    --idle` adds a run idle with two windows. Undo: `timing.rs`, `examples/bench.rs`.
+
 - **2026-11-11 · The idle list view's endless frames (since 7cd20cb): the rows hear their
   layout only while a selection rectangle is held, and never say `Tx::live_only` there.**
   Rune doesn't clear what a `live_only` event leaves behind in a window with no live values

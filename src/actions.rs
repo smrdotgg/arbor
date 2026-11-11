@@ -31,7 +31,7 @@ impl State {
             (true, n) => format!("Cut {n} items — paste to move them"),
         });
         let expect = self.cur().target_checks();
-        self.clip = Some(Clip { paths, cut, expect });
+        *self.shared.clip.borrow_mut() = Some(Clip { paths, cut, expect });
     }
 
     /// ⌘⇧C: the selected path as text.
@@ -84,19 +84,21 @@ impl State {
                 .collect();
         }
         if files.is_empty() && content.is_empty() {
-            files = self.clip.as_ref().map(|c| c.paths.clone()).unwrap_or_default();
+            files = self.shared.clip.borrow().as_ref().map(|c| c.paths.clone()).unwrap_or_default();
         }
         if files.is_empty() {
             self.note = Some("Nothing to paste: copy some files first".into());
             return;
         }
-        let ours = self.clip.as_ref().filter(|c| c.paths == files);
-        let was_cut = ours.is_some_and(|c| c.cut);
-        let expect = ours.map(|c| c.expect.clone()).unwrap_or_default();
+        let (was_cut, expect) = {
+            let clip = self.shared.clip.borrow();
+            let ours = clip.as_ref().filter(|c| c.paths == files);
+            (ours.is_some_and(|c| c.cut), ours.map(|c| c.expect.clone()).unwrap_or_default())
+        };
         let op = if move_requested || was_cut { Op::Move { sources: files, dest } } else { Op::Copy { sources: files, dest } };
         let op = checked(op, expect);
         if self.start_into(op, dest_id.map(|id| (ops::DestId::Folder(id), "pasted"))) && was_cut {
-            self.clip = None;
+            *self.shared.clip.borrow_mut() = None;
         }
     }
 
@@ -229,7 +231,7 @@ impl State {
     /// when the rename lands (which puts it right if the rename was refused).
     pub fn commit_rename(&mut self, tx: &mut Tx) {
         // One operation at a time: the field stays open until it can go.
-        if self.job.is_some() {
+        if self.busy() {
             self.note = Some(crate::app::BUSY.into());
             return;
         }
@@ -274,30 +276,30 @@ impl State {
     /// the stack only while the undo runs: if it's refused, fails or is cancelled, the worker
     /// hands back what's left and `poll_job` puts it back (undoing isn't itself undoable).
     pub fn undo_last(&mut self) {
-        if self.job.is_some() {
-            self.note = Some("Still working on the last operation (Esc cancels it)".into());
+        if self.busy() {
+            self.note = Some(self.busy_note().into());
             return;
         }
-        let Some(u) = self.undo.pop() else {
+        let Some((n, u)) = self.shared.undo.borrow_mut().pop() else {
             self.note = Some("Nothing to undo".into());
             return;
         };
-        self.start(Op::Undo(u));
+        self.start_job(Op::Undo(u), None, Some(n));
     }
 
     /// Redoes the last undone operation: the undo's own reverse, checked against the disk as
     /// the undo left it, so it refuses (and stays on the redo stack) when anything changed
     /// since. A redone operation goes back on the undo stack.
     pub fn redo_last(&mut self) {
-        if self.job.is_some() {
-            self.note = Some("Still working on the last operation (Esc cancels it)".into());
+        if self.busy() {
+            self.note = Some(self.busy_note().into());
             return;
         }
-        let Some(u) = self.redo.pop() else {
+        let Some((n, u)) = self.shared.redo.borrow_mut().pop() else {
             self.note = Some("Nothing to redo".into());
             return;
         };
-        self.start(Op::Undo(u));
+        self.start_job(Op::Undo(u), None, Some(n));
     }
 
     // ---- jobs -------------------------------------------------------------------------------
@@ -310,57 +312,124 @@ impl State {
     /// [`State::start`], for a copy or move into a folder that must still be the one with
     /// identity `dest_id` when the worker starts (with the verb its refusal says).
     pub fn start_into(&mut self, op: Op, dest_id: Option<(ops::DestId, &'static str)>) -> bool {
-        if self.job.is_some() {
-            self.note = Some("Still working on the last operation (Esc cancels it)".into());
+        self.start_job(op, dest_id, None)
+    }
+
+    /// [`State::start_into`]; `undoing`: the outcome an undo or redo takes back.
+    fn start_job(&mut self, op: Op, dest_id: Option<(ops::DestId, &'static str)>, undoing: Option<u64>) -> bool {
+        if self.busy() {
+            self.note = Some(self.busy_note().into());
             return false;
         }
+        self.forget_leftovers();
         self.note = None;
-        self.job_seen = (0, 0);
         // A new operation (not an undo or a redo) ends what could be redone.
         if !matches!(op, Op::Undo(_)) {
-            self.redo.clear();
+            self.shared.redo.borrow_mut().clear();
         }
-        self.job = Some(ops::start(op, dest_id, self.waker.clone()));
+        // The worker wakes whichever window owns the operation: this one, or the one made its
+        // owner if this one closes first (`State::leave`).
+        let waker = self.waker.as_ref().map(|_| self.shared.op_wake());
+        self.set_job(ops::start(op, dest_id, waker));
+        if let Some(j) = self.shared.job.borrow_mut().as_mut() {
+            j.undoing = undoing;
+        }
         true
     }
 
-    /// From `poll`: lands a finished job, or reports that its progress moved.
+    /// `run` is the app's file operation, this window's to show.
+    pub(crate) fn set_job(&mut self, run: ops::Running) {
+        if let Ok(mut w) = self.shared.op_waker.lock() {
+            w.clone_from(&self.waker);
+        }
+        *self.shared.job.borrow_mut() = Some(crate::app::Job { run, owner: self.win, seen: (0, 0), undoing: None, asked: self.win });
+    }
+
+    /// Outcome `n` was undone (or redone) from some window: its note, if this window still
+    /// says it, goes.
+    pub(crate) fn outcome_undone(&mut self, n: u64) {
+        if let Some((of, text)) = &self.note_of
+            && *of == n
+            && self.note.as_deref() == Some(text.as_str())
+        {
+            self.note = None;
+            self.alert = None;
+        }
+        if self.note_of.as_ref().is_some_and(|(of, _)| *of == n) {
+            self.note_of = None;
+        }
+    }
+
+    /// Why a command that starts a file operation can't run: one is running, here or in
+    /// another window.
+    pub(crate) fn busy_why(&self) -> &'static str {
+        if self.owns_job() { crate::app::BUSY } else { crate::app::BUSY_ELSEWHERE }
+    }
+
+    /// Why a new operation can't start while one runs: Esc cancels it here; in another window,
+    /// it's there to cancel.
+    pub(crate) fn busy_note(&self) -> &'static str {
+        if self.owns_job() { "Still working on the last operation (Esc cancels it)" } else { crate::app::BUSY_ELSEWHERE }
+    }
+
+    /// From `poll`: lands the app's finished file operation, or reports that its progress moved,
+    /// in the window that owns it, or in any window when its owner has gone (which then owns
+    /// it). The outcome lands once: whichever window takes it from `Shared` applies it to the
+    /// shared undo stack and tells the others what changed.
     pub fn poll_job(&mut self) -> bool {
-        let Some(job) = &self.job else { return false };
-        let Some(out) = job.take() else {
-            let seen = (job.progress.bytes_done.load(Relaxed), job.progress.items_done.load(Relaxed));
-            let moved = seen != self.job_seen;
-            self.job_seen = seen;
-            return moved;
-        };
-        let (verb, total) = (job.verb, job.progress.items_total.load(Relaxed));
-        self.job = None;
-        let mut out = out;
-        // An undo's leftovers stay on the undo stack and what went can be redone; a redo's the
-        // other way round.
-        let (left, done) = if verb == "Redoing" { (&mut self.redo, &mut self.undo) } else { (&mut self.undo, &mut self.redo) };
-        left.extend(out.undo.take());
-        done.extend(out.inverse.take());
-        // Renamed and moved items show where they are now at once (a fresh read or a recheck
-        // follows); a search still walking remembers them for the batches still to come.
-        if !out.moved.is_empty() || !out.removed.is_empty() {
-            let renamed: Vec<(PathBuf, PathBuf)> = out.moved.iter().filter(|(a, b)| a.parent() == b.parent()).cloned().collect();
-            for p in &mut self.panes {
-                if p.f.searching() {
-                    p.f.note_moves(&out.moved, &out.removed, &out.canon);
-                } else {
-                    p.f.renamed_paths(&renamed);
-                }
+        let (out, verb, total, undoing, asked) = {
+            let mut slot = self.shared.job.borrow_mut();
+            let Some(job) = slot.as_mut() else { return false };
+            if job.owner != self.win && self.shared.has(job.owner) {
+                return false;
             }
+            let adopt = job.owner != self.win;
+            job.owner = self.win;
+            let Some(out) = job.run.take() else {
+                let p = &job.run.progress;
+                let seen = (p.bytes_done.load(Relaxed), p.items_done.load(Relaxed));
+                let moved = seen != job.seen || adopt;
+                job.seen = seen;
+                drop(slot);
+                if adopt && let Ok(mut w) = self.shared.op_waker.lock() {
+                    w.clone_from(&self.waker);
+                }
+                return moved;
+            };
+            let job = slot.take().expect("just seen");
+            (out, job.run.verb, job.run.progress.items_total.load(Relaxed), job.undoing, job.asked)
+        };
+        let outcome = self.shared.outcomes.get() + 1;
+        self.shared.outcomes.set(outcome);
+        let mut out = out;
+        // An undo's leftovers stay on the undo stack (still the outcome they undo) and what
+        // went can be redone (this outcome); a redo's the other way round. One pair of stacks for
+        // every window.
+        {
+            let (mut undo, mut redo) = (self.shared.undo.borrow_mut(), self.shared.redo.borrow_mut());
+            let (left, done) = if verb == "Redoing" { (&mut *redo, &mut *undo) } else { (&mut *undo, &mut *redo) };
+            left.extend(out.undo.take().map(|u| (undoing.unwrap_or(outcome), u)));
+            done.extend(out.inverse.take().map(|u| (outcome, u)));
         }
-        // An inline rename's label goes: the row renamed, or back to its own name. Rows of items
-        // Arbor's action changed the ctime of take what it made of them, where that's identity.
-        for p in &mut self.panes {
-            p.f.land_pending(&out.moved);
-            p.f.reidentify(&out.reidentified);
+        // An undo or redo takes back an earlier outcome: no window goes on saying it happened.
+        if let Some(was) = undoing {
+            self.shared.tell_others(self.win, || Box::new(move |s, _| s.outcome_undone(was)));
         }
+        // What changed on disk, for every window: this one's panes now, the others' through
+        // their inboxes (each reads the folders it shows that changed, keeping its selection).
+        let fx = std::rc::Rc::new(Changed {
+            moved: std::mem::take(&mut out.moved),
+            removed: std::mem::take(&mut out.removed),
+            canon: std::mem::take(&mut out.canon),
+            reidentified: std::mem::take(&mut out.reidentified),
+            folders: std::mem::take(&mut out.folders),
+        });
+        self.shared.tell_others(self.win, || {
+            let fx = fx.clone();
+            Box::new(move |s, _| s.changed_on_disk(&fx, &[]))
+        });
         // A trash and a delete have no results to select: what they did is what's gone.
-        let n = if matches!(verb, "Moving to Trash" | "Deleting" | ops::EMPTYING) { out.removed.len() } else { out.results.len() };
+        let n = if matches!(verb, "Moving to Trash" | "Deleting" | ops::EMPTYING) { fx.removed.len() } else { out.results.len() };
         // Items the trash left because their disk has none: one question for all of them.
         let asks = !out.no_trash.is_empty();
         if asks {
@@ -417,13 +486,17 @@ impl State {
             self.note = None;
         }
         self.alert = if failed { self.note.clone() } else { None };
+        // This outcome's note, so an undo of it from any window takes it away.
+        self.note_of = self.note.clone().map(|t| (outcome, t));
         self.rename = None;
-        self.refresh(&out.folders, &out.results, &out.canon);
+        self.changed_on_disk(&fx, &out.results);
         // A new folder or file: renamed once it's listed in the active pane, unless the user
         // picked something else before then (`State::land`), and only that item
-        // (`State::rename_made`). A filter that would hide it is cleared, so it shows.
+        // (`State::rename_made`). A filter that would hide it is cleared, so it shows. Only in
+        // the window that asked for it (another may have landed it, its owner having closed).
         self.made = None;
         if (verb == ops::NEW_FOLDER || verb == ops::NEW_FILE)
+            && asked == self.win
             && let Some(made) = out.results.first().cloned()
             && let Some(p) = self.cur_mut().pending.as_mut().filter(|p| Some(p.path.as_path()) == made.parent() && p.nav == Nav::Reload)
         {
@@ -436,6 +509,31 @@ impl State {
             self.made = Some((made, out.made));
         }
         true
+    }
+
+    /// What a file operation changed (`fx`), in this window: renamed and moved items show where
+    /// they are now at once (a fresh read or a recheck follows; a search still walking
+    /// remembers them for the batches still to come), an inline rename's label goes, rows whose
+    /// identity Arbor's action changed take the new one, and every pane on a changed folder
+    /// reads it again, `select`ing what the operation made where it lands.
+    pub(crate) fn changed_on_disk(&mut self, fx: &Changed, select: &[PathBuf]) {
+        if !fx.moved.is_empty() || !fx.removed.is_empty() {
+            let renamed: Vec<(PathBuf, PathBuf)> = fx.moved.iter().filter(|(a, b)| a.parent() == b.parent()).cloned().collect();
+            for p in &mut self.panes {
+                if p.f.searching() {
+                    p.f.note_moves(&fx.moved, &fx.removed, &fx.canon);
+                } else {
+                    p.f.renamed_paths(&renamed);
+                }
+            }
+        }
+        // An inline rename's label goes: the row renamed, or back to its own name. Rows of items
+        // Arbor's action changed the ctime of take what it made of them, where that's identity.
+        for p in &mut self.panes {
+            p.f.land_pending(&fx.moved);
+            p.f.reidentify(&fx.reidentified);
+        }
+        self.refresh(&fx.folders, select, &fx.canon);
     }
 
     /// After `folders` (each with its identity, when known) changed on disk: every pane whose
@@ -491,7 +589,8 @@ impl State {
 
     /// "Copying 3 of 12 · 1.2 GB of 4 GB" for the status bar.
     pub fn job_status(&self) -> Option<String> {
-        let job = self.job.as_ref()?;
+        let slot = self.shared.job.borrow();
+        let job = &slot.as_ref().filter(|j| j.owner == self.win)?.run;
         let p = &job.progress;
         let (done, total) = (p.items_done.load(Relaxed), p.items_total.load(Relaxed));
         let (bd, bt) = (p.bytes_done.load(Relaxed), p.bytes_total.load(Relaxed));
@@ -601,7 +700,12 @@ impl State {
         let fav = i < self.places.len();
         let n = self.places.len();
         let item = |a: PlaceAct, title: &str, on: bool| Some((Act::Place(a, i), title.to_string(), on));
-        let mut v = vec![item(PlaceAct::Open, "Open", true), item(PlaceAct::NewTab, "Open in New Tab", true), None];
+        let mut v = vec![
+            item(PlaceAct::Open, "Open", true),
+            item(PlaceAct::NewTab, "Open in New Tab", true),
+            item(PlaceAct::NewWindow, Cmd::OpenInNewWindow.title(), true),
+            None,
+        ];
         if fav {
             v.extend([
                 item(PlaceAct::Remove, "Remove from Sidebar", true),
@@ -609,7 +713,7 @@ impl State {
                 item(PlaceAct::Down, "Move Down", i + 1 < n),
             ]);
         } else {
-            let eject = self.volumes.get(i - n).is_some_and(|v| v.eject) && self.ejecting.is_none() && self.job.is_none();
+            let eject = self.volumes.get(i - n).is_some_and(|v| v.eject) && self.ejecting.is_none() && !self.busy();
             let listed = self.place_at(i).is_some_and(|(_, p)| self.places.iter().any(|(_, q)| *q == p));
             v.extend([item(PlaceAct::Eject, "Eject", eject), item(PlaceAct::AddToSidebar, "Add to Favorites", !listed)]);
         }
@@ -684,7 +788,9 @@ impl State {
                 }
             }
             Act::Place(a, i) => match a {
-                PlaceAct::Open | PlaceAct::NewTab | PlaceAct::Eject | PlaceAct::AddToSidebar if i >= self.places.len() => {
+                PlaceAct::Open | PlaceAct::NewTab | PlaceAct::NewWindow | PlaceAct::Eject | PlaceAct::AddToSidebar
+                    if i >= self.places.len() =>
+                {
                     // A volume's row: the volume the menu was opened on, wherever the list
                     // has moved it since.
                     let Some((_, vol)) = self.menu_volume.take().filter(|(at, _)| *at == i) else {
@@ -694,6 +800,7 @@ impl State {
                     match a {
                         PlaceAct::Eject => self.eject(vol),
                         PlaceAct::AddToSidebar => self.add_favorites(vec![vol.path], None),
+                        PlaceAct::NewWindow => self.open_window(vol.path),
                         _ => {
                             if a == PlaceAct::NewTab {
                                 self.new_tab(tx);
@@ -708,6 +815,12 @@ impl State {
                 PlaceAct::NewTab => {
                     self.new_tab(tx);
                     self.go_place(i);
+                }
+                // A favorite that turns out to be gone shows the read's error in the new window.
+                PlaceAct::NewWindow => {
+                    if let Some((_, p)) = self.place_at(i) {
+                        self.open_window(p);
+                    }
                 }
                 PlaceAct::Remove => self.remove_favorite(i),
                 PlaceAct::Up if i > 0 => self.move_favorite(i, i - 1),
@@ -737,6 +850,7 @@ impl State {
             let on_selection = matches!(
                 cmd,
                 Cmd::Open
+                    | Cmd::OpenInNewWindow
                     | Cmd::OpenWith
                     | Cmd::Rename
                     | Cmd::Duplicate
@@ -759,6 +873,10 @@ impl State {
             Some((Act::Cmd(cmd), title, on))
         };
         let mut v = vec![item(Cmd::Open), item(Cmd::OpenWith), item(Cmd::Reveal)];
+        // A folder can open in a window of its own.
+        if on_row && folders && n == 1 {
+            v.insert(1, item(Cmd::OpenInNewWindow));
+        }
         // On a symbolic link, its original.
         if has && self.unavailable(Cmd::ShowOriginal).is_none() {
             v.push(item(Cmd::ShowOriginal));
@@ -777,6 +895,15 @@ impl State {
         v.extend([item(Cmd::SidebarAdd), item(Cmd::NewFolder), item(Cmd::NewFile), item(Cmd::Undo)]);
         v
     }
+}
+
+/// What a file operation changed on disk, as every window needs it (`State::changed_on_disk`).
+pub(crate) struct Changed {
+    pub moved: Vec<(PathBuf, PathBuf)>,
+    pub removed: Vec<PathBuf>,
+    pub canon: Vec<(PathBuf, PathBuf)>,
+    pub reidentified: Vec<(crate::fs::Ident, crate::fs::Ident)>,
+    pub folders: Vec<(PathBuf, Option<crate::noclobber::DirId>)>,
 }
 
 /// `op`, checked against `expect` first when there's anything to check (`Op::Checked`).

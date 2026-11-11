@@ -5,7 +5,11 @@ in `NORTHSTAR.md`. Each module's own `//!` comment says more about it.
 
 ## The shape
 
-One window, one `State` (`src/app/`), one UI thread. Rune calls four functions on it:
+One UI thread; each window (Rune's `open_window`: real OS windows in one event loop) has its
+own `State` (`src/app/`), and all of them share one `Shared` (`app/shared.rs`: the
+file-operation slot, undo and redo, the clipboard's files, the Jump history). A window reaches
+another only through that one's inbox (a message and a wake, run in its next `poll`). Rune
+calls four functions on each window's `State`:
 `view::view` (build the element tree from `State`, every frame), `State::on_key`,
 `State::poll` (after a waker fires: land whatever background work finished) and `setup`.
 Handlers change `State` and land the change with `tx.instant()` (nothing animates). Anything
@@ -22,8 +26,9 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 
 | Area | Modules | What they own |
 | --- | --- | --- |
-| Entry | `main.rs` | Start-up order, Rune's callbacks, exit drains |
-| State | `app/` | `State` and navigation (`mod.rs`), keys and per-command `run`/`unavailable` (`dispatch.rs`), the startup read (`boot.rs`) |
+| Entry | `main.rs` | Start-up order, the first window, exit drains |
+| | `window.rs` | Every window's spec and callbacks, opening another (⌘N), the registry other threads route through (requests from other apps, volumes) |
+| State | `app/` | `State` and navigation (`mod.rs`), keys and per-command `run`/`unavailable` (`dispatch.rs`), the startup read (`boot.rs`), what windows share and their inboxes (`shared.rs`) |
 | | `folder.rs` | One folder on screen: listing, cursor, selection, filter, sort, history; `TabMemo` |
 | | `panes.rs` | Tabs and split view |
 | Commands | `commands.rs` | The command table (`Cmd`: id, title, default keys), `Keymap`, palette scoring |
@@ -31,6 +36,7 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `palette.rs`, `menu.rs`, `confirm.rs` | Palette, Linux's in-window context menu, the one dialog |
 | File ops | `actions.rs` | UI side of file operations: clipboard, paste, rename, drag and drop, context menu |
 | | `ops/` | The operation worker (`worker.rs`), undo and redo (`undo.rs`), batch rename (`batch.rs`), fingerprints (`print.rs`), Empty Trash and Put Back (`trashed.rs`), New File and Make Symbolic Link with their undo and Windows' shortcut fallback (`links.rs`) |
+| | `leftovers.rs` | What an operation cut short by quitting left: the record, its writer, the next launch's note |
 | | `noclobber.rs` | Renames, copies and file ids that never replace anything |
 | | `trash/` | Each platform's trash, and telling a disk with none (`win.rs`: the Recycle Bin); what's in the trashes, their count for Empty Trash's dialog, `.trashinfo` records (`contents.rs`) |
 | | `delete.rs` | Permanent delete without following links |
@@ -57,7 +63,8 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 Nothing runs in the background unless the user did something, and nothing polls.
 
 - **Startup read** (`app::boot`): started by `main` before Rune's loop; reads
-  `config.toml`, `sidebar.toml`, then the first folder. The first window waits at most
+  `config.toml`, `sidebar.toml`, then the first folder. A later window reads nothing but its
+  folder (`State::new_window`). The first window waits at most
   `FIRST_PAINT_WAIT` (8 ms) for it, then lands it in `poll`.
 - **`rune::Latest` workers**: Rune's shared pool (≤ 4 threads) runs every latest-wins request:
   folder listings (`Folder::loader`, and each column's of the column view), settings reload, typed-path checks, completion, Get
@@ -74,16 +81,24 @@ Nothing runs in the background unless the user did something, and nothing polls.
   below the window's priority, sharing one queue and a stop flag per walk.
 - **Writers**: `arbor-history` (`jump::history`: appends, load, compaction, clear, under a
   lock file) and `arbor-sidebar` (`sidebar::Writer`: edits merged into the file under its
-  lock, then an atomic rewrite). Each registers with
+  lock, then an atomic rewrite). One of each for every window (`Shared`), waking the open window
+  focused last (`Shared::live_waker`): nothing shared holds a window's own waker or handle
+  (the operation's waker is moved to its new owner, `Shared::own_job`). Each registers with
   `persist::at_exit` and gets up to 100 ms when Arbor quits (`persist::drain_at_exit`).
 - **Get Info's total** (`arbor-info`): one walk per request, waking the window at most every
   30 ms.
 - **Listeners** (not in tests or the bench): `incoming::listen` (macOS open-documents events,
   Linux `arbor-dbus` serving `org.freedesktop.FileManager1`, Windows `arbor-pipe`) and
   `volumes::watch` (macOS mount notifications, Windows `arbor-devices` hidden window). Each
-  blocks on its source; none polls.
+  blocks on its source; none polls. Both reach the window focused last (`window::route`).
 - **The operation worker** (`ops::start`): one thread per file operation; only one runs at a
-  time (`State::job`).
+  time in the whole app, held by `Shared` (`Shared::job`), shown and landed by its owner (the
+  window that started it), which tells the others what changed. The worker wakes whichever
+  window owns it (`Shared::op_wake`): a window closing mid-operation makes another the owner
+  on the spot (`State::leave`), and a window whose operation's owner is gone lands it. The
+  last window's close cancels it and hands it to `arbor-quit` (`leftovers.rs`), which waits
+  ≤ 2 s for its cleanup and records what it left (`arbor-leftovers` writes the record); `main`
+  waits for it after Rune's loop ends.
 - **The Trash's count** (`arbor-trash-count`, `trash::contents::Counting`): while Empty
   Trash's dialog is open, one thread lists the items, then adds up their size, waking the
   window after each, and ends; closing the dialog stops it.
@@ -155,8 +170,9 @@ Nothing runs in the background unless the user did something, and nothing polls.
    on `Cmd` exhaustively, as `unavailable` does.
 3. Navigation calls `State::go*` → `Folder::read` → a `Latest` listing, landed by
    `State::land`. File commands go to `actions.rs`, which builds an `ops::Op` (capturing
-   identities) and calls `ops::start`; the outcome lands in `poll` (`State::job`) and goes on
-   the undo stack.
+   identities) and calls `ops::start`; the outcome lands in `poll` (`State::poll_job`) and goes on
+   the (shared) undo stack; every window reads the folders it changed
+   (`State::changed_on_disk`, the others through their inboxes).
 
 ## Platform code
 

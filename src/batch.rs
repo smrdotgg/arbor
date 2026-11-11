@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use rune::{Key, KeyEvent, Latest, TextEdit, Tx};
 
-use crate::app::{BUSY, State};
+use crate::app::State;
 use crate::ops::{Op, Renaming, Seen};
 use crate::rename::{self, CaseMode, Dir, Item, Plan, Platform, Rule, Status};
 
@@ -361,6 +361,7 @@ impl State {
     /// Enter or the Rename button: one file operation for every item that changes. While the
     /// plan for the current rule is still on a worker, it applies when that lands.
     pub fn batch_apply(&mut self, tx: &mut Tx) {
+        let busy = self.busy().then(|| self.busy_why());
         let Some(b) = &mut self.batch else { return };
         if b.stale() {
             b.apply_waiting = true;
@@ -371,8 +372,8 @@ impl State {
             self.note = Some(why);
             return;
         }
-        if self.job.is_some() {
-            self.note = Some(BUSY.into());
+        if let Some(why) = busy {
+            self.note = Some(why.into());
             return;
         }
         let Some(seen) = &b.seen else { return };
@@ -603,11 +604,11 @@ pub(crate) mod tests {
     /// Polls until the file operation is done and every pane has settled.
     fn finish_job(s: &mut State) {
         let until = Instant::now() + Duration::from_secs(10);
-        while s.job.is_some() && Instant::now() < until {
+        while s.owns_job() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(2));
             s.poll(&mut Tx::default());
         }
-        assert!(s.job.is_none(), "the operation never finished");
+        assert!(!s.owns_job(), "the operation never finished");
         settle_all(s);
     }
 
@@ -673,14 +674,14 @@ pub(crate) mod tests {
         assert_eq!(b.plan.new, ["Trip 05 (1).jpg", "Trip 06 (2).jpg", "notes.txt"], "notes.txt isn't counted");
         assert_eq!(b.plan.summary(), "2 will change");
         assert_eq!(b.blocked(), None);
-        let undo = s.undo.len();
+        let undo = s.shared.undo.borrow().len();
         assert!(s.batch_field_key(&key(Key::Enter), &mut tx));
-        assert!(s.batch.is_none() && s.job.is_some(), "one operation on the worker");
+        assert!(s.batch.is_none() && s.owns_job(), "one operation on the worker");
         finish_job(&mut s);
         assert_eq!(names(&d), ["Trip 05 (1).jpg", "Trip 06 (2).jpg", "notes.txt"]);
         assert_eq!(marked(&s), ["Trip 05 (1).jpg", "Trip 06 (2).jpg"], "the renamed items, selected");
         assert_eq!(s.note.as_deref(), Some("Renamed 2 items"));
-        assert_eq!(s.undo.len(), undo + 1, "one undo entry");
+        assert_eq!(s.shared.undo.borrow().len(), undo + 1, "one undo entry");
         s.run(Cmd::Undo, &mut tx);
         finish_job(&mut s);
         assert_eq!(names(&d), ["IMG_1.jpg", "IMG_2.jpg", "notes.txt"]);
@@ -755,7 +756,7 @@ pub(crate) mod tests {
         assert_eq!(b.plan.status[0], Status::Problem("“taken.txt” already exists here".into()));
         assert_eq!(b.blocked().as_deref(), Some("Fix the problems to rename"));
         s.batch_field_key(&key(Key::Enter), &mut tx);
-        assert!(s.batch.is_some() && s.job.is_none(), "nothing started");
+        assert!(s.batch.is_some() && !s.owns_job(), "nothing started");
         assert_eq!(s.note.as_deref(), Some("Fix the problems to rename"));
         // A bad regex too.
         set(&mut s, |b| {
@@ -804,9 +805,9 @@ pub(crate) mod tests {
         assert!(s.batch.as_ref().unwrap().stale(), "on the worker");
         assert_eq!(s.batch.as_ref().unwrap().blocked().as_deref(), Some("Updating…"));
         s.batch_apply(&mut tx);
-        assert!(s.batch.is_some() && s.job.is_none(), "waits for the plan");
+        assert!(s.batch.is_some() && !s.owns_job(), "waits for the plan");
         let until = Instant::now() + Duration::from_secs(10);
-        while s.job.is_none() && Instant::now() < until {
+        while !s.owns_job() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(2));
             s.poll(&mut tx);
         }

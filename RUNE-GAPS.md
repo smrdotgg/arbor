@@ -16,6 +16,46 @@ Newest first.
 
 ---
 
+## macOS Quit ends the process inside the windows' close callbacks
+
+- **Feature:** quitting while a file operation runs (`feature/new-window`): the operation is
+  cancelled at the close, and its cleanup gets up to 2 s after the windows have gone, with what
+  it couldn't finish recorded for the next launch (`leftovers.rs`).
+- **What Rune is missing:** a hook after the last window has gone and before the process ends
+  that runs on every platform. Closing the last window returns from `App::run` (winit's
+  `run_app`), so `main` can wait there; but macOS's Quit (⌘Q, the menu, the Dock) runs each
+  window's `on_close` from `applicationWillTerminate`, after which AppKit ends the process:
+  `App::run` never returns.
+- **What we did instead:** the close callback only cancels the operation and starts a thread,
+  which writes a provisional record (the copy being made, what cleanup already left), waits for
+  the cleanup and makes the record exact; `main` waits for it when `App::run` returns. The close
+  callback does no record I/O (PM decision).
+- **What users lose:** after ⌘Q on macOS, a cancelled copy's cleanup may be cut off by the
+  process ending, and its record too if the quit thread hadn't written it yet: then a partial
+  copy is left without a word at the next launch.
+- **Suggested Rune change:** an `App::on_exit` (or `before_exit`) hook that runs after every
+  window is hidden and before the process ends, on every platform, with a bounded time the app
+  asks for (`applicationShouldTerminate` answering `NSTerminateLater` on macOS).
+
+---
+
+## Multiple windows: a window opens with its spec's fixed title
+
+- **Feature:** ⌘N and "Open in New Window" (`feature/new-window`). Rune's `open_window` gives
+  each window its own state, tree and focus, which is all multiple windows needed otherwise.
+- **What Rune is missing:** a window's first title is `AppSpec::title`, a `&'static str`; only
+  `Tx::set_title` changes it, and a `Tx` exists only in a handler, update or `poll` of the
+  running window. A window opened on a folder can't start titled with it.
+- **What we did instead:** the new window's state sends itself a message
+  (`State::new_window` in `src/app/mod.rs`) that its waker delivers as soon as `setup` runs
+  (`Shared::set_waker`), and its first `poll` sets the title.
+- **What users lose:** the window is titled "Arbor" until its first `poll`, a frame or so
+  (in the Dock's window list, the Windows taskbar, Alt-Tab).
+- **Suggested Rune change:** `WindowSpec::title(impl Into<String>)` (or `App::title`), the
+  window's title from creation.
+
+---
+
 ## Idle: a `Tx::live_only` that no commit follows keeps a window without live values drawing
 
 - **Feature:** drag-select following the wheel (7cd20cb): the rows' `on_layout_tx` handler said
