@@ -55,7 +55,7 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             show_hidden: false,
-            sort: Sort { key: SortKey::Name, desc: false },
+            sort: Sort::new(SortKey::Name, false),
             start_folder: None,
             places: None,
             jump_enabled: true,
@@ -194,7 +194,7 @@ pub(crate) fn read_text(path: &Path) -> Result<Option<String>, String> {
     String::from_utf8(bytes).map(Some).map_err(|_| format!("{name} isn't text (UTF-8), so it was ignored"))
 }
 
-const GENERAL: [&str; 5] = ["show_hidden", "sort", "sort_descending", "start_folder", "places"];
+const GENERAL: [&str; 6] = ["show_hidden", "sort", "sort_descending", "folders_first", "start_folder", "places"];
 
 fn general(t: &dyn TableLike, s: &mut Settings, errors: &mut Vec<String>, line: &dyn Fn(Option<std::ops::Range<usize>>) -> usize) {
     let mut desc = None;
@@ -210,9 +210,13 @@ fn general(t: &dyn TableLike, s: &mut Settings, errors: &mut Vec<String>, line: 
                 Some(b) => desc = Some(b),
                 None => bad("true or false"),
             },
+            "folders_first" => match item.as_bool() {
+                Some(b) => s.sort.dirs_first = b,
+                None => bad("true or false"),
+            },
             "sort" => match item.as_str().and_then(sort_key) {
                 Some(k) => s.sort.key = k,
-                None => bad("\"name\", \"kind\", \"size\" or \"modified\""),
+                None => bad("\"name\", \"kind\", \"size\", \"modified\" or \"created\""),
             },
             "start_folder" => match item.as_str() {
                 Some("") => s.start_folder = None,
@@ -228,7 +232,7 @@ fn general(t: &dyn TableLike, s: &mut Settings, errors: &mut Vec<String>, line: 
         }
     }
     // Newest and largest first feel right; names and kinds read A→Z (as clicking a header).
-    s.sort.desc = desc.unwrap_or(matches!(s.sort.key, SortKey::Size | SortKey::Modified));
+    s.sort.desc = desc.unwrap_or(matches!(s.sort.key, SortKey::Size | SortKey::Modified | SortKey::Created));
 }
 
 fn jump(t: &dyn TableLike, s: &mut Settings, errors: &mut Vec<String>, line: &dyn Fn(Option<std::ops::Range<usize>>) -> usize) {
@@ -302,6 +306,7 @@ fn sort_key(s: &str) -> Option<SortKey> {
         "kind" => SortKey::Kind,
         "size" => SortKey::Size,
         "modified" | "date" => SortKey::Modified,
+        "created" => SortKey::Created,
         _ => return None,
     })
 }
@@ -430,10 +435,13 @@ pub fn template() -> String {
          # Show hidden files (dotfiles, and files the system marks hidden) in new windows.\n\
          # show_hidden = false\n\
          \n\
-         # How folders are sorted: \"name\", \"kind\", \"size\" or \"modified\".\n\
+         # How folders are sorted: \"name\", \"kind\", \"size\", \"modified\" or \"created\".\n\
          # sort = \"name\"\n\
-         # Reverse it. Without this line, size and modified sort largest and newest first.\n\
+         # Reverse it. Without this line, size and the dates sort largest and newest first.\n\
          # sort_descending = false\n\
+         # Keep folders above files, whatever the sort. \"Folders First\" in the command palette\n\
+         # turns it off or on in a window until Arbor quits.\n\
+         # folders_first = true\n\
          \n\
          # The folder to open when none is given on the command line. Empty: the current folder,\n\
          # or your home folder when Arbor is started from the desktop.\n\
@@ -573,7 +581,7 @@ mod tests {
         );
         assert_eq!(c.errors, Vec::<String>::new());
         assert!(c.settings.show_hidden);
-        assert_eq!(c.settings.sort, Sort { key: SortKey::Size, desc: true });
+        assert_eq!(c.settings.sort, Sort::new(SortKey::Size, true));
         assert_eq!(c.settings.start_folder, Some(fs::home().join("Projects")));
         assert_eq!(c.settings.places, Some(vec![fs::home(), PathBuf::from("/tmp")]));
         assert_eq!(chords(&c, Cmd::Trash), ["cmd+backspace", "shift+delete"]);
@@ -689,8 +697,8 @@ mod tests {
         assert_eq!(
             c.errors,
             [
-                "line 2: unknown setting 'show_hiden' (settings are show_hidden, sort, sort_descending, start_folder, places)",
-                "line 3: sort should be \"name\", \"kind\", \"size\" or \"modified\"",
+                "line 2: unknown setting 'show_hiden' (settings are show_hidden, sort, sort_descending, folders_first, start_folder, places)",
+                "line 3: sort should be \"name\", \"kind\", \"size\", \"modified\" or \"created\"",
                 "line 6: unknown command 'file.trahs' (did you mean 'file.trash'?)",
             ]
         );
@@ -741,7 +749,7 @@ mod tests {
             [
                 "line 2: string values must be quoted, expected literal string",
                 "line 4: unclosed table, expected `]`",
-                "line 5: unknown setting 'file.copy' (settings are show_hidden, sort, sort_descending, start_folder, places)",
+                "line 5: unknown setting 'file.copy' (settings are show_hidden, sort, sort_descending, folders_first, start_folder, places)",
             ]
         );
         assert_eq!(c.settings.sort.key, SortKey::Kind, "the valid lines still apply");

@@ -12,7 +12,15 @@ fn folder(name: &str, files: usize) -> PathBuf {
 }
 
 fn settings_for(dir: PathBuf, settings: Settings) -> Start {
-    Start { config: Config { settings, ..Config::default() }, start: dir, places: Vec::new(), note: None, custom: false, leftovers: None }
+    Start {
+        config: Config { settings, ..Config::default() },
+        start: dir,
+        places: Vec::new(),
+        note: None,
+        custom: false,
+        leftovers: None,
+        cols: Default::default(),
+    }
 }
 
 /// Polls as frames would until nothing is loading (or 10 s pass).
@@ -346,7 +354,7 @@ fn late_settings_keep_a_toggle_the_user_changed() {
     s.toggle_hidden();
     s.set_sort(SortKey::Size);
     let sort = s.cur().sort;
-    let file = Settings { show_hidden: false, sort: Sort { key: SortKey::Kind, desc: false }, ..Settings::default() };
+    let file = Settings { show_hidden: false, sort: Sort::new(SortKey::Kind, false), ..Settings::default() };
     send.send(Boot::Start(Box::new(settings_for(a, file)))).unwrap();
     s.poll(&mut Tx::default());
     assert!(s.show_hidden, "the user's ⌘. stays");
@@ -365,7 +373,7 @@ fn late_settings_keep_a_toggle_the_user_set_back_to_the_default() {
     s.set_sort(SortKey::Size);
     s.set_sort(SortKey::Name); // back to name, ascending: the default
     assert_eq!((s.show_hidden, s.cur().sort), (false, start));
-    let file = Settings { show_hidden: true, sort: Sort { key: SortKey::Kind, desc: false }, ..Settings::default() };
+    let file = Settings { show_hidden: true, sort: Sort::new(SortKey::Kind, false), ..Settings::default() };
     send.send(Boot::Start(Box::new(settings_for(a, file)))).unwrap();
     s.poll(&mut Tx::default());
     assert!(!s.show_hidden, "the user's explicit off stays");
@@ -1216,4 +1224,193 @@ fn the_next_launch_shows_the_leftovers_then_forgets_them() {
     assert_eq!(s.cur().cwd, d.join("into"));
     assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("payload"));
     assert!(s.leftover.is_none() && s.note.is_none(), "said once");
+}
+
+// ---- the list's columns, Folders First, the status bar --------------------------------------
+
+fn listed(s: &State) -> Vec<String> {
+    let f = s.cur();
+    f.visible.iter().map(|&i| f.entries[i as usize].name.clone()).collect()
+}
+
+/// Columns shown and hidden from the palette (or the header's menu, which runs the same
+/// commands), and a header edge dragged: every window draws them, and they're saved (the
+/// width when the drag ends, not while it moves; a cancelled drag puts it back, saving
+/// nothing). Reset Columns goes back to the defaults.
+#[test]
+fn columns_and_their_widths_are_saved_for_every_window() {
+    use crate::listcols::{self, Field, ListCols};
+    use rune::Phase;
+    let d = folder("columns", 1);
+    let file = d.join("cfg").join(listcols::FILE);
+    let mut s = state_in(&d);
+    *s.shared.cols_file.borrow_mut() = Some(file.clone());
+    let saved = |s: &State| {
+        assert!(s.flush_columns_file(Duration::from_secs(5)), "written");
+        listcols::load(Some(&file))
+    };
+    assert_eq!(s.cols(), ListCols::default());
+    assert!(s.unavailable(Cmd::ResetColumns).is_some());
+    assert_eq!((s.title(Cmd::ColumnCreated), s.checked(Cmd::ColumnCreated)), ("Show the Date Created Column".into(), Some(false)));
+    assert_eq!(s.checked(Cmd::Copy), None, "not a toggle");
+    let mut other = s.new_window(d.clone());
+    other.poll(&mut Tx::default());
+    s.run(Cmd::ColumnCreated, &mut Tx::default());
+    s.run(Cmd::ColumnKind, &mut Tx::default());
+    assert!(s.cols().shown(Field::Created) && !s.cols().shown(Field::Kind));
+    assert_eq!(s.note.as_deref(), Some("Kind column hidden"));
+    assert_eq!((s.title(Cmd::ColumnCreated), s.checked(Cmd::ColumnCreated)), ("Hide the Date Created Column".into(), Some(true)));
+    assert!(other.poll(&mut Tx::default()), "the other window draws them again");
+    assert_eq!(other.cols(), s.cols());
+    assert_eq!(saved(&s), listcols::Loaded { cols: s.cols(), error: None });
+    // Size's edge dragged 100 pt left with 30 to spare: 30 wider, saved when it's let go.
+    s.drag_header(Field::Size, Phase::Down, 0.0, 30.0, false);
+    s.drag_header(Field::Size, Phase::Move, -100.0, 30.0, false);
+    assert_eq!(s.cols().width(Field::Size), 110.0);
+    assert_eq!(saved(&s).cols.width(Field::Size), 80.0, "not saved while it moves");
+    s.drag_header(Field::Size, Phase::Up, -100.0, 30.0, false);
+    assert_eq!(saved(&s).cols.width(Field::Size), 110.0);
+    assert_eq!(other.cols().width(Field::Size), 110.0);
+    // Dragged right past its least, then Esc: back to 110, nothing saved.
+    s.drag_header(Field::Size, Phase::Down, 0.0, 0.0, false);
+    s.drag_header(Field::Size, Phase::Move, 500.0, 0.0, false);
+    assert_eq!(s.cols().width(Field::Size), Field::Size.min_w());
+    s.drag_header(Field::Size, Phase::Up, 500.0, 0.0, true);
+    assert_eq!(s.cols().width(Field::Size), 110.0);
+    assert_eq!(saved(&s).cols.width(Field::Size), 110.0);
+    // The header's menu: every column, checked as shown, then Folders First and Reset.
+    let items = s.header_menu_items();
+    let titles: Vec<String> = items.iter().map(|i| i.as_ref().map_or("-".into(), |(_, t, _)| t.clone())).collect();
+    assert_eq!(
+        titles,
+        [
+            "Kind",
+            "Extension",
+            "Size",
+            "Date Modified",
+            "Date Created",
+            Field::Permissions.title(),
+            "-",
+            "Folders First",
+            "-",
+            "Reset Columns"
+        ]
+    );
+    let checks: Vec<Option<bool>> = items.iter().flatten().map(|(a, _, _)| a.cmd().and_then(|c| s.checked(c))).collect();
+    assert_eq!(checks, [Some(false), Some(false), Some(true), Some(true), Some(true), Some(false), Some(true), None]);
+    s.run(Cmd::ResetColumns, &mut Tx::default());
+    assert_eq!(s.cols(), ListCols::default());
+    assert_eq!(saved(&s).cols, ListCols::default());
+}
+
+/// Folders First, from the palette: folders mix with files (under the sort, and in every tab,
+/// a new one too), and back. The setting starts a window with it off, and Reload Settings
+/// changes it without undoing a header click.
+#[test]
+fn folders_first_turns_off_and_on() {
+    let d = folder("folders-first", 0);
+    for n in ["b", "d"] {
+        std::fs::create_dir(d.join(n)).unwrap();
+    }
+    for n in ["a.txt", "c.txt"] {
+        std::fs::write(d.join(n), "x").unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    assert_eq!(listed(&s), ["b", "d", "a.txt", "c.txt"]);
+    assert_eq!(s.title(Cmd::FoldersFirst), "Turn Off Folders First");
+    s.run(Cmd::FoldersFirst, &mut Tx::default());
+    assert_eq!(listed(&s), ["a.txt", "b", "c.txt", "d"]);
+    assert_eq!((s.checked(Cmd::FoldersFirst), s.title(Cmd::FoldersFirst)), (Some(false), "Turn On Folders First".into()));
+    s.run(Cmd::SortReverse, &mut Tx::default());
+    assert_eq!(listed(&s), ["d", "c.txt", "b", "a.txt"], "under any sort");
+    s.new_tab(&mut Tx::default());
+    assert!(!s.cur().sort.dirs_first, "a new tab too");
+    s.run(Cmd::FoldersFirst, &mut Tx::default());
+    assert_eq!(listed(&s), ["d", "b", "c.txt", "a.txt"]);
+    // `folders_first = false` in the settings: a window starts with folders mixed in.
+    let dir = d.clone();
+    let off = Settings { sort: fs::Sort { dirs_first: false, ..Settings::default().sort }, ..Settings::default() };
+    let mut s = State::boot(Booting::spawn(Duration::ZERO, move || settings_for(dir, off)), Duration::from_secs(5));
+    settle_all(&mut s);
+    assert_eq!(listed(&s), ["a.txt", "b", "c.txt", "d"]);
+    let cfg = d.join("config.toml");
+    s.set_sort(SortKey::Size);
+    std::fs::write(&cfg, "[general]\nfolders_first = true\n").unwrap();
+    s.reload_settings_from(Some(cfg));
+    let until = Instant::now() + Duration::from_secs(10);
+    while !s.folders_first && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(2));
+        s.poll(&mut Tx::default());
+    }
+    assert!(s.folders_first && s.cur().sort.dirs_first);
+    assert_eq!(s.cur().sort.key, SortKey::Size, "the header click stays");
+    // Folders first again (by size, largest first: both 0, so by name the other way).
+    assert_eq!(&listed(&s)[..2], ["d", "b"]);
+}
+
+/// Two or more selected: how many, the files' total size, and the folders counted apart
+/// (their size isn't walked); worked out again when the selection changes.
+#[test]
+fn the_selections_size_adds_up_its_files() {
+    let d = folder("picked-size", 0);
+    std::fs::write(d.join("a"), vec![0u8; 1000]).unwrap();
+    std::fs::write(d.join("b"), vec![0u8; 2500]).unwrap();
+    std::fs::create_dir(d.join("dir")).unwrap();
+    std::fs::write(d.join("dir").join("inside"), vec![0u8; 9000]).unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    assert_eq!(s.cur().picked_size(), None, "one item: the row says its size");
+    s.cur_mut().select_all();
+    let p = s.cur().picked_size().unwrap();
+    assert_eq!(p, crate::folder::Picked { count: 3, bytes: 3500, folders: 1 });
+    assert_eq!(crate::view::picked_text(p), "3 selected · 3.5 KB + 1 folder");
+    let dir = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].is_dir).unwrap();
+    s.cur_mut().toggle_mark(dir);
+    let p = s.cur().picked_size().unwrap();
+    assert_eq!(crate::view::picked_text(p), "2 selected · 3.5 KB");
+    let files = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "a").unwrap();
+    s.cur_mut().toggle_mark(files);
+    assert_eq!(s.cur().picked_size(), None, "one left");
+    assert_eq!(crate::view::picked_text(crate::folder::Picked { count: 2, bytes: 0, folders: 2 }), "2 selected");
+}
+
+/// The volume's free space is read on a worker when a folder is read and after a file
+/// operation, once each: never on the window's thread, and never again while idle.
+#[test]
+fn free_space_is_read_off_the_window_thread_and_not_while_idle() {
+    let d = folder("free-space", 1);
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let me = std::thread::current().id();
+    let reads = || crate::fs::free_reads::of(&d);
+    let until = |s: &mut State, done: &dyn Fn(&State) -> bool| {
+        let t = Instant::now() + Duration::from_secs(10);
+        while !done(s) && Instant::now() < t {
+            std::thread::sleep(Duration::from_millis(2));
+            s.poll(&mut Tx::default());
+        }
+    };
+    s.reload();
+    until(&mut s, &|s| s.cur().free().is_some());
+    assert!(s.cur().free().is_some_and(|n| n > 0));
+    let after_read = reads();
+    assert!(!after_read.is_empty() && !after_read.contains(&me), "on a worker: {after_read:?}");
+    // Idle: polls (as wakes from elsewhere would make) read nothing more.
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(2));
+        s.poll(&mut Tx::default());
+    }
+    assert_eq!(reads().len(), after_read.len(), "nothing read while idle");
+    // A file operation reads it again (here with the folder's reload).
+    s.new_folder();
+    finish_job(&mut s);
+    until(&mut s, &|s| s.cur().free_asked.is_none());
+    let after_op = reads();
+    assert!(after_op.len() > after_read.len() && !after_op.contains(&me), "{after_op:?}");
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(2));
+        s.poll(&mut Tx::default());
+    }
+    assert_eq!(reads().len(), after_op.len());
 }

@@ -546,7 +546,7 @@ mod tests {
     }
 
     fn folder(n: usize) -> Folder {
-        let mut f = Folder::new(9, std::env::temp_dir(), crate::fs::Sort { key: crate::fs::SortKey::Name, desc: false }, false, None);
+        let mut f = Folder::new(9, std::env::temp_dir(), crate::fs::Sort::new(crate::fs::SortKey::Name, false), false, None);
         f.entries = (0..n).map(|i| crate::fs::Entry::test(&format!("f{i:02}"), false)).collect();
         f.refilter(None);
         f

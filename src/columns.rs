@@ -118,7 +118,7 @@ impl Column {
             pick: None,
             load: Load::Off,
             version: crate::folder::next_version(),
-            sort: Sort { key: fs::SortKey::Name, desc: false },
+            sort: Sort::new(fs::SortKey::Name, false),
             hidden: false,
             req: 0,
             stop: Arc::default(),
@@ -1114,7 +1114,7 @@ mod tests {
     fn a_stale_listing_never_lands_in_a_column() {
         let d = tree("stale");
         let mut c = Column::new(d.join("a"), None);
-        let sort = Sort { key: fs::SortKey::Name, desc: false };
+        let sort = Sort::new(fs::SortKey::Name, false);
         let answer = |req: u64, path: PathBuf| Answer { req, sort, listing: fs::list(path, sort) };
         let first = c.read(sort, false);
         drop(first);

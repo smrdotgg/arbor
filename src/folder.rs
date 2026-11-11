@@ -168,6 +168,25 @@ pub struct Folder {
     pub(crate) col_uid: Option<u64>,
     /// A column made the active folder, landing (`State::adopt_column`): for its request only.
     pub(crate) adopted: Option<Adopted>,
+    /// [`Folder::picked_size`] as last worked out, for the version, picks and selection size
+    /// it was worked out at (derived from what's on screen, nothing read from the disk).
+    picked_memo: Cell<Option<(PickedAt, Picked)>>,
+    /// The free space read for a folder, and the read in flight ([`Folder::ask_free`]).
+    pub(crate) free: Option<(PathBuf, Option<u64>)>,
+    pub(crate) free_asked: Option<PathBuf>,
+    pub(crate) free_loader: Latest<(PathBuf, Option<u64>)>,
+}
+
+/// What a [`Picked`] was worked out at: the listing's version, the picks and the selection's size.
+type PickedAt = (u64, u64, usize);
+
+/// What two or more selected items hold ([`Folder::picked_size`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Picked {
+    pub count: usize,
+    /// The files' sizes added up.
+    pub bytes: u64,
+    pub folders: usize,
 }
 
 /// What a column made the active folder brings besides its listing.
@@ -190,8 +209,9 @@ impl Drop for Folder {
 
 impl Folder {
     pub fn new(id: u64, cwd: PathBuf, sort: Sort, show_hidden: bool, waker: Option<rune::Waker>) -> Folder {
-        let loader = Latest::default();
+        let (loader, free_loader) = (Latest::default(), Latest::default());
         if let Some(w) = waker {
+            free_loader.set_waker(w.clone());
             loader.set_waker(w);
         }
         Folder {
@@ -229,6 +249,10 @@ impl Folder {
             cols_w: Rc::new(Cell::new(0.0)),
             col_uid: None,
             adopted: None,
+            picked_memo: Cell::new(None),
+            free: None,
+            free_asked: None,
+            free_loader,
         }
     }
 
@@ -337,6 +361,8 @@ impl Folder {
         let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
         let picks = self.picks;
         self.pending = Some(Pending { req, path: path.clone(), nav, select, rename, scroll: 0.0, picks });
+        // Its volume's free space, alongside (one call on another worker; the listing never waits).
+        self.ask_free(path.clone());
         self.loader.request_opt(path, move |p| Some(Answer { req, sort, listing: fs::list_until(p, sort, &stop)? }));
     }
 
@@ -345,6 +371,7 @@ impl Folder {
     /// the path and an empty list on screen until then.
     pub(crate) fn request_now(&mut self, wait: std::time::Duration) -> Option<Answer> {
         let req = self.pending.as_ref()?.req;
+        self.ask_free(self.cwd.clone());
         let (path, sort, stop) = (self.cwd.clone(), self.sort, self.stop_read());
         crate::bounded::read_waiting(&self.loader, wait, move || Some(Answer { req, sort, listing: fs::list_until(path, sort, &stop)? }))
     }
@@ -476,6 +503,7 @@ impl Folder {
         f.sort_set = other.sort_set;
         f.view = other.view;
         f.dir_id = other.dir_id;
+        f.free = other.free.clone();
         // A search's results stay its own: the new pane reads the folder.
         if other.is_loading() || other.searching() {
             f.request(other.cwd.clone(), Nav::Reload, Vec::new(), false);
@@ -541,13 +569,75 @@ impl Folder {
         // Search results are in the order found until a header is clicked: the first click
         // sorts by it, the way a new column does.
         let first = self.search.as_mut().is_some_and(|s| !std::mem::replace(&mut s.sorted, true));
+        let dirs_first = self.sort.dirs_first;
         self.sort = if self.sort.key == key && !first {
-            Sort { key, desc: !self.sort.desc }
+            Sort { key, desc: !self.sort.desc, dirs_first }
         } else {
             // Newest and largest first feel right; names and kinds read A→Z.
-            Sort { key, desc: matches!(key, SortKey::Size | SortKey::Modified) }
+            Sort { key, desc: matches!(key, SortKey::Size | SortKey::Modified | SortKey::Created), dirs_first }
         };
         self.resort();
+    }
+
+    /// Folders First turned on or off: the listing (or a search's sorted results) sorted again,
+    /// keeping the cursor; results still in the order found keep it, and take it when sorted.
+    pub fn set_dirs_first(&mut self, on: bool) {
+        if let Some(s) = self.search.as_mut() {
+            s.memo.sort.dirs_first = on;
+            if !s.sorted {
+                self.sort.dirs_first = on;
+                return;
+            }
+        }
+        if self.sort.dirs_first != on {
+            self.sort.dirs_first = on;
+            self.resort();
+        }
+    }
+
+    /// What the selection holds, for the status bar, while two or more items are selected:
+    /// how many, the files' total size, and how many folders (whose size isn't known: nothing
+    /// walks them). Worked out once per selection and listing, not every frame.
+    pub fn picked_size(&self) -> Option<Picked> {
+        if self.marked.len() < 2 {
+            return None;
+        }
+        let key = (self.version, self.picks, self.marked.len());
+        if let Some((k, p)) = self.picked_memo.get()
+            && k == key
+        {
+            return Some(p);
+        }
+        let mut p = Picked { count: 0, bytes: 0, folders: 0 };
+        for &i in &self.visible {
+            let e = &self.entries[i as usize];
+            if self.marked.contains(&e.os) {
+                p.count += 1;
+                if e.is_dir {
+                    p.folders += 1;
+                } else {
+                    p.bytes += e.size;
+                }
+            }
+        }
+        self.picked_memo.set(Some((key, p)));
+        Some(p)
+    }
+
+    /// Reads the free space of the volume `path` is on, on a worker ([`fs::free_space`]):
+    /// asked when a folder is read (and after a file operation), never on a timer. A newer
+    /// request replaces one in flight; it lands in `State::poll`.
+    pub(crate) fn ask_free(&mut self, path: PathBuf) {
+        self.free_asked = Some(path.clone());
+        self.free_loader.request(path, |p| {
+            let free = fs::free_space(&p);
+            (p, free)
+        });
+    }
+
+    /// The free space read for the folder on screen, if it's in.
+    pub fn free(&self) -> Option<u64> {
+        self.free.as_ref().filter(|(p, _)| *p == self.cwd).and_then(|(_, n)| *n)
     }
 
     /// A new sort from the settings: a search's results keep their order (the listing behind

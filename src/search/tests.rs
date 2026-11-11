@@ -159,7 +159,7 @@ fn unreadable_folders_are_skipped_and_counted() {
     }
     assert_eq!(found, ["open/hit.txt"]);
     assert_eq!(out.unreadable, 2);
-    let mut f = Folder::new(9, d.clone(), crate::fs::Sort { key: crate::fs::SortKey::Name, desc: false }, false, None);
+    let mut f = Folder::new(9, d.clone(), crate::fs::Sort::new(crate::fs::SortKey::Name, false), false, None);
     let mut s = Search::new(f.memo(), "hit", None);
     (s.query, s.unreadable, s.took) = ("hit".into(), 2, Some(Duration::from_millis(1800)));
     f.search = Some(Box::new(s));
@@ -220,7 +220,7 @@ fn a_walk_stops_at_the_result_cap() {
     let d = tree("cap", &names.iter().map(String::as_str).collect::<Vec<_>>());
     let (found, out) = walk_all(&d, "hit", false, false, 7);
     assert_eq!((found.len(), out.found, out.capped), (7, 7, true));
-    let mut f = Folder::new(9, d.clone(), crate::fs::Sort { key: crate::fs::SortKey::Name, desc: false }, false, None);
+    let mut f = Folder::new(9, d.clone(), crate::fs::Sort::new(crate::fs::SortKey::Name, false), false, None);
     let mut s = Search::new(f.memo(), "hit", None);
     (s.query, s.capped, s.took) = ("hit".into(), true, Some(Duration::from_millis(300)));
     f.search = Some(Box::new(s));
@@ -696,6 +696,8 @@ fn the_list_grows_only_so_far_while_the_walk_goes_on() {
         hidden: false,
         size: 1,
         mtime_ms: 1,
+        born_ms: 0,
+        mode: 0,
         id: None,
         pending: None,
     };

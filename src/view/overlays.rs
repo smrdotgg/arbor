@@ -326,16 +326,16 @@ pub(super) fn menu_view(m: &crate::menu::Menu, size: Option<[f32; 2]>, l: Look) 
     for (i, it) in m.items.iter().enumerate() {
         card = card.child(match it {
             Item::Separator => el().w_full().h(MENU_SEP_H).py(4.0).a11y_hidden().child(el().w_full().h(1.0).fill(l.t.separator)),
-            Item::Act { title, on, keys, .. } => {
+            Item::Act { title, on, keys, checked, .. } => {
                 let hi = m.sel == Some(i);
                 let (fg, dim) = match (hi, *on) {
                     (true, _) => (l.sel_text, l.sel_text.alpha(0.8)),
                     (false, true) => (l.t.text, l.t.text_secondary),
                     (false, false) => (l.t.text_secondary.alpha(0.55), l.t.text_secondary.alpha(0.45)),
                 };
-                let r = row()
+                let mut r = row()
                     .key(format!("menu-{i}"))
-                    .role("menuitem")
+                    .role(if checked.is_some() { "menuitemcheckbox" } else { "menuitem" })
                     .label(title.clone())
                     .disabled(!*on)
                     .shortcut_hint(keys.clone())
@@ -344,7 +344,12 @@ pub(super) fn menu_view(m: &crate::menu::Menu, size: Option<[f32; 2]>, l: Look) 
                     .px(10.0)
                     .gap(16.0)
                     .center_y()
-                    .radius(4.0)
+                    .radius(4.0);
+                // A toggle's check, in a column of its own so the titles line up.
+                if let Some(c) = *checked {
+                    r = r.checked(c).child(text(if c { "✓" } else { "" }).font(BODY).color(fg).w(10.0).a11y_hidden());
+                }
+                let r = r
                     .child(text(title.clone()).font(BODY).color(fg).truncate().grow(1.0).min_w(0.0))
                     .child(text(keys.clone()).font(BODY).color(dim));
                 match (hi, *on) {

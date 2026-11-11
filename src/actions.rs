@@ -553,6 +553,14 @@ impl State {
             p.f.reidentify(&fx.reidentified);
         }
         self.refresh(&fx.folders, select, &fx.canon);
+        // The space an operation freed or took: each pane's volume read again, once (a pane
+        // reading its folder again asked already; a newer request replaces an older one).
+        for p in &mut self.panes {
+            if p.f.pending.is_none() && !p.f.searching() {
+                let here = p.f.cwd.clone();
+                p.f.ask_free(here);
+            }
+        }
     }
 
     /// After `folders` (each with its identity, when known) changed on disk: every pane whose
@@ -706,6 +714,23 @@ impl State {
         self.show_menu(items, None, press, tx);
     }
 
+    /// Right-click on the list's header row: each column, checked while shown (Name always
+    /// is), Folders First, and Reset Columns.
+    pub fn header_menu(&mut self, press: PointerPress, tx: &mut Tx) {
+        let items = self.header_menu_items();
+        self.show_menu(items, None, press, tx);
+    }
+
+    pub(crate) fn header_menu_items(&self) -> Vec<Option<(Act, String, bool)>> {
+        let mut v: Vec<Option<(Act, String, bool)>> =
+            crate::listcols::Field::ALL.into_iter().map(|f| Some((Act::Cmd(f.cmd()), f.title().to_string(), true))).collect();
+        v.push(None);
+        v.push(Some((Act::Cmd(Cmd::FoldersFirst), "Folders First".into(), true)));
+        v.push(None);
+        v.push(Some((Act::Cmd(Cmd::ResetColumns), Cmd::ResetColumns.title().into(), self.unavailable(Cmd::ResetColumns).is_none())));
+        v
+    }
+
     /// Right-click on the sidebar's Trash: open it, or empty it.
     pub fn trash_menu(&mut self, press: PointerPress, tx: &mut Tx) {
         let item = |cmd: Cmd, title: &str| Some((Act::Cmd(cmd), title.to_string(), self.unavailable(cmd).is_none()));
@@ -768,7 +793,8 @@ impl State {
                     menu.submenu("Open With", sub)
                 }
                 Some((act, title, on)) => {
-                    let it = PopupItem::new(act.id(), &title).enabled(on);
+                    let checked = act.cmd().and_then(|c| self.checked(c)) == Some(true);
+                    let it = PopupItem::new(act.id(), &title).enabled(on).checked(checked);
                     menu.item(match act.cmd().and_then(|c| self.keymap.shortcut(c)) {
                         Some(k) => it.key_equivalent(k),
                         None => it,

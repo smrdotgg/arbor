@@ -109,6 +109,13 @@ pub struct State {
     /// The user toggled hidden files (even back to where it was), so settings that land late
     /// at startup leave it alone.
     hidden_set: bool,
+    /// Folders above files in every tab's sort ("Folders First", `folders_first`), and whether
+    /// the user toggled it since the window opened (late settings then leave it alone).
+    pub folders_first: bool,
+    folders_set: bool,
+    /// A column header's edge being dragged: which column, its width when the drag began, and
+    /// how much the name could give then.
+    pub(crate) head_drag: Option<(crate::listcols::Field, f32, f32)>,
     pub places: Vec<(String, PathBuf)>,
     /// The last error or note, shown in the status bar until the next action.
     pub note: Option<String>,
@@ -374,12 +381,12 @@ impl State {
         }
         // Without the settings yet: the defaults, in the folder Arbor was started in, until
         // they land (`land_start`).
-        let (config, cwd, places, note, custom, leftover) = match start {
+        let (config, cwd, places, note, custom, leftover, cols) = match start {
             Some(mut s) => {
                 let seen = s.leftovers.take();
-                (s.config, s.start, s.places, s.note, s.custom, seen)
+                (s.config, s.start, s.places, s.note, s.custom, seen, Some(s.cols))
             }
-            None => (Config::default(), std::env::current_dir().unwrap_or_else(|_| fs::home()), Vec::new(), None, false, None),
+            None => (Config::default(), std::env::current_dir().unwrap_or_else(|_| fs::home()), Vec::new(), None, false, None, None),
         };
         let mut side = crate::sidebar::Side::new(if cfg!(test) { None } else { crate::sidebar::file_path() });
         side.custom = custom;
@@ -391,6 +398,10 @@ impl State {
         history.enabled = config.settings.jump_enabled;
         history.exclude = crate::jump::exclude_globs(&config.settings.jump_exclude);
         let shared = std::rc::Rc::new(Shared::new(history));
+        if let Some(c) = cols {
+            shared.cols.set(c);
+        }
+        *shared.cols_file.borrow_mut() = if cfg!(test) { None } else { crate::listcols::file_path() };
         let note = config.summary().or(note);
         let mut s = State::assemble(crate::window::FIRST, shared, config.settings, config.keymap, cwd, places, side);
         s.note = note;
@@ -451,6 +462,9 @@ impl State {
             pane_drop: None,
             show_hidden: settings.show_hidden,
             hidden_set: false,
+            folders_first: settings.sort.dirs_first,
+            folders_set: false,
+            head_drag: None,
             places,
             note: None,
             alert: None,
@@ -554,6 +568,8 @@ impl State {
         );
         s.show_hidden = self.show_hidden;
         s.hidden_set = self.hidden_set;
+        s.set_folders_first(self.folders_first);
+        s.folders_set = self.folders_set;
         s.icon_size = self.icon_size;
         s.view_chosen = self.view_chosen;
         s.volumes = self.volumes.clone();
@@ -637,6 +653,7 @@ impl State {
         }
         for p in &self.panes {
             p.f.loader.set_waker(waker.clone());
+            p.f.free_loader.set_waker(waker.clone());
         }
         self.settings_loader.set_waker(waker.clone());
         self.shared.set_waker(self.win, waker.clone());
@@ -670,6 +687,14 @@ impl State {
             *w = Some(waker.clone());
         }
         self.waker = Some(waker);
+        // The first folder's volume's free space, when its listing was in before the window
+        // (the startup read): one call on a worker, now that its answer can wake the window.
+        for p in &mut self.panes {
+            if p.f.pending.is_none() && p.f.free_asked.is_none() && p.f.free.is_none() {
+                let here = p.f.cwd.clone();
+                p.f.ask_free(here);
+            }
+        }
         // A window opening as columns (`view.default`) gets them from its first frame.
         self.sync_columns();
     }
@@ -839,6 +864,19 @@ impl State {
                 changed |= self.land(ix, a, tx);
             }
         }
+        // Free space, read alongside a folder's listing: only an answer for the folder the
+        // active pane shows changes the status bar (one that comes before its listing waits).
+        for ix in 0..self.panes.len() {
+            let f = &mut self.panes[ix].f;
+            if let Some((path, free)) = f.free_loader.take() {
+                if f.free_asked.as_ref() == Some(&path) {
+                    f.free_asked = None;
+                }
+                let shown = ix == self.active && path == f.cwd && !f.is_loading();
+                changed |= shown && f.free.as_ref() != Some(&(path.clone(), free));
+                f.free = Some((path, free));
+            }
+        }
         if let Some(c) = self.settings_loader.take() {
             // Every window takes them; this one says so.
             let shared = std::rc::Rc::new(c.clone());
@@ -872,6 +910,7 @@ impl State {
         }
         changed |= self.poll_trash_count();
         changed |= self.poll_sidebar();
+        changed |= self.poll_cols_writer();
         changed |= self.poll_volumes();
         changed |= self.poll_open_with();
         changed |= self.poll_info();
@@ -928,11 +967,15 @@ impl State {
     /// it since the window opened on the defaults (even back to the default: a flag says so,
     /// not a comparison).
     fn land_start(&mut self, start: Start) {
-        let Start { config, start, places, note, custom, leftovers } = start;
+        let Start { config, start, places, note, custom, leftovers, cols } = start;
         if leftovers.is_some() {
-            self.land_start(Start { config, start, places, note, custom, leftovers: None });
+            self.land_start(Start { config, start, places, note, custom, leftovers: None, cols });
             self.take_leftovers(leftovers);
             return;
+        }
+        // The columns, unless the user changed them already.
+        if !self.shared.cols_set.get() {
+            self.shared.cols.set(cols);
         }
         if let Some(req) = self.boot_req
             && let Some(f) = self.panes.iter_mut().map(|p| &mut p.f).find(|f| f.pending.as_ref().is_some_and(|p| p.req == req))
@@ -942,19 +985,25 @@ impl State {
             p.path = start.clone();
             f.cwd = start;
         }
-        let (old, new) = (&self.settings, &config.settings);
+        let (old, new) = (self.settings.clone(), config.settings.clone());
         if !self.hidden_set {
             self.show_hidden = new.show_hidden;
             for p in &mut self.panes {
                 p.f.set_hidden(new.show_hidden);
             }
         }
+        if !self.folders_set && new.sort.dirs_first != self.folders_first {
+            self.set_folders_first(new.sort.dirs_first);
+        }
+        // Folders First is the window's (above); the key and direction each tab's.
+        let sort = fs::Sort { dirs_first: self.folders_first, ..new.sort };
+        let changed = (new.sort.key, new.sort.desc) != (old.sort.key, old.sort.desc);
         for p in &mut self.panes {
-            if !p.f.sort_set && new.sort != old.sort {
-                p.f.apply_sort(new.sort);
+            if !p.f.sort_set && changed {
+                p.f.apply_sort(sort);
             }
             for m in p.tabs.iter_mut().flatten().filter(|m| !m.sort_set) {
-                m.sort = new.sort;
+                m.sort = sort;
             }
         }
         // The view settings, where the user hasn't chosen since the window opened.
@@ -1111,6 +1160,12 @@ impl State {
                     _ => f.refilter(p.select.first().map(OsString::as_os_str)),
                 }
                 f.anchor = f.sel;
+                // A listing that came without its volume's free space being asked for (the startup
+                // read, a column made active, a second pane): asked for now.
+                if f.free_asked.as_ref() != Some(&f.cwd) && f.free.as_ref().is_none_or(|(at, _)| *at != f.cwd) {
+                    let here = f.cwd.clone();
+                    f.ask_free(here);
+                }
                 if p.nav == Nav::Show {
                     // Where it was when it was hidden (clamped if the folder shrank since).
                     tx.scroll_to_instant(f.list_key(), 0.0, p.scroll);
@@ -1148,6 +1203,29 @@ impl State {
 
     pub fn set_sort(&mut self, key: SortKey) {
         self.cur_mut().set_sort(key);
+    }
+
+    /// Folders First, on or off, for every tab of the window (and its closed tabs), each kept
+    /// at its cursor.
+    pub fn set_folders_first(&mut self, on: bool) {
+        self.folders_first = on;
+        for p in &mut self.panes {
+            p.f.set_dirs_first(on);
+            for m in p.tabs.iter_mut().flatten() {
+                m.sort.dirs_first = on;
+            }
+        }
+        for m in &mut self.closed {
+            m.sort.dirs_first = on;
+        }
+    }
+
+    /// The palette's Folders First: turned the other way, in this window, until it closes.
+    pub fn toggle_folders_first(&mut self) {
+        self.folders_set = true;
+        let on = !self.folders_first;
+        self.set_folders_first(on);
+        self.note = Some(if on { "Folders first".into() } else { "Folders sorted with files".into() });
     }
 
     pub fn toggle_hidden(&mut self) {
@@ -1311,12 +1389,16 @@ impl State {
     /// applies to every tab.
     /// `say`: this is the window that reloaded them, which says so in its status bar.
     fn apply_settings(&mut self, c: Config, say: bool, tx: &mut Tx) {
-        let (old, new) = (&self.settings, &c.settings);
-        if new.sort != old.sort {
+        let (old, new) = (self.settings.clone(), c.settings.clone());
+        if new.sort.dirs_first != old.sort.dirs_first {
+            self.set_folders_first(new.sort.dirs_first);
+        }
+        if (new.sort.key, new.sort.desc) != (old.sort.key, old.sort.desc) {
+            let sort = fs::Sort { dirs_first: self.folders_first, ..new.sort };
             for p in &mut self.panes {
-                p.f.apply_sort(new.sort);
+                p.f.apply_sort(sort);
                 for m in p.tabs.iter_mut().flatten() {
-                    m.sort = new.sort;
+                    m.sort = sort;
                 }
             }
         }
@@ -1332,10 +1414,9 @@ impl State {
         }
         // The settings' places are the default list: the user's own (sidebar.toml) stays.
         if new.places != old.places && !self.side.custom {
-            self.places = places_for(new);
+            self.places = places_for(&new);
             self.side.look_due = true;
         }
-        let new = c.settings.clone();
         self.apply_history_settings(&new);
         self.reveal(tx);
         if say {

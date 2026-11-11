@@ -241,6 +241,8 @@ impl State {
             SortKind => when(f.sort.key == SortKey::Kind, "Already sorted by kind"),
             SortSize => when(f.sort.key == SortKey::Size, "Already sorted by size"),
             SortModified => when(f.sort.key == SortKey::Modified, "Already sorted by date modified"),
+            SortCreated => when(f.sort.key == SortKey::Created, "Already sorted by date created"),
+            ResetColumns => when(self.cols() == crate::listcols::ListCols::default(), "The columns are already the defaults"),
             // The last tab of a window closes the window, while there are others.
             CloseTab => when(!self.split() && pane.tabs.len() == 1 && self.windows() < 2, "This is the only tab"),
             OpenInNewWindow => when(self.folder_to_open().is_none(), "Select one folder first"),
@@ -280,7 +282,9 @@ impl State {
             MakeDefault | RestoreDefault => when(self.handler_job.is_pending(), "Already changing the default for folders"),
             Reveal | CopyPath | Info | SidebarAdd => renaming,
             GoTo | Reload | Palette | OpenSettings | ReloadSettings | Hidden | SortReverse | NewTab | NewWindow | Split | ClearJump
-            | Search => None,
+            | Search | FoldersFirst | ColumnKind | ColumnExtension | ColumnSize | ColumnModified | ColumnCreated | ColumnPermissions => {
+                None
+            }
         }
     }
 
@@ -289,6 +293,12 @@ impl State {
         match cmd {
             Cmd::Hidden if self.show_hidden => "Hide Hidden Files".into(),
             Cmd::Hidden => "Show Hidden Files".into(),
+            Cmd::FoldersFirst if self.folders_first => "Turn Off Folders First".into(),
+            Cmd::FoldersFirst => "Turn On Folders First".into(),
+            _ if crate::listcols::Field::of_cmd(cmd).is_some() => {
+                let f = crate::listcols::Field::of_cmd(cmd).expect("just seen");
+                format!("{} the {} Column", if self.cols().shown(f) { "Hide" } else { "Show" }, f.title()).into()
+            }
             Cmd::Split if self.split() => "Close Split View".into(),
             Cmd::Split => "Split View".into(),
             Cmd::TogglePreview if self.preview.is_some() => "Close Preview".into(),
@@ -308,6 +318,15 @@ impl State {
                 Some((name, _)) => format!("Go to {name}").into(),
                 None => cmd.title().into(),
             },
+        }
+    }
+
+    /// Whether `cmd` is on, for a check beside it in a menu: a column shown, Folders First.
+    /// `None` for a command that isn't a toggle.
+    pub fn checked(&self, cmd: Cmd) -> Option<bool> {
+        match cmd {
+            Cmd::FoldersFirst => Some(self.folders_first),
+            _ => crate::listcols::Field::of_cmd(cmd).map(|f| self.cols().shown(f)),
         }
     }
 
@@ -510,6 +529,17 @@ impl State {
             SortKind => self.sort_by(SortKey::Kind, tx),
             SortSize => self.sort_by(SortKey::Size, tx),
             SortModified => self.sort_by(SortKey::Modified, tx),
+            SortCreated => self.sort_by(SortKey::Created, tx),
+            FoldersFirst => {
+                self.toggle_folders_first();
+                self.reveal(tx);
+            }
+            ColumnKind | ColumnExtension | ColumnSize | ColumnModified | ColumnCreated | ColumnPermissions => {
+                if let Some(f) = crate::listcols::Field::of_cmd(cmd) {
+                    self.toggle_column(f);
+                }
+            }
+            ResetColumns => self.reset_columns(),
             SortReverse => {
                 let key = self.cur().sort.key;
                 self.sort_by(key, tx);

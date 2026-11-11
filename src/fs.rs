@@ -24,6 +24,13 @@ pub struct Entry {
     pub size: u64,
     /// Milliseconds since the Unix epoch; 0 when unknown.
     pub mtime_ms: i64,
+    /// When it was made (Linux's statx btime, macOS's birth time, Windows' creation time), ms
+    /// since the Unix epoch; 0 where the file system keeps none. The item's own, not a link's
+    /// target's. From the metadata the listing reads anyway.
+    pub born_ms: i64,
+    /// Unix: `st_mode` (type and permission bits) from the same `lstat`; Windows: the file
+    /// attributes from the directory record. 0 when unknown.
+    pub mode: u32,
     /// What tells this item from another put at its path since it was read ([`ident`]).
     pub id: Option<Ident>,
     /// The name an inline rename is giving it, shown until the worker says how it went: only a
@@ -45,6 +52,8 @@ impl Entry {
             hidden: name.starts_with('.'),
             size: 0,
             mtime_ms: 0,
+            born_ms: 0,
+            mode: 0,
             id: None,
             pending: None,
         }
@@ -388,12 +397,23 @@ pub enum SortKey {
     Size,
     Modified,
     Kind,
+    /// When it was made (the birth time); items without one sort as the oldest.
+    Created,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sort {
     pub key: SortKey,
     pub desc: bool,
+    /// Folders above files whatever the key and direction ("Folders First", `folders_first`).
+    pub dirs_first: bool,
+}
+
+impl Sort {
+    /// By `key`, folders first (the default).
+    pub const fn new(key: SortKey, desc: bool) -> Sort {
+        Sort { key, desc, dirs_first: true }
+    }
 }
 
 pub struct Listing {
@@ -487,7 +507,10 @@ fn read_std(path: &Path, stop: &AtomicBool) -> Option<Result<Vec<Entry>, String>
             .as_ref()
             .and_then(ident)
             .map(|id| if id.wants_handle() { ident_of(&de.path(), meta.as_ref().unwrap()).unwrap_or(id) } else { id });
-        out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size: if is_dir { 0 } else { size }, mtime_ms, id, pending: None });
+        // The Date Created and Permissions columns' fields, from the same metadata (no call).
+        let (born_ms, mode) = meta.as_ref().map_or((0, 0), |m| (born_ms(m), mode_of(m)));
+        let size = if is_dir { 0 } else { size };
+        out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, born_ms, mode, id, pending: None });
     }
     #[cfg(test)]
     read_hook::done(path);
@@ -608,7 +631,22 @@ pub(crate) mod win_dir {
         let id = Ident::of_windows(kind, born, own_dir, file.and_then(|f| file_key(volume, f)));
         let lower = name.to_lowercase();
         let key = format!("f:{name}");
-        Entry { os, name, lower, key, is_dir, is_link, hidden, size: if is_dir { 0 } else { size }, mtime_ms, id: Some(id), pending: None }
+        let size = if is_dir { 0 } else { size };
+        Entry {
+            os,
+            name,
+            lower,
+            key,
+            is_dir,
+            is_link,
+            hidden,
+            size,
+            mtime_ms,
+            born_ms: ms(r.CreationTime),
+            mode: attrs,
+            id: Some(id),
+            pending: None,
+        }
     }
 
     /// A FILETIME as ms since the Unix epoch, 0 before it (as [`mtime`] gives it).
@@ -671,6 +709,131 @@ pub(crate) fn mtime(m: &std::fs::Metadata) -> i64 {
     m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as i64)
 }
 
+/// When the item was made, ms since the Unix epoch; 0 where the file system keeps no birth time
+/// (Linux: statx's, which `std` already asked for; nothing more is read).
+pub(crate) fn born_ms(m: &std::fs::Metadata) -> i64 {
+    m.created().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// [`Entry::mode`] from an item's own metadata: Unix's `st_mode`, Windows' attributes.
+pub(crate) fn mode_of(m: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        m.mode()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        m.file_attributes()
+    }
+}
+
+/// The Permissions column: `drwxr-xr-x` on Unix (as `ls -l`), the attributes' letters on
+/// Windows (`RHSA`, as Explorer's Attributes column), "—" when unknown.
+pub fn fmt_mode(e: &Entry) -> String {
+    if e.mode == 0 {
+        return "—".into();
+    }
+    if cfg!(windows) { fmt_attrs(e.mode) } else { fmt_unix_mode(e.mode) }
+}
+
+/// `st_mode` as `ls -l` writes it: the type, then owner, group and others' rwx, with setuid,
+/// setgid and sticky as s/S and t/T.
+pub fn fmt_unix_mode(m: u32) -> String {
+    let kind = match m & 0o170000 {
+        0o040000 => 'd',
+        0o120000 => 'l',
+        0o010000 => 'p',
+        0o140000 => 's',
+        0o020000 => 'c',
+        0o060000 => 'b',
+        _ => '-',
+    };
+    let mut s = String::with_capacity(10);
+    s.push(kind);
+    for (shift, special, mark) in [(6, 0o4000, 's'), (3, 0o2000, 's'), (0, 0o1000, 't')] {
+        let bits = (m >> shift) & 7;
+        s.push(if bits & 4 != 0 { 'r' } else { '-' });
+        s.push(if bits & 2 != 0 { 'w' } else { '-' });
+        s.push(match (bits & 1 != 0, m & special != 0) {
+            (true, true) => mark,
+            (false, true) => mark.to_ascii_uppercase(),
+            (true, false) => 'x',
+            (false, false) => '-',
+        });
+    }
+    s
+}
+
+/// Windows' file attributes as Explorer's Attributes column writes them: R (read-only), H
+/// (hidden), S (system), A (archive), those set, in that order; "—" when none is.
+pub fn fmt_attrs(a: u32) -> String {
+    let s: String = [(0x1, 'R'), (0x2, 'H'), (0x4, 'S'), (0x20, 'A')].iter().filter(|(b, _)| a & b != 0).map(|(_, c)| *c).collect();
+    if s.is_empty() { "—".into() } else { s }
+}
+
+/// The Extension column: what follows the name's last dot, as written ("JPG", "tar.gz" is
+/// "gz"); "—" for a folder or a name without one (a leading dot isn't one: `.bashrc`).
+pub fn shown_ext(e: &Entry) -> &str {
+    if e.is_dir {
+        return "—";
+    }
+    match e.name.rfind('.') {
+        Some(0) | None => "—",
+        Some(i) if i + 1 == e.name.len() => "—",
+        Some(i) => &e.name[i + 1..],
+    }
+}
+
+/// The space free to this user on the volume holding `path`, in bytes: one `statvfs`
+/// (`GetDiskFreeSpaceExW` on Windows). `None` when it can't be read. Run on a worker: a dead
+/// network volume can hold it up.
+pub fn free_space(path: &Path) -> Option<u64> {
+    #[cfg(test)]
+    free_reads::count(path);
+    #[cfg(unix)]
+    {
+        let c = crate::ffi::cstr(path).ok()?;
+        // SAFETY: a zeroed statvfs is a valid out-buffer; `c` is a NUL-terminated path.
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+            return None;
+        }
+        #[allow(clippy::unnecessary_cast)] // the fields' types differ by platform
+        Some(st.f_bavail as u64 * st.f_frsize as u64)
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+        let w = crate::ffi::wide(path);
+        let mut avail = 0u64;
+        // SAFETY: `w` is NUL-terminated; the out-pointers are valid or null (not wanted).
+        let ok = unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut avail, std::ptr::null_mut(), std::ptr::null_mut()) };
+        (ok != 0).then_some(avail)
+    }
+}
+
+/// Tests: which threads read each folder's free space ([`free_space`]), in order.
+#[cfg(test)]
+pub(crate) mod free_reads {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::thread::ThreadId;
+
+    static N: Mutex<Option<HashMap<PathBuf, Vec<ThreadId>>>> = Mutex::new(None);
+
+    pub(super) fn count(p: &Path) {
+        let mut n = N.lock().unwrap_or_else(|e| e.into_inner());
+        n.get_or_insert_with(HashMap::new).entry(p.to_path_buf()).or_default().push(std::thread::current().id());
+    }
+
+    pub(crate) fn of(p: &Path) -> Vec<ThreadId> {
+        N.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|n| n.get(p).cloned()).unwrap_or_default()
+    }
+}
+
 #[allow(unused_variables)]
 pub(crate) fn is_hidden(name: &str, meta: Option<&std::fs::Metadata>) -> bool {
     if name.starts_with('.') {
@@ -697,21 +860,32 @@ pub(crate) fn is_hidden(name: &str, meta: Option<&std::fs::Metadata>) -> bool {
 
 pub fn sort_entries(v: &mut [Entry], sort: Sort) {
     v.sort_unstable_by(|a, b| {
-        // Folders first, always.
-        let dirs = b.is_dir.cmp(&a.is_dir);
-        if dirs != Ordering::Equal {
-            return dirs;
+        // Folders first (whichever way the rest goes), unless that's turned off.
+        if sort.dirs_first {
+            let dirs = b.is_dir.cmp(&a.is_dir);
+            if dirs != Ordering::Equal {
+                return dirs;
+            }
         }
         let ord = match sort.key {
             SortKey::Name => Ordering::Equal,
             SortKey::Size => a.size.cmp(&b.size),
             SortKey::Modified => a.mtime_ms.cmp(&b.mtime_ms),
+            // Mixed with files, a folder's kind is "folder" (as the Kind column says).
+            SortKey::Kind if !sort.dirs_first => sort_kind(a).cmp(sort_kind(b)),
             SortKey::Kind => ext(&a.lower).cmp(ext(&b.lower)),
+            SortKey::Created => a.born_ms.cmp(&b.born_ms),
         }
         .then_with(|| natural(&a.lower, &b.lower))
         .then_with(|| a.name.cmp(&b.name));
         if sort.desc { ord.reverse() } else { ord }
     });
+}
+
+/// What a Kind sort compares when folders mix with files: a folder's kind is "folder", among
+/// the files' extensions (as Finder sorts kinds without folders on top).
+fn sort_kind(e: &Entry) -> &str {
+    if e.is_dir { "folder" } else { ext(&e.lower) }
 }
 
 pub fn ext(lower: &str) -> &str {
@@ -1061,7 +1235,7 @@ mod tests {
         for i in 0..10_000 {
             std::fs::write(d.join(format!("file {i} v{}.txt", i % 7)), b"x").unwrap();
         }
-        let sort = Sort { key: SortKey::Name, desc: false };
+        let sort = Sort::new(SortKey::Name, false);
         let mut times: Vec<f64> = (0..30)
             .map(|_| {
                 let t = std::time::Instant::now();
@@ -1073,7 +1247,7 @@ mod tests {
         times.sort_by(f64::total_cmp);
         let mut v = list(d.clone(), sort).result.unwrap();
         let t = std::time::Instant::now();
-        sort_entries(&mut v, Sort { key: SortKey::Modified, desc: true });
+        sort_entries(&mut v, Sort::new(SortKey::Modified, true));
         let resort = t.elapsed().as_secs_f64() * 1000.0;
         eprintln!("read+sort 10k: median {:.1} ms, p95 {:.1} ms; re-sort only {resort:.1} ms", times[15], times[28]);
         // Linux without birth times (a file handle per entry): what those systems pay.
@@ -1140,8 +1314,8 @@ mod tests {
         assert_eq!(ours.len(), 3004);
         assert_eq!(ours.len(), theirs.len());
         for (a, b) in ours.iter().zip(&theirs) {
-            let what = (&a.os, a.is_dir, a.is_link, a.hidden, a.size, a.mtime_ms);
-            assert_eq!(what, (&b.os, b.is_dir, b.is_link, b.hidden, b.size, b.mtime_ms));
+            let what = (&a.os, a.is_dir, a.is_link, a.hidden, a.size, a.mtime_ms, a.born_ms, a.mode);
+            assert_eq!(what, (&b.os, b.is_dir, b.is_link, b.hidden, b.size, b.mtime_ms, b.born_ms, b.mode));
             assert_eq!(a.id, b.id, "{:?}", a.os);
             let id = a.id.unwrap();
             assert!(id.handle.is_some(), "{:?}: a file id", a.os);
@@ -1152,12 +1326,112 @@ mod tests {
 
     #[test]
     fn lists_a_folder() {
-        let l = list(PathBuf::from(env!("CARGO_MANIFEST_DIR")), Sort { key: SortKey::Name, desc: false });
+        let l = list(PathBuf::from(env!("CARGO_MANIFEST_DIR")), Sort::new(SortKey::Name, false));
         let v = l.result.unwrap();
         assert!(v.iter().any(|e| e.name == "src" && e.is_dir));
         assert!(v.iter().any(|e| e.name == "Cargo.toml" && !e.is_dir));
         // Folders first.
         let first_file = v.iter().position(|e| !e.is_dir).unwrap();
         assert!(v[first_file..].iter().all(|e| !e.is_dir));
+    }
+
+    /// Folders First keeps every folder above every file under each sort, either way round;
+    /// off, they mix, each key ordering folders and files alike (a folder's kind is "folder").
+    #[test]
+    fn folders_first_under_every_sort() {
+        let mk = |name: &str, dir: bool, size: u64, t: i64| Entry { size, mtime_ms: t, born_ms: t * 2, ..Entry::test(name, dir) };
+        let all = vec![
+            mk("b dir", true, 0, 30),
+            mk("a.txt", false, 500, 10),
+            mk("z.zip", false, 100, 40),
+            mk("c dir", true, 0, 5),
+            mk("m.flac", false, 900, 20),
+            mk("noext", false, 1, 50),
+        ];
+        for key in [SortKey::Name, SortKey::Kind, SortKey::Size, SortKey::Modified, SortKey::Created] {
+            for desc in [false, true] {
+                let mut v = all.clone();
+                sort_entries(&mut v, Sort::new(key, desc));
+                let first_file = v.iter().position(|e| !e.is_dir).unwrap();
+                assert_eq!(first_file, 2, "{key:?} desc={desc}: {:?}", v.iter().map(|e| &e.name).collect::<Vec<_>>());
+                assert!(v[first_file..].iter().all(|e| !e.is_dir));
+                let mut mixed = all.clone();
+                sort_entries(&mut mixed, Sort { dirs_first: false, ..Sort::new(key, desc) });
+                let names: Vec<&str> = mixed.iter().map(|e| e.name.as_str()).collect();
+                let want: &[&str] = match (key, desc) {
+                    (SortKey::Name, false) => &["a.txt", "b dir", "c dir", "m.flac", "noext", "z.zip"],
+                    (SortKey::Name, true) => &["z.zip", "noext", "m.flac", "c dir", "b dir", "a.txt"],
+                    // No extension first, then flac, folder, txt, zip.
+                    (SortKey::Kind, false) => &["noext", "m.flac", "b dir", "c dir", "a.txt", "z.zip"],
+                    // Reversed whole, ties (by name) too, as before.
+                    (SortKey::Size, true) => &["m.flac", "a.txt", "z.zip", "noext", "c dir", "b dir"],
+                    (SortKey::Modified, true) | (SortKey::Created, true) => &["noext", "z.zip", "b dir", "m.flac", "a.txt", "c dir"],
+                    (SortKey::Modified, false) | (SortKey::Created, false) => &["c dir", "a.txt", "m.flac", "b dir", "z.zip", "noext"],
+                    _ => continue,
+                };
+                assert_eq!(names, want, "{key:?} desc={desc}");
+            }
+        }
+    }
+
+    #[test]
+    fn permissions_and_extensions_read_as_ls_and_explorer_write_them() {
+        assert_eq!(fmt_unix_mode(0o100644), "-rw-r--r--");
+        assert_eq!(fmt_unix_mode(0o040755), "drwxr-xr-x");
+        assert_eq!(fmt_unix_mode(0o120777), "lrwxrwxrwx");
+        assert_eq!(fmt_unix_mode(0o104755), "-rwsr-xr-x");
+        assert_eq!(fmt_unix_mode(0o102644), "-rw-r-Sr--");
+        assert_eq!(fmt_unix_mode(0o041777), "drwxrwxrwt");
+        assert_eq!(fmt_unix_mode(0o041776), "drwxrwxrwT");
+        assert_eq!(fmt_unix_mode(0o010600), "prw-------");
+        assert_eq!(fmt_attrs(0x20), "A");
+        assert_eq!(fmt_attrs(0x1 | 0x2 | 0x4 | 0x20 | 0x10), "RHSA");
+        assert_eq!(fmt_attrs(0x80), "—", "normal: none of them");
+        assert_eq!(fmt_mode(&Entry::test("x", false)), "—", "unknown");
+        let ext = |name: &str, dir: bool| shown_ext(&Entry::test(name, dir)).to_string();
+        assert_eq!(ext("IMG_1.JPG", false), "JPG");
+        assert_eq!(ext("a.tar.gz", false), "gz");
+        assert_eq!(ext(".bashrc", false), "—");
+        assert_eq!(ext("trailing.", false), "—");
+        assert_eq!(ext("noext", false), "—");
+        assert_eq!(ext("photos.v2", true), "—", "a folder has none");
+    }
+
+    /// The listing's Date Created and Permissions come from the metadata it reads anyway: an
+    /// item's own mode (a link's is the link's) and its birth time where the disk keeps one.
+    #[test]
+    fn the_listing_reads_creation_time_and_permissions() {
+        let d = std::env::temp_dir().join(format!("arbor-fs-extra-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("f.txt"), "x").unwrap();
+        let v = list(d.clone(), Sort::new(SortKey::Name, false)).result.unwrap();
+        let f = v.iter().find(|e| e.name == "f.txt").unwrap();
+        let m = std::fs::symlink_metadata(d.join("f.txt")).unwrap();
+        assert_eq!((f.born_ms, f.mode), (born_ms(&m), mode_of(&m)));
+        assert_ne!(f.mode, 0);
+        if m.created().is_ok() {
+            assert!(f.born_ms > 0);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(d.join("f.txt"), std::fs::Permissions::from_mode(0o640)).unwrap();
+            std::os::unix::fs::symlink(d.join("sub"), d.join("link")).unwrap();
+            let v = list(d.clone(), Sort::new(SortKey::Name, false)).result.unwrap();
+            let get = |n: &str| v.iter().find(|e| e.name == n).unwrap();
+            assert_eq!(fmt_mode(get("f.txt")), "-rw-r-----");
+            assert!(fmt_mode(get("sub")).starts_with('d'));
+            assert!(fmt_mode(get("link")).starts_with('l'), "the link's own");
+            assert!(get("link").is_dir, "and it still opens as a folder");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn free_space_is_read_for_the_volume() {
+        let d = std::env::temp_dir();
+        assert!(free_space(&d).is_some_and(|n| n > 0), "the temp folder's disk has room");
+        assert_eq!(free_space(Path::new("/no/such/folder/anywhere")), None);
     }
 }

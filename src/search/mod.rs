@@ -669,6 +669,8 @@ fn entry_at(root: &Path, path: &Path, show_hidden: bool) -> Option<Entry> {
         hidden,
         size: if is_dir { 0 } else { t.len() },
         mtime_ms: fs::mtime(t),
+        born_ms: fs::born_ms(&m),
+        mode: fs::mode_of(&m),
         id: fs::ident_of(path, &m),
         pending: None,
     })

@@ -40,9 +40,6 @@ pub(crate) const ROW_H: f32 = 24.0;
 /// Height of the top band (path bar, and the sidebar's traffic-light strip on macOS).
 pub const BAR_H: f32 = 38.0;
 const SIDEBAR_W: f32 = 168.0;
-const KIND_W: f32 = 72.0;
-const SIZE_W: f32 = 80.0;
-const DATE_W: f32 = 132.0;
 const TABS_H: f32 = 30.0;
 /// How far a row drag travels before letting go over the other pane drops there.
 const DRAG_START: f32 = 6.0;
@@ -57,31 +54,15 @@ const TAB: TextStyle = TextStyle::new(12.0, 500.0);
 /// which native builds don't bundle). Loaded the first time a text preview shows.
 const CODE: TextStyle = TextStyle::new(12.0, 400.0).family(tok::Family::SystemMono);
 
-/// Which optional columns fit the list's width; Name always gets at least ~180 pt.
-#[derive(Clone, Copy)]
-struct Cols {
-    kind: bool,
-    date: bool,
-}
-
 impl Ctx {
-    /// Search's folder column: its share (`FOLDER_GROW` to the name's 1) of what the fixed
+    /// Search's folder column: its share (`FOLDER_GROW` to the name's 1) of what the other
     /// columns, padding and gaps leave, so a long folder can be cut to fit before Rune lays it
     /// out (`fit_path`). `None` before the pane's first layout.
     fn folder_w(&self) -> Option<f32> {
         if self.w == f32::MAX {
             return None;
         }
-        let fixed = 24.0 + SIZE_W + 12.0 * 2.0 + if self.cols.date { DATE_W + 12.0 } else { 0.0 };
-        Some(((self.w - fixed) * FOLDER_GROW / (1.0 + FOLDER_GROW)).floor().max(24.0))
-    }
-}
-
-impl Cols {
-    fn for_width(w: f32) -> Cols {
-        let base = 24.0 + 180.0 + 12.0 + SIZE_W;
-        let date = w >= base + 12.0 + DATE_W;
-        Cols { date, kind: date && w >= base + 24.0 + DATE_W + KIND_W }
+        Some(((self.w - self.cols.fixed()) * FOLDER_GROW / (1.0 + FOLDER_GROW)).floor().max(24.0))
     }
 }
 
@@ -132,7 +113,8 @@ impl Panes {
 struct Ctx {
     id: u64,
     l: Look,
-    cols: Cols,
+    /// The list's columns after the name that fit this pane, and their widths (`listcols.rs`).
+    cols: crate::listcols::Fit,
     /// Selection in the accent colour: the active pane, or the only one.
     focused: bool,
     split: Option<Panes>,
@@ -179,6 +161,7 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         _ => None,
     };
     let mut panes = row().key("panes").w_full().grow(1.0).min_h(0.0);
+    let cols = s.cols();
     for (ix, p) in s.panes.iter().enumerate() {
         if ix > 0 {
             panes = panes.child(el().w(1.0).h_full().fill(l.t.separator));
@@ -195,7 +178,7 @@ fn root(s: &State, cx: &mut Cx<State>) -> El {
         let c = Ctx {
             id: p.id(),
             l,
-            cols: Cols::for_width(w),
+            cols: cols.fit(w, p.f.searching()),
             focused: ix == s.active || split.is_none(),
             split,
             w,
@@ -292,9 +275,12 @@ fn status(s: &State, l: Look) -> El {
     if f.is_loading() {
         bar = bar.child(text("Loading…").font(SMALL).color(l.t.text_secondary));
     }
+    // Notes and progress come first; then the selection and its size, the items, and the
+    // volume's free space (left out while a note or progress shows, to leave it room).
+    let busy = s.job_status().is_some() || s.note.is_some();
+    let picked = f.picked_size().map_or_else(String::new, |p| format!("{} · ", picked_text(p)));
+    let hint = if s.show_hidden { "hidden shown" } else { "" };
     if let Some(line) = State::search_status(f) {
-        let picked = if f.marked.len() > 1 { format!("{} selected · ", f.marked.len()) } else { String::new() };
-        let hint = if s.show_hidden { "hidden shown" } else { "" };
         return bar
             .child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)).a11y_hidden())
             .child(text(format!("{picked}{line}")).font(NUM).color(l.t.text_secondary).truncate().min_w(0.0).shrink());
@@ -305,10 +291,24 @@ fn status(s: &State, l: Look) -> El {
     } else {
         format!("{} of {} items", f.visible.len(), f.entries.len())
     };
-    let picked = if f.marked.len() > 1 { format!("{} selected · ", f.marked.len()) } else { String::new() };
-    let hint = if s.show_hidden { "hidden shown" } else { "" };
+    let free = match f.free() {
+        Some(n) if !busy => format!(" · {} free", fs::fmt_size(n)),
+        _ => String::new(),
+    };
     bar.child(text(hint).font(SMALL).color(l.t.text_secondary.alpha(0.7)).a11y_hidden())
-        .child(text(format!("{picked}{count}")).font(NUM).color(l.t.text_secondary))
+        .child(text(format!("{picked}{count}{free}")).key("counts").font(NUM).color(l.t.text_secondary))
+}
+
+/// Two or more selected items, as the status bar says them: "3 selected · 4.2 MB", "5 selected
+/// · 4.2 MB + 2 folders" (a folder's size isn't known: nothing walks it), "2 selected".
+pub(crate) fn picked_text(p: crate::folder::Picked) -> String {
+    let files = p.count - p.folders;
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    match (files, p.folders) {
+        (0, _) => format!("{} selected", p.count),
+        (_, 0) => format!("{} selected · {}", p.count, fs::fmt_size(p.bytes)),
+        (_, d) => format!("{} selected · {} + {d} folder{}", p.count, fs::fmt_size(p.bytes), plural(d)),
+    }
 }
 
 /// What a long path shows from its start when cut: an ellipsis and a separator (the path's

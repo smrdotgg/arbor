@@ -27,6 +27,8 @@ pub(super) struct Start {
     /// What a file operation cut short by the last quit left (`leftovers.rs`), as read from
     /// its record, which stays until the note saying so has been shown.
     pub(super) leftovers: Option<crate::leftovers::Seen>,
+    /// The list's columns (`columns.toml`, or the defaults).
+    pub(super) cols: crate::listcols::ListCols,
 }
 
 /// What the startup read sends, in this order.
@@ -53,13 +55,12 @@ impl Booting {
             let fav = crate::sidebar::load(crate::sidebar::file_path().as_deref());
             let custom = fav.list.is_some();
             let places = fav.list.map_or_else(|| places_for(&config.settings), crate::sidebar::named);
-            let note = match (note, fav.error) {
-                (Some(a), Some(b)) => Some(format!("{a} · {b}")),
-                (a, b) => a.or(b),
-            };
+            // The list's columns (columns.toml), or the defaults. Tests never read the user's.
+            let cols = crate::listcols::load(if cfg!(test) { None } else { crate::listcols::file_path() }.as_deref());
+            let note = [note, fav.error, cols.error].into_iter().flatten().reduce(|a, b| format!("{a} · {b}"));
             // Tests never read (or remove) the user's record.
             let leftovers = if cfg!(test) { None } else { crate::leftovers::file().and_then(|f| crate::leftovers::look(&f)) };
-            Start { config, start, places, note, custom, leftovers }
+            Start { config, start, places, note, custom, leftovers, cols: cols.cols }
         })
     }
 
