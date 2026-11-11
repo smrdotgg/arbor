@@ -66,7 +66,8 @@ fn frame_cost() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// The column view's per-key cost, as `frame_cost` (CPU only, no GPU): ← out of a 10,000-entry
+/// The column view's per-key cost, as `frame_cost` (CPU only, no GPU), in folders of 1,000, 10,000
+/// and 30,000 entries: ← out of the big
 /// folder (it becomes the column on the right) and → back into it (its entries become the
 /// active column), which only move listings on screen (the key budget, 8 ms), and End onto a
 /// folder, whose contents are read for the column on the right (a read: the listing budget),
@@ -76,6 +77,14 @@ fn frame_cost() {
 #[test]
 #[ignore]
 fn column_cost() {
+    // At three sizes: what a move costs shouldn't grow with the folder (nothing per entry).
+    for entries in [1_000, 10_000, 30_000] {
+        column_cost_in(entries);
+    }
+}
+
+/// [`column_cost`] in a folder of `entries` (250 folders, the rest files).
+fn column_cost_in(entries: usize) {
     let root = std::env::temp_dir().join(format!("arbor-column-cost-{}", std::process::id()));
     let d = root.join("big");
     let _ = std::fs::remove_dir_all(&root);
@@ -83,7 +92,7 @@ fn column_cost() {
     for i in 0..250 {
         std::fs::create_dir(d.join(format!("folder {i:04}"))).unwrap();
     }
-    for i in 0..9750 {
+    for i in 0..entries - 250 {
         std::fs::write(d.join(format!("file {i:05}.txt")), "x").unwrap();
     }
     DIR.with_borrow_mut(|slot| *slot = Some(d.clone()));
@@ -100,7 +109,7 @@ fn column_cost() {
         rt.frame(0.0);
     }
     let (mut out, mut into, mut read, mut back) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for round in 0..800 {
+    for round in 0..400 {
         let (key, times) = match round % 4 {
             0 => (Key::Left, &mut out),
             1 => (Key::Right, &mut into),
@@ -116,7 +125,7 @@ fn column_cost() {
             rt.frame(1.0 / 120.0);
         }
     }
-    assert!(rt.state.cur().cwd == d, "ended in the 10k folder");
+    assert!(rt.state.cur().cwd == d, "ended in the big folder");
     drop(back);
     // The list view's own frame landing the same listing after ← or → (the read itself, on a
     // worker, left out): what a navigation into a 10k folder costs the window anyway.
@@ -125,7 +134,7 @@ fn column_cost() {
         rt.frame(0.0);
     }
     let mut list = Vec::new();
-    for round in 0..100 {
+    for round in 0..40 {
         let key = if round % 2 == 0 { Key::Left } else { Key::Right };
         rt.key(KeyEvent { key, mods: Mods::default() });
         rt.frame(1.0 / 120.0);
@@ -138,11 +147,12 @@ fn column_cost() {
             }
         }
     }
+    let k = entries / 1000;
     for (name, times) in [
-        ("← out of 10k", &mut out),
-        ("→ into 10k", &mut into),
-        ("End onto a folder (a read)", &mut read),
-        ("list view: 10k listing lands", &mut list),
+        (format!("← out of {k}k"), &mut out),
+        (format!("→ into {k}k"), &mut into),
+        ("End onto a folder (a read)".to_string(), &mut read),
+        (format!("list view: {k}k listing lands"), &mut list),
     ] {
         times.sort_by(f64::total_cmp);
         let at = |q: f64| times[((times.len() as f64 - 1.0) * q).round() as usize];
