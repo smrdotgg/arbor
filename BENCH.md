@@ -32,6 +32,73 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-11, cold start on Windows and Linux (`perf/fast-start`)
+
+The budget is now under 30 ms on Windows and Linux; the owner's v0.1.0-alpha.4 takes about a
+second on a Windows gaming laptop. **Not met on either platform yet**; most of what's left is in
+Rune (RUNE-GAPS.md, "Cold start on Windows and Linux").
+
+New measurement: `ARBOR_TIMING_FILE=<path>` (a release build on Windows has no console) with
+`ARBOR_EXIT_AFTER_FIRST_FRAME=1`, a total from the process's creation (`GetProcessTimes`, so the
+loader counts) and finer splits; two probes to compare against, `examples/win32_hello.rs` (bare
+Win32 + GDI, the floor) and `examples/rune_hello.rs` (one Rune text view, Arbor's features and
+`dist` profile). The pre-release `coldstart-probe-1` has all three, MSVC `dist` builds of
+a620e33 (v0.1.0-alpha.4's startup); `scripts/coldstart-probe.ps1` runs them (for the owner's
+laptop: `irm https://raw.githubusercontent.com/smrdotgg/arbor/coldstart-probe-1/scripts/coldstart-probe.ps1 | iex`),
+and `scripts/coldstart-ab.ps1` compares builds. The "Cold start (Windows)" workflow runs both on
+every push to a `perf/` branch.
+
+**GitHub's Windows runner** (Hyper-V VM, no GPU: DX12 through WARP, software, so GPU work is
+grossly inflated; CPU-side costs are real), process creation → first frame submitted, median of
+the launches after the first (the first of a new exe is Windows Defender's scan, +200 to +1000 ms):
+
+| Probe (a620e33) | Run 1 (10 launches) | Run 2 (5) |
+| --- | --- | --- |
+| win32-hello | 32.5 ms | 32.7 ms |
+| rune-hello | 889 ms | 886 ms |
+| arbor | 678 ms | 683 ms |
+
+Where Arbor's time goes there (a620e33, medians): process creation → `main` 11.7 ms (loading the
+24 MB exe and its 32 imported DLLs; win32-hello imports 12); `main` → Rune runs `init` 3.8 ms
+(event loop); `init` 0.4 ms; → Rune runs `setup` 29 ms (Rune's font discovery, about 25 ms);
+→ native window created ~610 ms (window, GPU adapter probing, device, renderer, surface: WARP);
+first frame `update` 11 ms and `encode` 12 ms (software raster). Rune picked "Microsoft Basic
+Render Driver" (lowest power).
+
+A/B in one job (a slower VM: win32-hello 46 ms), 15 alternating launches, process → frame:
+
+| Build | Total | Before `main` | `setup` at | Window at |
+| --- | --- | --- | --- | --- |
+| a620e33 (alpha.4's startup) | 840.7 ms | 11.7 | 46.3 | 800.6 |
+| `rune::warm_gpu` first in `main` | **785.5 ms** | 12.1 | 58.0 | 746.7 |
+| the same, 13 system DLLs `/DELAYLOAD`ed | 785.7 ms | 8.3 | 60.6 | 747.5 |
+
+`warm_gpu` makes the GPU device and renderer on a thread from the top of `main`, so they overlap
+the event loop, fonts and window (macOS's `prewarm_gpu` does nothing elsewhere). Delay-loading
+moves 3.8 ms from before `main` into the startup that needs the same DLLs anyway: not kept.
+
+**tabot-dev, Linux** (Xeon 8375C, Xvfb with lavapipe: software rendering again; release builds,
+21 alternating launches in a 2-entry folder, spawn → first frame):
+
+| Build | Total | `init` at | `setup` at | Window at | First `update` |
+| --- | --- | --- | --- | --- | --- |
+| before | 127 ms | 25.5 | 34.2 | 121.4 | 3.1 ms |
+| `warm_gpu` | **101 ms** | 39.1 | 48.1 | 95.0 | 3.3 ms |
+| rune-hello (no warm-up) | 129 ms | | | | |
+
+On Linux the warm-up thread slows Rune's event loop by ~14 ms (the Vulkan loader `dlopen`s every
+ICD while winit `dlopen`s Xlib and XKB: the dynamic loader's lock, most likely), and still wins
+26 ms. Before the window: X11 event loop 25 ms, Rune's font discovery (directory walk, `fc-list`,
+mapping fallback fonts) ~9 ms. A 10,000-entry folder adds ~7 ms to the first `update` (10.5 vs
+3.1 ms), Rune copying every row key (RUNE-GAPS.md).
+
+What a real GPU would see: lavapipe and WARP make the device, pipelines and frames slow; on real
+hardware the device takes tens of ms, now hidden behind the 30–60 ms of CPU-side startup above,
+so Linux would land around 45–60 ms and Windows with one GPU around 50–70 ms (estimates, not
+measured). A hybrid laptop pays Rune probing both GPUs with a D3D12 device (twice) before the
+window: hundreds of ms, the likely cause of the owner's second. Waiting on the owner's
+`coldstart-probe.ps1` numbers.
+
 ## 2026-11-11, `feature/archives` (Compress and Extract Here)
 
 Compress and Extract Here of a 1 GB folder of mixed files (21,620 files: 300 MB of Rust source

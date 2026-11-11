@@ -9,6 +9,21 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-11 · Cold start on Windows and Linux: what Arbor did, and what's left for Rune
+  (`perf/fast-start`; Review: the probe release).**
+  - **`rune::warm_gpu` first thing in `main` on Windows and Linux**: the window's GPU device and
+    renderer made on Rune's warm-up thread while the event loop, fonts and window are made
+    (Windows runner 841 → 786 ms, Linux under Xvfb 127 → 101 ms; BENCH.md). Arbor gains `wgpu`
+    as a direct dependency on those platforms, only for `wgpu::Features::empty()` (the same crate
+    Rune builds; no new crate in the lock file). Undo: remove the call and the dependency.
+  - **The pre-release `coldstart-probe-1`** (MSVC builds of a620e33 by the "Cold start
+    (Windows)" workflow: win32-hello, rune-hello, Arbor with `ARBOR_TIMING_FILE`) and
+    `scripts/coldstart-probe.ps1` for the owner's laptop. Not a release of Arbor; delete the
+    release and the tag when done. The workflow publishes it only if it doesn't exist.
+  - **Not done:** delaying the system DLLs (`/DELAYLOAD`), measured as no gain; not waiting for
+    the first folder (8 ms at most, unchanged); everything in the GPU adapter choice and font
+    discovery, which is Rune's (RUNE-GAPS.md, "Cold start on Windows and Linux").
+
 - **2026-11-11 · Cold start on Windows and Linux: under 30 ms (owner).** The owner found Arbor
   takes about a second to open on a Windows gaming laptop and set the budget: "less than 30ms…
   the 100ms floor was macOS only." NORTHSTAR's row now says under 30 ms on Windows and Linux.

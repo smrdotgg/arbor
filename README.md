@@ -185,7 +185,12 @@ window waits at most 8 ms for the first folder; when it's slower, the listing's 
 logged as `first-listing`, and `ARBOR_SLOW_FIRST_READ_MS=N` (timing only) slows that read to try
 it. All times end at frame submission, a proxy: pixels reach the screen at least a refresh later. Off,
 it costs nothing: `main` reads the variable once and Rune gets the plain callbacks and no frame
-hook. Showing a hidden tab is logged as `tab`, with `same_frame=1` when its fresh read landed
+hook. `ARBOR_TIMING_FILE=<path>` appends the same lines to a file (Windows release builds have
+no console), plus `arbor <ms>`, from the process's creation to the first frame on Windows;
+`ARBOR_EXIT_AFTER_FIRST_FRAME=1` quits right after that frame. On Windows,
+`scripts/coldstart-probe.ps1` times Arbor against a bare Win32 window and a bare Rune window
+(`examples/win32_hello.rs`, `examples/rune_hello.rs`), and `scripts/coldstart-ab.ps1` compares
+builds. Showing a hidden tab is logged as `tab`, with `same_frame=1` when its fresh read landed
 in time for the key's own frame. `scripts/bench.sh` cold-starts Arbor on a 10,000-entry folder
 several times and reports median and p95 against each budget (`--tabs N` adds N runs timing a
 tab switch to that folder, and `--preview N` adds N runs timing the quick preview of a 256 KB

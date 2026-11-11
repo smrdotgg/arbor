@@ -88,30 +88,16 @@ jobs:
             Get-Content "err$i.txt"
           }
 
-      # Experiment: the system DLLs Arbor imports but doesn't need before `main`, delay-loaded
-      # (/DELAYLOAD: each loads at its first call, often on a worker thread), linked again from
-      # the same build (only the final link changes).
-      - name: Delay-load variant (experiment)
-        continue-on-error: true
-        run: |
-          args=()
-          for d in shell32 comctl32 oleaut32 ole32 uiautomationcore dwrite dxgi setupapi combase imm32 dwmapi ws2_32 uxtheme; do
-            args+=(-C "link-arg=/DELAYLOAD:$d.dll")
-          done
-          cargo rustc --profile dist --locked --bin arbor -- "${args[@]}" -C link-arg=delayimp.lib
-          cp target/dist/arbor.exe arbor-delay.exe
-
-      # Baseline (the coldstart-probe-1 release's arbor.exe, main's startup) against this commit
-      # and the delay-load variant, alternating.
+      # Baseline (the coldstart-probe-1 release's arbor.exe: v0.1.0-alpha.4's startup) against
+      # this commit, alternating. (Delay-loading the system DLLs was tried here: 3.8 ms less
+      # before `main`, the same total; BENCH.md.)
       - name: A/B against coldstart-probe-1
         continue-on-error: true
         shell: pwsh
         run: |
           Invoke-WebRequest https://github.com/smrdotgg/arbor/releases/download/coldstart-probe-1/coldstart-probes-windows.zip -OutFile base.zip
           Expand-Archive base.zip base
-          $exes = @('base/arbor.exe', 'probes/arbor.exe')
-          if (Test-Path arbor-delay.exe) { $exes += 'arbor-delay.exe' }
-          ./scripts/coldstart-ab.ps1 -Runs 15 @exes
+          ./scripts/coldstart-ab.ps1 -Runs 15 base/arbor.exe probes/arbor.exe
 
       # Published once: a later push doesn't replace what the owner may have downloaded.
       - name: Publish the pre-release (once)
