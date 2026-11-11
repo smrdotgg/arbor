@@ -73,9 +73,10 @@
 //! covered or not yet visible, no drawable in time) asks for nothing, and Rune draws again when
 //! it can. (A wake from an undrawn frame was handled in the same run-loop turn, so AppKit never
 //! got to say the window was visible, and the bench spun: RUNE-GAPS.md.)
-//! `ARBOR_BENCH_IDLE=list` (or `icons`) checks that an idle window costs nothing: the first
-//! step switches to the icon view, `list`'s second back to the list (each switch once left Rune
-//! drawing every frame until the next key), then it logs `arbor-timing idle-ready` and does
+//! `ARBOR_BENCH_IDLE=list` (or `icons`, `tiles`, `columns`) checks that an idle window costs
+//! nothing: the first step switches to the icon view, `list`'s second back to the list (each
+//! switch once left Rune drawing every frame until the next key; `tiles` switches to the tiles
+//! view, `columns` to the column view and then presses ↓), then it logs `arbor-timing idle-ready` and does
 //! nothing more, never quitting: the bench measures its CPU time from outside, then kills it.
 //! `ARBOR_BENCH_PACE_MS=N` spaces the steps at least N ms apart, as a person types (a thread
 //! sleeps and wakes the window; nothing polls), so the CPU cools between keys as it does for a
@@ -219,7 +220,10 @@ pub fn init() -> bool {
     COLUMNS.set(set("ARBOR_BENCH_COLUMNS"));
     PACE_MS.set(std::env::var("ARBOR_BENCH_PACE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0));
     let steps = if let Some(view) = IDLE.get() {
-        if view == crate::grid::ViewMode::Icons { 1 } else { 2 }
+        match view {
+            crate::grid::ViewMode::Icons | crate::grid::ViewMode::Tiles => 1,
+            crate::grid::ViewMode::List | crate::grid::ViewMode::Columns => 2,
+        }
     } else if SEARCH.get() {
         rounds
     } else if RENAME.get() {
@@ -603,9 +607,15 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
         WAIT_PREVIEW.set(preview_step(s, tx, n, now));
         return true;
     }
-    if IDLE.get().is_some() {
-        let cmd = if n == 0 { Cmd::AsIcons } else { Cmd::AsList };
-        measured(s, tx, now, |s, tx| run(s, cmd, tx));
+    if let Some(view) = IDLE.get() {
+        use crate::grid::ViewMode;
+        match (view, n) {
+            (ViewMode::Columns, 0) => measured(s, tx, now, |s, tx| run(s, Cmd::AsColumns, tx)),
+            (ViewMode::Columns, _) => keyed(s, &KeyEvent { key: Key::Down, mods: Mods::default() }, tx, now),
+            (ViewMode::Tiles, _) => measured(s, tx, now, |s, tx| run(s, Cmd::AsTiles, tx)),
+            (_, 0) => measured(s, tx, now, |s, tx| run(s, Cmd::AsIcons, tx)),
+            _ => measured(s, tx, now, |s, tx| run(s, Cmd::AsList, tx)),
+        };
         return true;
     }
     if COLUMNS.get() {

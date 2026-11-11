@@ -198,7 +198,7 @@ the time to the first thumbnail and to a screenful, and `--tiles N` the same pag
 tiles view, and `--columns N` adds N runs moving out of and back into the 10k folder in the
 column view (← and →), each key to its frame (`column_cost` times the same without a GPU),
 and every bench ends with `--idle N` (default 1, 0
-skips it): N starts left idle in the list and N in the icon view, after As Icons (and As List), each
+skips it): N starts left idle in each view (list, icons, tiles, columns), after switching to it, each
 failing the bench if it uses more than 0.05 s of CPU in 5 s; `--pace MS` spaces
 the steps as a person types and `--gap MS` idles between cold starts, since a cooled CPU is
 several times slower than a busy one: report both). It opens and closes windows, so leave the machine alone

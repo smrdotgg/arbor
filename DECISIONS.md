@@ -68,13 +68,10 @@ Format: date · decision · why · how to undo.
     2.3 ms of CPU (`column_cost`). The bench tells the two kinds apart by whether the key started
     a read (`reads=` on a `key` line) and waits for a column's read to land before the next key.
     Undo: the budgets in `examples/bench.rs`.
-  - **Not fixed here, found while checking idle (Review): on Xvfb, main (c3433d3) also keeps
-    redrawing after As Icons, As List, or → into a folder, until the next key** (100–240% CPU,
-    lavapipe's threads busy). Rune's headless runtime reports those frames idle, and Arbor's
-    waker doesn't fire, so Rune's windowed loop is deciding to draw again. The column view does
-    the same after the moves that do it in the list. A test checks the column view at rest
-    headless (`the_column_view_at_rest_draws_nothing`). Needs a look on the Mac (Activity
-    Monitor while idle) and in Rune's X11 path.
+  - **Idle, all four views: zero frames.** The redraw found here on Xvfb after As Icons, As List
+    or → (main too) was the rows' `live_only` layout handler, fixed on main (9e4f168, above).
+    Its idle test and `bench --idle` now cover the tiles and column views too, a column move
+    included: 0.00 s of CPU in 5 s for each view on tabot-dev.
   - **Tiles: one size** (48 pt icon in 248 × 72 pt tiles, widened to fill the row), the kind in
     words then the extension ("Image · PNG"), then size and date; ⌘+/⌘- stay the icon view's.
     It's the icon view's machinery (virtual rows, thumbnails at 48 pt, 2-D arrows, the

@@ -1252,9 +1252,14 @@ fn the_wheel_under_a_held_rectangle_updates_it() {
 #[test]
 fn an_idle_window_draws_nothing() {
     let quiet = |rt: &mut Runtime<State>, what: &str| {
-        // Let what was asked land: listings, thumbnails, scrolls.
+        // Let what was asked land: listings, thumbnails, scrolls, and the column view's reads
+        // (one can be a large folder: the temp folder's parent is a column there).
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(1));
+            rt.frame(1.0 / 60.0);
+        }
+        until(rt, |s| !s.cur().is_loading() && !s.cur().cols.as_ref().is_some_and(|c| c.loading()));
+        for _ in 0..5 {
             rt.frame(1.0 / 60.0);
         }
         let commits = rune::commit_generation();
@@ -1283,6 +1288,15 @@ fn an_idle_window_draws_nothing() {
         shake(&mut rt, &format!("{name}: list again"));
         run(&mut rt, Cmd::NewTab);
         shake(&mut rt, &format!("{name}: new tab"));
+        run(&mut rt, Cmd::AsTiles);
+        shake(&mut rt, &format!("{name}: tiles"));
+        run(&mut rt, Cmd::AsColumns);
+        shake(&mut rt, &format!("{name}: columns"));
+        // A column made active (the folder's parent, its listing on screen), and back.
+        run(&mut rt, Cmd::Parent);
+        shake(&mut rt, &format!("{name}: columns, the parent active"));
+        run(&mut rt, Cmd::Into);
+        shake(&mut rt, &format!("{name}: columns, back in"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -85,8 +85,8 @@
 //! after As Columns, 2 × ROUNDS of them reading.
 //!
 //! `--idle N` (default 1; 0 skips it) checks NORTHSTAR's "idle means idle": N starts in a folder
-//! of a few JPEGs, PNGs and text files with `ARBOR_BENCH_IDLE=list`, and N with `=icons` (see
-//! `src/timing.rs`). Once a run says it's idle, the bench lets it settle for [`IDLE_SETTLE`],
+//! of a few JPEGs, PNGs and text files with each of `ARBOR_BENCH_IDLE=list`, `=icons`, `=tiles`
+//! and `=columns` (see `src/timing.rs`). Once a run says it's idle, the bench lets it settle for [`IDLE_SETTLE`],
 //! measures the CPU time Arbor uses over [`IDLE_WINDOW`] (from outside: `/proc` on Linux, `ps`
 //! on macOS, `GetProcessTimes` on Windows) and kills it. More than [`IDLE_MAX_CPU`] fails the
 //! bench (exit status 1): an idle window draws nothing, so it should be zero.
@@ -312,8 +312,8 @@ fn main() {
     if idle_runs > 0 {
         let dir = root.join("idle");
         make_idle_folder(&dir);
-        for run in 0..idle_runs * 2 {
-            let view = if run % 2 == 0 { "list" } else { "icons" };
+        for run in 0..idle_runs * 4 {
+            let view = ["list", "icons", "tiles", "columns"][run as usize % 4];
             match idle_once(&bin, &dir, view) {
                 Ok(cpu) => {
                     if cpu > IDLE_MAX_CPU {
@@ -477,7 +477,7 @@ fn main() {
     if idle_runs > 0 {
         let each: Vec<String> = idle.iter().map(|(v, cpu)| format!("{v} {cpu:.2} s")).collect();
         println!(
-            "idle CPU over {} s, after As Icons (and As List for list): {} (at most {IDLE_MAX_CPU} s){}",
+            "idle CPU over {} s, after As Icons (and As List for list), As Tiles, As Columns and ↓: {} (at most {IDLE_MAX_CPU} s){}",
             IDLE_WINDOW.as_secs(),
             each.join(", "),
             if idle_failed.is_empty() { String::new() } else { format!("  OVER: {}", idle_failed.join(", ")) }
