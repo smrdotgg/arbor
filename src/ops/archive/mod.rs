@@ -428,15 +428,9 @@ impl Worker<'_> {
         let len = file.metadata().map_err(|e| e.to_string())?.len();
         self.p.bytes_done.store(0, Relaxed);
         let (entries, zl) = self.list_archive(fmt, &file, len).map_err(|e| said(&e))?;
-        let plan = archive::plan(&name, len, &entries, crate::rename::Platform::current()).map_err(|e| said(&e))?;
-        if let Some(free) = archive::free_space(&parent)
-            && plan.total > free
-        {
-            return Err(format!(
-                "it unpacks to {}, and only {} is free on the disk",
-                crate::fs::fmt_size(plan.total),
-                crate::fs::fmt_size(free)
-            ));
+        let plan = archive::plan(&name, &entries, crate::rename::Platform::current()).map_err(|e| said(&e))?;
+        if let Some(free) = archive::free_space(&parent) {
+            archive::room(plan.total, free)?;
         }
         self.p.bytes_total.store(plan.total, Relaxed);
         self.p.bytes_done.store(0, Relaxed);
@@ -506,7 +500,7 @@ impl Worker<'_> {
             }
             Format::Tar => {
                 (&*file).seek(SeekFrom::Start(0))?;
-                Ok((archive::tar::list(BufReader::with_capacity(256 * 1024, file), len, &stop)?, None))
+                Ok((archive::tar::list(BufReader::with_capacity(256 * 1024, file), &stop)?, None))
             }
             Format::TarGz => {
                 (&*file).seek(SeekFrom::Start(0))?;
@@ -526,7 +520,7 @@ impl Worker<'_> {
                     }
                     p.cancel.load(Relaxed)
                 };
-                Ok((archive::tar::list(gz, len, &stop)?, None))
+                Ok((archive::tar::list(gz, &stop)?, None))
             }
         }
     }

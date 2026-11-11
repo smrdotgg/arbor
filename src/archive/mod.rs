@@ -69,18 +69,20 @@ pub fn is_archive(name: &str) -> bool {
     Format::of(name).is_some()
 }
 
-/// The bounds against decompression bombs. Each can be reached by a real archive, rarely; a
-/// refusal says which and by how much.
+/// The bounds against decompression bombs, checked on the list before anything is written. No
+/// ratio of contents to archive size: real archives pass any useful one (logs at 294 times,
+/// zeros at 1,000, a sparse disk image far more). What declares sizes is held to them while
+/// it's written (each entry is cut off at its size, and must reach it with its CRC), entries
+/// may not share data (`zip.rs`), the disk must have room ([`room`]), and Esc stops it.
 pub mod limits {
     /// Entries in one archive (each is a file, folder or link to create).
     pub const ENTRIES: usize = 1_000_000;
     /// Total size of what an archive unpacks to.
     pub const TOTAL: u64 = 1 << 40;
-    /// What an archive may unpack to, in times its own size, once that's over [`RATIO_FROM`].
-    /// Deflate alone reaches about 1,000; real collections of files stay far below 200.
-    pub const RATIO: u64 = 200;
-    /// Below this total, the ratio isn't checked (a small archive of very repetitive text).
-    pub const RATIO_FROM: u64 = 256 << 20;
+    /// What's left free on the disk after extracting: at least this, and [`SPARE_PART`] of
+    /// what was free.
+    pub const SPARE: u64 = 1 << 30;
+    pub const SPARE_PART: u64 = 20;
     /// Folders inside folders, and bytes in an entry's path.
     pub const DEPTH: usize = 256;
     pub const PATH: usize = 16 * 1024;
@@ -242,14 +244,14 @@ fn bad_on_windows(c: char) -> bool {
     matches!(c, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*') || (c as u32) < 32
 }
 
-/// What `entries` (an archive's list, from a file `archive_len` bytes long named `archive`)
+/// What `entries` (an archive's list, from a file named `archive`)
 /// become when extracted on `p`, or why the archive is refused (an entry outside the folder, a
 /// link leaving it, too large: nothing is written then).
 ///
 /// The folder is named after the archive, unless everything in it is inside one folder: then
 /// that folder is what's made (so "Photos.zip" holding "Photos/…" makes "Photos", not
 /// "Photos/Photos").
-pub fn plan(archive: &str, archive_len: u64, entries: &[Entry], p: Platform) -> Result<Plan, Error> {
+pub fn plan(archive: &str, entries: &[Entry], p: Platform) -> Result<Plan, Error> {
     if entries.len() > limits::ENTRIES {
         return Err(Error::Refused(format!("it has more than {} entries", group(limits::ENTRIES as u64))));
     }
@@ -292,7 +294,7 @@ pub fn plan(archive: &str, archive_len: u64, entries: &[Entry], p: Platform) -> 
         items.push(Planned { index, rel, kind: e.kind.clone(), mode: e.mode, mtime: e.mtime });
     }
     let total = items.iter().map(|i| if let Kind::File { size } = i.kind { size } else { 0 }).fold(0u64, u64::saturating_add);
-    check_size(total, archive_len)?;
+    check_size(total)?;
     // One folder holding everything: it's the folder made.
     let top = items.first().map(|i| i.rel[0].clone());
     let single = top.as_ref().is_some_and(|t| items.iter().all(|i| &i.rel[0] == t && (i.rel.len() > 1 || i.kind == Kind::Dir)));
@@ -334,8 +336,8 @@ pub fn plan(archive: &str, archive_len: u64, entries: &[Entry], p: Platform) -> 
     Ok(Plan { root, root_mtime, items, total, notes })
 }
 
-/// Refuses `total` bytes from an archive `archive_len` long when it's past [`limits`].
-pub fn check_size(total: u64, archive_len: u64) -> Result<(), Error> {
+/// Refuses `total` bytes of contents past [`limits::TOTAL`].
+pub fn check_size(total: u64) -> Result<(), Error> {
     use crate::fs::fmt_size;
     if total > limits::TOTAL {
         return Err(Error::Refused(format!(
@@ -344,14 +346,21 @@ pub fn check_size(total: u64, archive_len: u64) -> Result<(), Error> {
             fmt_size(limits::TOTAL)
         )));
     }
-    if total > limits::RATIO_FROM && total / limits::RATIO > archive_len {
-        return Err(Error::Refused(format!(
-            "it's too large to extract: it would unpack to {} from {}, {} times its size (Arbor stops at {} times, against decompression bombs)",
+    Ok(())
+}
+
+/// Whether `total` bytes fit on a disk with `free` bytes free, leaving [`limits::SPARE`] or
+/// [`limits::SPARE_PART`] of it, whichever is more; why not, in words.
+pub fn room(total: u64, free: u64) -> Result<(), String> {
+    use crate::fs::fmt_size;
+    let spare = limits::SPARE.max(free / limits::SPARE_PART);
+    if total > free.saturating_sub(spare) {
+        return Err(format!(
+            "it's too large to extract: it unpacks to {}, and {} is free on the disk (Arbor leaves at least {} free)",
             fmt_size(total),
-            fmt_size(archive_len),
-            group(total / archive_len.max(1)),
-            limits::RATIO
-        )));
+            fmt_size(free),
+            fmt_size(spare)
+        ));
     }
     Ok(())
 }

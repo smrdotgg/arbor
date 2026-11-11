@@ -252,8 +252,8 @@ impl<R: Read> Read for Counted<R> {
 }
 
 /// Reads every entry of the tar in `r`, checking the running total against the limits as it
-/// goes (`archive_len`: the archive file's size, for the ratio); `stop` is asked between entries.
-pub fn list(r: impl Read, archive_len: u64, stop: &dyn Fn() -> bool) -> Result<Vec<Entry>, Error> {
+/// goes; `stop` is asked between entries.
+pub fn list(r: impl Read, stop: &dyn Fn() -> bool) -> Result<Vec<Entry>, Error> {
     let mut rd = Reader::new(r);
     let mut v = Vec::new();
     let mut total = 0u64;
@@ -263,7 +263,7 @@ pub fn list(r: impl Read, archive_len: u64, stop: &dyn Fn() -> bool) -> Result<V
         }
         if let Kind::File { size } = e.kind {
             total = total.saturating_add(size);
-            super::check_size(total, archive_len)?;
+            super::check_size(total)?;
         }
         v.push(e);
         if v.len() > limits::ENTRIES {

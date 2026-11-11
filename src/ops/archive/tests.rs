@@ -343,7 +343,7 @@ fn only_the_owners_permission_bits_are_kept() {
 fn bombs_are_refused_before_anything_is_written() {
     let d = tmp("bomb");
     let mut r = Raw::new();
-    for i in 0..4 {
+    for i in 0..300 {
         r.entry(&format!("z{i}"), 0, 8, 0, 2, u32::MAX - 1, &[3, 0], None);
     }
     fs::write(d.join("ratio.zip"), r.bytes()).unwrap();
@@ -356,6 +356,25 @@ fn bombs_are_refused_before_anything_is_written() {
     let o = extract(&d.join("overlap.zip"));
     assert!(o.errors.first().is_some_and(|e| e.contains("overlap")), "{:?}", o.errors);
     assert_eq!(names(&d), ["overlap.zip", "ratio.zip"]);
+}
+
+/// An archive of something very repetitive (here 260 MB of zeros, a thousand times its size)
+/// extracts: there's no ratio rule, only the cap, the room on the disk, and each entry held to
+/// its declared size.
+#[test]
+fn a_very_compressible_archive_extracts() {
+    let d = tmp("zeros");
+    let f = fs::File::create_new(d.join("zeros.img")).unwrap();
+    f.set_len(260 << 20).unwrap();
+    drop(f);
+    ok(&compress(&[d.join("zeros.img")]));
+    fs::remove_file(d.join("zeros.img")).unwrap();
+    let ratio = (260u64 << 20) / fs::metadata(d.join("zeros.img.zip")).unwrap().len();
+    assert!(ratio > 500, "{ratio}");
+    let o = extract(&d.join("zeros.img.zip"));
+    ok(&o);
+    assert_eq!(fs::metadata(d.join("zeros.img/zeros.img")).unwrap().len(), 260 << 20);
+    let _ = fs::remove_dir_all(&d);
 }
 
 #[test]

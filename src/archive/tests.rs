@@ -49,7 +49,7 @@ fn every_way_out_of_the_folder_is_refused() {
     ] {
         assert!(parts(name).is_err(), "{name:?} should be refused");
         // And the whole archive with it, whatever else is there.
-        let why = refused(plan("a.zip", 1000, &[file("fine.txt", 1), file(name, 1)], Linux));
+        let why = refused(plan("a.zip", &[file("fine.txt", 1), file(name, 1)], Linux));
         assert!(!why.is_empty());
     }
     assert_eq!(parts("a/./b//c/").unwrap(), ["a", "b", "c"]);
@@ -75,25 +75,24 @@ fn names_invalid_here_are_renamed_validly() {
     let fixed = fix(&"x".repeat(300), Windows).unwrap();
     assert_eq!(fixed.len(), 255);
     // In a plan: the name changes, and a note says so.
-    let p = plan("a.zip", 100, &[file("d/a:b.txt", 1), file("d/c", 1)], Windows).unwrap();
+    let p = plan("a.zip", &[file("d/a:b.txt", 1), file("d/c", 1)], Windows).unwrap();
     assert_eq!(p.items[0].rel, ["a_b.txt"]);
     assert!(p.notes.iter().any(|n| n.contains("“a:b.txt” was renamed “a_b.txt”")), "{:?}", p.notes);
 }
 
 #[test]
 fn one_folder_holding_everything_is_the_folder_made() {
-    let p = plan("Photos.zip", 100, &[dir("Photos/"), file("Photos/a.jpg", 1), dir("Photos/sub/"), file("Photos/sub/b.jpg", 1)], Linux)
-        .unwrap();
+    let p = plan("Photos.zip", &[dir("Photos/"), file("Photos/a.jpg", 1), dir("Photos/sub/"), file("Photos/sub/b.jpg", 1)], Linux).unwrap();
     assert_eq!(p.root, "Photos");
     let rels: Vec<String> = p.items.iter().map(|i| i.rel.join("/")).collect();
     assert_eq!(rels, ["a.jpg", "sub", "sub/b.jpg"]);
     // Without its own entry too.
-    let p = plan("x.zip", 100, &[file("Other/a", 1)], Linux).unwrap();
+    let p = plan("x.zip", &[file("Other/a", 1)], Linux).unwrap();
     assert_eq!(p.root, "Other");
     // Several items, or one file: a folder named after the archive.
-    let p = plan("Stuff.tar.gz", 100, &[file("a", 1), file("b/c", 1)], Linux).unwrap();
+    let p = plan("Stuff.tar.gz", &[file("a", 1), file("b/c", 1)], Linux).unwrap();
     assert_eq!((p.root.as_str(), p.items.len()), ("Stuff", 2));
-    let p = plan("one.zip", 100, &[file("notes.txt", 1)], Linux).unwrap();
+    let p = plan("one.zip", &[file("notes.txt", 1)], Linux).unwrap();
     assert_eq!(p.root, "one");
     assert_eq!(Format::stem("A.B.TGZ"), "A.B");
     assert_eq!(Format::stem(".zip"), "Archive");
@@ -101,7 +100,7 @@ fn one_folder_holding_everything_is_the_folder_made() {
 
 /// Links that could lead out are left out, each named in a note; the rest is extracted.
 fn left_out_links(entries: &[Entry]) -> (Plan, String) {
-    let p = plan("a.zip", 100, entries, Linux).unwrap_or_else(|e| panic!("refused: {e}"));
+    let p = plan("a.zip", entries, Linux).unwrap_or_else(|e| panic!("refused: {e}"));
     assert!(p.items.iter().all(
         |i| !matches!(i.kind, Kind::Link(_)) || link_target(i.rel.len() - 1, if let Kind::Link(t) = &i.kind { t } else { "" }).is_ok()
     ));
@@ -125,7 +124,7 @@ fn links_that_leave_the_folder_are_left_out() {
         assert!(note.contains(&format!("“{at}” → “{to}”")), "{note}");
     }
     // The top folder is the folder made: "../x" from inside it is outside.
-    let p = plan("Photos.zip", 100, &[dir("Photos/"), file("Photos/a", 1), link("Photos/l", "../x")], Linux).unwrap();
+    let p = plan("Photos.zip", &[dir("Photos/"), file("Photos/a", 1), link("Photos/l", "../x")], Linux).unwrap();
     assert_eq!(p.items.len(), 1);
     assert!(p.notes.iter().any(|n| n.contains("“l” → “../x”")), "{:?}", p.notes);
     // Down and back up: never followed, whatever the names on the way are (they may be links,
@@ -141,11 +140,10 @@ fn links_that_leave_the_folder_are_left_out() {
     assert!(note.contains("“l2” → “/”") && note.ends_with("(and 2 more)"), "{note}");
     // Down through another link of the archive: that link keeps to the same rule, so this stays
     // inside.
-    assert!(plan("a.zip", 100, &[dir("x/y/"), link("x/y/l", ".."), link("m", "x/y/l/z"), file("f", 1)], Linux).unwrap().notes.is_empty());
+    assert!(plan("a.zip", &[dir("x/y/"), link("x/y/l", ".."), link("m", "x/y/l/z"), file("f", 1)], Linux).unwrap().notes.is_empty());
     // Links that stay inside are fine.
     let p = plan(
         "a.zip",
-        100,
         &[
             file("lib/libfoo.so.1", 1),
             link("lib/libfoo.so", "libfoo.so.1"),
@@ -158,7 +156,7 @@ fn links_that_leave_the_folder_are_left_out() {
     .unwrap();
     assert_eq!(p.items.len(), 5);
     // Windows makes none, and says so.
-    let p = plan("a.zip", 100, &[file("f", 1), link("l", "f")], Windows).unwrap();
+    let p = plan("a.zip", &[file("f", 1), link("l", "f")], Windows).unwrap();
     assert_eq!(p.items.len(), 1);
     assert!(p.notes.iter().any(|n| n.contains("links aren't extracted on Windows")), "{:?}", p.notes);
 }
@@ -170,7 +168,7 @@ fn links_that_leave_the_folder_are_left_out() {
 #[test]
 fn a_link_through_a_renamed_link_is_refused() {
     let entries = [dir("a/b/c/Y/"), link("a/b/c/Y", "../../.."), link("X", "a/b/c/Y 2/../../../../in1"), file("f", 1)];
-    let p = plan("evil.zip", 100, &entries, Linux).unwrap();
+    let p = plan("evil.zip", &entries, Linux).unwrap();
     assert!(p.items.iter().all(|i| i.rel != ["X"]), "X is left out");
     assert!(p.notes.iter().any(|n| n.contains("“X” → ")), "{:?}", p.notes);
     assert!(link_target(3, "../../..").is_ok());
@@ -180,33 +178,40 @@ fn a_link_through_a_renamed_link_is_refused() {
 
 #[test]
 fn bombs_are_refused_by_size() {
-    // 300 MB from a 1 MB archive: over 200 times its size, past the floor.
-    let why = refused(plan("b.zip", 1 << 20, &[file("a", 300 << 20)], Linux));
-    assert!(why.contains("too large to extract") && why.contains("times"), "{why}");
-    // The same from a 10 MB archive is fine; so is 200 MB from a tiny one (under the floor).
-    assert!(plan("b.zip", 10 << 20, &[file("a", 300 << 20)], Linux).is_ok());
-    assert!(plan("b.zip", 1000, &[file("a", 200 << 20)], Linux).is_ok());
-    // Past the absolute cap, whatever the archive's size; sizes that would overflow add up to it.
-    let why = refused(plan("b.zip", u64::MAX / 2, &[file("a", limits::TOTAL + 1)], Linux));
+    // No ratio: any size up to the cap, whatever the archive's own size.
+    assert!(plan("b.zip", &[file("a", 300 << 30)], Linux).is_ok());
+    // Past the absolute cap; sizes that would overflow add up to it.
+    let why = refused(plan("b.zip", &[file("a", limits::TOTAL + 1)], Linux));
     assert!(why.contains("more than Arbor extracts"), "{why}");
-    assert!(plan("b.zip", u64::MAX / 2, &[file("a", u64::MAX), file("b", u64::MAX)], Linux).is_err());
+    assert!(plan("b.zip", &[file("a", u64::MAX), file("b", u64::MAX)], Linux).is_err());
     // Too deep.
     let deep = "d/".repeat(limits::DEPTH + 1) + "f";
-    assert!(refused(plan("b.zip", 100, &[file(&deep, 1)], Linux)).contains("deep"));
+    assert!(refused(plan("b.zip", &[file(&deep, 1)], Linux)).contains("deep"));
 }
 
 #[test]
 fn macos_resource_forks_are_left_out() {
-    let p = plan("a.zip", 100, &[dir("a/"), file("a/x", 1), dir("__MACOSX/"), file("__MACOSX/a/._x", 1)], Linux).unwrap();
+    let p = plan("a.zip", &[dir("a/"), file("a/x", 1), dir("__MACOSX/"), file("__MACOSX/a/._x", 1)], Linux).unwrap();
     assert_eq!(p.root, "a", "the one folder, once __MACOSX is left out");
     assert_eq!(p.items.len(), 1);
     assert!(p.notes.is_empty());
 }
 
 #[test]
+fn the_disk_must_keep_room() {
+    const G: u64 = 1 << 30;
+    assert!(room(9 * G, 10 * G).is_ok(), "1 GB left");
+    assert!(room(9 * G + 1, 10 * G).is_err());
+    assert!(room(95 * G, 100 * G).is_ok(), "5% left");
+    let why = room(96 * G, 100 * G).unwrap_err();
+    assert!(why.contains("too large to extract") && why.contains("free"), "{why}");
+    assert!(room(1, 100 << 20).is_err(), "under the spare: nothing fits");
+}
+
+#[test]
 fn skipped_entries_are_noted() {
     let e = Entry { name: "hard".into(), kind: Kind::Skip("hard links aren't extracted"), mode: None, mtime: None, lossy: false };
-    let p = plan("t.tar", 100, &[file("f", 1), e.clone(), Entry { name: "hard2".into(), ..e }], Linux).unwrap();
+    let p = plan("t.tar", &[file("f", 1), e.clone(), Entry { name: "hard2".into(), ..e }], Linux).unwrap();
     assert_eq!(p.items.len(), 1);
     assert!(p.notes.iter().any(|n| n == "“hard” was left out: hard links aren't extracted (and 1 more)"), "{:?}", p.notes);
 }
@@ -466,13 +471,13 @@ fn zip_bombs_are_refused() {
     r.entry("short", 0, 8, crc32fast::hash(b"short"), small.len() as u32, 1000, &small, None);
     let l = r.write(&d.join("short.zip")).unwrap();
     assert!(matches!(read_entry(&d.join("short.zip"), &l, 0), Err(Error::Corrupt(_))));
-    // Declared sizes far past the archive's: refused by the plan before anything is written.
+    // Declared sizes past the cap: refused by the plan before anything is written.
     let mut r = Raw::new();
-    for i in 0..4 {
+    for i in 0..300 {
         r.entry(&format!("z{i}"), 0, 8, 0, 2, u32::MAX - 1, &[3, 0], None);
     }
     let l = r.write(&d.join("ratio.zip")).unwrap();
-    let why = refused(plan("ratio.zip", fs::metadata(d.join("ratio.zip")).unwrap().len(), &l.entries, Linux));
+    let why = refused(plan("ratio.zip", &l.entries, Linux));
     assert!(why.contains("too large"), "{why}");
 }
 
@@ -532,7 +537,7 @@ fn tar_reads_ustar_pax_and_gnu() {
     tar_entry(&mut t, "././@LongLink", b'L', format!("top/gnu-{long}\0").as_bytes(), "");
     tar_entry(&mut t, "top/short-gnu", b'0', b"gnu", "");
     t.extend([0; 1024]);
-    let entries = tar::list(&t[..], t.len() as u64, &|| false).unwrap();
+    let entries = tar::list(&t[..], &|| false).unwrap();
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["top/", "top/a.txt", "top/l", "top/hard", "top/fifo", &format!("top/{long}"), &format!("top/gnu-{long}")]);
     assert_eq!(entries[1].kind, Kind::File { size: 5 });
@@ -560,16 +565,20 @@ fn tar_damage_is_an_error() {
     // A changed header byte: its checksum doesn't match.
     let mut bad = t.clone();
     bad[512 + 512] ^= 1; // b.txt's header, first byte of its name
-    assert!(matches!(tar::list(&bad[..], 0, &|| false), Err(Error::Corrupt(ref s)) if s.contains("checksum")));
+    assert!(matches!(tar::list(&bad[..], &|| false), Err(Error::Corrupt(ref s)) if s.contains("checksum")));
     // Cut in the middle of an entry, or of a header.
-    assert!(matches!(tar::list(&t[..600], 0, &|| false), Err(Error::Corrupt(_))));
-    assert!(matches!(tar::list(&t[..1024 + 100], 0, &|| false), Err(Error::Corrupt(_))));
+    assert!(matches!(tar::list(&t[..600], &|| false), Err(Error::Corrupt(_))));
+    assert!(matches!(tar::list(&t[..1024 + 100], &|| false), Err(Error::Corrupt(_))));
     // No end blocks: tolerated.
-    assert_eq!(tar::list(&t[..2048], 0, &|| false).unwrap().len(), 2);
-    // A declared size past the limits.
-    let mut huge = Vec::new();
-    huge.extend(tar_header("big", b'0', 0o77777777777, ""));
-    assert!(matches!(tar::list(&huge[..], 1000, &|| false), Err(Error::Refused(_))));
+    assert_eq!(tar::list(&t[..2048], &|| false).unwrap().len(), 2);
+    // A declared size past the cap (base-256: 2 TB).
+    let mut h = tar_header("big", b'0', 0, "");
+    h[124..136].copy_from_slice(&[0x80, 0, 0, 0, 0, 0, 0x02, 0, 0, 0, 0, 0]);
+    h[148..156].copy_from_slice(b"        ");
+    let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+    h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    let huge = h.to_vec();
+    assert!(matches!(tar::list(&huge[..], &|| false), Err(Error::Refused(_))));
 }
 
 #[test]
