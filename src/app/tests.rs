@@ -1731,3 +1731,30 @@ fn the_item_is_always_a_selected_one() {
     s.start_rename();
     assert_eq!(s.rename.as_ref().map(|r| r.os.clone()), Some("a".into()), "renaming what's selected");
 }
+
+/// A free-space answer still on its way when its window closes is dropped: it never wakes a
+/// window that's gone.
+#[test]
+fn a_closed_window_isnt_woken_by_its_free_space() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _one_at_a_time = crate::volinfo::hanging();
+    let d = folder("free-closed", 1);
+    let mut a = state_in(&d);
+    settle_all(&mut a);
+    let go = crate::fs::free_reads::hold(&d);
+    let woken = Arc::new(AtomicUsize::new(0));
+    let n = woken.clone();
+    a.setup(Arc::new(move || {
+        n.fetch_add(1, Ordering::SeqCst);
+    }));
+    let t = Instant::now();
+    while crate::fs::free_reads::of(&d).is_empty() && t.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    a.leave();
+    woken.store(0, Ordering::SeqCst);
+    drop(go);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(woken.load(Ordering::SeqCst), 0, "the closed window was woken");
+}

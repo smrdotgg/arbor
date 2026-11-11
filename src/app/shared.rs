@@ -259,6 +259,10 @@ impl State {
     /// the owner of its running file operation, if any, which shows and lands it from then on.
     /// True when it was the last.
     pub fn leave(&mut self) -> bool {
+        // A free-space answer still on its way isn't wanted: it would wake a window that's gone.
+        for p in &self.panes {
+            p.f.free_inbox.forget();
+        }
         let others = self.shared.others(self.win);
         if self.owns_job() {
             match crate::window::most_recent(&others).or_else(|| others.last().copied()) {
