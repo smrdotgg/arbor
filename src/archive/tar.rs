@@ -20,7 +20,22 @@ pub struct Reader<R: Read> {
     left: u64,
     pad: u64,
     done: bool,
+    /// For a tar read straight from a file: how to move ahead in it, and the file's length, so
+    /// skipping an entry's data reads nothing (and a file cut short is still seen).
+    seek: Option<(SeekFn<R>, u64)>,
 }
+
+/// Moves a reader so many bytes on, saying where it is then.
+type SeekFn<R> = fn(&mut R, u64) -> io::Result<u64>;
+
+/// Moves `r` `n` bytes on; where it is then.
+fn seek_ahead<R: io::Seek>(r: &mut R, n: u64) -> io::Result<u64> {
+    let n = i64::try_from(n).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "a size is too large"))?;
+    r.seek(io::SeekFrom::Current(n))
+}
+
+/// What a skip reads at a time between asking whether to stop.
+const SKIP_STEP: u64 = 1 << 20;
 
 /// The pax and GNU headers that apply to the next entry.
 #[derive(Default)]
@@ -60,18 +75,41 @@ fn text(f: &[u8]) -> &[u8] {
     &f[..f.iter().position(|&b| b == 0).unwrap_or(f.len())]
 }
 
+impl<R: Read + io::Seek> Reader<R> {
+    /// A reader of a tar file `len` bytes long, from its start, that seeks past entries' data.
+    pub fn seeking(r: R, len: u64) -> Reader<R> {
+        Reader { seek: Some((seek_ahead::<R>, len)), ..Reader::new(r) }
+    }
+}
+
 impl<R: Read> Reader<R> {
     pub fn new(r: R) -> Reader<R> {
-        Reader { r, left: 0, pad: 0, done: false }
+        Reader { r, left: 0, pad: 0, done: false, seek: None }
     }
 
-    /// Skips what's left of the current entry (its data and padding).
-    fn skip(&mut self) -> Result<(), Error> {
+    /// Skips what's left of the current entry (its data and padding): by seeking when it can,
+    /// else reading it a step at a time and asking `stop` between steps (a gzipped tar, whose
+    /// `stop` also moves the progress).
+    fn skip(&mut self, stop: &dyn Fn() -> bool) -> Result<(), Error> {
         let n = self.left + self.pad;
         if n > 0 {
-            let got = io::copy(&mut (&mut self.r).take(n), &mut io::sink())?;
-            if got < n {
-                return Err(corrupt("it ends in the middle of an entry"));
+            if let Some((seek, len)) = self.seek {
+                if seek(&mut self.r, n)? > len {
+                    return Err(corrupt("it ends in the middle of an entry"));
+                }
+            } else {
+                let mut left = n;
+                while left > 0 {
+                    if stop() {
+                        return Err(Error::Cancelled);
+                    }
+                    let step = left.min(SKIP_STEP);
+                    let got = io::copy(&mut (&mut self.r).take(step), &mut io::sink())?;
+                    if got < step {
+                        return Err(corrupt("it ends in the middle of an entry"));
+                    }
+                    left -= step;
+                }
             }
         }
         self.left = 0;
@@ -92,10 +130,15 @@ impl<R: Read> Reader<R> {
 
     /// The next entry; `None` at the end. Skips the rest of the one before.
     pub fn next(&mut self) -> Result<Option<Entry>, Error> {
+        self.next_with(&|| false)
+    }
+
+    /// [`Reader::next`], asking `stop` while it skips the data of the entry before.
+    pub fn next_with(&mut self, stop: &dyn Fn() -> bool) -> Result<Option<Entry>, Error> {
         if self.done {
             return Ok(None);
         }
-        self.skip()?;
+        self.skip(stop)?;
         let mut pending = Pending::default();
         for _ in 0..16 {
             let mut h = [0u8; BLOCK];
@@ -126,24 +169,24 @@ impl<R: Read> Reader<R> {
                 b'x' => {
                     let d = self.small(size)?;
                     pax(&d, &mut pending)?;
-                    self.skip()?;
+                    self.skip(stop)?;
                     continue;
                 }
                 // Global pax headers set defaults for every entry; nothing Arbor uses.
                 b'g' => {
-                    self.skip()?;
+                    self.skip(stop)?;
                     continue;
                 }
                 b'L' => {
                     let d = self.small(size)?;
                     pending.path = Some(text(&d).to_vec());
-                    self.skip()?;
+                    self.skip(stop)?;
                     continue;
                 }
                 b'K' => {
                     let d = self.small(size)?;
                     pending.link = Some(text(&d).to_vec());
-                    self.skip()?;
+                    self.skip(stop)?;
                     continue;
                 }
                 _ => {}
@@ -270,7 +313,8 @@ impl<R: Read> Read for Counted<R> {
 }
 
 /// Reads every entry of the tar in `r`, checking the running total against the limits as it
-/// goes; `stop` is asked between entries.
+/// goes; `stop` is asked between entries (tests: Arbor lists through [`list_from`]).
+#[cfg(test)]
 pub fn list(r: impl Read, stop: &dyn Fn() -> bool) -> Result<Vec<Entry>, Error> {
     list_from(&mut Reader::new(r), stop)
 }
@@ -279,7 +323,7 @@ pub fn list(r: impl Read, stop: &dyn Fn() -> bool) -> Result<Vec<Entry>, Error> 
 pub fn list_from<R: Read>(rd: &mut Reader<R>, stop: &dyn Fn() -> bool) -> Result<Vec<Entry>, Error> {
     let mut v = Vec::new();
     let mut total = 0u64;
-    while let Some(e) = rd.next()? {
+    while let Some(e) = rd.next_with(stop)? {
         if stop() {
             return Err(Error::Cancelled);
         }

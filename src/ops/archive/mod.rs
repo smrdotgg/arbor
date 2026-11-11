@@ -500,7 +500,8 @@ impl Worker<'_> {
             }
             Format::Tar => {
                 (&*file).seek(SeekFrom::Start(0))?;
-                Ok((archive::tar::list(BufReader::with_capacity(256 * 1024, file), &stop)?, None))
+                let mut rd = archive::tar::Reader::seeking(BufReader::with_capacity(256 * 1024, file), len);
+                Ok((archive::tar::list_from(&mut rd, &stop)?, None))
             }
             Format::TarGz => {
                 (&*file).seek(SeekFrom::Start(0))?;
@@ -587,7 +588,8 @@ impl Worker<'_> {
                     if self.cancelled() {
                         return Err(AErr::Cancelled);
                     }
-                    let e = rd.next()?.ok_or_else(changed)?;
+                    let p = self.p;
+                    let e = rd.next_with(&|| p.cancel.load(Relaxed))?.ok_or_else(changed)?;
                     if e.name != want.name || e.kind != want.kind {
                         return Err(changed());
                     }

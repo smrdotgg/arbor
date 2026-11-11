@@ -581,6 +581,64 @@ fn tar_damage_is_an_error() {
     assert!(matches!(tar::list(&huge[..], &|| false), Err(Error::Refused(_))));
 }
 
+/// Skipping a big entry (a gzipped tar's, which must be read) asks whether to stop as it goes,
+/// not only between entries.
+#[test]
+fn skipping_a_big_tar_entry_can_be_cancelled() {
+    let mut t = Vec::new();
+    tar_entry(&mut t, "big", b'0', &vec![0; 32 << 20], "");
+    t.extend([0; 1024]);
+    let asked = std::cell::Cell::new(0);
+    let stop = || {
+        asked.set(asked.get() + 1);
+        asked.get() >= 2
+    };
+    assert!(matches!(tar::list(&t[..], &stop), Err(Error::Cancelled)), "asked {} times", asked.get());
+}
+
+/// A plain tar straight from its file seeks past entries' data: listing an 8 GB entry reads a
+/// few blocks, and a file cut short inside an entry is still damage.
+#[test]
+fn a_plain_tar_is_listed_without_reading_its_data() {
+    use std::io::{Seek, SeekFrom};
+    struct Counted<'a> {
+        f: &'a fs::File,
+        n: u64,
+    }
+    impl Read for Counted<'_> {
+        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+            let k = self.f.read(b)?;
+            self.n += k as u64;
+            Ok(k)
+        }
+    }
+    impl Seek for Counted<'_> {
+        fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+            self.f.seek(to)
+        }
+    }
+    let d = tmp("tar-seek");
+    let size: u64 = (8 << 30) - 512; // the most 11 octal digits hold, rounded to a block
+    let mut f = fs::File::create_new(d.join("big.tar")).unwrap();
+    f.write_all(&tar_header("big.img", b'0', size, "")).unwrap();
+    f.seek(SeekFrom::Start(512 + size)).unwrap();
+    let mut rest = Vec::new();
+    tar_entry(&mut rest, "after.txt", b'0', b"after", "");
+    rest.extend([0; 1024]);
+    f.write_all(&rest).unwrap();
+    let len = f.metadata().unwrap().len();
+    drop(f);
+    let f = fs::File::open(d.join("big.tar")).unwrap();
+    let mut c = Counted { f: &f, n: 0 };
+    let entries = tar::list_from(&mut tar::Reader::seeking(&mut c, len), &|| false).unwrap();
+    assert_eq!(entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["big.img", "after.txt"]);
+    assert!(c.n < 64 * 1024, "read {} bytes", c.n);
+    (&f).seek(SeekFrom::Start(0)).unwrap();
+    let mut c = Counted { f: &f, n: 0 };
+    assert!(matches!(tar::list_from(&mut tar::Reader::seeking(&mut c, size / 2), &|| false), Err(Error::Corrupt(_))));
+    let _ = fs::remove_dir_all(&d);
+}
+
 #[test]
 fn formats_by_name() {
     assert_eq!(Format::of("a.ZIP"), Some(Format::Zip));
