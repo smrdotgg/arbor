@@ -33,6 +33,11 @@ pub(super) struct Step {
     /// A link Arbor made ([`What::Link`]): what it points at, so undo removes it only while it
     /// still does, and redo makes it again.
     pub(super) link: Option<Link>,
+    /// The item's object identity ([`crate::fs::Ident`]: with its birth time or handle) as the
+    /// operation left it, for what undo removes or trashes as Arbor's own (New File, links): a
+    /// replacement that got the freed inode back, with the same size and times (a `cp -a`), still
+    /// isn't it. Checked with the fingerprint, and again right before the item goes.
+    pub(super) ident: Option<crate::fs::Ident>,
 }
 
 /// A move back across disks that copied everything to `back` but couldn't remove all of the
@@ -57,7 +62,7 @@ impl Undo {
         let mut steps = Vec::new();
         for (at, back) in items {
             match at.symlink_metadata() {
-                Ok(m) => steps.push(Step { print: Print::of(&at, &m), at, back, split: None, link: None }),
+                Ok(m) => steps.push(Step { print: Print::of(&at, &m), at, back, split: None, link: None, ident: None }),
                 Err(e) => errors.push(format!("“{}” can't be undone: it couldn't be read right after ({e})", name_of(&at))),
             }
         }
@@ -101,7 +106,10 @@ impl Undo {
     /// A file just made (empty): undo trashes it only while it's still exactly that (its
     /// identity, size and modified time).
     pub fn new_file(path: PathBuf) -> Option<Undo> {
-        Undo::record(What::NewFile, [(path, None)])
+        let ident = crate::fs::ident_at(&path)?;
+        let mut u = Undo::record(What::NewFile, [(path, None)])?;
+        u.steps[0].ident = Some(ident);
+        Some(u)
     }
 }
 
@@ -161,7 +169,7 @@ impl Worker<'_> {
     /// can't be reversed again, which loses nothing).
     pub(super) fn inverse_step(&self, at: PathBuf, back: Option<PathBuf>, deep: bool) -> Option<Step> {
         let print = if back.is_none() || deep { self.print_all(&at).ok()? } else { Print::of(&at, &at.symlink_metadata().ok()?) };
-        Some(Step { at, print, back, split: None, link: None })
+        Some(Step { at, print, back, split: None, link: None, ident: None })
     }
 
     /// Undoes (or redoes) one checked step. Hands it back (updated if it got halfway) when it
@@ -169,14 +177,30 @@ impl Worker<'_> {
     /// item is in the Trash and goes back out of it ([`Undo::in_trash`]).
     pub(super) fn undo_step(&mut self, trashed: bool, word: &str, step: Step, out: &mut Outcome, inverse: &mut Vec<Step>) -> Option<Step> {
         let name = name_of(&step.at);
+        let strong = step.ident.is_some();
+        // What the step's item is now, in the same terms, for the record that reverses it.
+        let same_terms = |mut s: Step| {
+            if strong {
+                s.ident = crate::fs::ident_at(&s.at);
+            }
+            s
+        };
         let Some(back) = step.back.clone() else {
             self.before_act(&step.at);
+            // Right before it goes: still the object Arbor made (one put in its place since the
+            // check, even at the same inode, is left alone).
+            if let Some(want) = step.ident
+                && crate::fs::ident_at(&step.at) != Some(want)
+            {
+                out.errors.push(format!("“{name}” was replaced just now, so it was left alone"));
+                return Some(step);
+            }
             let p = self.p;
             return match (self.trash)(&step.at, &|| p.cancel.load(Relaxed)) {
                 Ok(put) => {
                     // Where the Trash put it, when it says (the Recycle Bin doesn't): redo
                     // takes it back out from there.
-                    inverse.extend(put.and_then(|put| self.inverse_step(put, Some(step.at.clone()), true)));
+                    inverse.extend(put.and_then(|put| self.inverse_step(put, Some(step.at.clone()), true)).map(same_terms));
                     out.removed.push(step.at.clone());
                     out.results.push(step.at);
                     None
@@ -200,7 +224,7 @@ impl Worker<'_> {
                 }
                 // Out of the Trash, reversing means trashing it again; otherwise moving it back.
                 let to = (!trashed).then(|| step.at.clone());
-                inverse.extend(self.inverse_step(back.clone(), to, false));
+                inverse.extend(self.inverse_step(back.clone(), to, false).map(same_terms));
                 out.moved.push((step.at.clone(), back.clone()));
                 out.results.push(back);
                 None
@@ -239,6 +263,11 @@ impl Worker<'_> {
                 return Err(format!("the folder {name} was in is gone (moved, deleted, or its drive was ejected)"));
             }
             Some(d) => return Err(d.say(&name, step.print.kind)),
+        }
+        if let Some(want) = step.ident
+            && crate::fs::ident_at(&step.at) != Some(want)
+        {
+            return Err(format!("{name} was replaced by another item with the same name"));
         }
         if self.cancelled() {
             return Ok(()); // the caller sees the cancel and changes nothing

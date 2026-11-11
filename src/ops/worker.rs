@@ -262,7 +262,7 @@ impl<'a> Worker<'a> {
                     match self.copy_one(src, &dest) {
                         Ok((to, print)) => {
                             out.results.push(to.clone());
-                            steps.push(Step { at: to, print, back: None, split: None, link: None });
+                            steps.push(Step { at: to, print, back: None, split: None, link: None, ident: None });
                         }
                         Err(e) => out.errors.push(format!("{}: {e}", name_of(src))),
                     }

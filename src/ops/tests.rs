@@ -2295,6 +2295,68 @@ mod links {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// Sets the link `p`'s own modified time (not its target's), as `cp -a` does.
+    fn set_link_mtime(p: &Path, t: std::time::SystemTime) {
+        let d = t.duration_since(std::time::UNIX_EPOCH).unwrap();
+        let ts = libc::timespec { tv_sec: d.as_secs() as libc::time_t, tv_nsec: d.subsec_nanos() as _ };
+        let c = crate::ffi::cstr(p).unwrap();
+        // SAFETY: a NUL-terminated path and two timespecs.
+        assert_eq!(unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), [ts, ts].as_ptr(), libc::AT_SYMLINK_NOFOLLOW) }, 0);
+    }
+
+    /// The reviewer's case: the link copied with `cp -a`, removed, and the copy put back. The
+    /// newcomer got the freed inode, and has the same size, modified time and target: the
+    /// fingerprint can't tell it from Arbor's link, but its birth time (or handle) can. Undo
+    /// refuses and the newcomer stays.
+    #[test]
+    fn undo_never_removes_a_link_put_back_at_the_same_inode() {
+        use std::os::unix::fs::MetadataExt;
+        if !crate::fs::inode_reuse_shows("link-put-back") {
+            return;
+        }
+        let d = tmp("links-put-back");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+        let at = d.join("a link.txt");
+        let was = at.symlink_metadata().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let back = (0..200).any(|_| {
+            fs::remove_file(&at).unwrap();
+            std::os::unix::fs::symlink(d.join("a.txt"), &at).unwrap();
+            at.symlink_metadata().unwrap().ino() == was.ino()
+        });
+        if !back {
+            eprintln!("link-put-back: skipped (the inode never came back)");
+            return;
+        }
+        set_link_mtime(&at, was.modified().unwrap());
+        let now = at.symlink_metadata().unwrap();
+        assert_eq!((now.ino(), now.len(), now.modified().unwrap()), (was.ino(), was.len(), was.modified().unwrap()), "a perfect copy");
+        let why = undo_refused(u);
+        assert!(why.contains("“a link.txt” was replaced"), "{why}");
+        assert!(at.symlink_metadata().is_ok(), "the newcomer stays");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Another link put at the name after undo's check, right before the removal: it's checked
+    /// again through the open folder at the removal itself, and stays.
+    #[test]
+    fn undo_never_removes_a_link_put_there_after_the_check() {
+        let d = tmp("links-swap");
+        fs::write(d.join("a.txt"), "a").unwrap();
+        let u = take(run_now(Op::MakeLinks { items: vec![d.join("a.txt")] }));
+        let target = d.join("a.txt");
+        let swap: PathHook = Box::new(move |at: &Path| {
+            fs::remove_file(at).unwrap();
+            std::os::unix::fs::symlink(&target, at).unwrap();
+        });
+        let o = run_hooked(Op::Undo(u), fake_trash, hooked(swap, false));
+        assert!(o.errors.first().is_some_and(|e| e.contains("“a link.txt” was replaced just now")), "{:?} {:?}", o.errors, o.refused);
+        assert!(d.join("a link.txt").symlink_metadata().is_ok(), "the newcomer stays");
+        assert!(o.undo.is_some(), "the record stays to try again");
+        let _ = fs::remove_dir_all(&d);
+    }
+
     /// The items are checked to be the ones listed: one replaced since gets no link.
     #[test]
     fn a_link_is_made_only_to_the_item_chosen() {
@@ -2390,4 +2452,34 @@ fn new_file_and_folder_refuse_a_folder_made_again_at_its_freed_inode() {
         assert_eq!(fs::read_dir(&here).unwrap().count(), 0, "nothing made in the new folder");
         let _ = fs::remove_dir_all(&d);
     }
+}
+
+/// New File's undo: a file put at its name since, even at the freed inode with the same size
+/// and modified time, isn't Arbor's (its birth time or handle says), and isn't trashed; nor is
+/// one put there right before the trash.
+#[cfg(unix)]
+#[test]
+fn new_file_undo_never_trashes_a_replacement() {
+    let d = tmp("nfile-replaced");
+    let u = take(run_now(Op::NewFile { dir: d.clone() }));
+    let at = d.join("untitled.txt");
+    let swap: PathHook = Box::new(|at: &Path| {
+        fs::remove_file(at).unwrap();
+        fs::write(at, "").unwrap();
+    });
+    let o = run_hooked(Op::Undo(u.clone()), fake_trash, hooked(swap, false));
+    assert!(o.errors.first().is_some_and(|e| e.contains("was replaced just now")), "{:?} {:?}", o.errors, o.refused);
+    assert!(at.exists() && !d.join(".trash").exists(), "not trashed");
+    if crate::fs::inode_reuse_shows("new-file-put-back") {
+        let d = tmp("nfile-put-back");
+        let u = take(run_now(Op::NewFile { dir: d.clone() }));
+        let at = d.join("untitled.txt");
+        let t = fs::metadata(&at).unwrap().modified().unwrap();
+        crate::fs::reuse_inode(&at, "").unwrap();
+        fs::File::options().write(true).open(&at).unwrap().set_modified(t).unwrap();
+        let why = undo_refused(u);
+        assert!(why.contains("replaced"), "{why}");
+        assert!(at.exists() && !d.join(".trash").exists());
+    }
+    let _ = fs::remove_dir_all(&d);
 }

@@ -34,10 +34,17 @@ Format: date · decision · why · how to undo.
     extension get "name link"; taken names count up ("photo link 2.jpg"). Windows' shortcut adds
     `.lnk`. Undo: `ops::links::link_name`.
   - **Undo of Make Link removes the links permanently, not to the Trash; redo makes them again.**
-    A link holds no data, so removing one that's still exactly the link Arbor made (identity,
-    time, size and, for a symbolic link, its target, re-read) loses nothing, and redo works on
-    Windows too, where the Recycle Bin doesn't say where it put an item. New File's undo trashes
-    the file, as New Folder's does (the task's rule). Undo: `Worker::undo_links`.
+    A link holds no data, so removing one that's still exactly the link Arbor made loses
+    nothing. "Exactly" (after review): its fingerprint, its object identity (`fs::Ident`, with
+    the birth time or Linux's handle, recorded when it was made: a `cp -a` copy put back at the
+    freed inode has the same inode, times and target) and its target, checked once with the
+    others and again at the removal itself: on Unix through the open folder (`statx`,
+    `readlinkat`, then `unlinkat`, no path resolved in between); on Windows through a handle on
+    the link that shares no delete access, deleted through that handle. New File's undo checks
+    the same identity when it checks and again right before the trash (which itself goes by
+    path). Removing also means redo works on Windows, where the Recycle Bin doesn't say where it
+    put an item. New File's undo trashes the file, as New Folder's does (the task's rule). Undo:
+    `Worker::undo_links`, `links::remove_if_still`.
   - **Windows: `std`'s symbolic-link calls** (they pass
     `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` to `CreateSymbolicLinkW`); on
     `ERROR_PRIVILEGE_NOT_HELD`, and on `ERROR_INVALID_FUNCTION`/`ERROR_NOT_SUPPORTED` (FAT and

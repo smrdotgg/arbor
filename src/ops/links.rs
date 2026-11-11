@@ -148,8 +148,8 @@ impl Worker<'_> {
                     if why.is_some() {
                         shortcuts = why;
                     }
-                    match at.symlink_metadata() {
-                        Ok(m) => steps.push(Step { print: Print::of(&at, &m), at: at.clone(), back: None, split: None, link: Some(link) }),
+                    match made_step(&at, link) {
+                        Ok(step) => steps.push(step),
                         Err(e) => out.errors.push(format!("“{}” can't be undone: it couldn't be read right after ({e})", name_of(&at))),
                     }
                     out.results.push(at);
@@ -231,11 +231,11 @@ impl Worker<'_> {
             };
             self.before_act(&step.at);
             let name = name_of(&step.at);
-            let done = if making { make_link_at(&step.at, &link) } else { self.remove_link(&step.at, &link) };
+            let done = if making { make_link_at(&step.at, &link) } else { self.remove_link(&step, &link) };
             match done {
                 Ok(()) if making => {
-                    match step.at.symlink_metadata() {
-                        Ok(m) => inverse.push(Step { print: Print::of(&step.at, &m), ..step.clone() }),
+                    match made_step(&step.at, link) {
+                        Ok(again) => inverse.push(again),
                         Err(e) => out.errors.push(format!("“{name}” can't be undone: it couldn't be read right after ({e})")),
                     }
                     out.results.push(step.at);
@@ -243,7 +243,11 @@ impl Worker<'_> {
                 Ok(()) => {
                     out.removed.push(step.at.clone());
                     out.results.push(step.at.clone());
-                    inverse.push(Step { print: unmatchable(), ..step });
+                    inverse.push(Step { print: unmatchable(), ident: None, ..step });
+                }
+                Err(e) if e.kind() == ErrorKind::Other && e.get_ref().is_some_and(|r| r.is::<Replaced>()) => {
+                    out.errors.push(format!("“{name}” was replaced just now, so it was left alone"));
+                    left.push(step);
                 }
                 Err(e) if making && e.kind() == ErrorKind::AlreadyExists => {
                     out.errors.push(format!("“{name}” was taken just now, so the link wasn't made again"));
@@ -284,18 +288,108 @@ impl Worker<'_> {
             Some(Diff::Gone) => return Err(format!("{name} was moved or deleted")),
             Some(d) => return Err(d.say(&name, step.print.kind)),
         }
+        if step.ident.is_none() || crate::fs::ident_at(&step.at) != step.ident {
+            return Err(format!("{name} was replaced by another item with the same name"));
+        }
         if !link.shortcut && std::fs::read_link(&step.at).ok().as_deref() != Some(link.target.as_path()) {
             return Err(format!("{name} points somewhere else now"));
         }
         Ok(())
     }
 
-    /// Removes a link Arbor made (the link itself; never what it points at).
-    fn remove_link(&self, at: &Path, link: &Link) -> io::Result<()> {
-        // A Windows link to a folder is removed as a folder (`RemoveDirectoryW`), which removes
-        // the link, not the folder's contents.
-        self.remove_one(at, cfg!(windows) && link.dir && !link.shortcut)
+    /// Removes a link Arbor made (the link itself; never what it points at), only while it's
+    /// still that object with that target, checked right before through what removes it
+    /// ([`remove_if_still`]): a link put at its name since the check, even at the same inode with
+    /// the same times and target, is left alone.
+    fn remove_link(&self, step: &Step, link: &Link) -> io::Result<()> {
+        #[cfg(test)]
+        if self.hooks.fail_remove.as_ref().is_some_and(|f| f(&step.at)) {
+            return Err(io::Error::new(ErrorKind::PermissionDenied, "permission denied"));
+        }
+        let want = step.ident.ok_or_else(|| io::Error::other(Replaced))?;
+        remove_if_still(&step.at, want, link, &step.print)
     }
+}
+
+/// What [`remove_if_still`] says when the item isn't the one it was told to remove.
+#[derive(Debug)]
+struct Replaced;
+
+impl std::fmt::Display for Replaced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("it was replaced")
+    }
+}
+
+impl std::error::Error for Replaced {}
+
+/// The undo step for a link just made at `at`: its fingerprint and object identity now.
+fn made_step(at: &Path, link: Link) -> io::Result<Step> {
+    let m = at.symlink_metadata()?;
+    let ident = crate::fs::ident_of(at, &m);
+    Ok(Step { print: Print::of(at, &m), at: at.to_path_buf(), back: None, split: None, link: Some(link), ident })
+}
+
+/// Unix: removes the link at `at` only while it's `want` pointing at the link's target. The
+/// folder is opened once; the identity and target are read relative to it (`statx`,
+/// `readlinkat`) and the link removed relative to it (`unlinkat`), so no path is resolved again
+/// between the check and the removal.
+#[cfg(unix)]
+fn remove_if_still(at: &Path, want: crate::fs::Ident, link: &Link, _: &Print) -> io::Result<()> {
+    use crate::dirfd;
+    let (Some(parent), Some(name)) = (at.parent(), at.file_name()) else { return Err(io::Error::from(ErrorKind::InvalidInput)) };
+    let dir = dirfd::open_dir(libc::AT_FDCWD, &crate::ffi::cstr(parent)?, true)?;
+    let name = crate::ffi::cstr(name)?;
+    if dirfd::ident_at(&dir, &name)? != want {
+        return Err(io::Error::other(Replaced));
+    }
+    if !link.shortcut && dirfd::read_link_at(&dir, &name)? != link.target {
+        return Err(io::Error::other(Replaced));
+    }
+    dirfd::unlink_at(&dir, &name)
+}
+
+/// Windows: removes the link at `at` only while it's `want` (with its target, or a shortcut's
+/// size and time). The link itself is opened (not what it points at) for deletion, sharing no
+/// delete access, so nothing can rename, replace or remove it while it's held; it's checked
+/// through that handle and then marked for deletion through it (`FileDispositionInfo`), so
+/// nothing is looked up by name again in between.
+#[cfg(windows)]
+fn remove_if_still(at: &Path, want: crate::fs::Ident, link: &Link, print: &Print) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FileDispositionInfo, SetFileInformationByHandle,
+    };
+    let f = std::fs::OpenOptions::new()
+        .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(at)?;
+    if crate::fs::ident_of_file(&f) != Some(want) {
+        return Err(io::Error::other(Replaced));
+    }
+    if link.shortcut {
+        let m = f.metadata()?;
+        if m.len() != print.size || m.modified().ok() != print.mtime {
+            return Err(io::Error::other(Replaced));
+        }
+    } else if std::fs::read_link(at)? != link.target {
+        // Read by name, but the name can't lead elsewhere while the handle holds it unshared.
+        return Err(io::Error::other(Replaced));
+    }
+    let info = FILE_DISPOSITION_INFO { DeleteFile: 1 };
+    // SAFETY: an open handle with DELETE access, and a disposition record as long as we say.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            f.as_raw_handle(),
+            FileDispositionInfo,
+            (&info as *const FILE_DISPOSITION_INFO).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    };
+    if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
 }
 
 /// The shell's `IShellLinkW` and `IPersistFile`, by hand (windows-sys has no COM interfaces).

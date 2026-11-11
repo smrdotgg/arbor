@@ -160,6 +160,27 @@ fn handle_raw(dir: RawFd, name: &CStr, flags: libc::c_int) -> Option<Vec<u8>> {
     }
 }
 
+/// Where the link `name` in open folder `dir` points (`readlinkat`: no path re-resolved).
+pub fn read_link_at(dir: &OwnedFd, name: &CStr) -> io::Result<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut cap = 256;
+    loop {
+        let mut buf = vec![0u8; cap];
+        // SAFETY: `name` is NUL-terminated and `buf` is as long as we say.
+        let n = unsafe { libc::readlinkat(dir.as_raw_fd(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let n = n as usize;
+        // Filled to the brim: it may have been cut short.
+        if n < cap {
+            buf.truncate(n);
+            return Ok(std::ffi::OsString::from_vec(buf).into());
+        }
+        cap *= 4;
+    }
+}
+
 /// Removes `name` from open folder `dir` (not a folder: `unlinkat` without `AT_REMOVEDIR`).
 pub fn unlink_at(dir: &OwnedFd, name: &CStr) -> io::Result<()> {
     // SAFETY: `name` is NUL-terminated and `dir` an open folder.
