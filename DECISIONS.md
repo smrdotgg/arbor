@@ -87,6 +87,13 @@ Format: date · decision · why · how to undo.
     inside, devices, sockets, FIFOs, links on Windows. Its temporary file is
     `.<name>.arbor-<pid>-<n>.part` beside the items (shown on Windows while it runs). Undo:
     `ops/archive/mod.rs`.
+  - **A `.tar.gz`'s gzip stream (after the re-review):** read member by member, each member's
+    CRC and length checked; it ends with the member holding the tar's end (nothing after it is
+    decompressed or looked at, so trailing zero padding, which gzip, tar and Python accept, and
+    even a damaged extra member, don't refuse it); zero bytes after the last member while the
+    tar still goes on end the stream, and data after zero padding is damage. A tar's running
+    total is held to the disk's room while it's listed. Undo: `archive::tar::Gz`, `list_from`'s
+    `free`.
   - **With multiple windows (main's aeeed9e):** Compress and Extract Here start through the
     app's one operation slot like every operation, and their outcome refreshes every window
     showing the folder, by identity. What they make is registered for the leftovers record the
