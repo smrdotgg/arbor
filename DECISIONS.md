@@ -9,6 +9,10 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-11 · feature/columns-status merges without its real-Mac QA (owner's call).** The Mac
+  may be off; the owner chose to merge on CI (macOS runner included) plus the GPT-6.1 Sol review
+  and run the Codex Mac pass on the next round, together with updating /Applications/Arbor.app.
+
 - **2026-11-11 · Compress and Extract Here (`feature/archives`; Review: Open, the folder made,
   the bomb limits, the level).**
   - **No zip crate: Arbor's own ZIP reader and writer and tar reader** (`src/archive/`, about
