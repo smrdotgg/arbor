@@ -690,9 +690,11 @@ mod tests {
         run(&mut s, Cmd::CopyToOther); // A's f0 into B
         run(&mut s, Cmd::OtherPane);
         s.go_to(c.clone()); // B's pane heads for C
+        // Until it has finished (a progress report also makes `poll_job` say so).
         let until = Instant::now() + Duration::from_secs(10);
-        while !s.poll_job() && Instant::now() < until {
+        while s.owns_job() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(2));
+            s.poll_job();
         }
         assert!(!s.owns_job());
         assert_eq!(s.pending_path(), Some(c.as_path()), "still on its way to C");
