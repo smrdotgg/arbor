@@ -57,6 +57,11 @@ Format: date · decision · why · how to undo.
     made again at the freed inode (ext4) for the one listed, so New File, New Folder, a paste
     and a drop went into it. Never the ctime, which a folder's every new entry changes. Every
     "same folder?" check uses it. Undo: `noclobber::dir_id`.
+  - **New File and New Folder clear a filter, and rename only what they made** (after review):
+    a filter hiding "untitled.txt" left another row selected, and the rename opened on it. The
+    active pane's filter (or go-to text) is cleared when the item is made, as Finder shows a new
+    item whatever the search, and the rename starts only when the selected row is the item made,
+    by name and identity; otherwise none starts. Undo: `State::rename_made`.
   - **New Folder now checks the folder's identity too**, as New File does: one put at the
     folder's path since it was listed makes nothing ("Nothing was made: … is another folder
     now"). A folder whose identity isn't known yet (still being read) is used as before. Undo:

@@ -1000,3 +1000,65 @@ fn originals_resolve_relative_targets() {
     assert_eq!(lexical(Path::new("/a/b/../c/./d")), Path::new("/a/c/d"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The review's case: with a filter that hides "untitled.txt" ("rep" shows report.txt), New
+/// File used to open the rename on report.txt. The filter is cleared so the new file shows,
+/// and the rename starts on it, in every view.
+#[test]
+fn new_file_under_a_filter_renames_the_new_file_not_another() {
+    for (i, view) in [Cmd::AsList, Cmd::AsIcons, Cmd::AsTiles, Cmd::AsColumns].into_iter().enumerate() {
+        let d = folder(&format!("new-file-filter-{i}"), 0);
+        std::fs::write(d.join("report.txt"), "r").unwrap();
+        std::fs::write(d.join("notes.md"), "n").unwrap();
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        let mut tx = Tx::default();
+        if view != Cmd::AsList {
+            s.run(view, &mut tx);
+            settle_all(&mut s);
+        }
+        s.cur_mut().type_filter("rep");
+        assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("report.txt"));
+        s.run(Cmd::NewFile, &mut tx);
+        finish_job(&mut s);
+        assert!(d.join("untitled.txt").is_file());
+        assert_eq!(s.cur().filter, "", "the filter that hid it is cleared ({view:?})");
+        assert_eq!(s.rename.as_ref().map(|r| r.os.clone()), Some("untitled.txt".into()), "{view:?}");
+        assert_eq!(s.cur().selected().map(|e| e.name.as_str()), Some("untitled.txt"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// The new file moved away before the reload lands: no rename starts at all (it used to open
+/// on whatever row was selected instead).
+#[test]
+fn new_file_starts_no_rename_on_a_row_that_isnt_it() {
+    let d = folder("new-file-gone", 0);
+    std::fs::write(d.join("a.txt"), "a").unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    // The disk changes after the file is made and before the operation lands (which asks for
+    // the reload), so the reload reads the change.
+    let made_then = |s: &mut State, change: &dyn Fn()| {
+        s.run(Cmd::NewFile, &mut Tx::default());
+        let until = Instant::now() + Duration::from_secs(10);
+        while !s.job.as_ref().is_some_and(|j| j.finished()) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        change();
+        wait_job(s);
+        assert!(s.is_loading(), "the reload is on its way");
+        settle_all(s);
+    };
+    made_then(&mut s, &|| std::fs::rename(d.join("untitled.txt"), d.join("moved.txt")).unwrap());
+    assert!(s.rename.is_none(), "renaming {:?}", s.rename.as_ref().map(|r| r.os.clone()));
+    // Another file at its name meanwhile isn't it either (made past the clock tick the new
+    // file was made in, so its birth time is its own).
+    made_then(&mut s, &|| {
+        std::fs::remove_file(d.join("untitled.txt")).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(d.join("untitled.txt"), "someone else's").unwrap();
+    });
+    assert!(s.rename.is_none(), "renaming {:?}", s.rename.as_ref().map(|r| r.os.clone()));
+    let _ = std::fs::remove_dir_all(&d);
+}

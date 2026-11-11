@@ -363,6 +363,9 @@ pub struct Outcome {
     /// still showing the first take the second ([`reidentified`]), so the next action on them,
     /// before their folder is read again, doesn't take Arbor's change for a replacement.
     pub reidentified: Vec<(crate::fs::Ident, crate::fs::Ident)>,
+    /// New File and New Folder: what they made, as an identity (read right after), so the
+    /// rename starts on that item and no other row.
+    pub made: Option<crate::fs::Ident>,
 }
 
 /// `id` as Arbor's own action left it, from an outcome's [`Outcome::reidentified`]; `id` when
@@ -385,6 +388,11 @@ impl Running {
     }
     pub fn cancel(&self) {
         self.progress.cancel.store(true, Relaxed);
+    }
+    /// Tests: whether the outcome is in, without taking it.
+    #[cfg(test)]
+    pub fn finished(&self) -> bool {
+        self.done.lock().is_ok_and(|d| d.is_some())
     }
 }
 

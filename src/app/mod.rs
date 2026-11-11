@@ -107,6 +107,9 @@ pub struct State {
     /// while `note` still says it.
     pub alert: Option<String>,
     pub rename: Option<Rename>,
+    /// The item New File or New Folder just made, and its identity when it could be read: its
+    /// rename starts once a reload lists it selected, and only on it (`State::rename_made`).
+    pub(crate) made: Option<(PathBuf, Option<fs::Ident>)>,
     /// The running file operation, if any.
     pub job: Option<ops::Running>,
     pub(crate) clip: Option<Clip>,
@@ -385,6 +388,7 @@ impl State {
             note: config.summary().or(note),
             alert: None,
             rename: None,
+            made: None,
             job: None,
             clip: None,
             paste_reqs: Vec::new(),
@@ -955,7 +959,7 @@ impl State {
                     }
                     tx.set_title(title(&self.cur().cwd));
                     if p.rename {
-                        self.start_rename();
+                        self.rename_made();
                     }
                 }
             }
@@ -976,6 +980,18 @@ impl State {
         let on = self.show_hidden;
         for p in &mut self.panes {
             p.f.set_hidden(on);
+        }
+    }
+
+    /// Starts the inline rename of what New File or New Folder made, now that a reload has
+    /// listed it: only when the selected row is that item, by name and identity. Nothing else
+    /// is ever renamed in its place (it was moved away, or something else took its name).
+    fn rename_made(&mut self) {
+        let Some((path, id)) = self.made.take() else { return };
+        let f = self.cur();
+        let ours = f.selected().is_some_and(|e| f.cwd.join(&e.os) == path && (id.is_none() || e.id.is_none() || e.id == id));
+        if ours {
+            self.start_rename();
         }
     }
 

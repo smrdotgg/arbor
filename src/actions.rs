@@ -400,12 +400,20 @@ impl State {
         self.rename = None;
         self.refresh(&out.folders, &out.results, &out.canon);
         // A new folder or file: renamed once it's listed in the active pane, unless the user
-        // picked something else before then (`State::land`).
+        // picked something else before then (`State::land`), and only that item
+        // (`State::rename_made`). A filter that would hide it is cleared, so it shows.
+        self.made = None;
         if (verb == ops::NEW_FOLDER || verb == ops::NEW_FILE)
-            && let Some(made) = out.results.first()
+            && let Some(made) = out.results.first().cloned()
             && let Some(p) = self.cur_mut().pending.as_mut().filter(|p| Some(p.path.as_path()) == made.parent() && p.nav == Nav::Reload)
         {
             p.rename = true;
+            let f = self.cur_mut();
+            if !f.filter.is_empty() {
+                f.filter.clear();
+                f.goto = false;
+            }
+            self.made = Some((made, out.made));
         }
         true
     }

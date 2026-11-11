@@ -195,6 +195,7 @@ impl<'a> Worker<'a> {
                 quiet: false,
                 canon: Vec::new(),
                 reidentified: Vec::new(),
+                made: None,
                 folders: Vec::new(),
             };
         }
@@ -244,6 +245,7 @@ impl<'a> Worker<'a> {
             canon,
             folders,
             reidentified: Vec::new(),
+            made: None,
         };
         match op {
             Op::Copy { sources, dest } => {
@@ -371,6 +373,7 @@ impl<'a> Worker<'a> {
                 out.quiet = true;
                 match new_folder(&dir, "untitled folder") {
                     Ok(path) => {
+                        out.made = crate::fs::ident_at(&path);
                         out.undo = Undo::new_folder(path.clone());
                         out.results.push(path);
                     }
@@ -382,6 +385,7 @@ impl<'a> Worker<'a> {
                 out.quiet = true;
                 match self.new_file(&dir) {
                     Ok(path) => {
+                        out.made = crate::fs::ident_at(&path);
                         out.undo = Undo::new_file(path.clone());
                         if out.undo.is_none() {
                             out.said = Some(format!("Made “{}”, but it can't be undone: it couldn't be read right after", name_of(&path)));
@@ -444,6 +448,7 @@ impl<'a> Worker<'a> {
                 quiet: false,
                 canon: Vec::new(),
                 reidentified: Vec::new(),
+                made: None,
                 folders: Vec::new(),
             };
         }
