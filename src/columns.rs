@@ -288,10 +288,15 @@ pub struct Columns {
     pub(crate) hits: std::cell::RefCell<Vec<Hit>>,
 }
 
-/// A column on screen: its rect, and which it is (`None`: the active one, the folder's list).
+/// A column on screen as it was laid out: its rect, and which column it was then, by its
+/// element's number (which moves with its listing when a column becomes the active one or
+/// stops being it) and its folder's path and identity. A drop resolves against that column,
+/// wherever its listing is now, never against whichever folder is active by then.
 pub(crate) struct Hit {
     pub rect: [f32; 4],
-    pub uid: Option<u64>,
+    pub uid: u64,
+    pub path: PathBuf,
+    pub dir_id: Option<crate::noclobber::FileId>,
 }
 
 impl Columns {
@@ -792,24 +797,29 @@ impl State {
         let inside = |[x, y, w, h]: [f32; 4]| at[0] >= x && at[0] < x + w && at[1] >= y && at[1] < y + h;
         let hit = hits.iter().find(|h| inside(h.rect))?;
         let row = |scroll: f32| ((at[1] - hit.rect[1] + scroll) / crate::view::ROW_H).floor();
-        match hit.uid {
-            None => {
-                let r = row(f.scroll.get());
-                let e = (r >= 0.0).then(|| f.visible.get(r as usize)).flatten().map(|&k| &f.entries[k as usize]);
-                Some(match e {
-                    Some(e) if e.is_dir => (f.row_dest(e), Some(e.os.clone())),
-                    _ => (f.dest(), None),
-                })
+        // The column it was, wherever its listing is now, while it's still that folder.
+        let same = |path: &Path, id: Option<crate::noclobber::FileId>| {
+            path == hit.path && (hit.dir_id.is_none() || id.is_none() || id == hit.dir_id)
+        };
+        if f.col_uid == Some(hit.uid) {
+            // The folder's own list (the active column now, whichever it was then).
+            if !same(&f.cwd, f.dir_id) {
+                return None;
             }
-            Some(uid) => {
-                let c = cols.by_uid(uid)?;
-                let r = row(c.scroll.get());
-                let e = (r >= 0.0 && c.listed()).then(|| c.entry(r as usize)).flatten();
-                Some(match e {
-                    Some(e) if e.is_dir => (c.row_dest(e), None),
-                    _ => (c.dest(), None),
-                })
-            }
+            let r = row(f.scroll.get());
+            let e = (r >= 0.0).then(|| f.visible.get(r as usize)).flatten().map(|&k| &f.entries[k as usize]);
+            Some(match e {
+                Some(e) if e.is_dir => (f.row_dest(e), Some(e.os.clone())),
+                _ => (f.dest(), None),
+            })
+        } else {
+            let c = cols.by_uid(hit.uid).filter(|c| same(&c.path, c.dir_id))?;
+            let r = row(c.scroll.get());
+            let e = (r >= 0.0 && c.listed()).then(|| c.entry(r as usize)).flatten();
+            Some(match e {
+                Some(e) if e.is_dir => (c.row_dest(e), None),
+                _ => (c.dest(), None),
+            })
         }
     }
 

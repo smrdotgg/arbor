@@ -811,8 +811,10 @@ impl State {
                 let moved = old != f.cwd;
                 let left_from = (moved && f.cols.is_some()).then(|| old.clone());
                 if moved {
-                    // Another folder: its visible rows are Rune's to say.
+                    // Another folder: its visible rows are Rune's to say, and no row of it is
+                    // under a drag yet (a name is no row of another folder).
                     f.grid_rows = None;
+                    f.drop_target = None;
                 }
                 match p.nav {
                     Nav::New => {

@@ -35,15 +35,16 @@ pub(super) fn columns(s: &State, f: &Folder, c: Ctx, cx: &mut Cx<State>, active:
     let hits = shown
         .clone()
         .filter_map(|k| {
-            let (key, uid) = if k < active_at {
-                (cols.left[k].key(), Some(cols.left[k].uid))
+            let (key, uid, path, dir_id) = if k < active_at {
+                let c = &cols.left[k];
+                (c.key(), c.uid, c.path.clone(), c.dir_id)
             } else if k == active_at {
-                (f.list_key(), None)
+                (f.list_key(), f.col_uid?, f.cwd.clone(), f.dir_id)
             } else {
-                let r = cols.right.as_ref()?;
-                (r.key(), Some(r.uid))
+                let c = cols.right.as_ref()?;
+                (c.key(), c.uid, c.path.clone(), c.dir_id)
             };
-            Some(crate::columns::Hit { rect: cx.layout_with(&key, |r| r)?, uid })
+            Some(crate::columns::Hit { rect: cx.layout_with(&key, |r| r)?, uid, path, dir_id })
         })
         .collect();
     cols.hits.replace(hits);

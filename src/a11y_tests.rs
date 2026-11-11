@@ -2018,3 +2018,45 @@ fn a_drag_between_columns_moves_the_file() {
     assert!(d.join("Work/plan.txt").exists() && !d.join("Docs/Work").exists(), "{:?}", rt.state.note);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A drag whose press, moves and release all come before the next frame: its press makes Docs
+/// the active column, so the column the release lands on was the active one when the columns
+/// were last laid out, and is a column beside it now. The target is the column the pointer is
+/// over as it was drawn (here the root's, its Docs row), never "whatever is active now" (it
+/// moved the file into Docs/Work, the row at that height in Docs).
+#[test]
+fn a_drop_lands_in_the_column_it_was_drawn_as() {
+    let d = nested("unframed-drop");
+    let mut rt = runtime(&d);
+    rt.update(|s, _| s.col_w = 200.0);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    let from = row_box(&mut rt, "readme.txt");
+    let onto = row_box(&mut rt, "Folder Docs");
+    let start = (from[0] + 30.0, from[1] + from[3] * 0.5);
+    let end = (onto[0] + 30.0, onto[1] + onto[3] * 0.5);
+    let pane = rt.state.cur().id;
+    assert_eq!(rt.state.column_drop_at(pane, [end.0, end.1]).unwrap().0.path, d.join("Docs"));
+    rt.pointer_move(start.0, start.1);
+    rt.pointer_down(start.0, start.1);
+    rt.pointer_move(start.0 - 10.0, start.1 + 5.0);
+    rt.pointer_move(end.0, end.1);
+    rt.pointer_up(end.0, end.1);
+    rt.frame(0.0);
+    until(&mut rt, |s| s.job.is_none());
+    assert!(d.join("Docs/readme.txt").exists(), "dropped on Docs, its own folder: nothing moves ({:?})", rt.state.note);
+    assert!(!d.join("Docs/Work/readme.txt").exists(), "never into the row at that height in the folder made active");
+    // Without the drop: right after the press, the root's Docs row is still where it lands.
+    let mut rt = runtime(&d);
+    rt.update(|s, _| s.col_w = 200.0);
+    run(&mut rt, Cmd::AsColumns);
+    settle_columns(&mut rt);
+    let from = row_box(&mut rt, "readme.txt");
+    let start = (from[0] + 30.0, from[1] + from[3] * 0.5);
+    rt.update(move |s, tx| {
+        s.activate_column(pane, &d.join("Docs"), Some(&"readme.txt".into()), tx);
+    });
+    let at = rt.state.column_drop_at(rt.state.cur().id, [end.0, end.1]).map(|(dest, row)| (dest.path, row));
+    assert_eq!(at, Some((rt.state.cur().cwd.parent().unwrap().join("Docs"), None)), "the root's Docs row, before any frame");
+    let _ = start;
+}
