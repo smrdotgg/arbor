@@ -98,6 +98,7 @@ impl Worker<'_> {
         let mounts = self.mounts().clone();
         let total: u64 = keep.iter().map(|s| self.size_of(s, &crate::mounts::Fence::below(s, &mounts))).sum();
         if self.cancelled() {
+            out.said = Some(format!("Cancelled: “{name}” wasn't made"));
             return;
         }
         self.p.bytes_total.store(total, Relaxed);

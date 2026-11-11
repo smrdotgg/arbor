@@ -146,10 +146,19 @@ mod imp {
                 }
                 let fd = match open_dir(parent, &c, false) {
                     Ok(fd) => fd,
-                    Err(e) if matches!(e.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP)) => {
-                        return Err(not_a_folder(&self.path(&dirs[..=i])));
+                    Err(e) => {
+                        // Made but not opened: still recorded, so the cleanup removes it.
+                        let path = self.path(&dirs[..=i]);
+                        if fresh && let Ok(meta) = path.symlink_metadata() {
+                            let id = crate::noclobber::file_id(&path, &meta);
+                            self.made.push(Made { path: path.clone(), dir: true, meta, id });
+                        }
+                        return Err(if matches!(e.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP)) {
+                            not_a_folder(&path)
+                        } else {
+                            Error::Io(e)
+                        });
                     }
-                    Err(e) => return Err(Error::Io(e)),
                 };
                 if fresh {
                     let f = File::from(fd.try_clone()?);
