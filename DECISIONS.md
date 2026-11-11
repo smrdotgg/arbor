@@ -59,10 +59,14 @@ Format: date · decision · why · how to undo.
   - **Status bar: "3 selected · 4.2 MB + 2 folders · 120 items · 84 GB free"**, the selection
     part only with two or more selected (one item's size is on its row). **The free space is
     left out while a note or progress shows (Review)**: the note keeps its room; the counts
-    stay as they always did. Free space is one `statvfs`/`GetDiskFreeSpaceExW` on a `Latest`
-    worker per folder, asked when the folder's read is asked (so it usually lands before the
-    listing and shows in its frame), and again after any file operation, for every pane; never
-    on a timer. Not shown in a search's results (they can cross disks). The selection's total
+    stay as they always did. Free space is one `statvfs`/`GetDiskFreeSpaceExW`, asked when a
+    listing lands (the volume is then known from its identity) and after any file operation,
+    for every pane; never on a timer. **Not on Rune's pool (after review)**: a `statvfs` can't
+    be stopped and a dead network volume never answers, so four hung ones starved every listing.
+    It runs on a thread per volume with a query in flight (`volinfo.rs`), below the window's
+    priority; a query for a volume still stuck waits behind it (no second thread), and a
+    folder's newer query supersedes its older one. The cost: the free space shows a frame after
+    the listing rather than in its frame. Not shown in a search's results (they can cross disks). The selection's total
     is worked out once per selection and listing (`Folder::picked_size`), not every frame.
     Undo: `view::status`, `Folder::{ask_free, picked_size}`.
   - **A test fixed, not the app**: `a_drop_on_a_column_refuses_a_replaced_folder` dropped

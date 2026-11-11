@@ -811,9 +811,28 @@ pub(crate) mod free_reads {
 
     static N: Mutex<Option<HashMap<PathBuf, Vec<ThreadId>>>> = Mutex::new(None);
 
+    /// Reads held (a hung volume) until their sender sends or is dropped.
+    static GATES: Mutex<Vec<(PathBuf, std::sync::mpsc::Receiver<()>)>> = Mutex::new(Vec::new());
+
     pub(super) fn count(p: &Path) {
-        let mut n = N.lock().unwrap_or_else(|e| e.into_inner());
-        n.get_or_insert_with(HashMap::new).entry(p.to_path_buf()).or_default().push(std::thread::current().id());
+        {
+            let mut n = N.lock().unwrap_or_else(|e| e.into_inner());
+            n.get_or_insert_with(HashMap::new).entry(p.to_path_buf()).or_default().push(std::thread::current().id());
+        }
+        let gate = {
+            let mut g = GATES.lock().unwrap_or_else(|e| e.into_inner());
+            g.iter().position(|(q, _)| q == p).map(|i| g.remove(i))
+        };
+        if let Some((_, go)) = gate {
+            let _ = go.recv();
+        }
+    }
+
+    /// The next read of `p`'s free space hangs until the returned sender sends (or drops).
+    pub(crate) fn hold(p: &Path) -> std::sync::mpsc::Sender<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        GATES.lock().unwrap_or_else(|e| e.into_inner()).push((p.to_path_buf(), rx));
+        tx
     }
 
     pub(crate) fn of(p: &Path) -> Vec<ThreadId> {

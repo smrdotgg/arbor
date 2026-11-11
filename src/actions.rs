@@ -557,8 +557,7 @@ impl State {
         // reading its folder again asked already; a newer request replaces an older one).
         for p in &mut self.panes {
             if p.f.pending.is_none() && !p.f.searching() {
-                let here = p.f.cwd.clone();
-                p.f.ask_free(here);
+                p.f.ask_free();
             }
         }
     }

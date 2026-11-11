@@ -653,7 +653,7 @@ impl State {
         }
         for p in &self.panes {
             p.f.loader.set_waker(waker.clone());
-            p.f.free_loader.set_waker(waker.clone());
+            p.f.free_inbox.set_waker(waker.clone());
         }
         self.settings_loader.set_waker(waker.clone());
         self.shared.set_waker(self.win, waker.clone());
@@ -690,9 +690,8 @@ impl State {
         // The first folder's volume's free space, when its listing was in before the window
         // (the startup read): one call on a worker, now that its answer can wake the window.
         for p in &mut self.panes {
-            if p.f.pending.is_none() && p.f.free_asked.is_none() && p.f.free.is_none() {
-                let here = p.f.cwd.clone();
-                p.f.ask_free(here);
+            if p.f.pending.is_none() && p.f.free.is_none() {
+                p.f.ask_free();
             }
         }
         // A window opening as columns (`view.default`) gets them from its first frame.
@@ -864,14 +863,11 @@ impl State {
                 changed |= self.land(ix, a, tx);
             }
         }
-        // Free space, read alongside a folder's listing: only an answer for the folder the
-        // active pane shows changes the status bar (one that comes before its listing waits).
+        // Free space, asked when a folder's listing landed: only an answer for the folder the
+        // active pane shows changes the status bar.
         for ix in 0..self.panes.len() {
             let f = &mut self.panes[ix].f;
-            if let Some((path, free)) = f.free_loader.take() {
-                if f.free_asked.as_ref() == Some(&path) {
-                    f.free_asked = None;
-                }
+            if let Some((path, free)) = f.free_inbox.take() {
                 let shown = ix == self.active && path == f.cwd && !f.is_loading();
                 changed |= shown && f.free.as_ref() != Some(&(path.clone(), free));
                 f.free = Some((path, free));
@@ -1160,12 +1156,9 @@ impl State {
                     _ => f.refilter(p.select.first().map(OsString::as_os_str)),
                 }
                 f.anchor = f.sel;
-                // A listing that came without its volume's free space being asked for (the startup
-                // read, a column made active, a second pane): asked for now.
-                if f.free_asked.as_ref() != Some(&f.cwd) && f.free.as_ref().is_none_or(|(at, _)| *at != f.cwd) {
-                    let here = f.cwd.clone();
-                    f.ask_free(here);
-                }
+                // The folder was read: its volume's free space, now that its identity says which
+                // volume it's on (`volinfo.rs`).
+                f.ask_free();
                 if p.nav == Nav::Show {
                     // Where it was when it was hidden (clamped if the folder shrank since).
                     tx.scroll_to_instant(f.list_key(), 0.0, p.scroll);

@@ -1963,8 +1963,7 @@ fn every_drop_refuses_a_replaced_destination() {
     settle_columns(&mut rt);
     let b = row_box(&mut rt, "Folder Work");
     replace(&d, "Docs/Work");
-    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 40.0, b[1] + b[3] * 0.5)));
-    rt.frame(0.0);
+    drop_and_wait(&mut rt, &d.join("top.txt"), (b[0] + 40.0, b[1] + b[3] * 0.5));
     refused(&mut rt, &d, "Docs/Work", "a folder row in a column");
     // The active column's background.
     key(&mut rt, Key::Right, false);
@@ -1972,8 +1971,7 @@ fn every_drop_refuses_a_replaced_destination() {
     assert_eq!(rt.state.cur().cwd, d.join("Docs"));
     let b = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
     replace(&d, "Docs");
-    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 40.0, b[1] + 150.0)));
-    rt.frame(0.0);
+    drop_and_wait(&mut rt, &d.join("top.txt"), (b[0] + 40.0, b[1] + 150.0));
     refused(&mut rt, &d, "Docs", "the active column");
     let _ = std::fs::remove_dir_all(&d);
     // A folder row in the list and in the icon view, and the list's background.
@@ -1983,8 +1981,7 @@ fn every_drop_refuses_a_replaced_destination() {
         run(&mut rt, view);
         let row = rect_of(&rt, "f:Docs").unwrap();
         replace(&d, "Docs");
-        rt.drop_files(vec![d.join("top.txt")], Some((row[0] + 20.0, row[1] + row[3] * 0.5)));
-        rt.frame(0.0);
+        drop_and_wait(&mut rt, &d.join("top.txt"), (row[0] + 20.0, row[1] + row[3] * 0.5));
         refused(&mut rt, &d, "Docs", &format!("a folder row, {view:?}"));
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -1995,8 +1992,7 @@ fn every_drop_refuses_a_replaced_destination() {
     until(&mut rt, |s| !s.cur().is_loading());
     let list = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
     replace(&d, "Docs");
-    rt.drop_files(vec![d.join("top.txt")], Some((list[0] + 100.0, list[1] + list[3] - 40.0)));
-    rt.frame(0.0);
+    drop_and_wait(&mut rt, &d.join("top.txt"), (list[0] + 100.0, list[1] + list[3] - 40.0));
     refused(&mut rt, &d, "Docs", "the list's background");
     let _ = std::fs::remove_dir_all(&d);
     // A row dragged onto the other pane of a split.

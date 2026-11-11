@@ -52,6 +52,7 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `complete.rs` | Tab completion in go-to mode |
 | | `info.rs`, `openwith/` | Get Info (and its streaming total); Open With (per platform, `xdg.rs`) |
 | | `sidebar.rs`, `volumes.rs` | Favorites and their file; Locations and Eject |
+| | `volinfo.rs` | The status bar's free space: a thread per volume, one query in flight each |
 | | `listcols.rs` | The list's columns after the name: which show, their widths, how they fit a pane, `columns.toml` and its writer, the header's drag |
 | Platform glue | `handler/` | Making Arbor the default for folders, and restoring (`linux.rs`, `windows.rs`, `mac.rs`) |
 | | `incoming/` | Folders other apps send (`mac.rs` Apple events, `linux.rs` D-Bus, `windows.rs` a pipe) |
@@ -69,9 +70,7 @@ Nothing runs in the background unless the user did something, and nothing polls.
   folder (`State::new_window`). The first window waits at most
   `FIRST_PAINT_WAIT` (8 ms) for it, then lands it in `poll`.
 - **`rune::Latest` workers**: Rune's shared pool (≤ 4 threads) runs every latest-wins request:
-  folder listings (`Folder::loader`, and each column's of the column view), the status bar's
-  free space (`Folder::free_loader`, one `statvfs` asked with each listing and after an
-  operation), settings reload, typed-path checks, completion, Get
+  folder listings (`Folder::loader`, and each column's of the column view), settings reload, typed-path checks, completion, Get
   Info's metadata, Open With's list, batch rename's reads and plans, search rechecks, volume
   lists, eject, launching apps. An older answer never lands over a newer one.
 - **Preview worker** (`arbor-preview`, `preview::Worker`): one thread, started by the first
@@ -90,6 +89,11 @@ Nothing runs in the background unless the user did something, and nothing polls.
   focused last (`Shared::live_waker`): nothing shared holds a window's own waker or handle
   (the operation's waker is moved to its new owner, `Shared::own_job`). Each registers with
   `persist::at_exit` and gets up to 100 ms when Arbor quits (`persist::drain_at_exit`).
+- **Free space** (`arbor-volume`, `volinfo.rs`): the status bar's `statvfs`, never on Rune's
+  pool (it can't be stopped, and a dead network volume never answers). A thread per volume with
+  a query in flight, below the window's priority, ending when that volume has nothing waiting;
+  one query in flight per volume (a stuck one gets no second thread), newer ones superseding a
+  folder's older ones. Asked when a listing lands and after a file operation.
 - **Get Info's total** (`arbor-info`): one walk per request, waking the window at most every
   30 ms.
 - **Listeners** (not in tests or the bench): `incoming::listen` (macOS open-documents events,

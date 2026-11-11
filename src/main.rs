@@ -59,6 +59,7 @@ mod tiles;
 mod timing;
 mod trash;
 mod view;
+mod volinfo;
 mod volumes;
 mod window;
 

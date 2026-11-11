@@ -1405,7 +1405,8 @@ fn free_space_is_read_off_the_window_thread_and_not_while_idle() {
     // A file operation reads it again (here with the folder's reload).
     s.new_folder();
     finish_job(&mut s);
-    until(&mut s, &|s| s.cur().free_asked.is_none());
+    let n = after_read.len();
+    until(&mut s, &|_| crate::fs::free_reads::of(&d).len() > n);
     let after_op = reads();
     assert!(after_op.len() > after_read.len() && !after_op.contains(&me), "{after_op:?}");
     for _ in 0..50 {
@@ -1413,4 +1414,37 @@ fn free_space_is_read_off_the_window_thread_and_not_while_idle() {
         s.poll(&mut Tx::default());
     }
     assert_eq!(reads().len(), after_op.len());
+}
+
+/// Free-space reads never take the listings' workers: a `statvfs` on a dead network volume
+/// never returns and can't be stopped. With every folder's free-space read hung, each folder
+/// still lists (they ran on Rune's four shared workers, so four hung reads starved every
+/// listing after them).
+#[test]
+fn hung_free_space_reads_never_hold_up_listings() {
+    let dirs: Vec<PathBuf> = (0..7).map(|i| folder(&format!("hung-free-{i}"), 1)).collect();
+    let gates: Vec<_> = dirs.iter().map(|d| crate::fs::free_reads::hold(d)).collect();
+    let mut s = state_in(&dirs[0]);
+    settle_all(&mut s);
+    for d in dirs.iter().cycle().skip(1).take(8) {
+        s.go(d.clone(), Nav::New, None);
+        let t = Instant::now();
+        while s.is_loading() && t.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(1));
+            s.poll(&mut Tx::default());
+        }
+        assert!(!s.is_loading(), "{} wasn't listed: free-space reads held up the listing", d.display());
+        assert_eq!(&s.cur().cwd, d);
+    }
+    // All on one volume: one read in flight for it, however many folders asked (it may wait
+    // behind another test's read on the same disk, so it's waited for).
+    let started = || dirs.iter().map(|d| crate::fs::free_reads::of(d).len()).sum::<usize>();
+    let t = Instant::now();
+    while started() == 0 && t.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(started(), 1, "one hung read per volume, not one per folder");
+    assert_eq!(s.cur().free(), None, "nothing known for the folder yet");
+    drop(gates);
 }

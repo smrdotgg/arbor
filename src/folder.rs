@@ -171,10 +171,10 @@ pub struct Folder {
     /// [`Folder::picked_size`] as last worked out, for the version, picks and selection size
     /// it was worked out at (derived from what's on screen, nothing read from the disk).
     picked_memo: Cell<Option<(PickedAt, Picked)>>,
-    /// The free space read for a folder, and the read in flight ([`Folder::ask_free`]).
+    /// The free space last read for a folder (shown while it's the one on screen), and where
+    /// the answer to the newest query lands ([`Folder::ask_free`], `volinfo.rs`).
     pub(crate) free: Option<(PathBuf, Option<u64>)>,
-    pub(crate) free_asked: Option<PathBuf>,
-    pub(crate) free_loader: Latest<(PathBuf, Option<u64>)>,
+    pub(crate) free_inbox: Arc<crate::volinfo::Inbox>,
 }
 
 /// What a [`Picked`] was worked out at: the listing's version, the picks and the selection's size.
@@ -209,9 +209,9 @@ impl Drop for Folder {
 
 impl Folder {
     pub fn new(id: u64, cwd: PathBuf, sort: Sort, show_hidden: bool, waker: Option<rune::Waker>) -> Folder {
-        let (loader, free_loader) = (Latest::default(), Latest::default());
+        let (loader, free_inbox) = (Latest::default(), Arc::new(crate::volinfo::Inbox::default()));
         if let Some(w) = waker {
-            free_loader.set_waker(w.clone());
+            free_inbox.set_waker(w.clone());
             loader.set_waker(w);
         }
         Folder {
@@ -251,8 +251,7 @@ impl Folder {
             adopted: None,
             picked_memo: Cell::new(None),
             free: None,
-            free_asked: None,
-            free_loader,
+            free_inbox,
         }
     }
 
@@ -361,11 +360,10 @@ impl Folder {
         let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
         let picks = self.picks;
         self.pending = Some(Pending { req, path: path.clone(), nav, select, rename, scroll: 0.0, picks });
-        self.loader.request_opt(path.clone(), move |p| Some(Answer { req, sort, listing: fs::list_until(p, sort, &stop)? }));
-        // Its volume's free space, alongside: one call on another worker, asked after the
-        // listing so it never takes the listing's worker. It usually lands first, in time for
-        // the listing's frame.
-        self.ask_free(path);
+        // An answer about the folder's volume asked before isn't wanted: the new listing asks
+        // again when it lands (`State::land`), with the volume its identity names.
+        self.free_inbox.forget();
+        self.loader.request_opt(path, move |p| Some(Answer { req, sort, listing: fs::list_until(p, sort, &stop)? }));
     }
 
     /// Asks for a fresh read of the folder as it is ([`Nav::Show`]), waiting here at most `wait`
@@ -374,16 +372,7 @@ impl Folder {
     pub(crate) fn request_now(&mut self, wait: std::time::Duration) -> Option<Answer> {
         let req = self.pending.as_ref()?.req;
         let (path, sort, stop) = (self.cwd.clone(), self.sort, self.stop_read());
-        // `bounded::read_waiting`, with the volume's free space asked between starting the
-        // listing and waiting for it (after it, as `request` does).
-        let waiting = crate::bounded::start(&self.loader, !wait.is_zero(), move || {
-            Some(Answer { req, sort, listing: fs::list_until(path, sort, &stop)? })
-        });
-        self.ask_free(self.cwd.clone());
-        if wait.is_zero() {
-            return None;
-        }
-        waiting.until(std::time::Instant::now() + wait)
+        crate::bounded::read_waiting(&self.loader, wait, move || Some(Answer { req, sort, listing: fs::list_until(path, sort, &stop)? }))
     }
 
     /// This tab's lightweight state, to keep while it's hidden.
@@ -469,8 +458,10 @@ impl Folder {
     /// Shows a hidden tab: its path, history, filter and sort at once, an empty list until its
     /// fresh read lands (`request_now`), then its selection and scroll.
     pub fn show(&mut self, m: TabMemo) {
-        // The tab that was here is hidden now: its read or search, if any, stops.
+        // The tab that was here is hidden now: its read or search, if any, stops, and an answer
+        // about its volume isn't wanted.
         self.stop_read();
+        self.free_inbox.forget();
         self.search = None;
         self.tiles = None;
         self.grid_rows = None;
@@ -634,15 +625,13 @@ impl Folder {
         Some(p)
     }
 
-    /// Reads the free space of the volume `path` is on, on a worker ([`fs::free_space`]):
-    /// asked when a folder is read (and after a file operation), never on a timer. A newer
-    /// request replaces one in flight; it lands in `State::poll`.
-    pub(crate) fn ask_free(&mut self, path: PathBuf) {
-        self.free_asked = Some(path.clone());
-        self.free_loader.request(path, |p| {
-            let free = fs::free_space(&p);
-            (p, free)
-        });
+    /// Asks for the free space of the volume the folder on screen is on (`volinfo.rs`: its own
+    /// thread per volume, never the listings' workers): when its listing lands and after a file
+    /// operation, never on a timer. A newer query supersedes this folder's older one; the
+    /// answer lands in `State::poll`.
+    pub(crate) fn ask_free(&mut self) {
+        let volume = crate::volinfo::Volume::of(&self.cwd, self.dir_id);
+        crate::volinfo::ask(&self.free_inbox, volume, self.cwd.clone());
     }
 
     /// The free space read for the folder on screen, if it's in.
