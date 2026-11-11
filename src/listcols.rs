@@ -193,8 +193,10 @@ impl Field {
             Field::Size if e.is_dir => Cow::Borrowed("—"),
             Field::Size => Cow::Owned(fs::fmt_size(e.size)),
             Field::Modified => Cow::Owned(fs::fmt_time(e.mtime_ms, now)),
-            Field::Created if e.born_ms == 0 => Cow::Borrowed("—"),
-            Field::Created => Cow::Owned(fs::fmt_time(e.born_ms, now)),
+            Field::Created => match e.born_ms() {
+                0 => Cow::Borrowed("—"),
+                ms => Cow::Owned(fs::fmt_time(ms, now)),
+            },
             Field::Permissions => Cow::Owned(fs::fmt_mode(e)),
         }
     }

@@ -32,12 +32,14 @@ Format: date · decision · why · how to undo.
     and look up on every navigation). Undo: `Shared::cols` per window instead.
   - **New columns: Extension, Date Created, Permissions (Windows: Attributes). Date Added:
     skipped**: macOS keeps it as a Spotlight attribute (`kMDItemDateAdded`), a call per item, and
-    Windows and Linux have nothing like it. Date Created is the birth time the listing reads
-    already (statx's btime, macOS's birthtime, the Windows record's CreationTime); Permissions
-    is the `lstat`'s `st_mode` (a link's own, as `ls -l` shows it) or the record's attributes.
-    Both are kept in every `Entry` (12 bytes) from metadata already in hand: no call more per
-    entry, so the listing pays nothing for them hidden or shown. **Extension stays though Kind
-    is the extension today** (Kind says "Folder"/"File" too); asked for, off by default, free.
+    Windows and Linux have nothing like it. Date Created is the birth time each entry's
+    identity already holds (statx's btime, macOS's birthtime, the Windows record's
+    CreationTime), read from it, not stored again; Permissions is the `lstat`'s `st_mode` (a
+    link's own, as `ls -l` shows it) or the record's attributes, a `u32` that sits in the
+    padding beside the flags. No call more per entry and no bigger an entry, so the listing
+    pays nothing for them, hidden or shown (a first version stored the birth time too: 16
+    bytes more per entry, about 1 ms on a 10k read). **Extension stays though Kind is the
+    extension today** (Kind says "Folder"/"File" too); asked for, off by default, free.
     Its header sorts as Kind does (same order); Permissions doesn't sort; Date Created adds
     "Sort by Date Created" and `sort = "created"`. Undo: `listcols::Field`.
   - **Resizing: the strip before a column's header drags that column's width; Name takes the

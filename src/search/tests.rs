@@ -696,7 +696,6 @@ fn the_list_grows_only_so_far_while_the_walk_goes_on() {
         hidden: false,
         size: 1,
         mtime_ms: 1,
-        born_ms: 0,
         mode: 0,
         id: None,
         pending: None,

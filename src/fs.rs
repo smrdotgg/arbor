@@ -24,18 +24,25 @@ pub struct Entry {
     pub size: u64,
     /// Milliseconds since the Unix epoch; 0 when unknown.
     pub mtime_ms: i64,
-    /// When it was made (Linux's statx btime, macOS's birth time, Windows' creation time), ms
-    /// since the Unix epoch; 0 where the file system keeps none. The item's own, not a link's
-    /// target's. From the metadata the listing reads anyway.
-    pub born_ms: i64,
     /// Unix: `st_mode` (type and permission bits) from the same `lstat`; Windows: the file
-    /// attributes from the directory record. 0 when unknown.
+    /// attributes from the directory record. 0 when unknown. (It sits in the padding beside the
+    /// flags: an entry is no bigger for it.)
     pub mode: u32,
     /// What tells this item from another put at its path since it was read ([`ident`]).
     pub id: Option<Ident>,
     /// The name an inline rename is giving it, shown until the worker says how it went: only a
     /// label (`os` is still its real name, which every action uses, and actions on it wait).
     pub pending: Option<String>,
+}
+
+impl Entry {
+    /// When it was made, ms since the Unix epoch (the Date Created column): the birth time its
+    /// identity holds (Linux's statx btime, macOS's birth time, Windows' creation time), the
+    /// item's own, not a link's target's; 0 where the file system keeps none. Read from its
+    /// identity, so a listing keeps nothing more for it.
+    pub fn born_ms(&self) -> i64 {
+        self.id.and_then(|i| i.born).map_or(0, |ns| (ns / 1_000_000).max(0) as i64)
+    }
 }
 
 #[cfg(test)]
@@ -52,7 +59,6 @@ impl Entry {
             hidden: name.starts_with('.'),
             size: 0,
             mtime_ms: 0,
-            born_ms: 0,
             mode: 0,
             id: None,
             pending: None,
@@ -507,10 +513,11 @@ fn read_std(path: &Path, stop: &AtomicBool) -> Option<Result<Vec<Entry>, String>
             .as_ref()
             .and_then(ident)
             .map(|id| if id.wants_handle() { ident_of(&de.path(), meta.as_ref().unwrap()).unwrap_or(id) } else { id });
-        // The Date Created and Permissions columns' fields, from the same metadata (no call).
-        let (born_ms, mode) = meta.as_ref().map_or((0, 0), |m| (born_ms(m), mode_of(m)));
+        // The Permissions column's mode, from the same metadata (no call; Date Created is the
+        // identity's birth time).
+        let mode = meta.as_ref().map_or(0, mode_of);
         let size = if is_dir { 0 } else { size };
-        out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, born_ms, mode, id, pending: None });
+        out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode, id, pending: None });
     }
     #[cfg(test)]
     read_hook::done(path);
@@ -632,21 +639,7 @@ pub(crate) mod win_dir {
         let lower = name.to_lowercase();
         let key = format!("f:{name}");
         let size = if is_dir { 0 } else { size };
-        Entry {
-            os,
-            name,
-            lower,
-            key,
-            is_dir,
-            is_link,
-            hidden,
-            size,
-            mtime_ms,
-            born_ms: ms(r.CreationTime),
-            mode: attrs,
-            id: Some(id),
-            pending: None,
-        }
+        Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode: attrs, id: Some(id), pending: None }
     }
 
     /// A FILETIME as ms since the Unix epoch, 0 before it (as [`mtime`] gives it).
@@ -707,12 +700,6 @@ pub(crate) mod read_hook {
 
 pub(crate) fn mtime(m: &std::fs::Metadata) -> i64 {
     m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as i64)
-}
-
-/// When the item was made, ms since the Unix epoch; 0 where the file system keeps no birth time
-/// (Linux: statx's, which `std` already asked for; nothing more is read).
-pub(crate) fn born_ms(m: &std::fs::Metadata) -> i64 {
-    m.created().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as i64)
 }
 
 /// [`Entry::mode`] from an item's own metadata: Unix's `st_mode`, Windows' attributes.
@@ -874,7 +861,7 @@ pub fn sort_entries(v: &mut [Entry], sort: Sort) {
             // Mixed with files, a folder's kind is "folder" (as the Kind column says).
             SortKey::Kind if !sort.dirs_first => sort_kind(a).cmp(sort_kind(b)),
             SortKey::Kind => ext(&a.lower).cmp(ext(&b.lower)),
-            SortKey::Created => a.born_ms.cmp(&b.born_ms),
+            SortKey::Created => a.born_ms().cmp(&b.born_ms()),
         }
         .then_with(|| natural(&a.lower, &b.lower))
         .then_with(|| a.name.cmp(&b.name));
@@ -1314,8 +1301,8 @@ mod tests {
         assert_eq!(ours.len(), 3004);
         assert_eq!(ours.len(), theirs.len());
         for (a, b) in ours.iter().zip(&theirs) {
-            let what = (&a.os, a.is_dir, a.is_link, a.hidden, a.size, a.mtime_ms, a.born_ms, a.mode);
-            assert_eq!(what, (&b.os, b.is_dir, b.is_link, b.hidden, b.size, b.mtime_ms, b.born_ms, b.mode));
+            let what = (&a.os, a.is_dir, a.is_link, a.hidden, a.size, a.mtime_ms, a.born_ms(), a.mode);
+            assert_eq!(what, (&b.os, b.is_dir, b.is_link, b.hidden, b.size, b.mtime_ms, b.born_ms(), b.mode));
             assert_eq!(a.id, b.id, "{:?}", a.os);
             let id = a.id.unwrap();
             assert!(id.handle.is_some(), "{:?}: a file id", a.os);
@@ -1339,7 +1326,9 @@ mod tests {
     /// off, they mix, each key ordering folders and files alike (a folder's kind is "folder").
     #[test]
     fn folders_first_under_every_sort() {
-        let mk = |name: &str, dir: bool, size: u64, t: i64| Entry { size, mtime_ms: t, born_ms: t * 2, ..Entry::test(name, dir) };
+        let born =
+            |t: i64| Some(Ident { node: (1, t as u64), kind: 0, born: Some(i128::from(t) * 2_000_000), changed: None, handle: None });
+        let mk = |name: &str, dir: bool, size: u64, t: i64| Entry { size, mtime_ms: t, id: born(t), ..Entry::test(name, dir) };
         let all = vec![
             mk("b dir", true, 0, 30),
             mk("a.txt", false, 500, 10),
@@ -1408,11 +1397,10 @@ mod tests {
         let v = list(d.clone(), Sort::new(SortKey::Name, false)).result.unwrap();
         let f = v.iter().find(|e| e.name == "f.txt").unwrap();
         let m = std::fs::symlink_metadata(d.join("f.txt")).unwrap();
-        assert_eq!((f.born_ms, f.mode), (born_ms(&m), mode_of(&m)));
+        assert_eq!(f.mode, mode_of(&m));
         assert_ne!(f.mode, 0);
-        if m.created().is_ok() {
-            assert!(f.born_ms > 0);
-        }
+        let born = m.created().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as i64);
+        assert_eq!(f.born_ms(), born, "the birth time, where the disk keeps one (0 where it doesn't)");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1433,5 +1421,13 @@ mod tests {
         let d = std::env::temp_dir();
         assert!(free_space(&d).is_some_and(|n| n > 0), "the temp folder's disk has room");
         assert_eq!(free_space(Path::new("/no/such/folder/anywhere")), None);
+    }
+
+    /// The columns cost a listing no memory: an entry is the size it was before them (its
+    /// mode sits in padding; Date Created is its identity's birth time).
+    #[test]
+    fn an_entry_is_no_bigger_for_the_columns() {
+        // 256 bytes before (and still) on 64-bit targets.
+        assert!(std::mem::size_of::<Entry>() <= 256, "{}", std::mem::size_of::<Entry>());
     }
 }

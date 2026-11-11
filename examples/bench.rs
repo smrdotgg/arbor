@@ -3,8 +3,11 @@
 //!
 //! ```text
 //! bench [RUNS] [ROUNDS] [--bin PATH] [--keep] [--tabs N] [--preview N] [--jump N] [--search N] [--rename N] [--grid N]
-//!       [--tiles N] [--columns N] [--window N] [--idle N] [--pace MS] [--gap MS]
+//!       [--tiles N] [--columns N] [--window N] [--idle N] [--pace MS] [--gap MS] [--all-columns]
 //! ```
+//!
+//! `--all-columns` shows every list column in every run (a `columns.toml` in its settings
+//! folder): Extension, Date Created and Permissions too, as many as fit the window.
 //!
 //! Makes a folder of 10,000 entries in the temp dir, then cold-starts Arbor on it RUNS times
 //! (default 10) with `ARBOR_BENCH=ROUNDS` (default 10): each run logs its first frame, then
@@ -145,6 +148,7 @@ fn main() {
     let mut tile_runs = 0;
     let mut column_runs = 0;
     let (mut pace, mut gap) = (0u64, 0u64);
+    let mut all_columns = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -162,6 +166,7 @@ fn main() {
             "--columns" => column_runs = args.next().and_then(|n| n.parse::<u32>().ok()).expect("--columns N"),
             "--pace" => pace = args.next().and_then(|n| n.parse::<u64>().ok()).expect("--pace MS"),
             "--gap" => gap = args.next().and_then(|n| n.parse::<u64>().ok()).expect("--gap MS"),
+            "--all-columns" => all_columns = true,
             n => nums.push(n.parse::<u32>().unwrap_or_else(|_| panic!("not a number: {n}"))),
         }
     }
@@ -177,6 +182,14 @@ fn main() {
     let root = std::env::temp_dir().join(format!("arbor-bench-{}", std::process::id()));
     let big = root.join("big");
     make_folder(&big);
+    if all_columns {
+        for dirs in ["dirs", "dirs-jump", "dirs-columns", "dirs-idle"] {
+            let cfg = root.join(dirs).join("config").join(if cfg!(any(target_os = "macos", windows)) { "Arbor" } else { "arbor" });
+            std::fs::create_dir_all(&cfg).expect("the settings folder");
+            let all = "shown = [\"kind\", \"extension\", \"size\", \"modified\", \"created\", \"permissions\"]\n";
+            std::fs::write(cfg.join("columns.toml"), all).expect("columns.toml");
+        }
+    }
 
     let (mut cold, mut main, mut nav, mut key) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut each, mut late, mut invalid) = (Vec::new(), Vec::new(), Vec::new());
