@@ -184,7 +184,7 @@ impl State {
         let when = |cond: bool, why: &'static str| cond.then_some(why);
         let searching = f.searching();
         // An item an inline rename is still renaming: nothing acts on it until that lands.
-        let renaming = busy && f.targets().iter().any(|e| e.pending.is_some());
+        let renaming = busy && f.targets().iter().any(|e| f.labels.contains_key(&e.os));
         let renaming = when(renaming, "Wait for the rename to finish");
         match cmd {
             // Start a file operation.

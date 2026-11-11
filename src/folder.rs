@@ -6,7 +6,7 @@
 //! fresh (`State::show_tab`), and the selection and scroll come back once the read lands.
 
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -130,12 +130,15 @@ pub(crate) struct Kept {
     marked: Marked,
     sel: usize,
     none: bool,
+    /// Renames not written into the listing ([`Folder::renames`]): the names to look for.
+    renames: Vec<(OsString, OsString)>,
 }
 
 impl Kept {
     /// As [`Folder::selection_names`] says it.
     fn names(&self) -> (Vec<OsString>, Option<OsString>) {
-        let name = |r: usize| self.rows.get(r).map(|&i| self.entries[i as usize].os.clone());
+        let renamed = |os: &OsString| self.renames.iter().rev().find(|(o, _)| o == os).map_or_else(|| os.clone(), |(_, n)| n.clone());
+        let name = |r: usize| self.rows.get(r).map(|&i| renamed(&self.entries[i as usize].os));
         let cursor = name(self.sel);
         let items = if self.marked.is_empty() {
             cursor.clone().into_iter().filter(|_| !self.none).collect()
@@ -241,6 +244,15 @@ pub struct Folder {
     /// The selection carried by entry while the rows are made again (`marked.rs`): empty
     /// otherwise.
     pub(crate) carry: Bits,
+    /// Names shown in place of items' own while an inline rename gives them (by their name in
+    /// the listing): only labels, which nothing acts on. Kept beside the listing, so starting
+    /// a rename never changes it (a reload's worker may hold it).
+    pub(crate) labels: HashMap<OsString, (String, Option<usize>)>,
+    /// Items renamed on disk while a reload's worker held the listing (`(old, new)` names in
+    /// it): not written into it (a copy of a big listing would hold up the window), but shown
+    /// under their new names, and followed by the next reload's selection. The listing it
+    /// brings replaces them.
+    pub(crate) renames: Vec<(OsString, OsString)>,
     /// How many times the user has picked a selection (a click, an arrow, ⌘A, Select by
     /// Pattern…): a reload asked for before the latest pick keeps it ([`Pending::picks`]).
     pub picks: u64,
@@ -346,6 +358,8 @@ impl Folder {
             marked: Marked::default(),
             none: false,
             carry: Bits::default(),
+            labels: HashMap::new(),
+            renames: Vec::new(),
             picks: 0,
             anchor: 0,
             filter: String::new(),
@@ -406,11 +420,21 @@ impl Folder {
     /// first selected item (the cursor may have been ⌘-clicked off); `None` with nothing
     /// selected. Never an item that isn't selected.
     pub fn selected(&self) -> Option<&Entry> {
+        self.selected_row().and_then(|r| self.visible.get(r)).map(|&i| &self.entries[i as usize])
+    }
+
+    /// [`Folder::selected`]'s row.
+    pub fn selected_row(&self) -> Option<usize> {
         if self.marked.is_empty() {
-            return if self.none { None } else { self.cursor() };
+            return (!self.none && self.sel < self.visible.len()).then_some(self.sel);
         }
-        let row = if self.marked.contains(self.sel) { Some(self.sel) } else { self.marked.iter().next() };
-        row.and_then(|r| self.visible.get(r)).map(|&i| &self.entries[i as usize])
+        if self.marked.contains(self.sel) { Some(self.sel) } else { self.marked.iter().next() }
+    }
+
+    /// The index in the listing of the item named `os`: `at` when that's it (no look through
+    /// a big listing), else found.
+    pub fn entry_at(&self, os: &OsStr, at: Option<usize>) -> Option<usize> {
+        at.filter(|&i| self.entries.get(i).is_some_and(|e| e.os == os)).or_else(|| self.entries.iter().position(|e| e.os == os))
     }
 
     /// The cursor's item, selected or not: where the cursor is.
@@ -502,7 +526,14 @@ impl Folder {
     /// The selection on screen, for a worker ([`Kept`]): two shared pointers and the selected
     /// rows' bits.
     pub(crate) fn kept(&self) -> Kept {
-        Kept { entries: self.entries.clone(), rows: self.visible.clone(), marked: self.marked.clone(), sel: self.sel, none: self.none }
+        Kept {
+            entries: self.entries.clone(),
+            rows: self.visible.clone(),
+            marked: self.marked.clone(),
+            sel: self.sel,
+            none: self.none,
+            renames: self.renames.clone(),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -644,6 +675,8 @@ impl Folder {
         self.adopted = None;
         self.entries = Arc::default();
         self.visible = Arc::default();
+        self.labels.clear();
+        self.renames.clear();
         self.marked.clear();
         self.sel = 0;
         self.anchor = 0;
@@ -1006,40 +1039,68 @@ impl Folder {
 
     /// The item `old` is being renamed `new` on the worker: its row shows the new name at once,
     /// but it's still `old` (what actions act on) until the outcome lands: a rename that fails
-    /// (the name was taken) never points the row at the other item.
-    pub fn rename_pending(&mut self, old: &OsStr, new: &str) {
-        if let Some(i) = self.entries.iter().position(|e| e.os == old) {
-            Arc::make_mut(&mut self.entries)[i].pending = Some(new.to_string());
+    /// (the name was taken) never points the row at the other item. A label beside the
+    /// listing: nothing in it changes.
+    /// `at`: its index in the listing, if known.
+    pub fn rename_pending(&mut self, old: &OsStr, new: &str, at: Option<usize>) {
+        self.labels.insert(old.to_os_string(), (new.to_string(), at));
+        self.bump();
+    }
+
+    /// The name row `e` shows: an inline rename's, one renamed while a reload held the
+    /// listing, or its own.
+    pub fn label<'a>(&'a self, e: &'a Entry) -> std::borrow::Cow<'a, str> {
+        if let Some((l, _)) = self.labels.get(&e.os) {
+            return std::borrow::Cow::Borrowed(l);
         }
+        match self.renames.iter().rev().find(|(o, _)| *o == e.os) {
+            Some((_, n)) => n.to_string_lossy(),
+            None => std::borrow::Cow::Borrowed(&e.name),
+        }
+    }
+
+    /// Whether a reload's worker holds the listing (changing it in place would copy it).
+    fn shared(&self) -> bool {
+        Arc::strong_count(&self.entries) > 1
     }
 
     /// The inline rename landed: a row whose pending name it gave (one of `moved`, which has
     /// the item's old and new paths) takes it, through whichever path this pane reached the
     /// folder by; any other goes back to its own name.
     pub fn land_pending(&mut self, moved: &[(PathBuf, PathBuf)]) {
-        if !self.entries.iter().any(|e| e.pending.is_some()) {
+        if self.labels.is_empty() {
             return;
         }
-        let done: Vec<(OsString, OsString)> = Arc::make_mut(&mut self.entries)
-            .iter_mut()
-            .filter_map(|e| {
-                let new = e.pending.take()?;
-                moved
-                    .iter()
-                    .any(|(f, t)| f.file_name() == Some(e.os.as_os_str()) && t.file_name() == Some(OsStr::new(&new)))
-                    .then(|| (e.os.clone(), OsString::from(new)))
-            })
+        let taken = |old: &OsString, new: &str| {
+            moved.iter().any(|(f, t)| f.file_name() == Some(old.as_os_str()) && t.file_name() == Some(OsStr::new(new)))
+        };
+        let done: Vec<(OsString, OsString, Option<usize>)> = std::mem::take(&mut self.labels)
+            .into_iter()
+            .filter(|(old, (new, _))| taken(old, new))
+            .map(|(old, (new, at))| (old, OsString::from(new), at))
             .collect();
-        for (old, new) in done {
-            self.renamed(&old, &new);
+        self.bump();
+        for (old, new, at) in done {
+            self.renamed(&old, &new, at);
         }
     }
 
     /// The item `old` was renamed `new` on disk: shows it under its new name at once (a fresh
-    /// read follows), keeping it selected if it was.
-    fn renamed(&mut self, old: &OsStr, new: &OsStr) {
-        let Some(ix) = self.entries.iter().position(|e| e.os == old) else { return };
-        let keep = self.visible.get(self.sel) == Some(&(ix as u32));
+    /// read follows), keeping it selected if it was. One entry changed, the rows kept unless
+    /// it's now hidden or filtered out (or back); while a reload's worker holds the listing, a
+    /// rename beside it ([`Folder::renames`]).
+    fn renamed(&mut self, old: &OsStr, new: &OsStr, at: Option<usize>) {
+        let Some(ix) = self.entry_at(old, at) else { return };
+        if self.shared() {
+            self.renames.push((old.to_os_string(), new.to_os_string()));
+            self.bump();
+            return;
+        }
+        let shown = |f: &Folder, e: &Entry| {
+            let q = if f.path_mode() { String::new() } else { f.filter.to_lowercase() };
+            (f.show_hidden || !e.hidden) && (q.is_empty() || e.lower.contains(&q))
+        };
+        let before = shown(self, &self.entries[ix]);
         let e = &mut Arc::make_mut(&mut self.entries)[ix];
         e.os = new.to_os_string();
         e.name = new.to_string_lossy().into_owned();
@@ -1047,6 +1108,12 @@ impl Folder {
         e.key = format!("f:{}", e.name);
         // A dot hides it, everywhere; other ways of hiding (a flag) come with the fresh read.
         e.hidden = e.name.starts_with('.') || (e.hidden && !old.to_string_lossy().starts_with('.'));
+        if shown(self, &self.entries[ix]) == before {
+            // The same rows: its row shows the new name (its key changed).
+            self.bump();
+            return;
+        }
+        let keep = self.visible.get(self.sel) == Some(&(ix as u32));
         let cursor = if keep { Some(new.to_os_string()) } else { self.cursor_name() };
         self.refilter(cursor.as_deref());
     }
@@ -1071,6 +1138,12 @@ impl Folder {
             })
             .collect();
         if map.is_empty() {
+            return;
+        }
+        // A reload's worker holds the listing: beside it, not in it (see `renames`).
+        if self.shared() && !searching {
+            self.renames.extend(map.into_iter().map(|(f, t)| (f.into_os_string(), t.into_os_string())));
+            self.bump();
             return;
         }
         let moved = |rel: &Path| -> Option<(PathBuf, bool)> {
@@ -1110,7 +1183,9 @@ impl Folder {
         if pairs.is_empty() {
             return;
         }
-        if !self.entries.iter().any(|e| e.id.is_some_and(|id| crate::ops::reidentified(id, pairs) != id)) {
+        // A reload's worker holds the listing: the reload brings the identities (until then an
+        // action on such an item is refused, as for any item changed since it was read).
+        if self.shared() || !self.entries.iter().any(|e| e.id.is_some_and(|id| crate::ops::reidentified(id, pairs) != id)) {
             return;
         }
         for e in Arc::make_mut(&mut self.entries).iter_mut() {
@@ -1162,5 +1237,46 @@ pub(crate) mod marked_on {
     pub(crate) fn here() -> bool {
         let me = std::thread::current().id();
         ON.lock().unwrap_or_else(|e| e.into_inner()).contains(&me)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A rename while a reload's worker holds a big listing (500,000 items) changes nothing in
+    /// it: no copy of it on the window's thread (it took 136 ms). The row shows the new name
+    /// at once, and the next reload's selection follows the item under it. In a release
+    /// build, each step is held to 1 ms.
+    #[test]
+    fn a_rename_while_a_reload_holds_the_listing_copies_nothing() {
+        let n = 500_000;
+        let mut f = Folder::new(0, PathBuf::from("/x"), Sort::new(SortKey::Name, false), true, None);
+        f.entries = (0..n).map(|i| Entry::test(&format!("{i:08}.txt"), false)).collect::<Vec<_>>().into();
+        f.refilter(None);
+        // The last item: found by its row, never by looking through the listing.
+        f.select(n - 1);
+        let at = f.selected_row().map(|r| f.visible[r] as usize);
+        let held = f.kept();
+        let listing = Arc::as_ptr(&f.entries);
+        let old = OsString::from(format!("{:08}.txt", n - 1));
+        let t = std::time::Instant::now();
+        f.rename_pending(&old, "renamed.txt", at);
+        let pending = t.elapsed();
+        let t = std::time::Instant::now();
+        f.land_pending(&[(PathBuf::from("/x").join(&old), PathBuf::from("/x/renamed.txt"))]);
+        let landed = t.elapsed();
+        assert!(std::ptr::eq(Arc::as_ptr(&f.entries), listing), "the listing wasn't copied");
+        assert_eq!(f.selected().map(|e| f.label(e).into_owned()).as_deref(), Some("renamed.txt"));
+        // The next reload looks for it under its new name.
+        drop(held);
+        assert_eq!(f.kept().names(), (vec![OsString::from("renamed.txt")], Some(OsString::from("renamed.txt"))));
+        eprintln!("rename shown: {pending:?}; landed: {landed:?}");
+        if !cfg!(debug_assertions) {
+            assert!(
+                pending < std::time::Duration::from_millis(1) && landed < std::time::Duration::from_millis(1),
+                "{pending:?}, {landed:?}"
+            );
+        }
     }
 }

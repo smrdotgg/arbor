@@ -906,6 +906,8 @@ impl Folder {
         let old_id = std::mem::replace(&mut self.dir_id, dir_id);
         self.visible = std::sync::Arc::default();
         self.marked.clear();
+        self.labels.clear();
+        self.renames.clear();
         self.sel = 0;
         self.anchor = 0;
         self.filter.clear();

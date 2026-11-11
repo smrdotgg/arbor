@@ -13,7 +13,7 @@ use crate::commands::{Cmd, Keymap};
 use crate::config::{self, Config, Settings};
 pub use crate::folder::Nav;
 use crate::folder::{Answer, Folder, TabMemo};
-use crate::fs::{self, Entry, Listing, Sort, SortKey};
+use crate::fs::{self, Listing, Sort, SortKey};
 use crate::jump::{History, JumpBox};
 use crate::palette::Palette;
 use crate::preview::{self, Preview};
@@ -41,6 +41,9 @@ pub(crate) const BUSY_ELSEWHERE: &str = "Another file operation is running in an
 pub struct Rename {
     pub os: OsString,
     pub edit: TextEdit,
+    /// Its index in the listing when the rename started (checked before it's used): found
+    /// without looking through a big folder.
+    pub at: Option<usize>,
 }
 
 /// What ⌘C / ⌘X put aside, so a paste knows a cut means move.
@@ -641,7 +644,7 @@ impl State {
     pub(crate) fn folder_to_open(&self) -> Option<PathBuf> {
         let f = self.cur();
         match f.targets().as_slice() {
-            [e] if e.is_dir && e.pending.is_none() => Some(f.cwd.join(&e.os)),
+            [e] if e.is_dir && !f.labels.contains_key(&e.os) => Some(f.cwd.join(&e.os)),
             _ => None,
         }
     }
@@ -740,10 +743,6 @@ impl State {
             Some(r) => &mut r.edit,
             None => &mut self.rename_sink,
         }
-    }
-
-    pub fn selected(&self) -> Option<&Entry> {
-        self.cur().selected()
     }
 
     pub fn target_paths(&self) -> Vec<PathBuf> {
@@ -1168,8 +1167,13 @@ impl State {
                     self.shared.history.borrow_mut().record(&here);
                 }
                 let f = &mut self.panes[ix].f;
-                // The rows before were the old listing's.
+                // The rows before were the old listing's; renames it didn't have are in this
+                // one (or weren't made); an inline rename still on its way keeps its label.
                 f.marked.clear();
+                f.renames.clear();
+                if !f.labels.is_empty() {
+                    f.labels.retain(|old, _| f.entries.iter().any(|e| e.os == *old));
+                }
                 // Only names still here are selected: what was trashed or deleted isn't. The
                 // listing's worker marked them on their entries when this is what it was asked
                 // to select (a column made active, the only other way with two or more, is

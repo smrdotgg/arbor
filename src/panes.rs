@@ -793,8 +793,10 @@ mod tests {
         run(&mut s, Cmd::Split);
         assert_eq!(cursor(&s), "f0");
         rename_to(&mut s, "renamed-first");
-        // At once, before any read lands: the other pane shows the new name, still selected.
-        assert_eq!(s.panes[0].f.selected().map(|e| e.name.as_str()), Some("renamed-first"));
+        // At once, before any read lands: the other pane shows the new name, still selected
+        // (the panes share the listing, so it's shown beside it until the read lands).
+        let f = &s.panes[0].f;
+        assert_eq!(f.selected().map(|e| f.label(e).into_owned()).as_deref(), Some("renamed-first"));
         settle(&mut s);
         let i = s.cur().visible.iter().position(|&i| s.cur().entries[i as usize].name == "f1").unwrap();
         s.cur_mut().select(i);

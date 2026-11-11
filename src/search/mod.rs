@@ -683,7 +683,6 @@ fn entry_at(root: &Path, path: &Path, show_hidden: bool) -> Option<Entry> {
         mtime_ms: fs::mtime(t),
         mode: fs::mode_of(&m),
         id: fs::ident_of(path, &m),
-        pending: None,
     })
 }
 

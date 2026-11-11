@@ -213,7 +213,10 @@ impl State {
     /// Starts an inline rename of the cursor's entry, with the name before its extension
     /// selected (as in Finder).
     pub fn start_rename(&mut self) {
-        let Some(e) = self.selected() else { return };
+        let f = self.cur();
+        let Some(row) = f.selected_row() else { return };
+        let at = f.visible[row] as usize;
+        let e = &f.entries[at];
         let (os, label, is_dir) = (e.os.clone(), e.name.clone(), e.is_dir);
         let stem = match label.rfind('.') {
             Some(i) if i > 0 && !is_dir => i,
@@ -225,12 +228,10 @@ impl State {
         // The item renamed is the selection, the cursor on it: what was selected (it, alone),
         // so cancelling leaves exactly that, never a cursor the user had deselected.
         let f = self.cur_mut();
-        if let Some(row) = f.visible.iter().position(|&i| f.entries[i as usize].os == os)
-            && !(f.marked.is_empty() && f.sel == row)
-        {
+        if !(f.marked.is_empty() && f.sel == row) {
             f.select(row);
         }
-        self.rename = Some(Rename { os, edit });
+        self.rename = Some(Rename { os, edit, at: Some(at) });
     }
 
     /// Esc: the inline rename ends with nothing renamed.
@@ -276,7 +277,8 @@ impl State {
         }
         // It must still be the item its listing (or the search walk) found there, edited or not
         // (checked on the worker).
-        let found = self.cur().entries.iter().find(|e| e.os == r.os).map(|e| e.id);
+        let at = self.cur().entry_at(&r.os, r.at);
+        let found = at.map(|i| self.cur().entries[i].id);
         let chosen = self.cur().chosen();
         // Beside it, in its own folder: never "the folder on screen + the new name".
         let Some(dir) = from.parent().map(Path::to_path_buf) else { return };
@@ -291,7 +293,7 @@ impl State {
         let id = if dir == f.cwd && !f.searching() { f.dir_id } else { None };
         for p in &mut self.panes {
             if !p.f.searching() && p.f.shows(&dir, id) {
-                p.f.rename_pending(&old, &new);
+                p.f.rename_pending(&old, &new, at);
             }
         }
     }

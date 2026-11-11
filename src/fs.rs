@@ -30,9 +30,6 @@ pub struct Entry {
     pub mode: u32,
     /// What tells this item from another put at its path since it was read ([`ident`]).
     pub id: Option<Ident>,
-    /// The name an inline rename is giving it, shown until the worker says how it went: only a
-    /// label (`os` is still its real name, which every action uses, and actions on it wait).
-    pub pending: Option<String>,
 }
 
 impl Entry {
@@ -61,7 +58,6 @@ impl Entry {
             mtime_ms: 0,
             mode: 0,
             id: None,
-            pending: None,
         }
     }
 }
@@ -517,7 +513,7 @@ fn read_std(path: &Path, stop: &AtomicBool) -> Option<Result<Vec<Entry>, String>
         // identity's birth time).
         let mode = meta.as_ref().map_or(0, mode_of);
         let size = if is_dir { 0 } else { size };
-        out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode, id, pending: None });
+        out.push(Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode, id });
     }
     #[cfg(test)]
     read_hook::done(path);
@@ -639,7 +635,7 @@ pub(crate) mod win_dir {
         let lower = name.to_lowercase();
         let key = format!("f:{name}");
         let size = if is_dir { 0 } else { size };
-        Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode: attrs, id: Some(id), pending: None }
+        Entry { os, name, lower, key, is_dir, is_link, hidden, size, mtime_ms, mode: attrs, id: Some(id) }
     }
 
     /// A FILETIME as ms since the Unix epoch, 0 before it (as [`mtime`] gives it).
@@ -1460,7 +1456,8 @@ mod tests {
     #[test]
     fn an_entry_is_no_bigger_for_the_columns() {
         /// `Entry` as it was before the columns (256 bytes on 64-bit Linux and macOS, 272 on
-        /// Windows, whose `OsString` is bigger).
+        /// Windows, whose `OsString` is bigger). It's smaller since (an inline rename's label
+        /// moved to the folder).
         #[allow(dead_code)]
         struct Before {
             os: OsString,
@@ -1475,6 +1472,6 @@ mod tests {
             id: Option<Ident>,
             pending: Option<String>,
         }
-        assert_eq!(std::mem::size_of::<Entry>(), std::mem::size_of::<Before>());
+        assert!(std::mem::size_of::<Entry>() <= std::mem::size_of::<Before>());
     }
 }

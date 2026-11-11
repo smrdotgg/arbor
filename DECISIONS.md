@@ -111,6 +111,14 @@ Format: date · decision · why · how to undo.
     on the window's thread (they copied every name: 70 ms at 500,000). The selection carried
     through a filter or sort is a set of entry indices beside the listing, so carrying it never
     writes to a listing a worker holds. Undo: `folder::{Kept, Pick}`.
+  - **A rename never changes a listing a worker holds (fourth review)**: an inline rename's
+    label is kept beside the listing (`Folder::labels`), and a rename that lands while a
+    reload's worker (or the other pane, on the same folder) holds the listing is shown and
+    followed beside it too (`Folder::renames`) until the reload brings it: copying a listing of
+    500,000 to change one name took 136 ms. Showing and landing a rename take under 10 µs there
+    now, the item found by its row, not by looking through the folder. Until the reload lands,
+    the row still names the old item for actions (refused, as for anything changed since it was
+    read). Undo: `Folder::{labels, renames}`.
   - **Narrow panes (after review):** once every other column is gone, Size narrows to its
     least and then goes, so Name keeps its 180 pt; a search's Folder column gets only what's
     past Name's least. Only on screen: the widths kept are the user's. Undo: `ListCols::fit`.

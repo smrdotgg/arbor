@@ -464,14 +464,15 @@ fn a_pending_rename_never_points_the_row_at_another_item() {
     s.commit_rename(&mut Tx::default());
     assert!(s.owns_job());
     assert_eq!(s.cur().target_paths(), [d.join("a")], "still the item being renamed");
-    assert_eq!(s.cur().selected().and_then(|e| e.pending.as_deref()), Some("b"), "its new name, as a label");
+    let f = s.cur();
+    assert_eq!(f.selected().map(|e| f.label(e).into_owned()).as_deref(), Some("b"), "its new name, as a label");
     for cmd in [Cmd::Open, Cmd::Copy, Cmd::Cut, Cmd::Rename, Cmd::OpenWith, Cmd::CopyPath, Cmd::Trash, Cmd::Delete] {
         assert!(s.unavailable(cmd).is_some(), "{cmd:?} waits for the rename");
     }
     finish_job(&mut s);
     assert_eq!(s.note.as_deref(), Some("“b” already exists"));
     assert_eq!(s.cur().target_paths(), [d.join("a")]);
-    assert!(s.cur().entries.iter().all(|e| e.pending.is_none()), "the label went");
+    assert!(s.cur().labels.is_empty(), "the label went");
     assert_eq!(s.unavailable(Cmd::Open), None);
     assert_eq!(std::fs::read_to_string(d.join("b")).unwrap(), "other");
 }
@@ -491,7 +492,8 @@ fn rename_and_new_folder_run_on_the_worker() {
     s.rename.as_mut().unwrap().edit.text = "b.txt".into();
     s.commit_rename(&mut tx);
     assert!(s.owns_job(), "on the worker");
-    assert_eq!(s.cur().selected().and_then(|e| e.pending.as_deref()), Some("b.txt"), "shown at once");
+    let f = s.cur();
+    assert_eq!(f.selected().map(|e| f.label(e).into_owned()).as_deref(), Some("b.txt"), "shown at once");
     finish_job(&mut s);
     assert!(d.join("b.txt").exists() && !d.join("a.txt").exists());
     assert_eq!((s.note.as_deref(), s.shared.undo.borrow().len()), (None, 1), "nothing to say; undoable");
@@ -1532,7 +1534,7 @@ fn a_big_reload_hands_its_selection_over_without_copying_names() {
     settle_all(&mut s);
     let n = 300_000;
     let f = s.cur_mut();
-    f.entries = (0..n).map(|i| Entry::test(&format!("{i:08}.txt"), false)).collect::<Vec<_>>().into();
+    f.entries = (0..n).map(|i| fs::Entry::test(&format!("{i:08}.txt"), false)).collect::<Vec<_>>().into();
     f.refilter(None);
     f.select_all();
     let t = Instant::now();
