@@ -110,7 +110,7 @@ fn cell(s: &State, f: &Folder, i: usize, g: Geom, c: Ctx) -> El {
             .fill(l.t.bg)
             .border(1.0, l.accent),
         None => {
-            let mut name = f.label(e).into_owned();
+            let mut name = f.label(e).to_string();
             if e.is_link {
                 name.push_str(" ↗");
             }

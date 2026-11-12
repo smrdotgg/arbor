@@ -164,20 +164,13 @@ impl State {
             // A folder: one folder, and each entry's name is its own.
             dir_paths.push(f.cwd.clone());
             for e in &targets {
-                items.push(Item {
-                    name: f.label(e).into_owned(),
-                    is_dir: e.is_dir,
-                    dir: 0,
-                    keep: keep(&e.os),
-                    gone: None,
-                    inside: Vec::new(),
-                });
+                items.push(Item { name: e.name.clone(), is_dir: e.is_dir, dir: 0, keep: keep(&e.os), gone: None, inside: Vec::new() });
                 expect.push(e.id);
-                paths.push(f.path_of(e));
+                paths.push(f.cwd.join(&e.os));
             }
         }
         for e in targets.iter().filter(|_| f.searching()) {
-            let p = f.path_of(e);
+            let p = f.cwd.join(&e.os);
             let parent = p.parent().unwrap_or(&p);
             let dir = match dir_paths.last() {
                 Some(last) if last == parent => (dir_paths.len() - 1) as u32,

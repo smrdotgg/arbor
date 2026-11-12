@@ -128,6 +128,11 @@ impl std::hash::Hash for Ident {
 }
 
 impl Ident {
+    /// Whether both are the same kind of thing (a file, a folder, a link).
+    pub fn same_kind(&self, o: &Ident) -> bool {
+        self.kind == o.kind
+    }
+
     /// From its parts, for metadata read without `std` (`dirfd`). `changed` (ctime) is kept
     /// only without a birth time.
     #[cfg(unix)]

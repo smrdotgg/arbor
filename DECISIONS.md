@@ -116,28 +116,29 @@ Format: date · decision · why · how to undo.
     on the window's thread (they copied every name: 70 ms at 500,000). The selection carried
     through a filter or sort is a set of entry indices beside the listing, so carrying it never
     writes to a listing a worker holds. Undo: `folder::{Kept, Pick}`.
-  - **A rename never changes a listing a worker holds (fourth review)**: an inline rename's
-    label is kept beside the listing (`Folder::labels`), and a rename that lands while a
-    reload's worker (or the other pane, on the same folder) holds the listing is shown and
-    followed beside it too (`Folder::renames`) until the reload brings it: copying a listing of
-    500,000 to change one name took 136 ms. Showing and landing a rename take under 10 µs there
-    now, the item found by its row, not by looking through the folder. Until the reload lands,
-    the row still names the old item for actions (refused, as for anything changed since it was
-    read). **Every action resolves through it (fifth review)**: an entry's path is
-    `Folder::path_of` (its name now, through a rename beside the listing), with the identity
-    its listing read (a rename keeps it), so a folder made under the old name meanwhile is never
-    what an open, a trash, a copy, a drag or Get Info acts on; and the renames go into the
-    listing as soon as no worker holds it (`absorb_renames`). **Renames landing in any order
-    with reads (fifth review's model)**: a label is kept under the listing's name for the item,
-    with the identity it was read with, and survives a new listing only on that item; a read
-    that already has the item under its new name selects it there (`listing_replaced`), hidden
-    tabs carrying their labels; a rename onto a name the listing still shows replaces that
-    stale entry when the disk says so; Select by Pattern matches the shown name; opening a row
-    renamed beside its listing checks its identity first (only those rows: where identity
-    falls back to ctime, checking every open would refuse edited files); and a navigation that
-    replaced a reload and fails asks for the reload again. Typing to filter still matches a
-    renamed row's old name until the read lands (milliseconds). Undo: `Folder::{labels,
-    renames, reread}`, `Label`, `TabMemo::labels`.
+  - **Renames and a shared listing: one rule, no overlay (PM decision, sixth review,
+    2026-11-12)**. The rename overlay of the fourth and fifth reviews (renames kept beside the
+    listing, every action resolving through them) produced about ten bugs in two rounds and is
+    gone. The rule now: a rename (or any operation) that lands while nobody else holds the
+    listing changes it in place (`Arc::make_mut`, free when unshared). While a reload's worker
+    or the other pane holds it, the listing isn't changed or translated: the refresh the
+    operation asks for supersedes any read on its way, and until that read lands the rows show
+    a display-only label with the new name (`Folder::labels`), and every action on them (open,
+    →, Enter, double-click, preview, Get Info, drag, copy, trash, rename, F5/F6, Open With, Show
+    Original, Open in New Window, menus, palette) is refused with "Updating… try again in a
+    moment". An inline rename's own label (while its outcome is on its way) works the same; a
+    failure, a hidden tab or another folder clears it. No other state (hidden tabs, picks, the
+    selection a reload keeps) learns of a rename: a read that lands carries the selection by
+    identity (`find_named`, on the read's worker): an item under its name while it's that item,
+    else wherever its identity is now, else another of its kind under its name (an editor's
+    save makes a new file); another kind of item under the name isn't selected. Hidden tabs keep
+    their items' identities for that (`TabMemo::ids`). Within a frame at 500,000: a landing
+    looks through the listing for a stale entry under the new name only up to 50,000 entries
+    (about 0.35 ms); above, the row is renamed by its index and every row of the new name waits
+    for the read. Kept from the overlay rounds: a navigation that replaced a reload and fails
+    asks for the reload again (`Folder::reread`), and a rename onto a name the listing still
+    shows (that item gone from outside) replaces the stale entry in place when the disk says
+    so. Undo: `Folder::labels`, `Label`, `find_named`, `Ids`, `UPDATING`.
   - **Narrow panes (after review):** once every other column is gone, Size narrows to its
     least and then goes, so Name keeps its 180 pt; a search's Folder column gets only what's
     past Name's least. Only on screen: the widths kept are the user's. Undo: `ListCols::fit`.

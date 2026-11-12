@@ -348,6 +348,10 @@ impl State {
             self.note = Some(crate::app::IN_OTHER_SEARCH.into());
             return;
         }
+        if src.f.drag_updating(i) {
+            self.note = Some(crate::app::UPDATING.into());
+            return;
+        }
         let (files, into, expect) = (src.f.drag_paths(i), dst.f.dest(), src.f.drag_checks(i));
         self.drop_into(&files, into, expect, tx);
     }
@@ -796,7 +800,7 @@ mod tests {
         // At once, before any read lands: the other pane shows the new name, still selected
         // (the panes share the listing, so it's shown beside it until the read lands).
         let f = &s.panes[0].f;
-        assert_eq!(f.selected().map(|e| f.label(e).into_owned()).as_deref(), Some("renamed-first"));
+        assert_eq!(f.selected().map(|e| f.label(e)), Some("renamed-first"));
         settle(&mut s);
         let i = s.cur().visible.iter().position(|&i| s.cur().entries[i as usize].name == "f1").unwrap();
         s.cur_mut().select(i);

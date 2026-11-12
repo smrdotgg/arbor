@@ -105,7 +105,7 @@ impl State {
                 }
                 // A command that would start a file operation while one runs (in this window or
                 // another) says why, rather than doing nothing silently.
-                if why == BUSY || why == BUSY_ELSEWHERE {
+                if why == BUSY || why == BUSY_ELSEWHERE || why == UPDATING {
                     self.note = Some(why.into());
                     return true;
                 }
@@ -183,9 +183,11 @@ impl State {
         let pane = &self.panes[self.active];
         let when = |cond: bool, why: &'static str| cond.then_some(why);
         let searching = f.searching();
-        // An item an inline rename is still renaming: nothing acts on it until that lands.
-        let renaming = busy && f.targets().iter().any(|e| f.labels.contains_key(&e.os));
-        let renaming = when(renaming, "Wait for the rename to finish");
+        // An item showing a label (its rename on its way, or landed while the listing was
+        // shared): nothing acts on it until the folder is read again.
+        if acts_on_items(cmd, self) && f.updating() {
+            return Some(UPDATING);
+        }
         match cmd {
             // Start a file operation.
             Trash | Delete => when(busy, busy_why).or(when(nothing, "Select an item first")),
@@ -203,11 +205,11 @@ impl State {
                 "Duplicate items from one folder at a time",
             )),
             // The archive goes beside the items, so all of them must be in one folder.
-            Compress => when(busy, BUSY).or(when(nothing, "Select an item first")).or(renaming).or(when(
+            Compress => when(busy, BUSY).or(when(nothing, "Select an item first")).or(when(
                 searching && f.target_paths().iter().map(|p| p.parent()).collect::<std::collections::HashSet<_>>().len() > 1,
                 "Compress items from one folder at a time",
             )),
-            Extract => when(busy, BUSY).or(when(nothing, "Select an archive first")).or(renaming).or(when(
+            Extract => when(busy, BUSY).or(when(nothing, "Select an archive first")).or(when(
                 !f.targets().iter().all(|e| !e.is_dir && crate::archive::is_archive(&e.name)),
                 "Select .zip, .tar or .tar.gz archives",
             )),
@@ -223,8 +225,8 @@ impl State {
             Redo => when(busy, busy_why).or(when(self.shared.redo.borrow().is_empty(), "Nothing to redo")),
             Cancel => when(!busy, "No file operation is running")
                 .or(when(!self.owns_job(), "The file operation is running in another window: cancel it there")),
-            Open | Copy | Cut | Rename | BatchRename => when(nothing, "Select an item first").or(renaming),
-            Into => when(!f.selected().is_some_and(|e| e.is_dir), "Select a folder first").or(renaming),
+            Open | Copy | Cut | Rename | BatchRename => when(nothing, "Select an item first"),
+            Into => when(!f.selected().is_some_and(|e| e.is_dir), "Select a folder first"),
             Parent => when(searching, "Leave the search first (Esc)").or(when(f.cwd.parent().is_none(), "Already at the top")),
             // In a search, Back leaves it.
             Back => when(!searching && f.back.is_empty(), "Nothing to go back to"),
@@ -269,7 +271,7 @@ impl State {
             Place1 | Place2 | Place3 | Place4 | Place5 | Place6 | Place7 | Place8 | Place9 => {
                 when(cmd.place().is_some_and(|i| i >= self.place_count()), "No sidebar place there")
             }
-            OpenWith => when(!f.targets().iter().any(|e| !e.is_dir), "Select a file first").or(renaming),
+            OpenWith => when(!f.targets().iter().any(|e| !e.is_dir), "Select a file first"),
             SidebarRemove => when(self.favorite_here().is_none(), "This folder isn't in the sidebar"),
             Eject => when(self.ejecting.is_some(), "Already ejecting a volume")
                 .or(when(busy, "Wait for the file operation to finish, then eject"))
@@ -277,10 +279,10 @@ impl State {
             // Always available.
             NewFolder => when(busy, busy_why).or(when(searching, "Leave the search (Esc) to make a folder here")),
             NewFile => when(busy, busy_why).or(when(searching, "Leave the search (Esc) to make a file here")),
-            MakeLink => when(busy, busy_why).or(when(nothing, "Select an item first")).or(renaming),
-            ShowOriginal => when(!f.selected().is_some_and(|e| e.is_link), "Select a symbolic link first").or(renaming),
+            MakeLink => when(busy, busy_why).or(when(nothing, "Select an item first")),
+            ShowOriginal => when(!f.selected().is_some_and(|e| e.is_link), "Select a symbolic link first"),
             MakeDefault | RestoreDefault => when(self.handler_job.is_pending(), "Already changing the default for folders"),
-            Reveal | CopyPath | Info | SidebarAdd => renaming,
+            Reveal | CopyPath | Info | SidebarAdd => None,
             GoTo | Reload | Palette | OpenSettings | ReloadSettings | Hidden | SortReverse | NewTab | NewWindow | Split | ClearJump
             | Search | FoldersFirst | ColumnOptions | ColumnKind | ColumnExtension | ColumnSize | ColumnModified | ColumnCreated
             | ColumnPermissions => None,
@@ -354,6 +356,11 @@ impl State {
 
     pub(super) fn run_cmd(&mut self, cmd: Cmd, tx: &mut Tx) {
         use Cmd::*;
+        // From a menu, the palette or a click as much as a key: an action on an item showing a
+        // label is refused, saying so.
+        if acts_on_items(cmd, self) && self.refuse_updating() {
+            return;
+        }
         let page = PAGE as isize;
         match cmd {
             Open => self.open_selected(),
@@ -637,5 +644,19 @@ impl State {
         } else {
             format!("{} can't be stopped once it has started", job.verb)
         })
+    }
+}
+
+/// Whether `cmd` acts on the selected items (opens, moves, copies, renames, reads them, or
+/// opens a panel on them): refused while one of them shows a label ([`Folder::updating`]).
+fn acts_on_items(cmd: Cmd, s: &State) -> bool {
+    use Cmd::*;
+    match cmd {
+        Trash | Delete | Duplicate | Compress | Extract | CopyToOther | MoveToOther | PutBack | Open | Into | Copy | Cut | Rename
+        | BatchRename | OpenWith | MakeLink | ShowOriginal | Reveal | CopyPath | SidebarAdd | OpenInNewWindow => true,
+        // Opening them; closing always works.
+        TogglePreview => s.preview.is_none(),
+        Info => s.info.is_none(),
+        _ => false,
     }
 }

@@ -347,7 +347,7 @@ impl State {
             let Some(os) = wants(e) else { continue };
             let known = f.tiles.as_ref().is_some_and(|t| t.shown.contains_key(&e.os) || t.asked.contains_key(&e.os));
             if !known {
-                want.push((e.os.clone(), f.path_of(e), os));
+                want.push((e.os.clone(), f.cwd.join(&e.os), os));
             }
         }
         if f.tiles.is_none() && want.is_empty() {

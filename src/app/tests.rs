@@ -465,7 +465,7 @@ fn a_pending_rename_never_points_the_row_at_another_item() {
     assert!(s.owns_job());
     assert_eq!(s.cur().target_paths(), [d.join("a")], "still the item being renamed");
     let f = s.cur();
-    assert_eq!(f.selected().map(|e| f.label(e).into_owned()).as_deref(), Some("b"), "its new name, as a label");
+    assert_eq!(f.selected().map(|e| f.label(e).to_string()).as_deref(), Some("b"), "its new name, as a label");
     for cmd in [Cmd::Open, Cmd::Copy, Cmd::Cut, Cmd::Rename, Cmd::OpenWith, Cmd::CopyPath, Cmd::Trash, Cmd::Delete] {
         assert!(s.unavailable(cmd).is_some(), "{cmd:?} waits for the rename");
     }
@@ -493,7 +493,7 @@ fn rename_and_new_folder_run_on_the_worker() {
     s.commit_rename(&mut tx);
     assert!(s.owns_job(), "on the worker");
     let f = s.cur();
-    assert_eq!(f.selected().map(|e| f.label(e).into_owned()).as_deref(), Some("b.txt"), "shown at once");
+    assert_eq!(f.selected().map(|e| f.label(e).to_string()).as_deref(), Some("b.txt"), "shown at once");
     finish_job(&mut s);
     assert!(d.join("b.txt").exists() && !d.join("a.txt").exists());
     assert_eq!((s.note.as_deref(), s.shared.undo.borrow().len()), (None, 1), "nothing to say; undoable");
@@ -1558,71 +1558,143 @@ fn a_big_reload_hands_its_selection_over_without_copying_names() {
     }
 }
 
-/// The selection, as identities (names: one folder's are unique), against a plain model of it
-/// under random runs of what changes it or the rows it's on: clicks, ⌘-clicks, ⇧-clicks, ⌘A,
-/// Invert, Select by Pattern (replace, add, remove), typing a filter and backspacing, an
-/// inline rename started and cancelled or committed (to a new name, or one that's taken) and
-/// left to land whenever a later poll takes its outcome, sorts, Folders First, hidden files,
-/// files added, removed, renamed and replaced by a folder (or a folder by a file) of the same
-/// name on disk then read again, the name a rename took an item from made again from outside,
-/// reloads raced by any of those and landing whenever a later poll takes them, a tab hidden
-/// (a rename landing meanwhile, or not) and shown again, the column view, and going into a
-/// folder (the one its row shows, at its name now, or refused) and back; half the runs split
-/// on the folder, so the panes share its listing and renames land beside it. A choice makes the
-/// model what was chosen; a rename that lands (by identity, at the new name) renames it there;
-/// anything else only takes out what isn't shown any more, and never puts anything in. After
-/// every step, what an action would act on (the paths it's given) is exactly the model, and
-/// the status bar's totals are theirs.
+/// The selection, as identities, against a plain model of it under random runs of what changes
+/// it or the rows it's on: clicks, ⌘-clicks, ⇧-clicks, ⌘A, Invert, Select by Pattern (replace,
+/// add, remove), typing a filter and backspacing, an inline rename started and cancelled or
+/// committed (to a new name, or one that's taken), sorts, Folders First, hidden files, the column
+/// view, files added, removed, renamed and replaced by another kind of item on disk, the name a
+/// rename took an item from made again, reloads asked for and left in flight while any of those
+/// happen, a tab hidden (a rename landing meanwhile, or not) and shown again, and going into a
+/// folder and back; half the runs split on the folder, and the model sometimes holds the listing
+/// as a reload's worker does, so renames land on a shared listing (a label, every action on it
+/// refused) as often as in place.
+///
+/// Deterministic: every worker finishes before the next step (a read superseded too), what lands
+/// lands only when the model says (reads, the operation's outcome, both), and the files' times
+/// come from the seed. A choice makes the model what was chosen; anything else only finds each
+/// item where its identity is now (as a read does: under its name, else under its new one, else
+/// a file in a file's place) and takes out what isn't shown. After every step, what an action
+/// would act on is exactly the model, its totals are theirs, and an action on a row showing a
+/// label is refused.
 ///
 /// `ARBOR_PROP_CASES` runs more (CI runs 5,000 from the same fixed seeds).
 #[test]
 fn the_selection_matches_a_model_whatever_happens() {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::OsString;
-    type Model = BTreeSet<OsString>;
-    /// An inline rename on its way: its folder, the item's name and identity, the new name.
-    type Ren = (PathBuf, OsString, Option<crate::fs::Ident>, OsString);
-    /// The rows, by the names of their items on disk now (renamed beside the listing too).
+    use std::sync::Arc;
+    type Model = BTreeMap<OsString, Option<crate::fs::Ident>>;
+    type Held = Option<Arc<Vec<fs::Entry>>>;
     fn shown(s: &State) -> Vec<OsString> {
         let f = s.cur();
-        f.visible.iter().map(|&i| f.current_os(&f.entries[i as usize].os).to_os_string()).collect()
+        f.visible.iter().map(|&i| f.entries[i as usize].os.clone()).collect()
     }
-    /// What an action would act on: the paths it's given.
-    fn targets(s: &State) -> Model {
+    fn chose(s: &State, names: impl IntoIterator<Item = OsString>) -> Model {
+        let f = s.cur();
+        names.into_iter().map(|n| (n.clone(), f.entries.iter().find(|e| e.os == n).and_then(|e| e.id))).collect()
+    }
+    fn targets(s: &State) -> BTreeSet<OsString> {
         s.cur().target_paths().iter().map(|p| p.file_name().unwrap().to_os_string()).collect()
     }
-    /// Names (the listing's, from `matching`) as they are on disk now.
-    fn now(s: &State, names: Vec<OsString>) -> Vec<OsString> {
-        names.into_iter().map(|n| s.cur().current_os(&n).to_os_string()).collect()
+    /// Each item where its identity is now in the listing, as a read finds it: under its name
+    /// while it's the item, else wherever it is, else under its name another of its kind (a
+    /// file saved anew); then only what's shown.
+    fn reconcile(model: &mut Model, s: &State) {
+        let f = s.cur();
+        let mut out = Model::new();
+        for (n, id) in model.iter() {
+            let under = f.entries.iter().find(|e| e.os == *n);
+            if let Some(e) = under.filter(|e| id.is_none() || e.id.is_none() || e.id == *id) {
+                out.insert(n.clone(), e.id.or(*id));
+            } else if let Some(e) = id.and_then(|id| f.entries.iter().find(|e| e.id == Some(id))) {
+                out.insert(e.os.clone(), e.id);
+            } else if let Some(e) = under.filter(|e| e.id.zip(*id).is_some_and(|(a, b)| a.same_kind(&b))) {
+                out.insert(n.clone(), e.id);
+            }
+        }
+        let rows: BTreeSet<OsString> = shown(s).into_iter().collect();
+        out.retain(|n, _| rows.contains(n));
+        *model = out;
     }
-    fn keep_shown(model: &mut Model, s: &State) {
-        let rows: Model = shown(s).into_iter().collect();
-        model.retain(|n| rows.contains(n));
-    }
-    fn poll(s: &mut State, times: usize) {
-        for _ in 0..times {
+    /// Waits, landing nothing, until no worker is busy: every pane's read in, the operation
+    /// done, and no superseded read still holding a listing (whether one is shared is then the
+    /// same every run).
+    fn quiesce(s: &State, held: &Held) {
+        let until = Instant::now() + Duration::from_secs(20);
+        loop {
+            let reads = s.panes.iter().any(|p| p.f.loader.is_pending());
+            let job = s.shared.job.borrow().as_ref().is_some_and(|j| !j.run.finished());
+            let extra = s.panes.iter().any(|p| {
+                let mine = s.panes.iter().filter(|q| Arc::ptr_eq(&q.f.entries, &p.f.entries)).count()
+                    + usize::from(held.as_ref().is_some_and(|h| Arc::ptr_eq(h, &p.f.entries)));
+                Arc::strong_count(&p.f.entries) > mine
+            });
+            if !(reads || job || extra) {
+                return;
+            }
+            assert!(Instant::now() < until, "workers never settled: reads {reads}, job {job}, a listing held {extra}");
             std::thread::sleep(Duration::from_millis(1));
-            s.poll(&mut Tx::default());
         }
     }
-    /// A change of selection the user makes (or of the rows): returns what it did, or `None`
-    /// when it couldn't (no rows). An inline rename committed is left on its way (`ren`).
-    fn choose(s: &mut State, model: &mut Model, r: &mut crate::prop::Rng, ren: &mut Option<Ren>) -> Option<String> {
+    /// Lands the panes' reads (only those), and what they ask for in turn.
+    fn land_reads(s: &mut State, held: &Held) {
+        for _ in 0..20 {
+            quiesce(s, held);
+            let mut any = false;
+            for ix in 0..s.panes.len() {
+                if let Some(a) = s.panes[ix].f.loader.take() {
+                    s.land(ix, a, &mut Tx::default());
+                    any = true;
+                }
+            }
+            if !any {
+                break;
+            }
+        }
+        quiesce(s, held);
+    }
+    /// Lands the operation's outcome (only it): the reads it asks for are left in flight.
+    fn land_job(s: &mut State, held: &Held) {
+        quiesce(s, held);
+        s.poll_job();
+        quiesce(s, held);
+    }
+    /// Everything in flight lands, until nothing is.
+    fn settle(s: &mut State, held: &Held) {
+        for _ in 0..20 {
+            quiesce(s, held);
+            s.poll(&mut Tx::default());
+            quiesce(s, held);
+            if !s.owns_job() && !s.panes.iter().any(|p| p.f.loader.is_pending()) && s.panes.iter().all(|p| p.f.pending.is_none()) {
+                break;
+            }
+        }
+    }
+    /// Times from the seed, so sorting by date is the same every run.
+    fn stamp(p: &Path, r: &mut crate::prop::Rng) {
+        let t = std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000 + r.below(1_000_000) as u64);
+        if let Ok(f) = std::fs::File::open(p) {
+            let _ = f.set_modified(t);
+        }
+    }
+    /// A change of selection the user makes (or of the rows): what it did, or `None` when it
+    /// couldn't. An inline rename committed is left on its way; its old name goes in `took`.
+    fn choose(s: &mut State, model: &mut Model, r: &mut crate::prop::Rng, took: &mut Vec<OsString>) -> Option<String> {
         let n = s.cur().visible.len();
         let row = |r: &mut crate::prop::Rng| r.below(n.max(1));
         Some(match r.below(12) {
             0 | 1 if n > 0 => {
                 let i = row(r);
                 s.cur_mut().select(i);
-                *model = [shown(s)[i].clone()].into();
+                *model = chose(s, [shown(s)[i].clone()]);
                 format!("click {i}")
             }
             2 if n > 0 => {
                 let i = row(r);
                 s.cur_mut().toggle_mark(i);
                 let name = shown(s)[i].clone();
-                if !model.remove(&name) {
-                    model.insert(name);
+                if model.remove(&name).is_none() {
+                    model.extend(chose(s, [name]));
                 }
                 format!("cmd-click {i}")
             }
@@ -1630,17 +1702,18 @@ fn the_selection_matches_a_model_whatever_happens() {
                 let i = row(r);
                 let a = s.cur().anchor.min(n - 1);
                 s.cur_mut().extend_to(i);
-                *model = shown(s)[a.min(i)..=a.max(i)].iter().cloned().collect();
+                *model = chose(s, shown(s)[a.min(i)..=a.max(i)].iter().cloned());
                 format!("shift-click {i} (anchor {a})")
             }
             4 => {
                 s.cur_mut().select_all();
-                *model = shown(s).into_iter().collect();
+                *model = chose(s, shown(s));
                 "select all".into()
             }
             5 => {
                 s.cur_mut().invert_selection();
-                *model = shown(s).into_iter().filter(|n| !model.contains(n)).collect();
+                let was = std::mem::take(model);
+                *model = chose(s, shown(s).into_iter().filter(|n| !was.contains_key(n)));
                 "invert".into()
             }
             6 => {
@@ -1650,18 +1723,16 @@ fn the_selection_matches_a_model_whatever_happens() {
             }
             7 => {
                 s.toggle_hidden();
-                keep_shown(model, s);
                 "hidden files".into()
             }
             8 => {
                 // Typing chooses the row it finds; backspacing only shows more.
                 let c = ["a", "1", "z", "img", "q"][r.below(5)];
                 s.cur_mut().type_filter(c);
-                *model = now(s, s.cur().cursor_name().into_iter().filter(|_| !s.cur().visible.is_empty()).collect()).into_iter().collect();
+                *model = chose(s, s.cur().cursor_name().into_iter().filter(|_| !s.cur().visible.is_empty()));
                 for _ in 0..c.len() {
                     s.on_key(&KeyEvent { key: Key::Backspace, mods: rune::Mods::default() }, &mut Tx::default());
                 }
-                keep_shown(model, s);
                 format!("type {c:?}, backspace")
             }
             9 => {
@@ -1670,13 +1741,13 @@ fn the_selection_matches_a_model_whatever_happens() {
                 let how = [How::Replace, How::Add, How::Remove][r.below(3)];
                 let g = crate::pattern::Glob::name(glob, crate::pattern::Case::Insensitive).unwrap();
                 let matches = s.cur().matching(&g);
-                let m: Model = now(s, matches.clone()).into_iter().collect();
+                let m = chose(s, matches.iter().cloned());
                 s.cur_mut().apply_matches(matches, how);
-                *model = match how {
-                    How::Replace => m,
-                    How::Add => model.union(&m).cloned().collect(),
-                    How::Remove => model.difference(&m).cloned().collect(),
-                };
+                match how {
+                    How::Replace => *model = m,
+                    How::Add => model.extend(m),
+                    How::Remove => model.retain(|n, _| !m.contains_key(n)),
+                }
                 format!("pattern {glob:?} {how:?}")
             }
             10 => {
@@ -1686,60 +1757,31 @@ fn the_selection_matches_a_model_whatever_happens() {
                 format!("{cmd:?}")
             }
             11 if !s.busy() => {
-                // An inline rename: started (it, alone, selected), then cancelled, or committed
-                // (to a new name, or one taken) and left to land whenever a later poll takes it.
-                let f = s.cur();
-                let (e, id) = f.selected().map(|e| (f.current_os(&e.os).to_os_string(), e.id))?;
-                s.start_rename();
-                *model = [e.clone()].into();
-                match r.below(3) {
-                    0 => {
-                        s.cancel_rename(&mut Tx::default());
-                        "rename, cancelled".into()
-                    }
-                    k => {
-                        let names = shown(s);
-                        let taken = k == 1 && names.len() > 1;
-                        let to: OsString = if taken {
-                            names.iter().find(|n| **n != e).cloned().unwrap()
-                        } else {
-                            format!("ren{}.txt", r.next() % 100_000).into()
-                        };
-                        s.rename.as_mut().unwrap().edit.text = to.to_string_lossy().into_owned();
-                        s.commit_rename(&mut Tx::default());
-                        if s.owns_job() {
-                            *ren = Some((s.cur().cwd.clone(), e.clone(), id, to.clone()));
-                        }
-                        format!("rename {e:?} to {to:?}{}", if taken { " (taken)" } else { "" })
-                    }
+                // An inline rename: refused on a row showing a label; else started (it, alone,
+                // selected), then cancelled, or committed (to a new name, or one taken).
+                let e = s.cur().selected().map(|e| e.os.clone())?;
+                if s.cur().updating() {
+                    s.start_rename();
+                    assert!(s.rename.is_none() && s.note.as_deref() == Some(crate::app::UPDATING), "rename refused");
+                    return Some("rename refused (updating)".into());
                 }
+                s.start_rename();
+                *model = chose(s, [e.clone()]);
+                if r.below(3) == 0 {
+                    s.cancel_rename(&mut Tx::default());
+                    return Some("rename, cancelled".into());
+                }
+                let names = shown(s);
+                let taken = r.one_in(2) && names.len() > 1;
+                let to: OsString =
+                    if taken { names.iter().find(|n| **n != e).cloned().unwrap() } else { format!("ren{}.txt", r.next() % 100_000).into() };
+                s.rename.as_mut().unwrap().edit.text = to.to_string_lossy().into_owned();
+                s.commit_rename(&mut Tx::default());
+                took.push(e.clone());
+                format!("rename {e:?} to {to:?}{}", if taken { " (taken)" } else { "" })
             }
             _ => return None,
         })
-    }
-    /// The inline rename on its way, once it has landed (its outcome came back, or a read
-    /// showed the item under its new name: its row has no label any more): renamed (the item
-    /// its row was, by identity, at the new name), the model follows it, in the folder it was
-    /// made in.
-    fn landed(s: &State, model: &mut Model, ren: &mut Option<Ren>, gone: &mut Option<OsString>, log: &mut Vec<String>) {
-        let Some((dir, from, id, to)) = ren.clone() else { return };
-        let done = match id {
-            Some(id) => crate::fs::ident_at(&dir.join(&to)) == Some(id),
-            None => dir.join(&to).exists() && !dir.join(&from).exists(),
-        };
-        let f = s.cur();
-        let label = f.labels.keys().any(|k| f.current_os(k) == from);
-        if s.owns_job() && !(done && !label) {
-            return;
-        }
-        *ren = None;
-        if done {
-            if s.cur().cwd == dir && model.remove(&from) {
-                model.insert(to.clone());
-            }
-            *gone = Some(from.clone());
-        }
-        log.push(format!("  rename of {from:?} landed{}", if done { "" } else { ", refused" }));
     }
     let d = folder("selection-model", 0);
     crate::prop::check("selection_model", 48, |r| {
@@ -1751,8 +1793,10 @@ fn the_selection_matches_a_model_whatever_happens() {
             let dot = if r.one_in(5) { "." } else { "" };
             let name = format!("{dot}{}{made}.{}", ["a", "B", "c", "img_", "Z"][r.below(5)], ["txt", "jpg", "md"][r.below(3)]);
             std::fs::write(d.join(&name), vec![b'x'; r.below(3000)]).unwrap();
+            stamp(&d.join(&name), r);
             if r.one_in(5) {
                 std::fs::create_dir(d.join(format!("dir{made}"))).unwrap();
+                stamp(&d.join(format!("dir{made}")), r);
             }
         };
         for _ in 0..10 {
@@ -1760,34 +1804,30 @@ fn the_selection_matches_a_model_whatever_happens() {
         }
         let mut s = state_in(&d);
         s.places = vec![("Test".into(), d.clone())];
-        settle_all(&mut s);
-        // Half the time split on the folder: the panes share its listing, so a rename landing
-        // is shown beside it until a read brings it.
+        let mut held: Held = None;
+        settle(&mut s, &held);
         if r.one_in(2) {
             s.run(Cmd::Split, &mut Tx::default());
-            settle_all(&mut s);
+            settle(&mut s, &held);
         }
-        let mut model: Model = shown(&s).into_iter().take(1).filter(|_| s.cur().selected().is_some()).collect();
+        let mut model = chose(&s, s.cur().selected().map(|e| e.os.clone()));
         let mut log: Vec<String> = Vec::new();
-        let (mut ren, mut gone): (Option<Ren>, Option<OsString>) = (None, None);
+        let mut took: Vec<OsString> = Vec::new();
         for step in 0..40 {
-            // The disk changes from outside never touch an item a rename is on its way for (the
-            // model couldn't say how it went).
-            let names: Vec<OsString> = std::fs::read_dir(&d)
-                .unwrap()
-                .flatten()
-                .map(|e| e.file_name())
-                .filter(|n| ren.as_ref().is_none_or(|(_, f, _, t)| n != f && n != t))
-                .collect();
+            quiesce(&s, &held);
+            let names: Vec<OsString> = {
+                let mut v: Vec<OsString> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name()).collect();
+                v.sort();
+                v
+            };
             let pick = |r: &mut crate::prop::Rng| names.get(r.below(names.len().max(1))).cloned();
-            match r.below(11) {
-                0..=4 => match choose(&mut s, &mut model, r, &mut ren) {
+            match r.below(14) {
+                0..=4 => match choose(&mut s, &mut model, r, &mut took) {
                     Some(what) => log.push(what),
                     None => continue,
                 },
                 5 | 6 => {
-                    // The disk changes; the folder is read again, or the read is raced by
-                    // choices and left to land whenever a later poll takes it.
+                    // The disk changes; a read is asked for, and lands now or is left in flight.
                     let what = match r.below(4) {
                         0 => {
                             add(r);
@@ -1810,7 +1850,7 @@ fn the_selection_matches_a_model_whatever_happens() {
                             None => "nothing".into(),
                         },
                         _ => match pick(r) {
-                            // Replaced by one of the other type, under the same name.
+                            // Replaced by another kind of item, under the same name.
                             Some(n) => {
                                 let p = d.join(&n);
                                 if p.is_dir() {
@@ -1820,115 +1860,101 @@ fn the_selection_matches_a_model_whatever_happens() {
                                 } else if std::fs::remove_file(&p).is_ok() {
                                     std::fs::create_dir(&p).unwrap();
                                 }
-                                format!("replaced {n:?} by the other type")
+                                stamp(&p, r);
+                                format!("replaced {n:?} by another kind")
                             }
                             None => "nothing".into(),
                         },
                     };
                     s.reload();
                     if r.one_in(2) {
-                        let mut raced = Vec::new();
-                        for _ in 0..1 + r.below(3) {
-                            if let Some(w) = choose(&mut s, &mut model, r, &mut ren) {
-                                raced.push(w);
-                            }
-                            poll(&mut s, r.below(2));
-                            landed(&s, &mut model, &mut ren, &mut gone, &mut raced);
-                            keep_shown(&mut model, &s);
-                        }
-                        log.push(format!("disk: {what}; reload raced by {raced:?}"));
-                    } else {
-                        settle_all(&mut s);
+                        land_reads(&mut s, &held);
                         log.push(format!("disk: {what}; reload"));
-                    }
-                }
-                10 => {
-                    // Something new under the name a rename took the item from, made from
-                    // outside (a file or a folder), then read or not.
-                    let Some(n) = [ren.as_ref().map(|r| r.1.clone()), gone.clone()].into_iter().flatten().find(|n| !d.join(n).exists())
-                    else {
-                        continue;
-                    };
-                    let folder = r.one_in(2);
-                    if folder {
-                        std::fs::create_dir(d.join(&n)).unwrap();
                     } else {
-                        std::fs::write(d.join(&n), "newcomer").unwrap();
+                        log.push(format!("disk: {what}; reload asked"));
                     }
-                    let read = r.one_in(2);
-                    if read {
-                        s.reload();
-                    }
-                    log.push(format!(
-                        "disk: {n:?} made again ({}){}",
-                        if folder { "folder" } else { "file" },
-                        if read { "; reload" } else { "" }
-                    ));
                 }
                 7 => {
-                    log.push("tab hidden and shown".into());
                     s.new_tab(&mut Tx::default());
-                    if r.one_in(2) {
-                        // The rename lands (or the read) while the tab is hidden.
-                        poll(&mut s, 2);
-                        landed(&s, &mut model, &mut ren, &mut gone, &mut log);
+                    let hidden_landing = r.one_in(2);
+                    if hidden_landing {
+                        // The operation's outcome lands while the tab is hidden.
+                        land_job(&mut s, &held);
                     }
                     s.run(Cmd::PrevTab, &mut Tx::default());
-                    settle_all(&mut s);
-                    landed(&s, &mut model, &mut ren, &mut gone, &mut log);
+                    land_reads(&mut s, &held);
                     let (ix, last) = (s.active, s.panes[s.active].tabs.len() - 1);
                     s.close_tab(ix, last, &mut Tx::default());
+                    log.push(format!("tab hidden and shown{}", if hidden_landing { " (outcome landed meanwhile)" } else { "" }));
                 }
                 8 => {
-                    // Into the selected folder, whatever's on its way (a rename, a read): it opens
-                    // the folder its row shows, at its name now, or it's refused; and back, the
-                    // folder it came from selected.
+                    // Into the selected folder: refused while it shows a label; else in, and
+                    // back, the folder it came from selected.
                     let f = s.cur();
                     let Some(e) = f.selected().filter(|e| e.is_dir) else { continue };
                     if f.marked.len() > 1 {
                         continue;
                     }
-                    let target = f.path_of(e);
-                    let dir = target.file_name().unwrap().to_os_string();
-                    if let Some(why) = s.unavailable(Cmd::Into) {
-                        log.push(format!("into {dir:?}: {why}"));
+                    let dir = e.os.clone();
+                    if s.cur().updating() {
+                        s.run(Cmd::Into, &mut Tx::default());
+                        assert_eq!((s.cur().cwd.clone(), s.note.as_deref()), (d.clone(), Some(crate::app::UPDATING)), "{log:#?}");
+                        log.push(format!("into {dir:?}: refused (updating)"));
                     } else {
                         s.run(Cmd::Into, &mut Tx::default());
-                        settle_all(&mut s);
-                        landed(&s, &mut model, &mut ren, &mut gone, &mut log);
-                        let there = s.cur().cwd.clone();
-                        assert!(there == target || there == d, "into {dir:?} opened {there:?} after {log:#?}");
-                        if there == d {
+                        settle(&mut s, &held);
+                        if s.cur().cwd == d {
                             log.push(format!("into {dir:?}: not opened ({:?})", s.note));
                         } else {
+                            assert_eq!(s.cur().cwd, d.join(&dir), "{log:#?}");
                             s.run(Cmd::Parent, &mut Tx::default());
-                            settle_all(&mut s);
-                            landed(&s, &mut model, &mut ren, &mut gone, &mut log);
-                            if s.cur().cwd != d {
-                                continue;
-                            }
-                            model = [dir.clone()].into();
+                            settle(&mut s, &held);
+                            assert_eq!(s.cur().cwd, d);
+                            model = chose(&s, [dir.clone()]);
                             log.push(format!("into {dir:?} and back"));
                         }
                     }
                 }
+                9 => {
+                    land_reads(&mut s, &held);
+                    log.push("reads land".into());
+                }
+                10 => {
+                    land_job(&mut s, &held);
+                    log.push("outcome lands".into());
+                }
+                11 => {
+                    settle(&mut s, &held);
+                    log.push("everything lands".into());
+                }
+                12 => {
+                    // Something new under a name a rename took an item from, a file or a folder.
+                    let Some(n) = took.iter().rev().find(|n| !d.join(n).exists()).cloned() else { continue };
+                    if r.one_in(2) {
+                        std::fs::create_dir(d.join(&n)).unwrap();
+                    } else {
+                        std::fs::write(d.join(&n), "newcomer").unwrap();
+                    }
+                    stamp(&d.join(&n), r);
+                    log.push(format!("disk: {n:?} made again"));
+                }
                 _ => {
-                    log.push("polls".into());
-                    poll(&mut s, 3);
+                    // The listing held as a reload's worker holds it, or let go.
+                    held = match held {
+                        Some(_) => None,
+                        None => Some(s.cur().entries.clone()),
+                    };
+                    log.push(if held.is_some() { "listing held".into() } else { "listing let go".into() });
                 }
             }
-            poll(&mut s, r.below(2));
-            landed(&s, &mut model, &mut ren, &mut gone, &mut log);
-            keep_shown(&mut model, &s);
-            assert_eq!(
-                targets(&s),
-                model,
-                "after {log:#?}\nrows {:?}\nlisting {:?}\nrenames {:?}\nlabels {:?}",
-                shown(&s),
-                s.cur().entries.iter().map(|e| (&e.os, e.is_dir)).collect::<Vec<_>>(),
-                s.cur().renames,
-                s.cur().labels
-            );
+            quiesce(&s, &held);
+            reconcile(&mut model, &s);
+            let rows = s.cur().visible.iter().map(|&i| &s.cur().entries[i as usize]).map(|e| (e.os.clone(), s.cur().label(e).to_string()));
+            let rows: Vec<(OsString, String)> = rows.collect();
+            assert_eq!(targets(&s), model.keys().cloned().collect::<BTreeSet<_>>(), "after {log:#?}\nrows {rows:?}");
+            if s.cur().updating() {
+                assert_eq!(s.unavailable(Cmd::Copy), Some(crate::app::UPDATING), "after {log:#?}");
+            }
             if let Some(p) = s.cur().picked_size() {
                 let t = s.cur().targets();
                 let bytes: u64 = t.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
@@ -1936,7 +1962,8 @@ fn the_selection_matches_a_model_whatever_happens() {
                 assert_eq!((p.count, p.bytes, p.folders), (t.len(), bytes, folders), "totals after {log:#?}");
             }
         }
-        settle_all(&mut s);
+        held = None;
+        settle(&mut s, &held);
     });
 }
 
@@ -2076,11 +2103,12 @@ fn open_folder_and_pattern_remove_act_on_the_selection() {
     assert!(s.cur().targets().is_empty(), "{:?}", s.cur().target_paths());
 }
 
-/// Split on one folder (the panes share its listing), a folder renamed, and another made
-/// under its old name before the panes read the folder again: every action on the row goes
-/// to the renamed folder it shows, never the newcomer at the old name. → opens it.
+/// Split on one folder (the panes share its listing), a folder renamed, and another made under
+/// its old name before the panes read the folder again: the row shows the new name, and every
+/// action on it is refused, saying so, until the read lands (nothing resolves the old row to the
+/// new name, nor opens the newcomer). Then it's the renamed folder, selected, and → opens it.
 #[test]
-fn actions_on_a_renamed_row_go_to_its_new_name_before_the_reload() {
+fn actions_on_a_renamed_row_wait_for_the_read() {
     let d = folder("renamed-row", 0);
     std::fs::create_dir(d.join("old")).unwrap();
     std::fs::write(d.join("other.txt"), "x").unwrap();
@@ -2096,18 +2124,49 @@ fn actions_on_a_renamed_row_go_to_its_new_name_before_the_reload() {
     wait_job(&mut s);
     assert!(d.join("renamed").is_dir());
     std::fs::create_dir(d.join("old")).unwrap();
-    // Before any read lands: what the row shows, and what it acts on.
+    // Before any read lands: what the row shows, and that nothing acts on it.
     let f = s.cur();
-    assert_eq!(f.selected().map(|e| f.label(e).into_owned()).as_deref(), Some("renamed"));
+    assert_eq!(f.selected().map(|e| f.label(e)), Some("renamed"));
+    for cmd in [
+        Cmd::Open,
+        Cmd::Into,
+        Cmd::Copy,
+        Cmd::Cut,
+        Cmd::Trash,
+        Cmd::Delete,
+        Cmd::Duplicate,
+        Cmd::Rename,
+        Cmd::CopyToOther,
+        Cmd::MoveToOther,
+        Cmd::Info,
+        Cmd::TogglePreview,
+        Cmd::CopyPath,
+        Cmd::Reveal,
+        Cmd::OpenInNewWindow,
+        Cmd::Compress,
+    ] {
+        assert_eq!(s.unavailable(cmd), Some(crate::app::UPDATING), "{cmd:?}");
+    }
+    assert_eq!(s.folder_to_open(), None);
+    assert!(s.drag_item(s.cur().id, i).is_none(), "no drag");
+    s.run(Cmd::Into, &mut Tx::default());
+    assert_eq!(s.cur().cwd, d, "not opened");
+    assert_eq!(s.note.as_deref(), Some(crate::app::UPDATING));
+    s.note = None;
+    s.open_selected();
+    assert_eq!((s.cur().cwd.clone(), s.note.as_deref()), (d.clone(), Some(crate::app::UPDATING)), "a double-click too");
+    // The read lands: the renamed folder, selected (by identity), and nothing waits.
+    settle_all(&mut s);
     assert_eq!(s.cur().target_paths(), [d.join("renamed")]);
-    assert_eq!(s.cur().target_checks().items.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), [d.join("renamed")]);
+    assert!(s.cur().labels.is_empty());
     s.run(Cmd::Into, &mut Tx::default());
     settle_all(&mut s);
     assert_eq!(s.cur().cwd, d.join("renamed"), "opened the folder the row shows");
 }
 
-/// A tab hidden while a rename is shown beside the listing (before the reload lands) keeps
-/// the renamed item selected: shown again, it's that item, under its new name.
+/// A tab hidden while a renamed row waits for the read (split on one folder: the listing is
+/// shared) keeps the item selected: shown again, its read finds it under its new name, by
+/// identity. The hidden tab learns nothing of the rename itself.
 #[test]
 fn a_hidden_tab_keeps_a_renamed_selection() {
     let d = folder("renamed-tab", 0);
@@ -2123,11 +2182,12 @@ fn a_hidden_tab_keeps_a_renamed_selection() {
     s.rename.as_mut().unwrap().edit.text = "renamed".into();
     s.commit_rename(&mut Tx::default());
     wait_job(&mut s);
-    assert_eq!(s.cur().target_paths(), [d.join("renamed")]);
+    assert!(s.cur().updating(), "waits for the read");
     s.new_tab(&mut Tx::default());
     s.run(Cmd::PrevTab, &mut Tx::default());
     settle_all(&mut s);
     assert_eq!(s.cur().target_paths(), [d.join("renamed")]);
+    assert!(s.cur().labels.is_empty());
 }
 
 /// A navigation that replaces a read of the folder on screen (asked for after a change) and
@@ -2148,10 +2208,11 @@ fn a_failed_navigation_keeps_the_read_it_replaced() {
     assert!(names.contains(&"new"), "read again: {names:?}");
 }
 
-/// Select by Pattern matches the name a row shows: an item renamed beside a shared listing
-/// (split on one folder, before the read lands) matches by its new name.
+/// Select by Pattern matches the names the listing has: a row renamed while the listing was
+/// shared (split on one folder) is still its old name until the read lands, and acting on it
+/// waits; once read, its new name matches.
 #[test]
-fn select_by_pattern_matches_a_renamed_rows_new_name() {
+fn select_by_pattern_matches_a_renamed_row_once_read() {
     let d = folder("pattern-renamed", 0);
     for n in ["a", "b"] {
         std::fs::write(d.join(n), n).unwrap();
@@ -2165,17 +2226,23 @@ fn select_by_pattern_matches_a_renamed_rows_new_name() {
     s.rename.as_mut().unwrap().edit.text = "zed".into();
     s.commit_rename(&mut Tx::default());
     wait_job(&mut s);
-    let g = crate::pattern::Glob::name("z*", crate::pattern::Case::Insensitive).unwrap();
-    let m = s.cur().matching(&g);
-    s.cur_mut().apply_matches(m, crate::select::How::Replace);
+    let pick = |s: &mut State, glob: &str| {
+        let g = crate::pattern::Glob::name(glob, crate::pattern::Case::Insensitive).unwrap();
+        let m = s.cur().matching(&g);
+        s.cur_mut().apply_matches(m, crate::select::How::Replace);
+    };
+    pick(&mut s, "a");
+    assert_eq!(s.unavailable(Cmd::Copy), Some(crate::app::UPDATING), "the row waits for the read");
+    settle_all(&mut s);
+    pick(&mut s, "z*");
     assert_eq!(s.cur().target_paths(), [d.join("zed")]);
 }
 
-/// A folder renamed beside a shared listing, then replaced by another folder under its new name
-/// before the read lands: → doesn't open the newcomer (it says why), the row being the item
-/// its listing read.
+/// A folder renamed while the listing was shared, then replaced by another folder under its new
+/// name before the read lands: → is refused, saying so (the newcomer isn't opened); once read,
+/// the folder selected is gone, and nothing else is selected in its place.
 #[test]
-fn opening_a_renamed_row_checks_it_is_still_the_item() {
+fn opening_a_renamed_row_waits_for_the_read() {
     let d = folder("open-renamed", 0);
     std::fs::create_dir(d.join("old")).unwrap();
     std::fs::write(d.join("other.txt"), "x").unwrap();
@@ -2191,14 +2258,15 @@ fn opening_a_renamed_row_checks_it_is_still_the_item() {
     std::fs::remove_dir(d.join("renamed")).unwrap();
     std::fs::create_dir(d.join("renamed")).unwrap();
     s.run(Cmd::Into, &mut Tx::default());
-    settle_all(&mut s);
     assert_eq!(s.cur().cwd, d, "not the newcomer");
-    assert!(s.note.as_deref().is_some_and(|n| n.contains("changed since")), "{:?}", s.note);
+    assert_eq!(s.note.as_deref(), Some(crate::app::UPDATING));
+    settle_all(&mut s);
+    assert!(s.cur().targets().is_empty(), "{:?}", s.cur().target_paths());
 }
 
-/// A row renamed beside a shared listing (split on one folder, before the read lands) renamed
-/// again: its row shows the second new name and waits for it like any rename, and once it
-/// lands every action goes to the second name.
+/// A row renamed while the listing was shared (split on one folder) can't be renamed again
+/// before the read lands (refused, saying so); once read, it's the item under its new name, and
+/// renaming it again goes as any rename.
 #[test]
 fn a_renamed_row_renamed_again_before_the_read() {
     let d = folder("renamed-twice", 0);
@@ -2210,18 +2278,26 @@ fn a_renamed_row_renamed_again_before_the_read() {
     s.run(Cmd::Split, &mut Tx::default());
     settle_all(&mut s);
     s.cur_mut().select(0);
-    for (to, done) in [("first", false), ("second", true)] {
+    let rename = |s: &mut State, to: &str| {
         s.start_rename();
-        s.rename.as_mut().unwrap().edit.text = to.into();
-        s.commit_rename(&mut Tx::default());
-        if done {
-            let f = s.cur();
-            assert_eq!(f.selected().map(|e| f.label(e).into_owned()).as_deref(), Some("second"), "shown at once");
-            assert!(s.unavailable(Cmd::Open).is_some(), "waits for the rename");
+        if let Some(r) = s.rename.as_mut() {
+            r.edit.text = to.into();
         }
-        wait_job(&mut s);
-        assert_eq!(s.cur().target_paths(), [d.join(to)]);
-    }
+        s.commit_rename(&mut Tx::default());
+    };
+    rename(&mut s, "first");
+    let f = s.cur();
+    assert_eq!(f.selected().map(|e| f.label(e)), Some("first"), "shown at once");
+    assert!(s.unavailable(Cmd::Open).is_some(), "waits for the rename");
+    wait_job(&mut s);
+    rename(&mut s, "second");
+    assert!(s.rename.is_none() && !s.owns_job(), "refused");
+    assert_eq!(s.note.as_deref(), Some(crate::app::UPDATING));
+    settle_all(&mut s);
+    assert_eq!(s.cur().target_paths(), [d.join("first")]);
+    rename(&mut s, "second");
+    finish_job(&mut s);
+    assert_eq!(s.cur().target_paths(), [d.join("second")]);
     assert_eq!(std::fs::read_to_string(d.join("second")).unwrap(), "a");
 }
 
@@ -2322,4 +2398,103 @@ fn a_rename_landing_while_its_tab_is_hidden_keeps_it_selected() {
     s.run(Cmd::PrevTab, &mut Tx::default());
     settle_all(&mut s);
     assert_eq!(s.cur().target_paths(), [d.join("renamed")]);
+}
+
+// ---- The sixth review's probes, under the one rule.
+
+/// Split on one folder, a folder renamed, then the renamed folder moved away and another made
+/// under its new name before the read: Open in New Window is refused (it has nothing to open).
+#[test]
+fn open_in_new_window_waits_for_the_read() {
+    let d = folder("new-window", 0);
+    std::fs::create_dir(d.join("old")).unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.run(Cmd::Split, &mut Tx::default());
+    s.cur_mut().select(0);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "renamed".into();
+    s.commit_rename(&mut Tx::default());
+    wait_job(&mut s);
+    std::fs::rename(d.join("renamed"), d.join("parked")).unwrap();
+    std::fs::create_dir(d.join("renamed")).unwrap();
+    assert_eq!(s.folder_to_open(), None);
+    assert_eq!(s.unavailable(Cmd::OpenInNewWindow), Some(crate::app::UPDATING));
+}
+
+/// An inline rename done on disk, its old name made again, a reload landing before the rename's
+/// outcome, and the newcomer chosen (then split, sharing the listing): the newcomer shows its own
+/// name (the label was the original's), stays what's selected when the outcome lands, and
+/// nothing redirects it to the renamed original.
+#[test]
+fn a_late_outcome_never_redirects_a_newcomer() {
+    let d = folder("late-outcome", 0);
+    std::fs::create_dir(d.join("old")).unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.cur_mut().select(0);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "renamed".into();
+    s.commit_rename(&mut Tx::default());
+    wait_for(&d.join("renamed"));
+    std::fs::create_dir(d.join("old")).unwrap();
+    s.reload();
+    land_reads(&mut s, 0);
+    assert!(s.owns_job());
+    let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].os == "old").unwrap();
+    s.cur_mut().select(i);
+    assert_eq!(s.cur().selected().map(|e| s.cur().label(e)), Some("old"), "its own name");
+    s.run(Cmd::Split, &mut Tx::default());
+    wait_job(&mut s);
+    assert_eq!(s.cur().target_paths(), [d.join("old")]);
+    settle_all(&mut s);
+    assert_eq!(s.cur().target_paths(), [d.join("old")]);
+}
+
+/// An inline rename that fails (the name is taken) while its tab is hidden: shown again, the
+/// row is its own name, with no label, and acting on it acts on it.
+#[test]
+fn a_rename_failing_while_hidden_leaves_no_label() {
+    let d = folder("hidden-failure", 0);
+    for n in ["a", "b"] {
+        std::fs::write(d.join(n), n).unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.cur_mut().select(0);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "b".into();
+    s.commit_rename(&mut Tx::default());
+    s.new_tab(&mut Tx::default());
+    wait_job(&mut s);
+    s.run(Cmd::PrevTab, &mut Tx::default());
+    settle_all(&mut s);
+    let f = s.cur();
+    assert_eq!(f.selected().map(|e| f.label(e)), Some("a"));
+    assert!(f.labels.is_empty());
+    assert_eq!(s.unavailable(Cmd::Duplicate), None);
+}
+
+/// Split on one folder, b removed from outside (not read yet), a renamed to b, then Invert: the
+/// selection is the stale b row and c. Once read, b is the renamed folder (another kind of item
+/// than the file selected under that name): only c is selected.
+#[test]
+fn a_stale_row_doesnt_select_what_took_its_name() {
+    let d = folder("freed-invert", 0);
+    std::fs::create_dir(d.join("a")).unwrap();
+    for n in ["b", "c"] {
+        std::fs::write(d.join(n), n).unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.run(Cmd::Split, &mut Tx::default());
+    s.cur_mut().select(0);
+    std::fs::remove_file(d.join("b")).unwrap();
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "b".into();
+    s.commit_rename(&mut Tx::default());
+    wait_job(&mut s);
+    s.cur_mut().invert_selection();
+    settle_all(&mut s);
+    assert_eq!(s.cur().target_paths(), [d.join("c")]);
 }

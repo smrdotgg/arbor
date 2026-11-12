@@ -507,7 +507,7 @@ impl State {
         // its way, what's on the right stays.
         let loading = f.is_loading();
         let single = f.marked.len() <= 1;
-        let want_right = f.selected().filter(|e| single && e.is_dir).map(|e| f.path_of(e));
+        let want_right = f.selected().filter(|e| single && e.is_dir && !f.labelled(e)).map(|e| f.cwd.join(&e.os));
         let cols = f.cols.get_or_insert_with(|| {
             changed = true;
             Box::new(Columns::new(PathBuf::new()))
@@ -850,6 +850,10 @@ impl State {
     /// row or column in the column view): into it, as a file drop, each item checked.
     pub(crate) fn drop_rows_into(&mut self, id: u64, i: usize, version: u64, dest: crate::ops::Dest, tx: &mut Tx) {
         let Some(src) = self.pane(id).filter(|p| p.f.version == version) else { return };
+        if src.f.drag_updating(i) {
+            self.note = Some(crate::app::UPDATING.into());
+            return;
+        }
         let (files, expect) = (src.f.drag_paths(i), src.f.drag_checks(i));
         self.drop_into(&files, dest, expect, tx);
     }
@@ -907,7 +911,6 @@ impl Folder {
         self.visible = std::sync::Arc::default();
         self.marked.clear();
         self.labels.clear();
-        self.renames.clear();
         self.sel = 0;
         self.anchor = 0;
         self.filter.clear();
@@ -929,8 +932,18 @@ impl Folder {
         self.loader.cancel();
         let req = crate::folder::next_request();
         let picks = self.picks;
-        self.pending =
-            Some(crate::folder::Pending { req, path, nav, select, cursor: None, none: false, rename: false, scroll: 0.0, picks });
+        self.pending = Some(crate::folder::Pending {
+            req,
+            path,
+            nav,
+            select,
+            cursor: None,
+            none: false,
+            rename: false,
+            scroll: 0.0,
+            picks,
+            ids: Default::default(),
+        });
         req
     }
 }

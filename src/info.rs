@@ -609,21 +609,23 @@ impl State {
         }
         let key = self.info_key();
         let f = self.cur();
-        let picked = f.targets();
+        // An item showing a label isn't read until the folder is read again: the folder is
+        // shown meanwhile.
+        let picked = if f.updating() { Vec::new() } else { f.targets() };
         let (paths, dirs, files, size, name) = if picked.is_empty() {
             (vec![f.cwd.clone()], 1, 0, 0, crate::sidebar::name_for(&f.cwd))
         } else {
             let dirs = picked.iter().filter(|e| e.is_dir && !e.is_link).count();
             let size = picked.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
             let name = if picked.len() == 1 { picked[0].name.clone() } else { format!("{} items", picked.len()) };
-            (picked.iter().map(|e| f.path_of(e)).collect(), dirs, picked.len() - dirs, size, name)
+            (picked.iter().map(|e| f.cwd.join(&e.os)).collect(), dirs, picked.len() - dirs, size, name)
         };
         let dir = f.cwd.clone();
         // Folders (not links to them) are walked; selected files count from the listing.
         let walk_roots: Vec<Root> = if picked.is_empty() {
             vec![Root::Here(f.cwd.clone(), f.dir_id)]
         } else {
-            picked.iter().filter(|e| e.is_dir && !e.is_link).map(|e| Root::Picked(f.path_of(e), e.id)).collect()
+            picked.iter().filter(|e| e.is_dir && !e.is_link).map(|e| Root::Picked(f.cwd.join(&e.os), e.id)).collect()
         };
         let known = match picked.as_slice() {
             [e] => Some(Meta {

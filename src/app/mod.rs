@@ -36,6 +36,9 @@ pub(crate) const BUSY: &str = "Another file operation is running";
 
 /// [`BUSY`], when the operation is another window's (only that window shows and cancels it).
 pub(crate) const BUSY_ELSEWHERE: &str = "Another file operation is running in another window";
+/// Why an action on a row showing a label waits ([`Folder::labels`]): its rename is on its way,
+/// or landed while the listing was shared, and the folder is being read again.
+pub(crate) const UPDATING: &str = "Updating… try again in a moment";
 
 /// An inline rename in progress (always in the active pane).
 pub struct Rename {
@@ -431,6 +434,7 @@ impl State {
                     rename: false,
                     scroll: 0.0,
                     picks: 0,
+                    ids: Default::default(),
                 });
                 s.boot = Some(boot);
                 s.boot_req = Some(req);
@@ -594,6 +598,7 @@ impl State {
             rename: false,
             scroll: 0.0,
             picks: 0,
+            ids: Default::default(),
         });
         // Tests and headless runs wait, so what they check is there.
         let wait = if cfg!(test) || rune::tooling::headless_run().is_some() { s.show_wait } else { std::time::Duration::ZERO };
@@ -644,7 +649,7 @@ impl State {
     pub(crate) fn folder_to_open(&self) -> Option<PathBuf> {
         let f = self.cur();
         match f.targets().as_slice() {
-            [e] if e.is_dir && !f.labels.contains_key(&e.os) => Some(f.path_of(e)),
+            [e] if e.is_dir && !f.labelled(e) => Some(f.cwd.join(&e.os)),
             _ => None,
         }
     }
@@ -819,18 +824,25 @@ impl State {
         self.reload_selecting(Vec::new(), false);
     }
 
+    /// An action on the selection while one of its items shows a label ([`Folder::updating`]):
+    /// refused, saying so. True when it is.
+    pub(crate) fn refuse_updating(&mut self) -> bool {
+        let updating = self.cur().updating();
+        if updating {
+            self.note = Some(UPDATING.into());
+        }
+        updating
+    }
+
     /// Opens the cursor's entry: a folder navigates, a file opens in its default app.
     /// With several files selected, opens each file.
     pub fn open_selected(&mut self) {
-        let f = self.cur();
-        // A row renamed beside its listing (not read again yet) opens the item at its name now
-        // only while that's still the item it read: never one made there since.
-        let moved = f.targets().into_iter().find(|e| f.current_os(&e.os) != e.os && e.id.is_some() && fs::ident_at(&f.path_of(e)) != e.id);
-        if let Some(e) = moved {
-            self.note = Some(format!("“{}” changed since it was read: try again in a moment", f.label(e)));
+        // (A double-click comes here without the command's check.)
+        if self.refuse_updating() {
             return;
         }
-        let targets: Vec<(PathBuf, bool)> = f.targets().iter().map(|e| (f.path_of(e), e.is_dir)).collect();
+        let f = self.cur();
+        let targets: Vec<(PathBuf, bool)> = f.targets().iter().map(|e| (f.cwd.join(&e.os), e.is_dir)).collect();
         if let [(path, true)] = targets.as_slice() {
             let p = path.clone();
             self.go(p, Nav::New, None);
@@ -848,7 +860,7 @@ impl State {
 
     pub fn reveal_selected(&mut self) {
         let f = self.cur();
-        let path = f.selected().map_or_else(|| f.cwd.clone(), |e| f.path_of(e));
+        let path = f.selected().map_or_else(|| f.cwd.clone(), |e| f.cwd.join(&e.os));
         if let Err(err) = fs::reveal(&path) {
             self.note = Some(format!("Couldn't reveal: {err}"));
         }
@@ -872,8 +884,6 @@ impl State {
             if let Some(a) = self.panes[ix].f.loader.take() {
                 changed |= self.land(ix, a, tx);
             }
-            // Renames made beside a listing a worker held go into it once it's free.
-            changed |= self.panes[ix].f.absorb_renames();
         }
         // Free space, asked when a folder's listing landed: only an answer for the folder the
         // active pane shows changes the status bar.
@@ -1178,26 +1188,10 @@ impl State {
                     self.shared.history.borrow_mut().record(&here);
                 }
                 let f = &mut self.panes[ix].f;
-                // The rows before were the old listing's; renames it didn't have are in this
-                // one (or weren't made); an inline rename still on its way keeps its label.
+                // The rows before were the old listing's; labels of renames that landed go (this
+                // one has them); an inline rename still on its way keeps its label.
                 f.marked.clear();
-                // An inline rename this listing already has (read after it, before its outcome
-                // came back): what was selected under the old name is the item under the new
-                // one, never a newcomer under the old.
-                for (old, new, at) in f.listing_replaced() {
-                    let was = |n: &OsString| *n == old;
-                    if p.select.iter().any(was) || p.cursor.as_ref().is_some_and(was) {
-                        if let Some(m) = marks.as_mut().filter(|_| p.select.iter().any(was)) {
-                            if let Some(o) = f.entries.iter().position(|e| e.os == old) {
-                                m.unset(o);
-                            }
-                            m.set(at);
-                        }
-                        for n in p.select.iter_mut().chain(p.cursor.iter_mut()).filter(|n| **n == old) {
-                            *n = new.clone();
-                        }
-                    }
-                }
+                f.listing_replaced(moved);
                 // Only names still here are selected: what was trashed or deleted isn't. The
                 // listing's worker marked them on their entries when this is what it was asked
                 // to select (a column made active, the only other way with two or more, is
@@ -1317,7 +1311,7 @@ impl State {
     fn rename_made(&mut self) {
         let Some((path, id)) = self.made.take() else { return };
         let f = self.cur();
-        let ours = f.selected().is_some_and(|e| f.path_of(e) == path && (id.is_none() || e.id.is_none() || e.id == id));
+        let ours = f.selected().is_some_and(|e| f.cwd.join(&e.os) == path && (id.is_none() || e.id.is_none() || e.id == id));
         if ours {
             self.start_rename();
         }
@@ -1411,7 +1405,7 @@ impl State {
     /// a slow disk), waiting here at most a frame.
     pub fn show_original(&mut self) {
         let f = self.cur();
-        let Some(link) = f.selected().filter(|e| e.is_link).map(|e| f.path_of(e)) else { return };
+        let Some(link) = f.selected().filter(|e| e.is_link).map(|e| f.cwd.join(&e.os)) else { return };
         let id = crate::folder::next_request();
         self.going_to = Some(id);
         let wait = self.show_wait;
@@ -1544,9 +1538,10 @@ pub(crate) const IN_OTHER_SEARCH: &str = "The other pane is showing search resul
 /// the read that shows it reads again, still restoring its selection and scroll.
 pub(crate) fn reload_folder(f: &mut Folder, names: Vec<OsString>, rename: bool) {
     if let Some(p) = f.pending.as_ref().filter(|p| p.nav == Nav::Show) {
-        let (keep, cursor) = if names.is_empty() { (p.select.clone(), p.cursor.clone()) } else { (names, None) };
+        let (keep, cursor, ids) =
+            if names.is_empty() { (p.select.clone(), p.cursor.clone(), p.ids.clone()) } else { (names, None, Default::default()) };
         let scroll = p.scroll;
-        f.request_chosen(f.cwd.clone(), Nav::Show, keep, cursor, false);
+        f.request_chosen(f.cwd.clone(), Nav::Show, keep, cursor, ids, false);
         if let Some(p) = &mut f.pending {
             p.scroll = scroll;
         }

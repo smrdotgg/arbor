@@ -213,11 +213,14 @@ impl State {
     /// Starts an inline rename of the cursor's entry, with the name before its extension
     /// selected (as in Finder).
     pub fn start_rename(&mut self) {
+        if self.refuse_updating() {
+            return;
+        }
         let f = self.cur();
         let Some(row) = f.selected_row() else { return };
         let at = f.visible[row] as usize;
         let e = &f.entries[at];
-        let (os, label, is_dir) = (e.os.clone(), f.label(e).into_owned(), e.is_dir);
+        let (os, label, is_dir) = (e.os.clone(), e.name.clone(), e.is_dir);
         let stem = match label.rfind('.') {
             Some(i) if i > 0 && !is_dir => i,
             _ => label.len(),
@@ -266,7 +269,7 @@ impl State {
         tx.blur();
         let new = r.edit.text.trim().to_string();
         // The item's own name (in a search, `os` is a path below the root).
-        let from = self.cur().cwd.join(self.cur().current_os(&r.os));
+        let from = self.cur().cwd.join(&r.os);
         let Some(old) = from.file_name().map(|n| n.to_os_string()) else { return };
         if new.is_empty() || new == old.to_string_lossy() {
             return;
@@ -279,7 +282,6 @@ impl State {
         // (checked on the worker).
         let at = self.cur().entry_at(&r.os, r.at);
         let found = at.map(|i| self.cur().entries[i].id);
-        let id = found.flatten();
         let chosen = self.cur().chosen();
         // Beside it, in its own folder: never "the folder on screen + the new name".
         let Some(dir) = from.parent().map(Path::to_path_buf) else { return };
@@ -291,10 +293,10 @@ impl State {
         // At once, before the worker answers: the panes on this folder show the new name, as a
         // label only; the row is still the item it was (and actions on it wait) until it lands.
         let f = self.cur();
-        let dir_id = if dir == f.cwd && !f.searching() { f.dir_id } else { None };
+        let id = if dir == f.cwd && !f.searching() { f.dir_id } else { None };
         for p in &mut self.panes {
-            if !p.f.searching() && p.f.shows(&dir, dir_id) {
-                p.f.rename_pending(&old, &new, at, id);
+            if !p.f.searching() && p.f.shows(&dir, id) {
+                p.f.rename_pending(&old, &new, at);
             }
         }
     }
@@ -546,31 +548,21 @@ impl State {
     /// identity Arbor's action changed take the new one, and every pane on a changed folder
     /// reads it again, `select`ing what the operation made where it lands.
     pub(crate) fn changed_on_disk(&mut self, fx: &Changed, select: &[PathBuf]) {
-        if !fx.moved.is_empty() || !fx.removed.is_empty() {
-            let renamed: Vec<(PathBuf, PathBuf)> = fx.moved.iter().filter(|(a, b)| a.parent() == b.parent()).cloned().collect();
-            for p in &mut self.panes {
-                if p.f.searching() {
-                    p.f.note_moves(&fx.moved, &fx.removed, &fx.canon);
-                } else {
-                    p.f.renamed_paths(&renamed);
-                }
-                // A hidden tab on the folder keeps its selection by the new names (it's read
-                // again, by name, when it's shown).
-                for m in p.tabs.iter_mut().flatten() {
-                    for (from, to) in renamed.iter().filter(|(f, _)| f.parent() == Some(m.path.as_path())) {
-                        let (Some(old), Some(new)) = (from.file_name(), to.file_name()) else { continue };
-                        for n in m.select.iter_mut().chain(m.cursor.iter_mut()).filter(|n| n.as_os_str() == old) {
-                            *n = new.to_os_string();
-                        }
-                        m.labels.retain(|(n, _)| n.as_os_str() != old);
-                    }
-                }
-            }
-        }
-        // An inline rename's label goes: the row renamed, or back to its own name. Rows of items
-        // Arbor's action changed the ctime of take what it made of them, where that's identity.
+        let renamed: Vec<(PathBuf, PathBuf)> = fx.moved.iter().filter(|(a, b)| a.parent() == b.parent()).cloned().collect();
         for p in &mut self.panes {
-            p.f.land_pending(&fx.moved);
+            if p.f.searching() {
+                if !fx.moved.is_empty() || !fx.removed.is_empty() {
+                    p.f.note_moves(&fx.moved, &fx.removed, &fx.canon);
+                }
+            } else {
+                // An inline rename's label goes (its row renamed, by its index, or back to its
+                // own name), or stays while the listing is shared; the other renames after.
+                let done = p.f.land_pending(&fx.moved);
+                let rest: Vec<(PathBuf, PathBuf)> = renamed.iter().filter(|m| !done.contains(m)).cloned().collect();
+                p.f.renamed_paths(&rest);
+            }
+            // Rows of items Arbor's action changed the ctime of take what it made of them, where
+            // that's identity.
             p.f.reidentify(&fx.reidentified);
         }
         self.refresh(&fx.folders, select, &fx.canon);
@@ -656,7 +648,12 @@ impl State {
     /// item against its listing's identity right before acting (`State::drop_on_pane`); what
     /// another app does with a drop is that app's to check.
     pub fn drag_item(&self, id: u64, i: usize) -> Option<DragItem> {
-        let paths = self.pane(id)?.f.drag_paths(i);
+        // Rows showing a label don't drag until the folder is read again.
+        let f = &self.pane(id)?.f;
+        if f.drag_updating(i) {
+            return None;
+        }
+        let paths = f.drag_paths(i);
         if paths.is_empty() {
             return None;
         }
@@ -832,7 +829,7 @@ impl State {
         }
         let files: Vec<PathBuf> = {
             let f = self.cur();
-            f.targets().iter().filter(|e| !e.is_dir).map(|e| f.path_of(e)).collect()
+            f.targets().iter().filter(|e| !e.is_dir).map(|e| f.cwd.join(&e.os)).collect()
         };
         self.menu_apps = apps.map(|a| (files, a));
         tx.popup_menu(menu, press, |s: &mut State, picked, tx| {

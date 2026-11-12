@@ -249,12 +249,6 @@ impl Bits {
         self.0[i / 64] |= 1 << (i % 64);
     }
 
-    pub fn unset(&mut self, i: usize) {
-        if let Some(w) = self.0.get_mut(i / 64) {
-            *w &= !(1 << (i % 64));
-        }
-    }
-
     pub fn count(&self) -> usize {
         self.0.iter().map(|w| w.count_ones() as usize).sum()
     }
