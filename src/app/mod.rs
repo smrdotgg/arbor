@@ -823,6 +823,13 @@ impl State {
     /// With several files selected, opens each file.
     pub fn open_selected(&mut self) {
         let f = self.cur();
+        // A row renamed beside its listing (not read again yet) opens the item at its name now
+        // only while that's still the item it read: never one made there since.
+        let moved = f.targets().into_iter().find(|e| f.current_os(&e.os) != e.os && e.id.is_some() && fs::ident_at(&f.path_of(e)) != e.id);
+        if let Some(e) = moved {
+            self.note = Some(format!("“{}” changed since it was read: try again in a moment", f.label(e)));
+            return;
+        }
         let targets: Vec<(PathBuf, bool)> = f.targets().iter().map(|e| (f.path_of(e), e.is_dir)).collect();
         if let [(path, true)] = targets.as_slice() {
             let p = path.clone();

@@ -2070,3 +2070,28 @@ fn select_by_pattern_matches_a_renamed_rows_new_name() {
     s.cur_mut().apply_matches(m, crate::select::How::Replace);
     assert_eq!(s.cur().target_paths(), [d.join("zed")]);
 }
+
+/// A folder renamed beside a shared listing, then replaced by another folder under its new name
+/// before the read lands: → doesn't open the newcomer (it says why), the row being the item
+/// its listing read.
+#[test]
+fn opening_a_renamed_row_checks_it_is_still_the_item() {
+    let d = folder("open-renamed", 0);
+    std::fs::create_dir(d.join("old")).unwrap();
+    std::fs::write(d.join("other.txt"), "x").unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.run(Cmd::Split, &mut Tx::default());
+    settle_all(&mut s);
+    s.cur_mut().select(0);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "renamed".into();
+    s.commit_rename(&mut Tx::default());
+    wait_job(&mut s);
+    std::fs::remove_dir(d.join("renamed")).unwrap();
+    std::fs::create_dir(d.join("renamed")).unwrap();
+    s.run(Cmd::Into, &mut Tx::default());
+    settle_all(&mut s);
+    assert_eq!(s.cur().cwd, d, "not the newcomer");
+    assert!(s.note.as_deref().is_some_and(|n| n.contains("changed since")), "{:?}", s.note);
+}
