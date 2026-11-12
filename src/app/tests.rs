@@ -2124,3 +2124,24 @@ fn a_renamed_row_renamed_again_before_the_read() {
     }
     assert_eq!(std::fs::read_to_string(d.join("second")).unwrap(), "a");
 }
+
+/// A rename onto a name the listing still shows (that item was removed from outside, not read
+/// yet): one row under that name, the item renamed, selected.
+#[test]
+fn a_rename_onto_a_name_freed_on_disk_leaves_one_row() {
+    let d = folder("freed-name", 0);
+    for n in ["a", "b", "c"] {
+        std::fs::write(d.join(n), n).unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    std::fs::remove_file(d.join("b")).unwrap();
+    s.cur_mut().select(0);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "b".into();
+    s.commit_rename(&mut Tx::default());
+    wait_job(&mut s);
+    let names: Vec<&str> = s.cur().entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names.iter().filter(|n| **n == "b").count(), 1, "{names:?}");
+    assert_eq!(s.cur().target_paths(), [d.join("b")]);
+}

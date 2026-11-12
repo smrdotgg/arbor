@@ -1120,7 +1120,58 @@ impl Folder {
         if id.is_some() && e.id.is_some() && e.id != id {
             return;
         }
+        // Another entry under the new name: the item, read since (nothing to do), or stale (gone
+        // before the rename found the name free: the item renamed takes its place).
+        if let Some(j) = self.entries.iter().position(|o| o.os == new) {
+            if id.is_some() && self.entries[j].id == id {
+                return;
+            }
+            let map = HashMap::from([(PathBuf::from(old), PathBuf::from(new))]);
+            self.rename_listed(&map, &[(j, ix)]);
+            return;
+        }
         self.rename_entry(ix, new);
+    }
+
+    /// Renames in the listing itself (nobody else holds it), by the items' own names (`map`,
+    /// from old to new, each listed under its old name), where each entry `stale.0` was listed
+    /// under a new name but gone before the rename found it free: entry `stale.1`, renamed to
+    /// it, takes its place (its row, if it was selected or under the cursor, as a read of the
+    /// folder by name would have it).
+    fn rename_listed(&mut self, map: &HashMap<PathBuf, PathBuf>, stale: &[(usize, usize)]) {
+        let new_of = |os: &OsStr| map.get(Path::new(os)).map(|n| n.as_os_str().to_os_string());
+        let keep = self.cursor_name().map(|c| new_of(&c).unwrap_or(c));
+        self.carry_marks();
+        let mut old = std::mem::take(&mut self.carry);
+        for &(j, heir) in stale {
+            if old.get(j) {
+                old.set(heir);
+            }
+        }
+        let (mut carry, mut i, mut k) = (Bits::default(), 0, 0);
+        let entries = Arc::make_mut(&mut self.entries);
+        entries.retain(|_| {
+            let kept = !stale.iter().any(|s| s.0 == i);
+            if kept {
+                if old.get(i) {
+                    carry.set(k);
+                }
+                k += 1;
+            }
+            i += 1;
+            kept
+        });
+        for e in entries.iter_mut() {
+            let Some(new) = new_of(&e.os) else { continue };
+            let was_dot = e.name.starts_with('.');
+            e.name = new.to_string_lossy().into_owned();
+            e.lower = e.name.to_lowercase();
+            e.key = format!("f:{}", e.name);
+            e.hidden = e.name.starts_with('.') || (e.hidden && !was_dot);
+            e.os = new;
+        }
+        self.carry = carry;
+        self.refilter_carried(keep.as_deref());
     }
 
     /// A rename beside a listing a worker holds: `old` is the item's name now (its listing's,
@@ -1236,9 +1287,37 @@ impl Folder {
             }
             return;
         }
-        // The listing names items as the disk does from here.
+        // The listing names items as the disk does from here. An item listed under both names
+        // was read since the rename (the one under the old name is a newcomer: kept), or the
+        // entry under the new name is stale (gone before the rename found the name free: it
+        // goes); the disk says which.
+        let mut map = map;
         if !searching {
             self.absorb_renames();
+            let names: HashSet<&OsStr> = map.iter().flat_map(|(f, t)| [f.as_os_str(), t.as_os_str()]).collect();
+            let mut at: HashMap<OsString, usize> = HashMap::new();
+            for (i, e) in self.entries.iter().enumerate() {
+                if names.contains(e.os.as_os_str()) {
+                    at.insert(e.os.clone(), i);
+                }
+            }
+            let mut stale = Vec::new();
+            map.retain(|f, t| match (at.get(f.as_os_str()), at.get(t.as_os_str())) {
+                (Some(_), None) => true,
+                (Some(&i), Some(&j)) => {
+                    let id = self.entries[i].id;
+                    let renamed = id.is_some() && fs::ident_at(&cwd.join(&*t)) == id;
+                    if renamed {
+                        stale.push((j, i));
+                    }
+                    renamed
+                }
+                (None, _) => false,
+            });
+            if map.is_empty() {
+                return;
+            }
+            return self.rename_listed(&map, &stale);
         }
         let moved = |rel: &Path| -> Option<(PathBuf, bool)> {
             if let Some(n) = map.get(rel) {
