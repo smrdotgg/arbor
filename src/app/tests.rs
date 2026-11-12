@@ -2614,3 +2614,62 @@ fn a_dialog_or_menu_open_on_an_item_labelled_since_is_refused() {
     assert_eq!(s.note.as_deref(), Some(crate::app::UPDATING));
     b.leave();
 }
+
+/// Rows dropped on the sidebar: refused, saying so, while the row shows a label (split on the
+/// folder, renamed in it, a folder made under the old name); otherwise added by path once a
+/// worker has found each still the folder its listing read: one replaced since isn't added (and
+/// that's said), an unchanged one is.
+#[test]
+fn a_row_dropped_on_the_sidebar_is_the_folder_it_shows() {
+    let poll_until = |s: &mut State, done: &dyn Fn(&State) -> bool| {
+        let until = Instant::now() + Duration::from_secs(5);
+        while !done(s) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            s.poll(&mut Tx::default());
+        }
+    };
+    // Labelled.
+    let d = folder("sidebar-labelled", 0);
+    std::fs::create_dir(d.join("old")).unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.run(Cmd::Split, &mut Tx::default());
+    s.cur_mut().select(0);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "renamed".into();
+    s.commit_rename(&mut Tx::default());
+    wait_job(&mut s);
+    std::fs::create_dir(d.join("old")).unwrap();
+    let before = s.places.clone();
+    let f = s.cur();
+    let (id, row, version) = (f.id, f.sel, f.version);
+    s.drop_rows_on_sidebar(id, row, version);
+    assert_eq!(s.note.as_deref(), Some(crate::app::UPDATING));
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(2));
+        s.poll(&mut Tx::default());
+    }
+    assert_eq!(s.places, before, "not added");
+    // Replaced since it was listed (not labelled: nothing told this window).
+    let d = folder("sidebar-replaced", 0);
+    for n in ["old", "kept"] {
+        std::fs::create_dir(d.join(n)).unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    let before = s.places.clone();
+    std::fs::rename(d.join("old"), d.join("aside")).unwrap();
+    std::fs::create_dir(d.join("old")).unwrap();
+    let row = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].os == "old").unwrap();
+    let f = s.cur();
+    let (id, version) = (f.id, f.version);
+    s.drop_rows_on_sidebar(id, row, version);
+    poll_until(&mut s, &|s| s.note.as_deref().is_some_and(|n| n.contains("changed since")));
+    assert!(s.note.as_deref().is_some_and(|n| n.contains("changed since it was dragged")), "{:?}", s.note);
+    assert_eq!(s.places, before, "not added");
+    // Unchanged: added.
+    let row = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].os == "kept").unwrap();
+    s.drop_rows_on_sidebar(id, row, version);
+    poll_until(&mut s, &|s| s.places.len() > before.len());
+    assert!(s.places.iter().any(|(_, p)| *p == d.join("kept")), "{:?}", s.places);
+}
