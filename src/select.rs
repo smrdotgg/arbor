@@ -50,7 +50,15 @@ impl Folder {
         self.visible
             .iter()
             .map(|&i| &self.entries[i as usize])
-            .filter(|e| g.matches_folded(if folded { &e.lower } else { &e.name }))
+            .filter(|e| {
+                // The name its row shows, renamed beside the listing too.
+                let now = self.current_os(&e.os);
+                if now == e.os {
+                    return g.matches_folded(if folded { &e.lower } else { &e.name });
+                }
+                let n = now.to_string_lossy();
+                g.matches_folded(&if folded { n.to_lowercase() } else { n.into_owned() })
+            })
             .map(|e| e.os.clone())
             .collect()
     }

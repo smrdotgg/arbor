@@ -2047,3 +2047,26 @@ fn a_failed_navigation_keeps_the_read_it_replaced() {
     let names: Vec<&str> = s.cur().entries.iter().map(|e| e.name.as_str()).collect();
     assert!(names.contains(&"new"), "read again: {names:?}");
 }
+
+/// Select by Pattern matches the name a row shows: an item renamed beside a shared listing
+/// (split on one folder, before the read lands) matches by its new name.
+#[test]
+fn select_by_pattern_matches_a_renamed_rows_new_name() {
+    let d = folder("pattern-renamed", 0);
+    for n in ["a", "b"] {
+        std::fs::write(d.join(n), n).unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.run(Cmd::Split, &mut Tx::default());
+    settle_all(&mut s);
+    s.cur_mut().select(0);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "zed".into();
+    s.commit_rename(&mut Tx::default());
+    wait_job(&mut s);
+    let g = crate::pattern::Glob::name("z*", crate::pattern::Case::Insensitive).unwrap();
+    let m = s.cur().matching(&g);
+    s.cur_mut().apply_matches(m, crate::select::How::Replace);
+    assert_eq!(s.cur().target_paths(), [d.join("zed")]);
+}
