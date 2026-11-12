@@ -124,6 +124,17 @@ pub(crate) enum Pick {
 
 /// The selection on screen, handed to a worker as it is, without copying a name: the listing
 /// and its rows (shared), and the selected rows (a word per 64). The worker reads the names.
+/// An inline rename on its way ([`Folder::labels`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Label {
+    /// The name it's being given, shown on its row.
+    pub name: String,
+    /// Its index in the listing when the rename started (checked before it's used).
+    pub at: Option<usize>,
+    /// The identity it was read with.
+    pub id: Option<fs::Ident>,
+}
+
 pub(crate) struct Kept {
     entries: Arc<Vec<Entry>>,
     rows: Arc<Rows>,
@@ -247,7 +258,7 @@ pub struct Folder {
     /// Names shown in place of items' own while an inline rename gives them (by their name in
     /// the listing): only labels, which nothing acts on. Kept beside the listing, so starting
     /// a rename never changes it (a reload's worker may hold it).
-    pub(crate) labels: HashMap<OsString, (String, Option<usize>)>,
+    pub(crate) labels: HashMap<OsString, Label>,
     /// Items renamed on disk while a reload's worker held the listing (`(old, new)` names in
     /// it): not written into it (a copy of a big listing would hold up the window), but shown
     /// under their new names, and followed by the next reload's selection. The listing it
@@ -1048,17 +1059,18 @@ impl Folder {
     /// but it's still `old` (what actions act on) until the outcome lands: a rename that fails
     /// (the name was taken) never points the row at the other item. A label beside the
     /// listing: nothing in it changes.
-    /// `at`: its index in the listing, if known.
-    pub fn rename_pending(&mut self, old: &OsStr, new: &str, at: Option<usize>) {
-        self.labels.insert(old.to_os_string(), (new.to_string(), at));
+    /// `old` is its name on disk now (the listing may have it under an earlier name, renamed
+    /// beside it); `at`, its index in the listing, if known; `id`, the identity it was read with.
+    pub fn rename_pending(&mut self, old: &OsStr, new: &str, at: Option<usize>, id: Option<fs::Ident>) {
+        self.labels.insert(self.listing_os(old), Label { name: new.to_string(), at, id });
         self.bump();
     }
 
     /// The name row `e` shows: an inline rename's, one renamed while a reload held the
     /// listing, or its own.
     pub fn label<'a>(&'a self, e: &'a Entry) -> std::borrow::Cow<'a, str> {
-        if let Some((l, _)) = self.labels.get(&e.os) {
-            return std::borrow::Cow::Borrowed(l);
+        if let Some(l) = self.labels.get(&e.os) {
+            return std::borrow::Cow::Borrowed(&l.name);
         }
         match self.renames.iter().rev().find(|(o, _)| *o == e.os) {
             Some((_, n)) => n.to_string_lossy(),
@@ -1078,32 +1090,37 @@ impl Folder {
         if self.labels.is_empty() {
             return;
         }
-        let taken = |old: &OsString, new: &str| {
-            moved.iter().any(|(f, t)| f.file_name() == Some(old.as_os_str()) && t.file_name() == Some(OsStr::new(new)))
-        };
-        let done: Vec<(OsString, OsString, Option<usize>)> = std::mem::take(&mut self.labels)
-            .into_iter()
-            .filter(|(old, (new, _))| taken(old, new))
-            .map(|(old, (new, at))| (old, OsString::from(new), at))
-            .collect();
+        let labels = std::mem::take(&mut self.labels);
         self.bump();
-        for (old, new, at) in done {
-            self.renamed(&old, &new, at);
+        for (old, l) in labels {
+            // By its name on disk when the rename started (the listing's may be earlier).
+            let now = self.current_os(&old).to_os_string();
+            if moved.iter().any(|(f, t)| f.file_name() == Some(now.as_os_str()) && t.file_name() == Some(OsStr::new(&l.name))) {
+                self.renamed(&now, OsStr::new(&l.name), l.at, l.id);
+            }
         }
     }
 
-    /// The item `old` was renamed `new` on disk: shows it under its new name at once (a fresh
-    /// read follows), keeping it selected if it was. One entry changed, the rows kept unless
-    /// it's now hidden or filtered out (or back); while a reload's worker holds the listing, a
-    /// rename beside it ([`Folder::renames`]).
-    fn renamed(&mut self, old: &OsStr, new: &OsStr, at: Option<usize>) {
+    /// The item called `old` on disk (with identity `id`, when known) was renamed `new`: shown
+    /// under its new name at once (a fresh read follows), kept selected if it was. Nothing to do
+    /// when that's already done (`renamed_paths` saw the same rename, or the listing was read
+    /// since). One entry changed, the rows kept unless it's now hidden or filtered out (or
+    /// back); while a worker holds the listing, a rename beside it ([`Folder::renames`]).
+    fn renamed(&mut self, old: &OsStr, new: &OsStr, at: Option<usize>, id: Option<fs::Ident>) {
         if self.shared() {
+            if self.renames.iter().any(|(_, n)| n == new) {
+                return;
+            }
             self.note_rename(old, new);
             return;
         }
-        if let Some(ix) = self.entry_at(old, at) {
-            self.rename_entry(ix, new);
+        self.absorb_renames();
+        let Some(ix) = self.entry_at(old, at) else { return };
+        let e = &self.entries[ix];
+        if id.is_some() && e.id.is_some() && e.id != id {
+            return;
         }
+        self.rename_entry(ix, new);
     }
 
     /// A rename beside a listing a worker holds: `old` is the item's name now (its listing's,
@@ -1160,6 +1177,28 @@ impl Folder {
         self.renames.iter().rev().find(|(o, _)| o == os).map_or(os, |(_, n)| n.as_os_str())
     }
 
+    /// The listing's name for the item called `now` on disk: [`Folder::current_os`] the other
+    /// way round.
+    pub fn listing_os(&self, now: &OsStr) -> OsString {
+        self.renames.iter().rev().find(|(_, n)| n == now).map_or_else(|| now.to_os_string(), |(o, _)| o.clone())
+    }
+
+    /// A new listing landed: renames beside the old one are in it (or weren't made), and an
+    /// inline rename still on its way keeps its label on the item it was started on (by its
+    /// name now and the identity it was read with: never a newcomer under its old name).
+    pub(crate) fn listing_replaced(&mut self) {
+        if !self.labels.is_empty() {
+            let labels = std::mem::take(&mut self.labels);
+            let entries = self.entries.clone();
+            self.labels = labels
+                .into_iter()
+                .map(|(old, l)| (self.current_os(&old).to_os_string(), l))
+                .filter(|(now, l)| entries.iter().any(|e| e.os == *now && (l.id.is_none() || e.id.is_none() || e.id == l.id)))
+                .collect();
+        }
+        self.renames.clear();
+    }
+
     /// Where entry `e` is on disk now ([`Folder::current_os`]): the path every action on it
     /// takes (with the identity its listing read, which a rename keeps).
     pub fn path_of(&self, e: &Entry) -> PathBuf {
@@ -1191,9 +1230,15 @@ impl Folder {
         // A reload's worker holds the listing: beside it, not in it (see `renames`).
         if self.shared() && !searching {
             for (f, t) in map {
-                self.note_rename(f.as_os_str(), t.as_os_str());
+                if !self.renames.iter().any(|(_, n)| n == t.as_os_str()) {
+                    self.note_rename(f.as_os_str(), t.as_os_str());
+                }
             }
             return;
+        }
+        // The listing names items as the disk does from here.
+        if !searching {
+            self.absorb_renames();
         }
         let moved = |rel: &Path| -> Option<(PathBuf, bool)> {
             if let Some(n) = map.get(rel) {
@@ -1310,7 +1355,7 @@ mod tests {
         let listing = Arc::as_ptr(&f.entries);
         let old = OsString::from(format!("{:08}.txt", n - 1));
         let t = std::time::Instant::now();
-        f.rename_pending(&old, "renamed.txt", at);
+        f.rename_pending(&old, "renamed.txt", at, None);
         let pending = t.elapsed();
         let t = std::time::Instant::now();
         f.land_pending(&[(PathBuf::from("/x").join(&old), PathBuf::from("/x/renamed.txt"))]);

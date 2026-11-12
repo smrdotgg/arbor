@@ -1181,10 +1181,7 @@ impl State {
                 // The rows before were the old listing's; renames it didn't have are in this
                 // one (or weren't made); an inline rename still on its way keeps its label.
                 f.marked.clear();
-                f.renames.clear();
-                if !f.labels.is_empty() {
-                    f.labels.retain(|old, _| f.entries.iter().any(|e| e.os == *old));
-                }
+                f.listing_replaced();
                 // Only names still here are selected: what was trashed or deleted isn't. The
                 // listing's worker marked them on their entries when this is what it was asked
                 // to select (a column made active, the only other way with two or more, is

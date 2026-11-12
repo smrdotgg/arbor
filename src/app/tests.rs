@@ -2095,3 +2095,32 @@ fn opening_a_renamed_row_checks_it_is_still_the_item() {
     assert_eq!(s.cur().cwd, d, "not the newcomer");
     assert!(s.note.as_deref().is_some_and(|n| n.contains("changed since")), "{:?}", s.note);
 }
+
+/// A row renamed beside a shared listing (split on one folder, before the read lands) renamed
+/// again: its row shows the second new name and waits for it like any rename, and once it
+/// lands every action goes to the second name.
+#[test]
+fn a_renamed_row_renamed_again_before_the_read() {
+    let d = folder("renamed-twice", 0);
+    for n in ["a", "b"] {
+        std::fs::write(d.join(n), n).unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.run(Cmd::Split, &mut Tx::default());
+    settle_all(&mut s);
+    s.cur_mut().select(0);
+    for (to, done) in [("first", false), ("second", true)] {
+        s.start_rename();
+        s.rename.as_mut().unwrap().edit.text = to.into();
+        s.commit_rename(&mut Tx::default());
+        if done {
+            let f = s.cur();
+            assert_eq!(f.selected().map(|e| f.label(e).into_owned()).as_deref(), Some("second"), "shown at once");
+            assert!(s.unavailable(Cmd::Open).is_some(), "waits for the rename");
+        }
+        wait_job(&mut s);
+        assert_eq!(s.cur().target_paths(), [d.join(to)]);
+    }
+    assert_eq!(std::fs::read_to_string(d.join("second")).unwrap(), "a");
+}

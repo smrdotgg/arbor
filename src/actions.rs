@@ -279,6 +279,7 @@ impl State {
         // (checked on the worker).
         let at = self.cur().entry_at(&r.os, r.at);
         let found = at.map(|i| self.cur().entries[i].id);
+        let id = found.flatten();
         let chosen = self.cur().chosen();
         // Beside it, in its own folder: never "the folder on screen + the new name".
         let Some(dir) = from.parent().map(Path::to_path_buf) else { return };
@@ -290,10 +291,10 @@ impl State {
         // At once, before the worker answers: the panes on this folder show the new name, as a
         // label only; the row is still the item it was (and actions on it wait) until it lands.
         let f = self.cur();
-        let id = if dir == f.cwd && !f.searching() { f.dir_id } else { None };
+        let dir_id = if dir == f.cwd && !f.searching() { f.dir_id } else { None };
         for p in &mut self.panes {
-            if !p.f.searching() && p.f.shows(&dir, id) {
-                p.f.rename_pending(&old, &new, at);
+            if !p.f.searching() && p.f.shows(&dir, dir_id) {
+                p.f.rename_pending(&old, &new, at, id);
             }
         }
     }
