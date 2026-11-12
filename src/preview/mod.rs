@@ -386,6 +386,8 @@ impl State {
         let Some(p) = &mut self.preview else { return info };
         let f = &self.panes[self.active].f;
         let target = match (f.selected(), &p.target) {
+            // An item showing a label isn't read until the folder is read again.
+            (Some(e), _) if f.labelled(e) => None,
             (Some(e), Some(t)) if t.is(f.id, &f.cwd, e) => return info,
             (None, None) if p.body == Body::Empty => return info,
             (e, _) => e.map(|e| Target::of(f.id, &f.cwd, e)),

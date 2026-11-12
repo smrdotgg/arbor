@@ -1753,7 +1753,7 @@ fn windows_a_tunnelled_replacement_is_refused() {
     use super::{Checks, Chosen};
     let d = tmp("tunnelled");
     fs::write(d.join("a"), "the item listed").unwrap();
-    let listed = crate::fs::list(d.clone(), crate::fs::Sort { key: crate::fs::SortKey::Name, desc: false });
+    let listed = crate::fs::list(d.clone(), crate::fs::Sort::new(crate::fs::SortKey::Name, false));
     let id = listed.result.unwrap().iter().find(|e| e.name == "a").unwrap().id.unwrap();
     let born = fs::symlink_metadata(d.join("a")).unwrap().created().unwrap();
     fs::remove_file(d.join("a")).unwrap();

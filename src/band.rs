@@ -23,8 +23,7 @@
 //! (RUNE-GAPS.md). The wheel scrolling the list under a held rectangle moves it with the
 //! content too (the rows' layout report on each scrolled frame), selecting what scrolls in.
 
-use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::folder::Folder;
@@ -131,6 +130,7 @@ impl Layout {
 }
 
 /// A rectangle being dragged out in one pane's list.
+#[cfg_attr(test, derive(Clone))]
 pub struct Band {
     pub pane: u64,
     /// The folder's version when it started: a listing that lands meanwhile ends it.
@@ -153,17 +153,20 @@ pub struct Band {
     pub hits: Hits,
     /// It has applied its first selection (`apply`).
     pub started: bool,
-    /// The items it touches now, by name, each with whether it was selected before the
-    /// rectangle reached it: what an item that leaves the rectangle goes back to, and what ⌘
-    /// flips. Only what it touches: a move costs what it changes, never the whole selection.
-    pub orig: HashMap<OsString, bool>,
-    /// Alone (no ⇧ or ⌘): the selection it started with, moved aside (not copied), for Esc.
-    pub cleared: Option<HashSet<OsString>>,
-    /// ⇧ or ⌘ with only the cursor selected: the cursor's item, put in the selection first (it
+    /// The rows it touches now, each with whether it was selected before the rectangle reached
+    /// it: what a row that leaves the rectangle goes back to, and what ⌘ flips. Only what it
+    /// touches: a move costs what it changes, never the whole selection. (A listing landing
+    /// ends the rectangle, so rows stay put while it's dragged.)
+    pub orig: HashMap<usize, bool>,
+    /// Alone (no ⇧ or ⌘): the selection it started with (and its totals), moved aside (not
+    /// copied), for Esc.
+    pub cleared: Option<crate::marked::Marked>,
+    /// ⇧ or ⌘ with only the cursor selected: the cursor's row, put in the selection first (it
     /// was selected, as the cursor), and taken out again on Esc.
-    pub seeded: Option<OsString>,
-    /// The cursor and the anchor as they were, for Esc.
+    pub seeded: Option<usize>,
+    /// The cursor and the anchor as they were, and whether nothing was selected, for Esc.
     pub before: (usize, usize),
+    pub none_before: bool,
     /// It started below the rows or in a gutter: a click there (no rectangle) clears the
     /// selection.
     pub on_empty: bool,
@@ -210,11 +213,10 @@ impl Band {
             match self.mode {
                 Mode::Replace => self.cleared = Some(std::mem::take(&mut f.marked)),
                 // The cursor alone counts as selected: ⇧ adds to it, ⌘ toggles against it.
-                _ if f.marked.is_empty() => {
-                    if let Some(c) = f.cursor_name() {
-                        f.marked.insert(c.clone());
-                        self.seeded = Some(c);
-                    }
+                _ if f.marked.is_empty() && !f.none => {
+                    let c = f.sel;
+                    f.marked.set(c, true, &f.visible);
+                    self.seeded = Some(c);
                 }
                 _ => {}
             }
@@ -225,25 +227,15 @@ impl Band {
         minus(cols, &old, &self.hits, n, &mut left);
         minus(cols, &self.hits, &old, n, &mut entered);
         for i in left {
-            let name = &f.entries[f.visible[i] as usize].os;
-            if let Some(was) = self.orig.remove(name) {
-                if was {
-                    f.marked.insert(name.clone());
-                } else {
-                    f.marked.remove(name);
-                }
+            if let Some(was) = self.orig.remove(&i) {
+                f.marked.set(i, was, &f.visible);
             }
         }
         for i in entered {
-            let name = &f.entries[f.visible[i] as usize].os;
-            let was = f.marked.contains(name);
-            self.orig.insert(name.clone(), was);
+            let was = f.marked.contains(i);
+            self.orig.insert(i, was);
             let on = self.mode != Mode::Toggle || !was;
-            if on {
-                f.marked.insert(name.clone());
-            } else {
-                f.marked.remove(name);
-            }
+            f.marked.set(i, on, &f.visible);
         }
         // The cursor follows the pointer's end of the rectangle, the anchor stays at its start,
         // so ⇧-arrows afterwards carry on from there.
@@ -252,6 +244,8 @@ impl Band {
             (f.anchor, f.sel) = if down { (first, last) } else { (last, first) };
         }
         f.picks += 1;
+        // A rectangle over nothing selects nothing (not the cursor's row).
+        f.none = f.marked.is_empty();
         true
     }
 
@@ -260,18 +254,16 @@ impl Band {
         if let Some(m) = self.cleared.take() {
             f.marked = m;
         } else {
-            for (name, was) in self.orig.drain() {
-                if was {
-                    f.marked.insert(name);
-                } else {
-                    f.marked.remove(&name);
-                }
+            for (row, was) in self.orig.drain() {
+                f.marked.set(row, was, &f.visible);
             }
             if let Some(c) = self.seeded.take() {
-                f.marked.remove(&c);
+                f.marked.set(c, false, &f.visible);
             }
         }
         (f.sel, f.anchor) = self.before;
+        f.none = self.none_before;
+        f.picks += 1;
     }
 }
 
@@ -373,6 +365,7 @@ impl crate::app::State {
                     cleared: None,
                     seeded: None,
                     before: (f.sel, f.anchor),
+                    none_before: f.none,
                     on_empty,
                 };
                 b.start = b.content(d.window_point(), scroll);
@@ -541,13 +534,14 @@ mod tests {
             cleared: None,
             seeded: None,
             before: (0, 0),
+            none_before: false,
             on_empty: false,
         }
     }
 
     fn folder(n: usize) -> Folder {
-        let mut f = Folder::new(9, std::env::temp_dir(), crate::fs::Sort { key: crate::fs::SortKey::Name, desc: false }, false, None);
-        f.entries = (0..n).map(|i| crate::fs::Entry::test(&format!("f{i:02}"), false)).collect();
+        let mut f = Folder::new(9, std::env::temp_dir(), crate::fs::Sort::new(crate::fs::SortKey::Name, false), false, None);
+        f.entries = (0..n).map(|i| crate::fs::Entry::test(&format!("f{i:02}"), false)).collect::<Vec<_>>().into();
         f.refilter(None);
         f
     }
@@ -561,7 +555,7 @@ mod tests {
         let mut f = folder(10);
         // Rows 2..=4.
         let drag = |f: &mut Folder, mode, before: &[&str]| {
-            f.marked = before.iter().map(OsString::from).collect();
+            f.mark_names(before);
             let mut b = band(LIST, mode, before);
             b.start = [5.0, 2.0 * 24.0 + 3.0];
             b.end = [5.0, 4.0 * 24.0 + 3.0];
@@ -597,7 +591,7 @@ mod tests {
     fn rows_it_leaves_go_back_and_esc_puts_it_all_back() {
         let mut f = folder(10);
         let names = |f: &Folder| selected(f);
-        f.marked = ["f01", "f03"].iter().map(OsString::from).collect();
+        f.mark_names(&["f01", "f03"]);
         let mut b = band(LIST, Mode::Toggle, &[]);
         b.start = [5.0, 1.0];
         b.end = [5.0, 4.0 * 24.0 + 1.0];
@@ -620,7 +614,7 @@ mod tests {
         b.cancel(&mut f);
         assert!(f.marked.is_empty() && f.sel == 6);
         // Alone: the old selection is set aside and comes back whole on Esc.
-        f.marked = ["f08", "f09"].iter().map(OsString::from).collect();
+        f.mark_names(&["f08", "f09"]);
         let mut b = band(LIST, Mode::Replace, &[]);
         b.start = [5.0, 1.0];
         b.end = [5.0, 1.0];
@@ -628,6 +622,167 @@ mod tests {
         assert_eq!(names(&f), [0]);
         b.cancel(&mut f);
         assert_eq!(names(&f), [8, 9]);
+    }
+
+    /// A folder of `n` files, file i `(i + 1) × 100` bytes, folder rows every tenth.
+    fn sized(n: usize) -> Folder {
+        let mut f = folder(n);
+        for (i, e) in std::sync::Arc::make_mut(&mut f.entries).iter_mut().enumerate() {
+            e.size = (i as u64 + 1) * 100;
+            e.is_dir = i % 10 == 9;
+        }
+        f.refilter(None);
+        f
+    }
+
+    /// The selection's total moves by what a change changes: a ⌘-click, a rectangle growing
+    /// and shrinking, never a look through the listing (the rows' running sums say each row's
+    /// size). Every entry's size is changed behind the selection's back: a total worked out
+    /// again from the listing would show it.
+    #[test]
+    fn a_selection_change_costs_what_it_changes() {
+        let mut f = sized(1000);
+        f.select(0);
+        f.toggle_mark(1);
+        let p = f.picked_size().unwrap();
+        assert_eq!(p, crate::marked::Picked { count: 2, bytes: 300, folders: 0 });
+        for e in std::sync::Arc::make_mut(&mut f.entries).iter_mut() {
+            e.size *= 1000;
+        }
+        // Row 5: 600 bytes when the rows were made (600,000 now, unseen).
+        f.toggle_mark(5);
+        assert_eq!(f.picked_size().unwrap(), crate::marked::Picked { count: 3, bytes: 900, folders: 0 });
+        // A rectangle over rows 10..=19 (row 19 a folder), then back to 10..=14.
+        let mut b = band(LIST, Mode::Add, &[]);
+        b.start = [5.0, 10.0 * 24.0 + 1.0];
+        b.end = [5.0, 19.0 * 24.0 + 1.0];
+        b.apply(&mut f);
+        let rows: u64 = (11..=19).map(|i| i * 100).sum();
+        assert_eq!(f.picked_size().unwrap(), crate::marked::Picked { count: 13, bytes: 900 + rows, folders: 1 });
+        b.end = [5.0, 14.0 * 24.0 + 1.0];
+        b.apply(&mut f);
+        let rows: u64 = (11..=15).map(|i| i * 100).sum();
+        assert_eq!(f.picked_size().unwrap(), crate::marked::Picked { count: 8, bytes: 900 + rows, folders: 0 });
+    }
+
+    /// Every selection change at 500,000 rows costs what it changes, not the folder: a click,
+    /// ⌘-click, ⇧ growing and shrinking a range by a row, ⌘A, Invert, Esc, a rectangle's move
+    /// and its Esc. None of them looks at the listing (its entries are taken away once the rows
+    /// are made: a look would panic), and in a release build each takes under 1 ms (the best
+    /// of five: a busy machine can hold up any one). They took up to 238 ms.
+    #[test]
+    fn every_selection_change_is_quick_at_500k() {
+        let n = 500_000;
+        let mut f = folder(0);
+        f.entries = (0..n)
+            .map(|i| crate::fs::Entry { size: i as u64, ..crate::fs::Entry::test(&format!("f{i:06}"), i % 50 == 0) })
+            .collect::<Vec<_>>()
+            .into();
+        f.refilter(None);
+        let entries = std::mem::take(&mut f.entries);
+        let mut worst = Vec::new();
+        let mut time = |what: &str, f: &mut Folder, op: &dyn Fn(&mut Folder)| {
+            let best = (0..5)
+                .map(|_| {
+                    let mut g = folder(0);
+                    (g.marked, g.visible, g.sel, g.anchor) = (f.marked.clone(), f.visible.clone(), f.sel, f.anchor);
+                    let t = std::time::Instant::now();
+                    op(&mut g);
+                    let e = t.elapsed();
+                    std::hint::black_box(g.picked_size());
+                    e
+                })
+                .min()
+                .unwrap();
+            op(f);
+            worst.push((what.to_string(), best));
+        };
+        time("⌘A", &mut f, &|f| f.select_all());
+        time("a click (clears 500k)", &mut f, &|f| f.select(250_000));
+        time("⇧ to the end", &mut f, &|f| f.extend_to(n - 1));
+        time("⇧ shrinks a row", &mut f, &|f| f.extend_to(n - 2));
+        time("⇧ grows a row", &mut f, &|f| f.extend_to(n - 1));
+        time("⌘-click", &mut f, &|f| f.toggle_mark(10));
+        time("⇧ after a ⌘-click", &mut f, &|f| f.extend_to(0));
+        time("Invert", &mut f, &|f| {
+            f.invert_selection();
+        });
+        time("Esc (clears)", &mut f, &|f| f.marked.clear());
+        // A rectangle over 400k rows (made once, as it would be over many moves), then a row
+        // more and a row less at its edge, each from the same start.
+        f.marked.clear();
+        let mut b = band(LIST, Mode::Replace, &[]);
+        (b.start, b.end) = ([5.0, 1.0], [5.0, 400_000.0 * 24.0 - 10.0]);
+        b.apply(&mut f);
+        for (what, to) in [("the rectangle grows a row", 400_001.0), ("the rectangle shrinks a row", 399_999.0)] {
+            let best = (0..5)
+                .map(|_| {
+                    let (mut g, mut c) = (folder(0), b.clone());
+                    (g.marked, g.visible, g.sel, g.anchor) = (f.marked.clone(), f.visible.clone(), f.sel, f.anchor);
+                    c.end = [5.0, to * 24.0 - 10.0];
+                    let t = std::time::Instant::now();
+                    c.apply(&mut g);
+                    let e = t.elapsed();
+                    assert_eq!(g.picked_size().map(|p| p.count), Some(to as usize));
+                    e
+                })
+                .min()
+                .unwrap();
+            worst.push((what.to_string(), best));
+        }
+        assert_eq!(f.picked_size().map(|p| p.count), Some(400_000), "the rectangle's rows");
+        b.cancel(&mut f);
+        assert!(f.marked.is_empty());
+        drop(entries);
+        for (what, t) in &worst {
+            eprintln!("{what}: {:.3} ms", t.as_secs_f64() * 1e3);
+            if !cfg!(debug_assertions) {
+                assert!(*t < std::time::Duration::from_millis(1), "{what}: {t:?} at 500k rows");
+            }
+        }
+    }
+
+    /// What's selected, what the status bar adds up and what an action acts on are the same
+    /// items: hiding one (hidden files turned off) takes it out of all three.
+    #[test]
+    fn hidden_items_leave_the_selection_and_its_total() {
+        let mut f = sized(10);
+        std::sync::Arc::make_mut(&mut f.entries)[3].hidden = true;
+        f.set_hidden(true);
+        f.select(2);
+        f.toggle_mark(3);
+        f.toggle_mark(4);
+        assert_eq!(f.picked_size().map(|p| p.count), Some(3));
+        f.set_hidden(false);
+        let targets: Vec<(String, u64)> = f.targets().iter().map(|e| (e.name.clone(), e.size)).collect();
+        assert_eq!(targets, [("f02".to_string(), 300), ("f04".to_string(), 500)]);
+        let p = f.picked_size().unwrap();
+        assert_eq!((p.count, p.bytes), (targets.len(), targets.iter().map(|t| t.1).sum::<u64>()), "the total is the targets'");
+        // Shown again, it stays out (it was deselected, not set aside).
+        f.set_hidden(true);
+        assert_eq!(f.picked_size().map(|p| p.count), Some(2));
+    }
+
+    /// Esc on a rectangle puts the selection's total back with the selection, whichever way it
+    /// started (alone, setting the old selection aside; ⇧ or ⌘, changing items one by one),
+    /// though as many items are selected before and during it.
+    #[test]
+    fn a_cancelled_rectangle_puts_the_total_back() {
+        for mode in [Mode::Replace, Mode::Add, Mode::Toggle] {
+            let mut f = sized(100);
+            f.select(0);
+            f.toggle_mark(1);
+            let before = f.picked_size().unwrap();
+            assert_eq!(before.bytes, 300);
+            // Over rows 4 and 5 (alone: they replace rows 0 and 1, two for two).
+            let mut b = band(LIST, mode, &[]);
+            b.start = [5.0, 4.0 * 24.0 + 1.0];
+            b.end = [5.0, 5.0 * 24.0 + 1.0];
+            b.apply(&mut f);
+            assert_ne!(f.picked_size(), Some(before), "{mode:?}: it changed the selection");
+            b.cancel(&mut f);
+            assert_eq!(f.picked_size(), Some(before), "{mode:?}");
+        }
     }
 
     /// The items between two rectangles, in a grid and a list, are exactly those that differ.

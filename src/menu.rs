@@ -81,7 +81,14 @@ impl Act {
 /// platform draws them), or a separator.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
-    Act { act: Act, title: String, on: bool, keys: String },
+    /// `checked`: a toggle (a column, Folders First), and whether it's on.
+    Act {
+        act: Act,
+        title: String,
+        on: bool,
+        keys: String,
+        checked: Option<bool>,
+    },
     Separator,
 }
 
@@ -133,7 +140,13 @@ impl State {
         let items = items
             .into_iter()
             .map(|it| match it {
-                Some((act, title, on)) => Item::Act { act, title, on, keys: act.cmd().map(|c| self.keymap.label(c)).unwrap_or_default() },
+                Some((act, title, on)) => Item::Act {
+                    act,
+                    title,
+                    on,
+                    keys: act.cmd().map(|c| self.keymap.label(c)).unwrap_or_default(),
+                    checked: act.cmd().and_then(|c| self.checked(c)),
+                },
                 None => Item::Separator,
             })
             .collect();

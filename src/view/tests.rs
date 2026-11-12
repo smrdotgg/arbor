@@ -155,12 +155,9 @@ fn measured_breadcrumbs_fit_a_split_pane() {
 #[test]
 fn a_tab_dropped_on_a_pane_lands_where_the_pointer_is() {
     let pane = |n: usize, tab: usize| Pane {
-        f: Folder::new(9, PathBuf::from("/"), crate::fs::Sort { key: SortKey::Name, desc: false }, false, None),
+        f: Folder::new(9, PathBuf::from("/"), crate::fs::Sort::new(SortKey::Name, false), false, None),
         tabs: (0..n)
-            .map(|j| {
-                (j != tab)
-                    .then(|| Folder::new(9, PathBuf::from("/"), crate::fs::Sort { key: SortKey::Name, desc: false }, false, None).memo())
-            })
+            .map(|j| (j != tab).then(|| Folder::new(9, PathBuf::from("/"), crate::fs::Sort::new(SortKey::Name, false), false, None).memo()))
             .collect(),
         tab,
     };

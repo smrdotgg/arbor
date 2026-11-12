@@ -10,9 +10,8 @@
 //! refreshes keeps it. Case follows the platform's usual file system (insensitive on macOS and
 //! Windows, sensitive on Linux) unless `select.case_sensitive` says otherwise.
 //!
-//! Arbor always has a selected row while a folder has any (with nothing marked, the cursor's
-//! row is the selection), so taking out every selected item leaves the cursor on the nearest
-//! row that isn't one of them.
+//! Taking out every selected item leaves nothing selected, the cursor on the nearest row that
+//! isn't one of them.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -68,16 +67,18 @@ impl Folder {
             .count()
     }
 
-    /// The selection as names: what's marked, or the cursor's row.
+    /// The selection as names: what's marked, or the cursor's row while it's selected
+    /// (nothing, with nothing selected).
     pub fn selection(&self) -> HashSet<OsString> {
-        if self.marked.is_empty() { self.cursor_name().into_iter().collect() } else { self.marked.clone() }
+        self.selection_names().0.into_iter().collect()
     }
 
-    /// Makes `names` the selection, moving the cursor onto it if it's off it. Nothing to select
-    /// can't be had (the cursor's row is the selection then), so an empty set puts the cursor on
-    /// the nearest row not in `avoid` instead. False when every row is in `avoid`.
+    /// Makes `names` the selection, moving the cursor onto it if it's off it. An empty set
+    /// selects nothing, the cursor moving to the nearest row not in `avoid` (it isn't
+    /// selected). False when every row is in `avoid`.
     pub fn set_selection(&mut self, names: HashSet<OsString>, avoid: &HashSet<OsString>) -> bool {
         self.picks += 1;
+        self.none = names.is_empty();
         fn name(f: &Folder, i: usize) -> &OsString {
             &f.entries[f.visible[i] as usize].os
         }
@@ -102,7 +103,13 @@ impl Folder {
             self.sel = i;
         }
         self.anchor = self.sel;
-        self.marked = names;
+        // The rows on screen with those names (a pattern looks at every row anyway).
+        self.marked.clear();
+        for r in 0..self.visible.len() {
+            if names.contains(name(self, r)) {
+                self.marked.set(r, true, &self.visible);
+            }
+        }
         true
     }
 
@@ -122,14 +129,22 @@ impl Folder {
         n
     }
 
-    /// Selects every row on screen that isn't selected, and unselects the rest.
+    /// Selects every row on screen that isn't selected, and unselects the rest: a word per 64
+    /// rows. With nothing left (everything was selected) the cursor stays where it is.
     pub fn invert_selection(&mut self) -> usize {
-        let old = self.selection();
-        let new: HashSet<OsString> =
-            self.visible.iter().map(|&i| &self.entries[i as usize].os).filter(|n| !old.contains(*n)).cloned().collect();
-        let n = new.len();
-        self.set_selection(new, &old);
-        n
+        self.picks += 1;
+        if self.marked.is_empty() && !self.none {
+            self.marked.set(self.sel, true, &self.visible);
+        }
+        self.marked.invert(&self.visible);
+        self.none = self.marked.is_empty();
+        if !self.marked.contains(self.sel)
+            && let Some(r) = self.marked.iter().next()
+        {
+            self.sel = r;
+        }
+        self.anchor = self.sel;
+        self.marked.len()
     }
 
     /// Selects every row on screen of the cursor row's kind: folders for a folder, else files
@@ -295,6 +310,21 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Add (and Remove) work on the selection as it is: with nothing selected (the cursor
+    /// ⌘-clicked off), adding a match selects the match alone, not the cursor's item too.
+    #[test]
+    fn adding_to_nothing_selects_only_the_matches() {
+        let mut f =
+            crate::folder::Folder::new(0, std::path::PathBuf::from("/"), crate::fs::Sort::new(crate::fs::SortKey::Name, false), true, None);
+        f.entries = ["a", "b", "c"].iter().map(|n| crate::fs::Entry::test(n, false)).collect::<Vec<_>>().into();
+        f.refilter(None);
+        f.select(0);
+        f.toggle_mark(0);
+        assert!(f.targets().is_empty());
+        f.apply_matches(vec!["b".into()], How::Add);
+        assert_eq!(f.targets().iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["b"]);
+    }
     use std::path::{Path, PathBuf};
 
     fn folder(name: &str, files: &[&str]) -> PathBuf {
@@ -452,7 +482,8 @@ mod tests {
         assert_eq!(names(&s), ["IMG_1.heic", "IMG_2.heic"]);
     }
 
-    /// Taking out everything selected leaves the cursor on a row that wasn't.
+    /// Taking out everything selected leaves nothing selected, the cursor on a row that
+    /// wasn't.
     #[test]
     fn removing_everything_moves_the_cursor_off_the_matches() {
         let d = folder("remove-all", FILES);
@@ -465,8 +496,8 @@ mod tests {
         s.open_pick(&mut tx);
         typed(&mut s, "*.jpg");
         s.pick_apply(How::Remove, &mut tx);
-        assert!(s.cur().marked.is_empty());
-        assert!(!s.cur().selected().unwrap().lower.ends_with(".jpg"));
+        assert!(s.cur().targets().is_empty(), "nothing selected");
+        assert!(!s.cur().cursor().unwrap().lower.ends_with(".jpg"));
     }
 
     /// The listing refreshes while the box is open (a file operation, a reload): the count

@@ -198,7 +198,7 @@ the time to the first thumbnail and to a screenful, and `--tiles N` the same pag
 tiles view, and `--columns N` adds N runs moving out of and back into the 10k folder in the
 column view (← and →), each key to its frame (`column_cost` times the same without a GPU),
 and `--window N` adds N runs opening a new window on the 10k folder: ⌘N to the new window's
-first frame showing it, and every bench ends with `--idle N` (default 1, 0
+first frame showing it, and `--all-columns` shows every list column in every run, and every bench ends with `--idle N` (default 1, 0
 skips it): N starts left idle in each view (list, icons, tiles, columns), after switching to it,
 and N in the list with a second window open, each
 failing the bench if it uses more than 0.05 s of CPU in 5 s; `--pace MS` spaces
@@ -250,7 +250,7 @@ or on the list: same disk moves, another disk copies, and ⌥ forces a copy.
 ### Views and drag-select
 
 Each tab shows its folder in one of four views: **as a list** (rows with Kind, Size and
-Modified columns), **as icons** (a grid of icons with names under them), **as columns** (a
+Modified columns, and others you can add: [below](#list-columns-folders-first-and-the-status-bar)), **as icons** (a grid of icons with names under them), **as columns** (a
 column per folder, like Finder's column view) or **as tiles** (a grid of wide tiles: a larger
 icon beside the name, kind, size and date). **⌥⌘1** to **⌥⌘4** (Ctrl+Alt+1 to 4 off macOS),
 "As List", "As Icons", "As Columns" and "As Tiles" in the palette, or the four buttons at the
@@ -295,6 +295,47 @@ drags files). ⇧ adds what the rectangle touches to the selection; ⌘ (Ctrl) t
 the selection back. Dragged above or below the list it scrolls, a step for each pointer move
 (holding still doesn't scroll: Arbor runs no timers). A click in empty space below the rows
 clears a multiple selection.
+
+### List columns, Folders First and the status bar
+
+The list (and a search's results) shows **Kind**, **Size** and **Date Modified** after the name
+to start with. **Right-click the header row** for a menu of columns, each checked while it's
+shown: Kind, **Extension**, Size, Date Modified, **Date Created** and **Permissions**
+(`drwxr-xr-x`, as `ls -l`; on Windows **Attributes**, `RHSA` as Explorer writes them), then
+Folders First and Reset Columns ("Column Options…" in the palette opens it from the
+keyboard). The palette has the same: "Show the Date Created Column", "Hide
+the Kind Column" and so on, and "Reset Columns". **Drag the line before a column's header** to
+make that column wider or narrower; the name takes what's left, and never gets narrower than
+180 pt, so a column can't be dragged past that. A pane too narrow for every column leaves out
+the least needed first (Permissions, Date Created, Extension, Kind, then Date Modified; then
+Size narrows, and goes last), only on screen: the widths you set are kept. A click on a header sorts by it (Extension sorts as Kind does, by extension; Permissions
+doesn't sort), and "Sort by Date Created" is in the palette. Every column comes from what the
+listing reads anyway (one `lstat`/`statx` per item, or Windows' directory record), so showing
+one costs nothing more per item; Date Created shows "—" where the disk keeps no creation time
+(ext2/3, some network disks). A search's results also have their Folder column.
+
+The columns and their widths are the same in every window and every tab, and are kept in
+`columns.toml` beside the settings file (user data; `config.toml`, which you edit, is never
+rewritten). Arbor rewrites it, whole, when you show, hide or resize a column (a resize when you
+let go); delete it to go back to the defaults. A file that can't be read or isn't valid gives
+the defaults and a note in the status bar, and your next change replaces it.
+
+**Folders First** keeps folders above files whatever the sort, as Arbor always has (Explorer's
+way; Finder's default mixes them). Turn it off with "Turn Off Folders First" in the palette or
+the header's menu: folders then sort among the files (by name, size, date, or as the kind
+"folder"). That lasts until the window closes; `folders_first = false` in the settings starts
+every window with it off.
+
+**The status bar** says, on the right, how many items the folder has ("120 items", or "12 of
+120 items" while a filter hides some) and the free space on its disk ("120 items · 84 GB
+free"). With two or more items selected it adds their number and the files' total size first
+("3 selected · 4.2 MB · 120 items"); folders are counted, not measured ("5 selected · 4.2 MB +
+2 folders"), since nothing walks them. The free space is one `statvfs` (Windows:
+`GetDiskFreeSpaceExW`) read when a folder's listing lands and after a file operation, never on a
+timer, on at most four threads of its own (never the listings' workers), one question at a time
+per disk: a disk that doesn't answer (a dead network share) holds up only its own free space,
+and while four don't answer, no free space is shown for the others either. It's left out while a note or an
+operation's progress is showing on the left.
 
 ### Tabs and split view
 
@@ -988,7 +1029,9 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Sort by Kind |  |  | `view.sort_kind` |
 | Sort by Size |  |  | `view.sort_size` |
 | Sort by Date Modified |  |  | `view.sort_modified` |
+| Sort by Date Created |  |  | `view.sort_created` |
 | Reverse Sort Order |  |  | `view.sort_reverse` |
+| Keep Folders First (Toggle) |  |  | `view.folders_first` |
 | Quick Preview (Toggle) | Space | Space | `view.preview` |
 | Close Preview |  |  | `view.close_preview` |
 | As List | ⌥⌘1 | Ctrl+Alt+1 | `view.as_list` |
@@ -997,6 +1040,14 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | As Tiles | ⌥⌘4 | Ctrl+Alt+4 | `view.as_tiles` |
 | Larger Icons | ⌘+, ⌘= | Ctrl++, Ctrl+= | `view.larger_icons` |
 | Smaller Icons | ⌘- | Ctrl+- | `view.smaller_icons` |
+| Show or Hide the Kind Column |  |  | `view.column_kind` |
+| Show or Hide the Extension Column |  |  | `view.column_extension` |
+| Show or Hide the Size Column |  |  | `view.column_size` |
+| Show or Hide the Date Modified Column |  |  | `view.column_modified` |
+| Show or Hide the Date Created Column |  |  | `view.column_created` |
+| Show or Hide the Permissions (Windows: Attributes) Column |  |  | `view.column_permissions` |
+| Reset Columns |  |  | `view.reset_columns` |
+| Column Options… |  |  | `view.column_options` |
 | New Window | ⌘N | Ctrl+N | `window.new` |
 | Open in New Window |  |  | `window.open_folder` |
 | New Tab | ⌘T | Ctrl+T | `tab.new` |
@@ -1036,7 +1087,9 @@ Arbor gives every part a role and a name (`src/view/`; `src/a11y_tests.rs` check
   option named from its cells in reading order (name, kind, size, modified: "notes.txt, txt,
   5 KB, Today 10:30"; a folder says "Folder" when the Kind column is hidden), selected when it
   is, with its place in the whole folder ("2 of 120", not of the rows built). The list's active
-  descendant is the cursor's row, so a reader follows ↑↓, typing and every other key. In a
+  descendant is the cursor's row, so a reader follows ↑↓, typing and every other key. The
+  extra columns (Extension, Date Created, Permissions) join a row's name when they're shown; a
+  "—" (no extension, no creation time) is left out. In a
   split window both lists point at the active pane's cursor row. In the icon and tiles views
   each cell is an option the same way (a tile named from its name, kind and size). **The
   column view** is a group ("Columns, 3 folders") of list boxes, one per column, each named for
@@ -1046,7 +1099,10 @@ Arbor gives every part a role and a name (`src/view/`; `src/a11y_tests.rs` check
 - **The sidebar** is a list box of places, favorites then volumes (the folder on screen
   selected, ⌘1–9 as each one's shortcut, a volume's ⏏ a button named "Eject …"); **the path bar** a toolbar of named buttons (Go Back, Go Forward, Go to Parent
   Folder, dimmed when they can't) and the breadcrumbs as links; **the tab strip** a tab list
-  with the shown tab selected; the column headers say which one sorts and which way.
+  with the shown tab selected; the column headers say which one sorts and which way, and the
+  edge before each is a splitter named "Size column width" whose value is its width. The
+  header's menu (Arbor's own on Linux) has its columns and Folders First as checkbox items,
+  checked when on; native menus on macOS and Windows show the same checks.
 - **The status bar's note is a live region**: results ("Moved 3 items to the Trash", "Restored
   1 item", "Redid 2 items") are announced when the user is idle, and failures (a refused undo,
   an operation's errors, a folder that can't be read) at once, as alerts. Progress isn't
@@ -1067,7 +1123,10 @@ Arbor gives every part a role and a name (`src/view/`; `src/a11y_tests.rs` check
   focus ↑↓ ←→ scroll three lines, Page Up/Down a page, Home and End to the ends.
 
 **Keyboard only.** Every command is in the palette (⌘K), including those with no key (Sort by
-Name, Kind, Size or Date, Batch Rename, Select All of This Kind, Open With, Add to Sidebar…).
+Name, Kind, Size or Date, Batch Rename, Select All of This Kind, Open With, Add to Sidebar…),
+and every column's Show/Hide and Folders First; "Column Options…" opens the header's menu
+itself, under the header, for the arrows and Enter. Widths
+can't be changed from the keyboard yet (Reset Columns puts them back).
 Sidebar places are ⌘1–9 and "Go to …" in the palette, ⌘I is Get Info and ⌘E ejects; the breadcrumbs are ⌘↑ (parent) and ⌘L (type a path, Tab completes).
 Tab moves focus to the list, the search field and the preview's contents (and switches panes
 when the window is split). Focus shows as the selection (the accent colour in the active pane,
@@ -1106,8 +1165,9 @@ file: run "Reload Settings" after saving (or restart).
 ```toml
 [general]
 show_hidden = false        # show hidden files in new windows (⌘. toggles)
-sort = "name"              # "name", "kind", "size" or "modified"
-sort_descending = false    # default: size and modified sort largest and newest first
+sort = "name"              # "name", "kind", "size", "modified" or "created"
+sort_descending = false    # default: size and the dates sort largest and newest first
+folders_first = true       # folders above files under any sort ("Folders First" toggles it)
 start_folder = "~"         # when none is given on the command line
 places = ["~", "~/Projects", "/"]   # the sidebar's default favorites (until you change them in Arbor)
 

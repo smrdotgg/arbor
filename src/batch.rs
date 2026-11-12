@@ -376,6 +376,14 @@ impl State {
             self.note = Some(why.into());
             return;
         }
+        // An item that shows a label since the panel opened waits for the folder to be read
+        // again (the worker checks each item's identity right before renaming).
+        let paths = b.paths.clone();
+        if self.any_labelled(paths.iter().map(PathBuf::as_path)) {
+            self.note = Some(crate::app::UPDATING.into());
+            return;
+        }
+        let Some(b) = &mut self.batch else { return };
         let Some(seen) = &b.seen else { return };
         let items: Vec<Renaming> = (0..b.items.len())
             .filter(|&i| b.plan.status[i] == Status::Change)
@@ -618,7 +626,8 @@ pub(crate) mod tests {
     }
 
     fn marked(s: &State) -> Vec<String> {
-        let mut v: Vec<String> = s.cur().marked.iter().map(|n| n.to_string_lossy().into_owned()).collect();
+        let f = s.cur();
+        let mut v: Vec<String> = f.marked.iter().map(|r| f.entries[f.visible[r] as usize].name.clone()).collect();
         v.sort();
         v
     }

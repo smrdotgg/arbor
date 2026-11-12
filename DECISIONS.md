@@ -9,6 +9,12 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-12 · columns-status merged with a known +11% at 500k entries (Review).** The final
+  review found no wrong-target issues; at 500,000 entries a one-pane listing landing is 47.1 ms
+  vs main's 42.5 ms (both far over the 8 ms frame budget, a pre-existing large-folder cost), while
+  split landing went 44 → 14 ms and the rename guard 62 → 24 ms. Tracked under BACKLOG.md's
+  "Large-folder performance". Undo: revert the squash commit.
+
 - **2026-11-11 · Cold start on Windows and Linux: under 30 ms (owner).** The owner found Arbor
   takes about a second to open on a Windows gaming laptop and set the budget: "less than 30ms…
   the 100ms floor was macOS only." NORTHSTAR's row now says under 30 ms on Windows and Linux.
@@ -17,6 +23,144 @@ Format: date · decision · why · how to undo.
   may be off; the owner chose to merge on CI (macOS runner included) plus the GPT-6.1 Sol review
   and run the Codex Mac pass on the next round, together with updating /Applications/Arbor.app.
 
+- **2026-11-11 · List columns, Folders First and the status bar (`feature/columns-status`;
+  Review: the file, Folders First's default and toggle, what the status bar drops).**
+  - **Columns live in `columns.toml` beside the settings (Review)**, not in `config.toml`:
+    Arbor would have to rewrite a file people edit by hand, comments and all. It's written
+    whole by a thread of its own (`arbor-columns`, started by the first change, the last of a
+    run of changes only, an atomic rewrite, a failure said once, drained at exit), like
+    `sidebar.toml`'s writer but without its read-and-merge: the file is one value, so two
+    Arbor processes are last-change-wins. A resize is saved when the drag ends. A corrupt file
+    gives the defaults and a note; unknown column names (a newer Arbor's) are skipped, widths
+    clamped. Undo: `listcols::{load, Writer}`.
+  - **One set of columns for every window, tab and folder**, Explorer's "apply to all folders"
+    rather than Finder's per-folder view options (those would be per-folder user data to keep
+    and look up on every navigation). Undo: `Shared::cols` per window instead.
+  - **New columns: Extension, Date Created, Permissions (Windows: Attributes). Date Added:
+    skipped**: macOS keeps it as a Spotlight attribute (`kMDItemDateAdded`), a call per item, and
+    Windows and Linux have nothing like it. Date Created is the birth time each entry's
+    identity already holds (statx's btime, macOS's birthtime, the Windows record's
+    CreationTime), read from it, not stored again; Permissions is the `lstat`'s `st_mode` (a
+    link's own, as `ls -l` shows it) or the record's attributes, a `u32` that sits in the
+    padding beside the flags. No call more per entry and no bigger an entry, so the listing
+    pays nothing for them, hidden or shown (a first version stored the birth time too: 16
+    bytes more per entry; its cost on a 10k read was within this host's noise, but a test now
+    holds `Entry` to its old size). **Extension stays though Kind is the
+    extension today** (Kind says "Folder"/"File" too); asked for, off by default, free.
+    Its header sorts as Kind does (same order); Permissions doesn't sort; Date Created adds
+    "Sort by Date Created" and `sort = "created"`. Undo: `listcols::Field`.
+  - **Resizing: the strip before a column's header drags that column's width; Name takes the
+    rest** and never goes under 180 pt (what the list kept before); a column won't widen past
+    what Name can give, 36–48 pt at least, 480 at most. A pane too narrow drops the least
+    needed first (Permissions, Created, Extension, Kind, Modified; Size stays, as before). Not
+    by keyboard (optional in the task): Reset Columns puts widths back. Undo: `listcols::{fit,
+    dragged}`, `view::list::column_edge`.
+  - **Folders First defaults on (Review)**: it's what Arbor always did, and Explorer's and
+    most Linux file managers' default; Finder's is off. **The setting is `[general]
+    folders_first`**, beside `sort` and `sort_descending` (the task's `sort.folders_first`
+    would have been a new `[sort]` section for one key). **The palette's "Turn Off/On Folders
+    First" lasts until the window closes**, as ⌘. does for hidden files; nothing is saved.
+    Off, a Kind sort puts folders among the kinds as "folder" (Finder's way). Undo:
+    `Sort::dirs_first`, `State::toggle_folders_first`.
+  - **Status bar: "3 selected · 4.2 MB + 2 folders · 120 items · 84 GB free"**, the selection
+    part only with two or more selected (one item's size is on its row). **The free space is
+    left out while a note or progress shows (Review)**: the note keeps its room; the counts
+    stay as they always did. Free space is one `statvfs`/`GetDiskFreeSpaceExW`, asked when a
+    listing lands (the volume is then known from its identity) and after any file operation,
+    for every pane; never on a timer. **Not on Rune's pool (after review)**: a `statvfs` can't
+    be stopped and a dead network volume never answers, so four hung ones starved every listing.
+    It runs on a thread per volume with a query in flight (`volinfo.rs`), below the window's
+    priority; a query for a volume still stuck waits behind it (no second thread), and a
+    folder's newer query supersedes its older one. The cost: the free space shows a frame after
+    the listing rather than in its frame. Not shown in a search's results (they can cross
+    disks). **The selection's totals are kept by every change (after review)** (`marked.rs`:
+    each selected name with its size): a click, ⌘-click or a rectangle's move costs what it
+    changes (a scan of a 500k list per change was 33 ms); a pattern, an inversion and ⌘A look
+    at every row anyway; a reload's selection is found on the listing's worker. ⇧-click still
+    makes its range afresh, as it did. Undo: `view::status`, `volinfo.rs`, `marked.rs`.
+  - **Free space: at most four threads in all (PM, 2026-11-11, second review)**: volumes keyed
+    by device (`st_dev`, the volume serial number), never by path (a folder whose identity
+    isn't known isn't asked about); when all four are stuck, nothing new starts and the status
+    bar shows no free space (not a figure that may be stale); a stuck thread can't be killed,
+    but its answer is dropped once nobody wants it. As listings on a hung volume behave; within
+    NORTHSTAR (no work starts for a view that's gone; a blocked call uses no CPU). Undo:
+    `volinfo::THREADS`.
+  - **The selection is rows on screen (second review)**: a bitset over the visible rows,
+    with running sums of the rows' sizes (`marked.rs`), replacing names with sizes. So a click,
+    ⌘-click, ⇧ growing or shrinking a range, ⌘A, Invert, Esc and a rectangle's move cost what
+    they change, a word per 64 rows at most: under 0.2 ms at 500,000 rows in a debug build
+    (⇧-shrink was 238 ms, clearing 30 ms). **An item that's hidden (hidden files off, a
+    filter) is deselected (Review)**: what's selected, what the status bar adds up and what an
+    action acts on are the same rows; Finder and Explorer deselect what a search hides too. The
+    selection rides on its entries (`Entry::sel`, in padding) through a sort or a reload; when
+    the user picks during a reload, the new pick is marked on the landed listing on a worker,
+    then lands. Select by Pattern and Select All of This Kind still look at every row (they
+    match names). Undo: `marked.rs`.
+  - **Nothing selected is a state (third review; Review)**: when what was selected goes
+    (hidden, filtered out, gone after a reload, a ⌘-click taking off the last item, a rectangle
+    over nothing), nothing is selected: the cursor stays where it lands but isn't selected, and
+    a command on "the item" says to select one. Before, the cursor's new row became the
+    selection, so the next trash or move acted on an item the user never chose. A click, an
+    arrow, typing a filter or any selection command selects again; a folder newly opened still
+    starts with its first row selected. A sort during a search takes in the results the
+    selection (and the cursor) landed on past the shown ones, rather than losing them. Found by
+    the randomized model tests (`the_selection_matches_a_model_whatever_happens`, and its search
+    twin): typing a filter carried the old cursor's item as the selection while the cursor
+    moved to the match (typing now chooses afresh, and a filter matching nothing leaves nothing
+    selected); a reload in which none of the selected items is left selected the cursor's row;
+    "the item" for Rename or Get Info was the cursor's even after a ⌘-click took it off the
+    selection (it's now always a selected item). The fourth review's stronger model (reloads
+    raced by any change and landing late, renames, type changes, patterns, the column view)
+    found two more: Open Folder (→) opened the cursor's folder when the cursor had been
+    ⌘-clicked off, and Select by Pattern taking out everything selected selected the row the
+    cursor moved to (it now leaves nothing selected). CI runs the models 5,000 cases each from
+    fixed seeds. Undo: `Folder::none`.
+  - **A reload hands its selection to the worker as it is (third review)**: the listing is
+    shared (`Arc`, copied only if changed while a worker holds it) and the selection goes as its
+    rows' bits; the worker reads the names and finds them in the new listing. Asking for a
+    reload of 300,000 selected items, and landing one that raced a new pick, take under 0.1 ms
+    on the window's thread (they copied every name: 70 ms at 500,000). The selection carried
+    through a filter or sort is a set of entry indices beside the listing, so carrying it never
+    writes to a listing a worker holds. Undo: `folder::{Kept, Pick}`.
+  - **Renames and a shared listing: one rule, no overlay (PM decision, sixth review,
+    2026-11-12)**. The rename overlay of the fourth and fifth reviews (renames kept beside the
+    listing, every action resolving through them) produced about ten bugs in two rounds and is
+    gone. The rule now: a rename (or any operation) that lands while nobody else holds the
+    listing changes it in place (`Arc::make_mut`, free when unshared). While a reload's worker
+    or the other pane holds it, the listing isn't changed or translated: the refresh the
+    operation asks for supersedes any read on its way, and until that read lands the rows show
+    a display-only label with the new name (`Folder::labels`), and every action on them (open,
+    →, Enter, double-click, preview, Get Info, drag, copy, trash, rename, F5/F6, Open With, Show
+    Original, Open in New Window, menus, palette) is refused with "Updating… try again in a
+    moment". An inline rename's own label (while its outcome is on its way) works the same; a
+    failure, a hidden tab or another folder clears it. No other state (hidden tabs, picks, the
+    selection a reload keeps) learns of a rename: a read that lands carries the selection by
+    identity (`find_named`, on the read's worker): an item under its name while it's that item,
+    else wherever its identity is now, else another of its kind under its name (an editor's
+    save makes a new file); another kind of item under the name isn't selected. Hidden tabs keep
+    their items' identities for that (`TabMemo::ids`). Within a frame at 500,000: a landing
+    looks through the listing for a stale entry under the new name only up to 50,000 entries
+    (about 0.35 ms); above, the row is renamed by its index and every row of the new name waits
+    for the read. Kept from the overlay rounds: a navigation that replaced a reload and fails
+    asks for the reload again (`Folder::reread`), and a rename onto a name the listing still
+    shows (that item gone from outside) replaces the stale entry in place when the disk says
+    so. **What captures items and acts later (seventh review)**: the Open With box and a context
+    menu's apps keep each file's identity from when they opened, and the launch's worker checks
+    it right before opening (a stat per file, off the window's thread); the delete dialog and
+    Batch Rename already hand identities to their worker. All of them, and a context menu's
+    commands, refuse with the Updating note an item that shows a label by the time they act
+    (`State::any_labelled`, looking up labels only). Get Info's Rename is the Rename command.
+    Undo: `Folder::labels`, `Label`, `find_named`, `Ids`, `UPDATING`, `openwith::changed_since`.
+  - **Narrow panes (after review):** once every other column is gone, Size narrows to its
+    least and then goes, so Name keeps its 180 pt; a search's Folder column gets only what's
+    past Name's least. Only on screen: the widths kept are the user's. Undo: `ListCols::fit`.
+  - **"Column Options…"** (palette, no key) opens the header's menu under the header, the
+    keyboard's way to it; Shift+F10 and the Menu key aren't bound (rows have no keyboard
+    context menu either). Undo: `State::column_options`.
+  - **A test fixed, not the app**: `a_drop_on_a_column_refuses_a_replaced_folder` dropped
+    right after an operation and waited one frame; the free-space read after the operation can
+    land in that frame, and Rune holds a file drop a frame when state changed since the last
+    build (`hold_files`), so the drop came a frame later. It now waits for the drop to be taken.
 - **2026-11-11 · Compress and Extract Here (`feature/archives`; Review: Open, the folder made,
   the bomb limits, the level).**
   - **No zip crate: Arbor's own ZIP reader and writer and tar reader** (`src/archive/`, about

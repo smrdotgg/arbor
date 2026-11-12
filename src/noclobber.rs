@@ -386,6 +386,11 @@ pub struct DirId {
 }
 
 impl DirId {
+    /// The volume it's on: the device (Unix) or the volume's serial number (Windows).
+    pub fn volume(&self) -> u64 {
+        self.node.0
+    }
+
     /// Device and inode alone (the search walk's loop check, Get Info's walk).
     #[cfg(any(unix, test))]
     pub fn file_id(&self) -> FileId {

@@ -609,7 +609,9 @@ impl State {
         }
         let key = self.info_key();
         let f = self.cur();
-        let picked = f.targets();
+        // An item showing a label isn't read until the folder is read again: the folder is
+        // shown meanwhile.
+        let picked = if f.updating() { Vec::new() } else { f.targets() };
         let (paths, dirs, files, size, name) = if picked.is_empty() {
             (vec![f.cwd.clone()], 1, 0, 0, crate::sidebar::name_for(&f.cwd))
         } else {

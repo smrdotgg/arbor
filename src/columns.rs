@@ -82,7 +82,7 @@ pub struct Column {
     /// The whole folder, sorted (empty unless [`Load::Ready`]).
     pub entries: Vec<Entry>,
     /// Indices into `entries` the hidden-file rule shows.
-    pub visible: Vec<u32>,
+    pub visible: crate::marked::Rows,
     /// The item highlighted: in a column left of the active one, the next folder on the way.
     pub pick: Option<OsString>,
     pub load: Load,
@@ -114,11 +114,11 @@ impl Column {
             uid: next_uid(),
             dir_id: None,
             entries: Vec::new(),
-            visible: Vec::new(),
+            visible: crate::marked::Rows::default(),
             pick: None,
             load: Load::Off,
             version: crate::folder::next_version(),
-            sort: Sort { key: fs::SortKey::Name, desc: false },
+            sort: Sort::new(fs::SortKey::Name, false),
             hidden: false,
             req: 0,
             stop: Arc::default(),
@@ -136,7 +136,7 @@ impl Column {
         dir_id: Option<crate::noclobber::DirId>,
         (sort, hidden): (Sort, bool),
         uid: Option<u64>,
-        rows: Option<(Vec<u32>, u64)>,
+        rows: Option<(crate::marked::Rows, u64)>,
         waker: Option<&rune::Waker>,
     ) -> Column {
         let mut c = Column::new(path, waker);
@@ -179,8 +179,7 @@ impl Column {
 
     fn refilter(&mut self, hidden: bool) {
         self.hidden = hidden;
-        self.visible.clear();
-        self.visible.extend(self.entries.iter().enumerate().filter(|(_, e)| hidden || !e.hidden).map(|(i, _)| i as u32));
+        self.visible = crate::marked::Rows::of(&self.entries, 0..self.entries.len(), |e| hidden || !e.hidden);
         self.version = crate::folder::next_version();
     }
 
@@ -213,7 +212,7 @@ impl Column {
         self.stop.store(true, Relaxed);
         self.loader.cancel();
         self.entries = Vec::new();
-        self.visible = Vec::new();
+        self.visible = crate::marked::Rows::default();
         self.load = Load::Off;
         self.version = crate::folder::next_version();
     }
@@ -227,7 +226,7 @@ impl Column {
         self.sort = sort;
         self.hidden = hidden;
         self.load = Load::Loading;
-        crate::bounded::start(&self.loader, true, move || Some(Answer { req, sort, listing: fs::list_until(path, sort, &stop)? }))
+        crate::bounded::start(&self.loader, true, move || Some(Answer::new(req, sort, fs::list_until(path, sort, &stop)?)))
     }
 
     /// A finished read, if it's the one this column waits for. True when it landed.
@@ -249,7 +248,7 @@ impl Column {
             Err(e) => {
                 // An error isn't a listing: nothing from before stays behind it.
                 self.entries = Vec::new();
-                self.visible = Vec::new();
+                self.visible = crate::marked::Rows::default();
                 self.load = Load::Failed(e);
                 self.version = crate::folder::next_version();
             }
@@ -508,7 +507,7 @@ impl State {
         // its way, what's on the right stays.
         let loading = f.is_loading();
         let single = f.marked.len() <= 1;
-        let want_right = f.selected().filter(|e| single && e.is_dir).map(|e| f.cwd.join(&e.os));
+        let want_right = f.selected().filter(|e| single && e.is_dir && !f.labelled(e)).map(|e| f.cwd.join(&e.os));
         let cols = f.cols.get_or_insert_with(|| {
             changed = true;
             Box::new(Columns::new(PathBuf::new()))
@@ -680,7 +679,7 @@ impl State {
         let rows = (col.sort == f.sort && col.hidden == f.show_hidden).then(|| (std::mem::take(&mut col.visible), col.version));
         f.adopted = Some(crate::folder::Adopted { req, uid: col.uid, rows });
         let listing = Listing { path: col.path.clone(), result: Ok(std::mem::take(&mut col.entries)), dir_id: col.dir_id, missing: false };
-        self.col_ready = Some((id, Answer { req, sort, listing }));
+        self.col_ready = Some((id, Answer::new(req, sort, listing)));
         // Landed by the next handler with a `Tx` (a key's, a command's, a press's), or else by
         // the `poll` this wakes.
         if let Some(w) = &self.waker {
@@ -851,6 +850,10 @@ impl State {
     /// row or column in the column view): into it, as a file drop, each item checked.
     pub(crate) fn drop_rows_into(&mut self, id: u64, i: usize, version: u64, dest: crate::ops::Dest, tx: &mut Tx) {
         let Some(src) = self.pane(id).filter(|p| p.f.version == version) else { return };
+        if src.f.drag_updating(i) {
+            self.note = Some(crate::app::UPDATING.into());
+            return;
+        }
         let (files, expect) = (src.f.drag_paths(i), src.f.drag_checks(i));
         self.drop_into(&files, dest, expect, tx);
     }
@@ -902,10 +905,12 @@ impl Folder {
             }
             Nav::Reload | Nav::Show | Nav::Fresh => {}
         }
-        let entries = std::mem::take(&mut self.entries);
+        // Its own unless a reload's worker still holds it (then a copy).
+        let entries = std::sync::Arc::try_unwrap(std::mem::take(&mut self.entries)).unwrap_or_else(|a| (*a).clone());
         let old_id = std::mem::replace(&mut self.dir_id, dir_id);
-        self.visible.clear();
+        self.visible = std::sync::Arc::default();
         self.marked.clear();
+        self.labels.clear();
         self.sel = 0;
         self.anchor = 0;
         self.filter.clear();
@@ -927,7 +932,18 @@ impl Folder {
         self.loader.cancel();
         let req = crate::folder::next_request();
         let picks = self.picks;
-        self.pending = Some(crate::folder::Pending { req, path, nav, select, rename: false, scroll: 0.0, picks });
+        self.pending = Some(crate::folder::Pending {
+            req,
+            path,
+            nav,
+            select,
+            cursor: None,
+            none: false,
+            rename: false,
+            scroll: 0.0,
+            picks,
+            ids: Default::default(),
+        });
         req
     }
 }
@@ -1114,8 +1130,8 @@ mod tests {
     fn a_stale_listing_never_lands_in_a_column() {
         let d = tree("stale");
         let mut c = Column::new(d.join("a"), None);
-        let sort = Sort { key: fs::SortKey::Name, desc: false };
-        let answer = |req: u64, path: PathBuf| Answer { req, sort, listing: fs::list(path, sort) };
+        let sort = Sort::new(fs::SortKey::Name, false);
+        let answer = |req: u64, path: PathBuf| Answer::new(req, sort, fs::list(path, sort));
         let first = c.read(sort, false);
         drop(first);
         let old = c.req;

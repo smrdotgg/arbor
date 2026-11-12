@@ -348,8 +348,9 @@ pub struct Side {
     /// A newer list (and its revision) that came while a favorite was being dragged here: shown
     /// when the drag ends, with the drag's move made on it (`State::drag_favorite_by`).
     held: Option<(u64, Vec<(String, PathBuf)>)>,
-    /// Folders dropped on the sidebar from another app, checked on a worker.
-    pub(crate) dropped: rune::Latest<Vec<PathBuf>>,
+    /// Folders dropped on the sidebar (from another app, or rows of a list, each still the item
+    /// its listing read), checked on a worker; and what it says of rows that changed since.
+    pub(crate) dropped: rune::Latest<(Vec<PathBuf>, Option<String>)>,
     /// Looks started, for tests.
     pub looks: Arc<AtomicU64>,
     /// The favorites changed (or just landed): look at the new ones at the next `poll` once
@@ -484,11 +485,14 @@ impl State {
             // The list written, at its own revision (not this window's, which may be mid-drag).
             self.tell_favorites(rev, &list);
         }
-        if let Some(dirs) = self.side.dropped.take() {
+        if let Some((dirs, changed_since)) = self.side.dropped.take() {
             if dirs.is_empty() {
-                self.note = Some("Only folders can go in the sidebar".into());
+                self.note = Some(changed_since.unwrap_or_else(|| "Only folders can go in the sidebar".into()));
             } else {
                 self.add_favorites(dirs, None);
+                if let Some(why) = changed_since {
+                    self.note = Some(why);
+                }
             }
             changed = true;
         }
@@ -678,22 +682,47 @@ impl State {
     /// Files dropped on the sidebar from another app: the folders among them are added, once a
     /// worker has looked at which are folders.
     pub fn drop_on_sidebar(&mut self, files: &[PathBuf]) {
-        let files = files.to_vec();
-        self.side.dropped.request(files, |files| files.into_iter().filter(|p| p.is_dir()).collect());
+        self.drop_checked(files.iter().map(|p| (p.clone(), None)).collect());
     }
 
-    /// Rows dragged from pane `id`'s list onto the sidebar: their folders are added (what the
-    /// listing says, no disk I/O).
+    /// Folders to add to the sidebar, looked at on a worker: those that are folders, and, for a
+    /// list's rows (`Some` identity), only while each is still the item its listing read.
+    fn drop_checked(&mut self, items: Vec<(PathBuf, Option<fs::Ident>)>) {
+        self.side.dropped.request(items, |items| {
+            let mut changed = None;
+            let dirs = items
+                .into_iter()
+                .filter(|(p, id)| {
+                    let same = id.is_none() || fs::ident_at(p) == *id;
+                    if !same {
+                        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        changed = Some(format!("“{name}” changed since it was dragged, so it wasn't added: drag it again"));
+                    }
+                    same && p.is_dir()
+                })
+                .map(|(p, _)| p)
+                .collect();
+            (dirs, changed)
+        });
+    }
+
+    /// Rows dragged from pane `id`'s list onto the sidebar: their folders are added, each by its
+    /// path while it's still the item its listing read (checked on a worker). Refused, saying
+    /// so, while one shows a label (its rename on its way, or the folder being read again).
     pub fn drop_rows_on_sidebar(&mut self, id: u64, i: usize, version: u64) {
         let Some(p) = self.pane(id).filter(|p| p.f.version == version) else { return };
         let f = &p.f;
+        if f.drag_updating(i) {
+            self.note = Some(crate::app::UPDATING.into());
+            return;
+        }
         let rows = if f.is_selected(i) { f.targets() } else { f.visible.get(i).map(|&e| &f.entries[e as usize]).into_iter().collect() };
-        let dirs: Vec<PathBuf> = rows.iter().filter(|e| e.is_dir).map(|e| f.cwd.join(&e.os)).collect();
+        let dirs: Vec<(PathBuf, Option<fs::Ident>)> = rows.iter().filter(|e| e.is_dir).map(|e| (f.cwd.join(&e.os), e.id)).collect();
         if dirs.is_empty() {
             self.note = Some("Only folders can go in the sidebar".into());
             return;
         }
-        self.add_favorites(dirs, None);
+        self.drop_checked(dirs);
     }
 }
 

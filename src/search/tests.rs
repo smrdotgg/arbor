@@ -159,7 +159,7 @@ fn unreadable_folders_are_skipped_and_counted() {
     }
     assert_eq!(found, ["open/hit.txt"]);
     assert_eq!(out.unreadable, 2);
-    let mut f = Folder::new(9, d.clone(), crate::fs::Sort { key: crate::fs::SortKey::Name, desc: false }, false, None);
+    let mut f = Folder::new(9, d.clone(), crate::fs::Sort::new(crate::fs::SortKey::Name, false), false, None);
     let mut s = Search::new(f.memo(), "hit", None);
     (s.query, s.unreadable, s.took) = ("hit".into(), 2, Some(Duration::from_millis(1800)));
     f.search = Some(Box::new(s));
@@ -220,7 +220,7 @@ fn a_walk_stops_at_the_result_cap() {
     let d = tree("cap", &names.iter().map(String::as_str).collect::<Vec<_>>());
     let (found, out) = walk_all(&d, "hit", false, false, 7);
     assert_eq!((found.len(), out.found, out.capped), (7, 7, true));
-    let mut f = Folder::new(9, d.clone(), crate::fs::Sort { key: crate::fs::SortKey::Name, desc: false }, false, None);
+    let mut f = Folder::new(9, d.clone(), crate::fs::Sort::new(crate::fs::SortKey::Name, false), false, None);
     let mut s = Search::new(f.memo(), "hit", None);
     (s.query, s.capped, s.took) = ("hit".into(), true, Some(Duration::from_millis(300)));
     f.search = Some(Box::new(s));
@@ -696,12 +696,12 @@ fn the_list_grows_only_so_far_while_the_walk_goes_on() {
         hidden: false,
         size: 1,
         mtime_ms: 1,
+        mode: 0,
         id: None,
-        pending: None,
     };
     // As poll_search appends batches while the walk is still going.
     for batch in 0..3 {
-        f.entries.extend((0..700).map(|i| fake(batch * 700 + i)));
+        std::sync::Arc::make_mut(&mut f.entries).extend((0..700).map(|i| fake(batch * 700 + i)));
         f.take_in();
     }
     assert_eq!((f.entries.len(), f.visible.len()), (2100, LIVE_ROWS));
@@ -1270,4 +1270,164 @@ fn a_change_made_through_another_path_reaches_the_search() {
     s.activate(1 - other, &mut tx());
     frames(&mut s, 10);
     assert!(results(&s).is_empty(), "{:?}", results(&s));
+}
+
+/// Names of what an action would act on.
+fn target_names(f: &Folder) -> Vec<String> {
+    f.targets().iter().map(|e| e.name.clone()).collect()
+}
+
+/// A sort while the walk is still going (1,000 of 1,500 results taken in) keeps the selection
+/// on its items wherever they land, taken in if they land past the end, and never puts another
+/// row in their place: reversing the name sort used to select `00001499.txt` instead of the
+/// first two.
+#[test]
+fn a_sort_keeps_the_selection_on_results_not_yet_shown() {
+    let mut f = Folder::new(0, PathBuf::from("/"), crate::fs::Sort::new(crate::fs::SortKey::Name, false), true, None);
+    f.entries = (0..1500).map(|i| Entry { size: i as u64 + 1, ..Entry::test(&format!("{i:08}.txt"), false) }).collect::<Vec<_>>().into();
+    let mut s = Search::new(f.memo(), "txt", None);
+    s.upto = 1000;
+    f.search = Some(Box::new(s));
+    f.refilter(None);
+    f.select(0);
+    f.toggle_mark(1);
+    let want = ["00000000.txt", "00000001.txt"];
+    assert_eq!(target_names(&f), want);
+    f.set_sort(crate::fs::SortKey::Name);
+    f.set_sort(crate::fs::SortKey::Name);
+    assert!(f.sort.desc);
+    assert_eq!(target_names(&f), ["00000001.txt", "00000000.txt"], "the same two, in the new order");
+    assert_eq!(f.picked_size().map(|p| p.count), Some(2));
+    // The cursor alone selected, sorted away past the end: still it.
+    f.select(5);
+    let it = target_names(&f);
+    f.set_sort(crate::fs::SortKey::Name);
+    assert_eq!(target_names(&f), it);
+}
+
+/// What was selected and is gone leaves nothing selected, never another row: the cursor's
+/// item hidden (hidden files turned off) takes the selection with it, and a command on "the
+/// item" says to select one.
+#[test]
+fn a_selection_that_goes_isnt_replaced_by_another_row() {
+    let mut f = Folder::new(0, PathBuf::from("/"), crate::fs::Sort::new(crate::fs::SortKey::Name, false), true, None);
+    f.entries = [".a", "b", "c"].iter().map(|n| Entry::test(n, false)).collect::<Vec<_>>().into();
+    f.refilter(None);
+    f.select(0);
+    assert_eq!(target_names(&f), [".a"]);
+    f.set_hidden(false);
+    assert!(target_names(&f).is_empty(), "nothing selected: {:?}", target_names(&f));
+    assert!(f.selected().is_none() && f.cursor().is_some(), "the cursor is still somewhere");
+    f.set_hidden(true);
+    assert!(target_names(&f).is_empty(), "shown again, still not selected");
+    // A click selects again.
+    f.select(1);
+    assert_eq!(target_names(&f), ["b"]);
+}
+
+/// The selection in a search's results, as identities (paths below the root), against a plain
+/// model under random runs of results streaming in (the list showing at most 1,000 while the
+/// walk goes on), the walk ending, header sorts (while walking and after), hidden files shown
+/// and hidden, clicks, ⌘-clicks, ⇧-clicks, ⌘A and Invert. Results arriving or being sorted
+/// never change the selection; hiding takes out what's hidden; a choice is what was chosen.
+#[test]
+fn search_selection_matches_a_model_whatever_happens() {
+    use std::collections::BTreeSet;
+    fn shown(f: &Folder) -> Vec<OsString> {
+        f.visible.iter().map(|&i| f.entries[i as usize].os.clone()).collect()
+    }
+    crate::prop::check("search_selection_model", 40, |r| {
+        let mut f = Folder::new(0, PathBuf::from("/"), crate::fs::Sort::new(crate::fs::SortKey::Name, false), true, None);
+        f.search = Some(Box::new(Search::new(f.memo(), "x", None)));
+        f.refilter(None);
+        let mut model: BTreeSet<OsString> = BTreeSet::new();
+        // Until a choice, the first result to show is selected (as a folder's first row when
+        // it opens), and then that result, wherever it goes.
+        let mut first = true;
+        let (mut found, mut walking, mut log) = (0, true, Vec::<String>::new());
+        for _ in 0..40 {
+            let n = f.visible.len();
+            match r.below(11) {
+                0..=2 if walking => {
+                    let k = [3, 40, 400, 900][r.below(4)];
+                    log.push(format!("{k} found"));
+                    let batch: Vec<Entry> = (0..k)
+                        .map(|_| {
+                            found += 1;
+                            let dot = if r.one_in(6) { "." } else { "" };
+                            let name = format!("{dot}{}{found}.x", ["a", "m", "z"][r.below(3)]);
+                            let mut e = Entry { size: r.below(5000) as u64, ..Entry::test(&name, r.one_in(8)) };
+                            e.os = format!("d{}/{name}", r.below(4)).into();
+                            e
+                        })
+                        .collect();
+                    std::sync::Arc::make_mut(&mut f.entries).extend(batch);
+                    f.take_in_as(true);
+                }
+                3 if walking => {
+                    log.push("walk ends".into());
+                    walking = false;
+                    f.take_in_as(false);
+                    if f.search.as_ref().is_some_and(|s| s.sorted) {
+                        f.resort();
+                    }
+                }
+                4 => {
+                    let key = [crate::fs::SortKey::Name, crate::fs::SortKey::Size, crate::fs::SortKey::Kind][r.below(3)];
+                    log.push(format!("sort {key:?}"));
+                    f.set_sort(key);
+                }
+                5 => {
+                    log.push("hidden files".into());
+                    let on = !f.show_hidden;
+                    f.set_hidden(on);
+                    let rows: BTreeSet<OsString> = shown(&f).into_iter().collect();
+                    model.retain(|n| rows.contains(n));
+                }
+                6 | 7 if n > 0 => {
+                    let i = r.below(n);
+                    log.push(format!("click {i}"));
+                    f.select(i);
+                    model = [shown(&f)[i].clone()].into();
+                }
+                8 if n > 0 => {
+                    let i = r.below(n);
+                    log.push(format!("cmd-click {i}"));
+                    f.toggle_mark(i);
+                    let name = shown(&f)[i].clone();
+                    if !model.remove(&name) {
+                        model.insert(name);
+                    }
+                }
+                9 if n > 0 => {
+                    let i = r.below(n);
+                    let a = f.anchor.min(n - 1);
+                    log.push(format!("shift-click {i} (anchor {a})"));
+                    f.extend_to(i);
+                    model = shown(&f)[a.min(i)..=a.max(i)].iter().cloned().collect();
+                }
+                10 => {
+                    if r.one_in(2) {
+                        log.push("select all".into());
+                        f.select_all();
+                        model = shown(&f).into_iter().collect();
+                    } else {
+                        log.push("invert".into());
+                        f.invert_selection();
+                        model = shown(&f).into_iter().filter(|n| !model.contains(n)).collect();
+                    }
+                }
+                _ => continue,
+            }
+            if log.last().is_some_and(|l| ["click", "select all", "invert"].iter().any(|c| l.contains(c))) {
+                first = false;
+            }
+            if first && !f.visible.is_empty() {
+                first = false;
+                model = [shown(&f)[0].clone()].into();
+            }
+            let real: BTreeSet<OsString> = f.targets().iter().map(|e| e.os.clone()).collect();
+            assert_eq!(real, model, "after {log:?} ({} shown of {})", f.visible.len(), f.entries.len());
+        }
+    });
 }

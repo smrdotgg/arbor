@@ -35,6 +35,8 @@ mod incoming;
 mod info;
 mod jump;
 mod leftovers;
+mod listcols;
+mod marked;
 mod menu;
 mod mounts;
 mod noclobber;
@@ -58,6 +60,7 @@ mod tiles;
 mod timing;
 mod trash;
 mod view;
+mod volinfo;
 mod volumes;
 mod window;
 

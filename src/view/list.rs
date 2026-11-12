@@ -8,11 +8,12 @@ pub(super) const SEARCH_H: f32 = 32.0;
 pub(super) const FOLDER_GROW: f32 = 0.6;
 
 pub(super) fn header(f: &Folder, c: Ctx) -> El {
+    use crate::listcols::{GAP, PAD};
     let (id, l) = (c.id, c.l);
     // Search results are in the order found until a header is clicked.
     let unsorted = f.search.as_ref().is_some_and(|s| !s.sorted);
-    let col_head = |label: &'static str, key: SortKey, w: Option<f32>, align: Align| {
-        let on = f.sort.key == key && !unsorted;
+    let col_head = |label: &'static str, key: Option<SortKey>, w: Option<f32>, align: Align| {
+        let on = key.is_some_and(|k| f.sort.key == k) && !unsorted;
         let arrow = if !on {
             ""
         } else if f.sort.desc {
@@ -28,35 +29,73 @@ pub(super) fn header(f: &Folder, c: Ctx) -> El {
             .font(SMALL)
             .color(if on { l.t.text } else { l.t.text_secondary })
             .align(align)
-            .cursor(Cursor::Pointer)
-            .on_press_tx(move |s: &mut State, tx| {
+            .truncate();
+        if let Some(key) = key {
+            t = t.cursor(Cursor::Pointer).on_press_tx(move |s: &mut State, tx| {
                 if in_pane(s, id, tx) {
                     s.set_sort(key);
                     s.reveal(tx);
                 }
             });
+        }
         t = match w {
             Some(w) => t.w(w),
             None => t.grow(1.0).min_w(0.0),
         };
         t
     };
-    let mut h =
-        row().key("header").w_full().h(24.0).px(12.0).gap(12.0).center_y().child(col_head("Name", SortKey::Name, None, Align::Start));
+    // Right-clicking the header row: which columns show, and Folders First.
+    let mut h = row()
+        .key("header")
+        .w_full()
+        .h(24.0)
+        .px(PAD)
+        .center_y()
+        .on_secondary_press(move |s: &mut State, press, tx| {
+            if in_pane(s, id, tx) {
+                s.header_menu(press, tx);
+            }
+        })
+        .child(col_head("Name", Some(SortKey::Name), None, Align::Start));
     if f.searching() {
         let head = text("Folder").key("head-folder").role("columnheader").font(SMALL).color(l.t.text_secondary).min_w(0.0);
-        h = h.child(match c.folder_w() {
+        h = h.child(el().w(GAP)).child(match c.folder_w() {
             Some(w) => head.w(w),
             None => head.grow(FOLDER_GROW),
         });
-    } else if c.cols.kind {
-        h = h.child(col_head("Kind", SortKey::Kind, Some(KIND_W), Align::Start));
     }
-    h = h.child(col_head("Size", SortKey::Size, Some(SIZE_W), Align::End));
-    if c.cols.date {
-        h = h.child(col_head("Modified", SortKey::Modified, Some(DATE_W), Align::Start));
+    // What the name can give a column dragged wider, as laid out now.
+    let slack = if c.w == f32::MAX { 0.0 } else { c.cols.slack(c.w) };
+    for (field, w) in c.cols.iter() {
+        let align = if field.end_aligned() { Align::End } else { Align::Start };
+        h = h.child(column_edge(field, w, slack, c)).child(col_head(field.header(), field.sort_key(), Some(w), align));
     }
     h
+}
+
+/// The gap before column `field` (`w` wide) in the header: a line in its middle, and a strip
+/// the pointer drags to change the column's width (the name gives or takes the difference,
+/// never going under its least: `slack` is what it can give now). For assistive technology a
+/// splitter whose value is the width.
+fn column_edge(field: crate::listcols::Field, w: f32, slack: f32, c: Ctx) -> El {
+    use crate::listcols::{GAP, MAX_W};
+    let id = c.id;
+    el().key(format!("edge-{}", field.id()))
+        .w(GAP)
+        .h_full()
+        .center()
+        .cursor(Cursor::ResizeColumn)
+        .role("separator")
+        .label(format!("{} column width", field.title()))
+        .range_value(f64::from(w), f64::from(field.min_w()), f64::from(MAX_W))
+        .child(el().w(1.0).h(12.0).fill(c.l.t.separator).a11y_hidden())
+        .on_drag(move |s: &mut State, d: &mut Drag, tx: &mut rune::Tx| {
+            tx.instant();
+            if d.phase == Phase::Down && !in_pane(s, id, tx) {
+                return;
+            }
+            s.drag_header(field, d.phase, d.dx, slack, d.cancelled());
+        })
 }
 
 /// The active pane's cursor row, as a key path any list can name for assistive technology
@@ -64,7 +103,7 @@ pub(super) fn header(f: &Folder, c: Ctx) -> El {
 /// it follows the keys (Tab switches panes without moving Rune's focus).
 pub(super) fn active_row(s: &State) -> Option<String> {
     let f = s.cur();
-    let e = f.selected()?;
+    let e = f.cursor()?;
     if f.view.is_grid() {
         // A cell is inside its grid row, which is keyed by the row's first item.
         let cols = f.grid_cols.get().max(1);
@@ -133,6 +172,7 @@ pub(super) fn list(f: &Folder, c: Ctx, active: Option<String>) -> El {
     }
     if c.list[2] > 0.0 {
         f.list_w.set(c.list[2]);
+        f.list_at.set([c.list[0], c.list[1]]);
     }
     // Empty space below the rows (and a grid's gutters): a press there that moves drags out a
     // selection rectangle (`band.rs`).
@@ -395,7 +435,8 @@ pub(super) fn folder_drop(e: El, f: &Folder, c: Ctx, entry: &crate::fs::Entry) -
 }
 
 pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
-    let (id, l, cols) = (c.id, c.l, c.cols);
+    use crate::listcols::Field;
+    let (id, l) = (c.id, c.l);
     let e = &f.entries[f.visible[i] as usize];
     let selected = f.is_selected(i);
     // With several rows selected, the cursor row that isn't selected gets a soft highlight.
@@ -412,7 +453,7 @@ pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
     let whole = selected && !s.band.as_ref().is_some_and(|b| b.pane == id);
     let glyph = folder_mark(
         text(glyph).font(BODY).color(if selected && c.focused { fg } else { l.accent }).w(10.0),
-        e.is_dir && (!cols.kind || c.narrow),
+        e.is_dir && (c.cols.get(crate::listcols::Field::Kind).is_none() || c.narrow),
     );
     let name = match renaming {
         Some(r) => row().grow(1.0).min_w(0.0).gap(6.0).center_y().child(glyph).child(
@@ -435,7 +476,7 @@ pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
                 .border(1.0, l.accent),
         ),
         None => {
-            let mut name = e.pending.clone().unwrap_or_else(|| e.name.clone());
+            let mut name = f.label(e).to_string();
             if e.is_link {
                 name.push_str("  ↗"); // In the bundled Inter, so it draws the same everywhere.
             }
@@ -503,15 +544,22 @@ pub(super) fn file_row(s: &State, f: &Folder, i: usize, c: Ctx) -> El {
             None => text(at).grow(FOLDER_GROW),
         };
         r = r.child(folder.font(BODY).color(dim).truncate_head().min_w(0.0));
-    } else if cols.kind {
-        r = r.child(text(fs::kind(e).to_string()).font(NUM).color(dim).truncate().w(KIND_W));
     }
     if !c.narrow {
-        let size = text(if e.is_dir { "—".to_string() } else { fs::fmt_size(e.size) }).font(NUM).color(dim).align(Align::End).w(SIZE_W);
-        // A folder's "—" says nothing to a reader.
-        r = r.child(if e.is_dir { size.a11y_hidden() } else { size });
-        if cols.date {
-            r = r.child(text(fs::fmt_time(e.mtime_ms, f.now)).font(NUM).color(dim).w(DATE_W));
+        for (field, w) in c.cols.iter() {
+            let cell = field.cell(e, f.now);
+            // A "—" (a folder's size, no birth time) says nothing to a reader.
+            let none = cell == "—";
+            let mut t = text(cell.into_owned()).font(NUM).color(dim).w(w);
+            // Sizes and dates fit their default widths; a narrower column (or a long kind)
+            // cuts them with an ellipsis rather than drawing over the next.
+            if w < field.default_w() || matches!(field, Field::Kind | Field::Extension | Field::Permissions) {
+                t = t.truncate();
+            }
+            if field.end_aligned() {
+                t = t.align(Align::End);
+            }
+            r = r.child(if none { t.a11y_hidden() } else { t });
         }
     }
     r = if drop_here {

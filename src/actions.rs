@@ -213,7 +213,13 @@ impl State {
     /// Starts an inline rename of the cursor's entry, with the name before its extension
     /// selected (as in Finder).
     pub fn start_rename(&mut self) {
-        let Some(e) = self.selected() else { return };
+        if self.refuse_updating() {
+            return;
+        }
+        let f = self.cur();
+        let Some(row) = f.selected_row() else { return };
+        let at = f.visible[row] as usize;
+        let e = &f.entries[at];
         let (os, label, is_dir) = (e.os.clone(), e.name.clone(), e.is_dir);
         let stem = match label.rfind('.') {
             Some(i) if i > 0 && !is_dir => i,
@@ -222,8 +228,13 @@ impl State {
         let mut edit = TextEdit::new(label);
         edit.set_selection(0, stem);
         edit.focused = true;
-        self.cur_mut().marked.clear();
-        self.rename = Some(Rename { os, edit });
+        // The item renamed is the selection, the cursor on it: what was selected (it, alone),
+        // so cancelling leaves exactly that, never a cursor the user had deselected.
+        let f = self.cur_mut();
+        if !(f.marked.is_empty() && f.sel == row) {
+            f.select(row);
+        }
+        self.rename = Some(Rename { os, edit, at: Some(at) });
     }
 
     /// Esc: the inline rename ends with nothing renamed.
@@ -269,7 +280,8 @@ impl State {
         }
         // It must still be the item its listing (or the search walk) found there, edited or not
         // (checked on the worker).
-        let found = self.cur().entries.iter().find(|e| e.os == r.os).map(|e| e.id);
+        let at = self.cur().entry_at(&r.os, r.at);
+        let found = at.map(|i| self.cur().entries[i].id);
         let chosen = self.cur().chosen();
         // Beside it, in its own folder: never "the folder on screen + the new name".
         let Some(dir) = from.parent().map(Path::to_path_buf) else { return };
@@ -284,7 +296,7 @@ impl State {
         let id = if dir == f.cwd && !f.searching() { f.dir_id } else { None };
         for p in &mut self.panes {
             if !p.f.searching() && p.f.shows(&dir, id) {
-                p.f.rename_pending(&old, &new);
+                p.f.rename_pending(&old, &new, at);
             }
         }
     }
@@ -536,23 +548,31 @@ impl State {
     /// identity Arbor's action changed take the new one, and every pane on a changed folder
     /// reads it again, `select`ing what the operation made where it lands.
     pub(crate) fn changed_on_disk(&mut self, fx: &Changed, select: &[PathBuf]) {
-        if !fx.moved.is_empty() || !fx.removed.is_empty() {
-            let renamed: Vec<(PathBuf, PathBuf)> = fx.moved.iter().filter(|(a, b)| a.parent() == b.parent()).cloned().collect();
-            for p in &mut self.panes {
-                if p.f.searching() {
-                    p.f.note_moves(&fx.moved, &fx.removed, &fx.canon);
-                } else {
-                    p.f.renamed_paths(&renamed);
-                }
-            }
-        }
-        // An inline rename's label goes: the row renamed, or back to its own name. Rows of items
-        // Arbor's action changed the ctime of take what it made of them, where that's identity.
+        let renamed: Vec<(PathBuf, PathBuf)> = fx.moved.iter().filter(|(a, b)| a.parent() == b.parent()).cloned().collect();
         for p in &mut self.panes {
-            p.f.land_pending(&fx.moved);
+            if p.f.searching() {
+                if !fx.moved.is_empty() || !fx.removed.is_empty() {
+                    p.f.note_moves(&fx.moved, &fx.removed, &fx.canon);
+                }
+            } else {
+                // An inline rename's label goes (its row renamed, by its index, or back to its
+                // own name), or stays while the listing is shared; the other renames after.
+                let done = p.f.land_pending(&fx.moved);
+                let rest: Vec<(PathBuf, PathBuf)> = renamed.iter().filter(|m| !done.contains(m)).cloned().collect();
+                p.f.renamed_paths(&rest);
+            }
+            // Rows of items Arbor's action changed the ctime of take what it made of them, where
+            // that's identity.
             p.f.reidentify(&fx.reidentified);
         }
         self.refresh(&fx.folders, select, &fx.canon);
+        // The space an operation freed or took: each pane's volume read again, once (a pane
+        // reading its folder again asked already; a newer request replaces an older one).
+        for p in &mut self.panes {
+            if p.f.pending.is_none() && !p.f.searching() {
+                p.f.ask_free();
+            }
+        }
     }
 
     /// After `folders` (each with its identity, when known) changed on disk: every pane whose
@@ -584,6 +604,17 @@ impl State {
                 cols.reread(folders, false);
             }
             let going = f.pending.as_ref().is_some_and(|p| matches!(p.nav, Nav::New | Nav::Back | Nav::Forward));
+            // On its way elsewhere while the folder on screen changed: if that navigation fails,
+            // the folder is read again (`Folder::reread`), so nothing it shows (a label above
+            // all, whose actions wait for that read) is left as it was before the change.
+            if going
+                && folders.iter().any(|(path, id)| match (f.dir_id, id) {
+                    (Some(a), Some(b)) => a == *b,
+                    _ => *path == f.cwd,
+                })
+            {
+                f.reread = true;
+            }
             let (at, at_id) = match &f.pending {
                 // Not listed yet: its identity isn't known.
                 Some(p) if going => (p.path.clone(), None),
@@ -628,7 +659,12 @@ impl State {
     /// item against its listing's identity right before acting (`State::drop_on_pane`); what
     /// another app does with a drop is that app's to check.
     pub fn drag_item(&self, id: u64, i: usize) -> Option<DragItem> {
-        let paths = self.pane(id)?.f.drag_paths(i);
+        // Rows showing a label don't drag until the folder is read again.
+        let f = &self.pane(id)?.f;
+        if f.drag_updating(i) {
+            return None;
+        }
+        let paths = f.drag_paths(i);
         if paths.is_empty() {
             return None;
         }
@@ -706,6 +742,31 @@ impl State {
         self.show_menu(items, None, press, tx);
     }
 
+    /// Right-click on the list's header row: each column, checked while shown (Name always
+    /// is), Folders First, and Reset Columns.
+    pub fn header_menu(&mut self, press: PointerPress, tx: &mut Tx) {
+        let items = self.header_menu_items();
+        self.show_menu(items, None, press, tx);
+    }
+
+    /// "Column Options…" (the keyboard's way to the header's menu): the same menu, just under
+    /// the active pane's header (or near the window's top left before the list's first layout).
+    pub fn column_options(&mut self, tx: &mut Tx) {
+        let [x, y] = self.cur().list_at.get();
+        let (x, y) = if x > 0.0 || y > 0.0 { (x + 12.0, y) } else { (180.0, 62.0) };
+        self.header_menu(PointerPress { x, y }, tx);
+    }
+
+    pub(crate) fn header_menu_items(&self) -> Vec<Option<(Act, String, bool)>> {
+        let mut v: Vec<Option<(Act, String, bool)>> =
+            crate::listcols::Field::ALL.into_iter().map(|f| Some((Act::Cmd(f.cmd()), f.title().to_string(), true))).collect();
+        v.push(None);
+        v.push(Some((Act::Cmd(Cmd::FoldersFirst), "Folders First".into(), true)));
+        v.push(None);
+        v.push(Some((Act::Cmd(Cmd::ResetColumns), Cmd::ResetColumns.title().into(), self.unavailable(Cmd::ResetColumns).is_none())));
+        v
+    }
+
     /// Right-click on the sidebar's Trash: open it, or empty it.
     pub fn trash_menu(&mut self, press: PointerPress, tx: &mut Tx) {
         let item = |cmd: Cmd, title: &str| Some((Act::Cmd(cmd), title.to_string(), self.unavailable(cmd).is_none()));
@@ -768,7 +829,8 @@ impl State {
                     menu.submenu("Open With", sub)
                 }
                 Some((act, title, on)) => {
-                    let it = PopupItem::new(act.id(), &title).enabled(on);
+                    let checked = act.cmd().and_then(|c| self.checked(c)) == Some(true);
+                    let it = PopupItem::new(act.id(), &title).enabled(on).checked(checked);
                     menu.item(match act.cmd().and_then(|c| self.keymap.shortcut(c)) {
                         Some(k) => it.key_equivalent(k),
                         None => it,
@@ -776,10 +838,7 @@ impl State {
                 }
             };
         }
-        let files: Vec<PathBuf> = {
-            let f = self.cur();
-            f.targets().iter().filter(|e| !e.is_dir).map(|e| f.cwd.join(&e.os)).collect()
-        };
+        let files = self.open_with_files();
         self.menu_apps = apps.map(|a| (files, a));
         tx.popup_menu(menu, press, |s: &mut State, picked, tx| {
             tx.instant();
@@ -794,11 +853,12 @@ impl State {
     pub(crate) fn run_act(&mut self, act: Act, tx: &mut Tx) {
         use crate::menu::PlaceAct;
         match act {
-            Act::Cmd(cmd) => {
-                if self.unavailable(cmd).is_none() {
-                    self.run(cmd, tx);
-                }
-            }
+            Act::Cmd(cmd) => match self.unavailable(cmd) {
+                None => self.run(cmd, tx),
+                // A menu left open on an item that shows a label now: refused, saying so.
+                Some(why) if why == crate::app::UPDATING => self.note = Some(why.into()),
+                Some(_) => {}
+            },
             Act::OpenWith(i) => {
                 if let Some((files, apps)) = self.menu_apps.take()
                     && let Some(h) = apps.get(i).cloned()

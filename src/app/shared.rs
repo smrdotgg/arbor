@@ -71,6 +71,13 @@ pub struct Shared {
     /// an older list than the newest is dropped.
     pub(crate) side_writer: RefCell<Option<crate::sidebar::Writer>>,
     pub(crate) side_rev: std::cell::Cell<u64>,
+    /// The list's columns, for every window (`listcols.rs`), whether the user changed them
+    /// since Arbor started (columns read late at startup then don't replace them), where
+    /// they're kept, and the one thread writing them, from the first change on.
+    pub(crate) cols: std::cell::Cell<crate::listcols::ListCols>,
+    pub(crate) cols_set: std::cell::Cell<bool>,
+    pub(crate) cols_file: RefCell<Option<std::path::PathBuf>>,
+    pub(crate) cols_writer: RefCell<Option<crate::listcols::Writer>>,
     members: RefCell<Vec<Member>>,
     /// The open windows' wakers, the one focused last at the end: what a shared writer wakes
     /// (`live_waker`), so it never holds a window that has closed.
@@ -89,6 +96,10 @@ impl Shared {
             history: RefCell::new(history),
             side_writer: RefCell::default(),
             side_rev: std::cell::Cell::new(0),
+            cols: std::cell::Cell::default(),
+            cols_set: std::cell::Cell::new(false),
+            cols_file: RefCell::default(),
+            cols_writer: RefCell::default(),
             members: RefCell::default(),
             live: Arc::default(),
         }
@@ -248,6 +259,10 @@ impl State {
     /// the owner of its running file operation, if any, which shows and lands it from then on.
     /// True when it was the last.
     pub fn leave(&mut self) -> bool {
+        // A free-space answer still on its way isn't wanted: it would wake a window that's gone.
+        for p in &self.panes {
+            p.f.free_inbox.forget();
+        }
         let others = self.shared.others(self.win);
         if self.owns_job() {
             match crate::window::most_recent(&others).or_else(|| others.last().copied()) {

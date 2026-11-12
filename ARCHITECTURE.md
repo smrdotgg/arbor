@@ -52,6 +52,9 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `complete.rs` | Tab completion in go-to mode |
 | | `info.rs`, `openwith/` | Get Info (and its streaming total); Open With (per platform, `xdg.rs`) |
 | | `sidebar.rs`, `volumes.rs` | Favorites and their file; Locations and Eject |
+| | `marked.rs` | The rows on screen with running sums of their sizes, and the selection as bits over them, with its totals |
+| | `volinfo.rs` | The status bar's free space: at most four threads, one query in flight per volume |
+| | `listcols.rs` | The list's columns after the name: which show, their widths, how they fit a pane, `columns.toml` and its writer, the header's drag |
 | Platform glue | `handler/` | Making Arbor the default for folders, and restoring (`linux.rs`, `windows.rs`, `mac.rs`) |
 | | `incoming/` | Folders other apps send (`mac.rs` Apple events, `linux.rs` D-Bus, `windows.rs` a pipe) |
 | UI | `view/` | Every element: root and status bar (`mod.rs`), `sidebar`, `pane` (path bar, tabs, view switch), `list` (rows, item presses and drags, the selection rectangle), `grid` (the icon and tiles views, type icons), `columns` (the column view), `panels`, `overlays`, `batch` |
@@ -64,7 +67,7 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 Nothing runs in the background unless the user did something, and nothing polls.
 
 - **Startup read** (`app::boot`): started by `main` before Rune's loop; reads
-  `config.toml`, `sidebar.toml`, then the first folder. A later window reads nothing but its
+  `config.toml`, `sidebar.toml`, `columns.toml`, then the first folder. A later window reads nothing but its
   folder (`State::new_window`). The first window waits at most
   `FIRST_PAINT_WAIT` (8 ms) for it, then lands it in `poll`.
 - **`rune::Latest` workers**: Rune's shared pool (≤ 4 threads) runs every latest-wins request:
@@ -81,11 +84,17 @@ Nothing runs in the background unless the user did something, and nothing polls.
 - **Search pool** (`search::Pool`): up to four walker threads, started by the first search,
   below the window's priority, sharing one queue and a stop flag per walk.
 - **Writers**: `arbor-history` (`jump::history`: appends, load, compaction, clear, under a
-  lock file) and `arbor-sidebar` (`sidebar::Writer`: edits merged into the file under its
-  lock, then an atomic rewrite). One of each for every window (`Shared`), waking the open window
+  lock file), `arbor-sidebar` (`sidebar::Writer`: edits merged into the file under its
+  lock, then an atomic rewrite) and `arbor-columns` (`listcols::Writer`: the whole file, the
+  last change queued, an atomic rewrite), each started by its first write. One of each for every window (`Shared`), waking the open window
   focused last (`Shared::live_waker`): nothing shared holds a window's own waker or handle
   (the operation's waker is moved to its new owner, `Shared::own_job`). Each registers with
   `persist::at_exit` and gets up to 100 ms when Arbor quits (`persist::drain_at_exit`).
+- **Free space** (`arbor-volume`, `volinfo.rs`): the status bar's `statvfs`, never on Rune's
+  pool (it can't be stopped, and a dead network volume never answers). At most four threads in
+  the whole app, below the window's priority, ending when nothing waits; volumes by device, one
+  query in flight per volume (its answer goes to every folder that asked about it); while all
+  four are stuck nothing new starts. Asked when a listing lands and after a file operation.
 - **Get Info's total** (`arbor-info`): one walk per request, waking the window at most every
   30 ms.
 - **Listeners** (not in tests or the bench): `incoming::listen` (macOS open-documents events,

@@ -13,7 +13,7 @@ use crate::commands::{Cmd, Keymap};
 use crate::config::{self, Config, Settings};
 pub use crate::folder::Nav;
 use crate::folder::{Answer, Folder, TabMemo};
-use crate::fs::{self, Entry, Listing, Sort, SortKey};
+use crate::fs::{self, Listing, Sort, SortKey};
 use crate::jump::{History, JumpBox};
 use crate::palette::Palette;
 use crate::preview::{self, Preview};
@@ -36,11 +36,17 @@ pub(crate) const BUSY: &str = "Another file operation is running";
 
 /// [`BUSY`], when the operation is another window's (only that window shows and cancels it).
 pub(crate) const BUSY_ELSEWHERE: &str = "Another file operation is running in another window";
+/// Why an action on a row showing a label waits ([`Folder::labels`]): its rename is on its way,
+/// or landed while the listing was shared, and the folder is being read again.
+pub(crate) const UPDATING: &str = "Updating… try again in a moment";
 
 /// An inline rename in progress (always in the active pane).
 pub struct Rename {
     pub os: OsString,
     pub edit: TextEdit,
+    /// Its index in the listing when the rename started (checked before it's used): found
+    /// without looking through a big folder.
+    pub at: Option<usize>,
 }
 
 /// What ⌘C / ⌘X put aside, so a paste knows a cut means move.
@@ -109,6 +115,13 @@ pub struct State {
     /// The user toggled hidden files (even back to where it was), so settings that land late
     /// at startup leave it alone.
     hidden_set: bool,
+    /// Folders above files in every tab's sort ("Folders First", `folders_first`), and whether
+    /// the user toggled it since the window opened (late settings then leave it alone).
+    pub folders_first: bool,
+    folders_set: bool,
+    /// A column header's edge being dragged: which column, its width when the drag began, and
+    /// how much the name could give then.
+    pub(crate) head_drag: Option<(crate::listcols::Field, f32, f32)>,
     pub places: Vec<(String, PathBuf)>,
     /// The last error or note, shown in the status bar until the next action.
     pub note: Option<String>,
@@ -221,7 +234,7 @@ pub struct State {
     pub(crate) next_open_with: u64,
     pub(crate) launch_job: Latest<Result<(), String>>,
     /// The files and apps a native context menu's Open With submenu was built with.
-    pub(crate) menu_apps: Option<(Vec<PathBuf>, Vec<crate::openwith::Handler>)>,
+    pub(crate) menu_apps: Option<(Vec<crate::openwith::Chosen>, Vec<crate::openwith::Handler>)>,
     /// The sidebar item a menu was opened on, when it's a volume: (its index then, the volume).
     pub(crate) menu_volume: Option<(usize, crate::volumes::Volume)>,
     /// Get Info's panel, while it's open (`info.rs`).
@@ -374,12 +387,12 @@ impl State {
         }
         // Without the settings yet: the defaults, in the folder Arbor was started in, until
         // they land (`land_start`).
-        let (config, cwd, places, note, custom, leftover) = match start {
+        let (config, cwd, places, note, custom, leftover, cols) = match start {
             Some(mut s) => {
                 let seen = s.leftovers.take();
-                (s.config, s.start, s.places, s.note, s.custom, seen)
+                (s.config, s.start, s.places, s.note, s.custom, seen, Some(s.cols))
             }
-            None => (Config::default(), std::env::current_dir().unwrap_or_else(|_| fs::home()), Vec::new(), None, false, None),
+            None => (Config::default(), std::env::current_dir().unwrap_or_else(|_| fs::home()), Vec::new(), None, false, None, None),
         };
         let mut side = crate::sidebar::Side::new(if cfg!(test) { None } else { crate::sidebar::file_path() });
         side.custom = custom;
@@ -391,6 +404,10 @@ impl State {
         history.enabled = config.settings.jump_enabled;
         history.exclude = crate::jump::exclude_globs(&config.settings.jump_exclude);
         let shared = std::rc::Rc::new(Shared::new(history));
+        if let Some(c) = cols {
+            shared.cols.set(c);
+        }
+        *shared.cols_file.borrow_mut() = if cfg!(test) { None } else { crate::listcols::file_path() };
         let note = config.summary().or(note);
         let mut s = State::assemble(crate::window::FIRST, shared, config.settings, config.keymap, cwd, places, side);
         s.note = note;
@@ -399,7 +416,7 @@ impl State {
         match listing {
             Some(first) => match first.result {
                 Ok(v) => {
-                    f.entries = v;
+                    f.entries = std::sync::Arc::new(v);
                     f.dir_id = first.dir_id;
                 }
                 Err(e) => s.note = Some(s.note.take().map_or(e.clone(), |n| format!("{e} · {n}"))),
@@ -412,9 +429,12 @@ impl State {
                     path: f.cwd.clone(),
                     nav: Nav::Reload,
                     select: Vec::new(),
+                    cursor: None,
+                    none: false,
                     rename: false,
                     scroll: 0.0,
                     picks: 0,
+                    ids: Default::default(),
                 });
                 s.boot = Some(boot);
                 s.boot_req = Some(req);
@@ -451,6 +471,9 @@ impl State {
             pane_drop: None,
             show_hidden: settings.show_hidden,
             hidden_set: false,
+            folders_first: settings.sort.dirs_first,
+            folders_set: false,
+            head_drag: None,
             places,
             note: None,
             alert: None,
@@ -554,6 +577,8 @@ impl State {
         );
         s.show_hidden = self.show_hidden;
         s.hidden_set = self.hidden_set;
+        s.set_folders_first(self.folders_first);
+        s.folders_set = self.folders_set;
         s.icon_size = self.icon_size;
         s.view_chosen = self.view_chosen;
         s.volumes = self.volumes.clone();
@@ -568,9 +593,12 @@ impl State {
             path,
             nav: Nav::Fresh,
             select: Vec::new(),
+            cursor: None,
+            none: false,
             rename: false,
             scroll: 0.0,
             picks: 0,
+            ids: Default::default(),
         });
         // Tests and headless runs wait, so what they check is there.
         let wait = if cfg!(test) || rune::tooling::headless_run().is_some() { s.show_wait } else { std::time::Duration::ZERO };
@@ -621,7 +649,7 @@ impl State {
     pub(crate) fn folder_to_open(&self) -> Option<PathBuf> {
         let f = self.cur();
         match f.targets().as_slice() {
-            [e] if e.is_dir && e.pending.is_none() => Some(f.cwd.join(&e.os)),
+            [e] if e.is_dir && !f.labelled(e) => Some(f.cwd.join(&e.os)),
             _ => None,
         }
     }
@@ -637,6 +665,7 @@ impl State {
         }
         for p in &self.panes {
             p.f.loader.set_waker(waker.clone());
+            p.f.free_inbox.set_waker(waker.clone());
         }
         self.settings_loader.set_waker(waker.clone());
         self.shared.set_waker(self.win, waker.clone());
@@ -670,6 +699,13 @@ impl State {
             *w = Some(waker.clone());
         }
         self.waker = Some(waker);
+        // The first folder's volume's free space, when its listing was in before the window
+        // (the startup read): one call on a worker, now that its answer can wake the window.
+        for p in &mut self.panes {
+            if p.f.pending.is_none() && p.f.free.is_none() {
+                p.f.ask_free();
+            }
+        }
         // A window opening as columns (`view.default`) gets them from its first frame.
         self.sync_columns();
     }
@@ -712,10 +748,6 @@ impl State {
             Some(r) => &mut r.edit,
             None => &mut self.rename_sink,
         }
-    }
-
-    pub fn selected(&self) -> Option<&Entry> {
-        self.cur().selected()
     }
 
     pub fn target_paths(&self) -> Vec<PathBuf> {
@@ -792,9 +824,35 @@ impl State {
         self.reload_selecting(Vec::new(), false);
     }
 
+    /// Whether one of `paths` (items chosen earlier: an open box's, a menu's, a dialog's) shows
+    /// a label in a pane on its folder now: acting on it waits for the folder to be read again.
+    pub(crate) fn any_labelled<'a>(&self, paths: impl IntoIterator<Item = &'a Path>) -> bool {
+        if self.panes.iter().all(|p| p.f.labels.is_empty()) {
+            return false;
+        }
+        paths.into_iter().any(|p| {
+            let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else { return false };
+            self.panes.iter().any(|q| q.f.cwd == dir && q.f.labels.contains_key(name))
+        })
+    }
+
+    /// An action on the selection while one of its items shows a label ([`Folder::updating`]):
+    /// refused, saying so. True when it is.
+    pub(crate) fn refuse_updating(&mut self) -> bool {
+        let updating = self.cur().updating();
+        if updating {
+            self.note = Some(UPDATING.into());
+        }
+        updating
+    }
+
     /// Opens the cursor's entry: a folder navigates, a file opens in its default app.
     /// With several files selected, opens each file.
     pub fn open_selected(&mut self) {
+        // (A double-click comes here without the command's check.)
+        if self.refuse_updating() {
+            return;
+        }
         let f = self.cur();
         let targets: Vec<(PathBuf, bool)> = f.targets().iter().map(|e| (f.cwd.join(&e.os), e.is_dir)).collect();
         if let [(path, true)] = targets.as_slice() {
@@ -839,6 +897,16 @@ impl State {
                 changed |= self.land(ix, a, tx);
             }
         }
+        // Free space, asked when a folder's listing landed: only an answer for the folder the
+        // active pane shows changes the status bar.
+        for ix in 0..self.panes.len() {
+            let f = &mut self.panes[ix].f;
+            if let Some((path, free)) = f.free_inbox.take() {
+                let shown = ix == self.active && path == f.cwd && !f.is_loading();
+                changed |= shown && f.free.as_ref() != Some(&(path.clone(), free));
+                f.free = Some((path, free));
+            }
+        }
         if let Some(c) = self.settings_loader.take() {
             // Every window takes them; this one says so.
             let shared = std::rc::Rc::new(c.clone());
@@ -872,6 +940,7 @@ impl State {
         }
         changed |= self.poll_trash_count();
         changed |= self.poll_sidebar();
+        changed |= self.poll_cols_writer();
         changed |= self.poll_volumes();
         changed |= self.poll_open_with();
         changed |= self.poll_info();
@@ -911,7 +980,7 @@ impl State {
                     let req = self.boot_req.take();
                     let ix = self.panes.iter().position(|p| req.is_some() && p.f.pending.as_ref().map(|p| p.req) == req);
                     if let (Some(ix), Some(req)) = (ix, req) {
-                        changed |= self.land(ix, Answer { req, sort, listing }, tx);
+                        changed |= self.land(ix, Answer::new(req, sort, listing), tx);
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -928,11 +997,15 @@ impl State {
     /// it since the window opened on the defaults (even back to the default: a flag says so,
     /// not a comparison).
     fn land_start(&mut self, start: Start) {
-        let Start { config, start, places, note, custom, leftovers } = start;
+        let Start { config, start, places, note, custom, leftovers, cols } = start;
         if leftovers.is_some() {
-            self.land_start(Start { config, start, places, note, custom, leftovers: None });
+            self.land_start(Start { config, start, places, note, custom, leftovers: None, cols });
             self.take_leftovers(leftovers);
             return;
+        }
+        // The columns, unless the user changed them already.
+        if !self.shared.cols_set.get() {
+            self.shared.cols.set(cols);
         }
         if let Some(req) = self.boot_req
             && let Some(f) = self.panes.iter_mut().map(|p| &mut p.f).find(|f| f.pending.as_ref().is_some_and(|p| p.req == req))
@@ -942,19 +1015,25 @@ impl State {
             p.path = start.clone();
             f.cwd = start;
         }
-        let (old, new) = (&self.settings, &config.settings);
+        let (old, new) = (self.settings.clone(), config.settings.clone());
         if !self.hidden_set {
             self.show_hidden = new.show_hidden;
             for p in &mut self.panes {
                 p.f.set_hidden(new.show_hidden);
             }
         }
+        if !self.folders_set && new.sort.dirs_first != self.folders_first {
+            self.set_folders_first(new.sort.dirs_first);
+        }
+        // Folders First is the window's (above); the key and direction each tab's.
+        let sort = fs::Sort { dirs_first: self.folders_first, ..new.sort };
+        let changed = (new.sort.key, new.sort.desc) != (old.sort.key, old.sort.desc);
         for p in &mut self.panes {
-            if !p.f.sort_set && new.sort != old.sort {
-                p.f.apply_sort(new.sort);
+            if !p.f.sort_set && changed {
+                p.f.apply_sort(sort);
             }
             for m in p.tabs.iter_mut().flatten().filter(|m| !m.sort_set) {
-                m.sort = new.sort;
+                m.sort = sort;
             }
         }
         // The view settings, where the user hasn't chosen since the window opened.
@@ -975,7 +1054,7 @@ impl State {
 
     /// Shows a finished listing in pane `ix` if it's the one being waited for (a newer request
     /// wins).
-    pub(crate) fn land(&mut self, ix: usize, a: Answer, tx: &mut Tx) -> bool {
+    pub(crate) fn land(&mut self, ix: usize, mut a: Answer, tx: &mut Tx) -> bool {
         let active = ix == self.active;
         let f = &mut self.panes[ix].f;
         let Some(mut p) = f.pending.take_if(|p| p.req == a.req && p.path == a.listing.path) else { return false };
@@ -986,21 +1065,42 @@ impl State {
         // made; if the user picked something else meanwhile, their choice stands, so a ⌘C right
         // after a click copies what was clicked.
         if p.nav == Nav::Reload && f.picks != p.picks {
-            p.select = f.picked();
             p.rename = false;
+            p.picks = f.picks;
+            (p.select, p.cursor, p.none) = (Vec::new(), None, f.selected().is_none());
+            // The selection on screen now, found in the new listing on a worker (handed over as
+            // it is: looking through a big folder, or even copying its names, here would hold
+            // up the window). Then it lands, unless the user picks again meanwhile.
+            if a.listing.result.is_ok() {
+                let kept = f.kept();
+                f.pending = Some(p);
+                f.loader.request_opt((), move |()| {
+                    (a.marks, a.chosen) = (None, None);
+                    a.pick(crate::folder::Pick::Kept(kept));
+                    Some(a)
+                });
+                return false;
+            }
         }
+        // What a worker worked out from the selection kept on screen: the names, the cursor's.
+        if let Some((select, cursor)) = a.chosen.take() {
+            (p.select, p.cursor) = (select, cursor);
+        }
+        let mut marks = a.marks.take();
         // The folder on screen couldn't be read again (a reload, a tab shown): what it listed
         // before isn't shown or acted on any more, only why it can't be read. (A navigation
         // elsewhere that fails leaves the folder it was in, as it was.)
         if a.listing.result.is_err() && p.path == f.cwd {
-            f.entries = Vec::new();
-            f.visible.clear();
+            f.entries = std::sync::Arc::default();
+            f.visible = std::sync::Arc::default();
             f.marked.clear();
             f.sel = 0;
             f.anchor = 0;
             f.dir_id = None;
             f.bump();
         }
+        // A navigation that replaced a read of the folder on screen, and failed: that read again.
+        let reread = std::mem::take(&mut f.reread) && a.listing.result.is_err() && p.path != f.cwd;
         let jumped = self.jump_req.take_if(|&mut r| r == p.req).is_some();
         let placed = self.side.going.take_if(|(r, _)| *r == p.req).is_some();
         match a.listing.result {
@@ -1026,9 +1126,13 @@ impl State {
                 self.lands += 1;
                 // The sort changed while it was being read.
                 if a.sort != f.sort {
-                    fs::sort_entries(&mut entries, f.sort);
+                    match marks.as_mut() {
+                        // What's to be selected moves with its entries.
+                        Some(m) => crate::folder::sort_carrying(&mut entries, m, f.sort),
+                        None => fs::sort_entries(&mut entries, f.sort),
+                    }
                 }
-                let old = std::mem::replace(&mut f.cwd, p.path);
+                let old = std::mem::replace(&mut f.cwd, p.path.clone());
                 let old_id = std::mem::replace(&mut f.dir_id, a.listing.dir_id);
                 let moved = old != f.cwd;
                 let left_from = (moved && f.cols.is_some()).then(|| old.clone());
@@ -1059,14 +1163,20 @@ impl State {
                 }
                 // The rows the folder showed, for the column it becomes (when they're its whole
                 // listing, no filter): kept with their version rather than worked out again.
-                let old_rows = (left_from.is_some() && f.filter.is_empty()).then(|| (std::mem::take(&mut f.visible), f.version));
-                let old_entries = std::mem::replace(&mut f.entries, entries);
+                let own = |r: std::sync::Arc<crate::marked::Rows>| std::sync::Arc::try_unwrap(r).unwrap_or_else(|r| (*r).clone());
+                let old_rows = (left_from.is_some() && f.filter.is_empty()).then(|| (own(std::mem::take(&mut f.visible)), f.version));
+                // The listing replaced: let go of (the other pane on the folder may hold it still:
+                // then nothing is copied), unless it becomes a column.
+                let old_entries = std::mem::replace(&mut f.entries, std::sync::Arc::new(entries));
                 // The column view: the folder just left can be a column in the same frame (on
                 // the right after going up, on the left after going in), from this listing.
                 if let Some(old) = left_from
                     && let Some(cols) = f.cols.as_mut()
                     && !old_entries.is_empty()
                 {
+                    // Its own unless a reload's worker or the other pane still holds it (then a
+                    // copy).
+                    let old_entries = std::sync::Arc::try_unwrap(old_entries).unwrap_or_else(|a| (*a).clone());
                     // The column left takes the element the folder was drawn as; the folder, the
                     // one of the column it came from (`adopt_column`), or a new one.
                     let uid = f.col_uid.replace(adopt_uid.unwrap_or_else(crate::columns::next_uid));
@@ -1093,24 +1203,49 @@ impl State {
                     self.shared.history.borrow_mut().record(&here);
                 }
                 let f = &mut self.panes[ix].f;
+                // The rows before were the old listing's; labels of renames that landed go (this
+                // one has them); an inline rename still on its way keeps its label.
                 f.marked.clear();
-                if p.select.len() > 1 {
-                    // Only names still here: what was trashed or deleted isn't selected.
-                    let here: std::collections::HashSet<&OsString> = f.entries.iter().map(|e| &e.os).collect();
-                    f.marked.extend(p.select.iter().filter(|n| here.contains(n)).cloned());
+                f.listing_replaced(moved);
+                // Only names still here are selected: what was trashed or deleted isn't. The
+                // listing's worker marked them on their entries when this is what it was asked
+                // to select (a column made active, the only other way with two or more, is
+                // marked here).
+                let several = p.marks();
+                if several && marks.is_none() {
+                    marks = Some(crate::folder::mark_named(&f.entries, &p.select));
                 }
+                f.carry = if several { marks.unwrap_or_default() } else { Default::default() };
+                let mut survived = false;
                 match adopt_rows {
                     // A column's rows, as it showed them (same sort, no filter, the hidden-file
                     // rule it was shown with): kept, under their version.
-                    Some((visible, version)) if a.sort == f.sort && f.filter.is_empty() => {
-                        f.visible = visible;
+                    Some((visible, version)) if a.sort == f.sort && f.filter.is_empty() && !several => {
+                        f.visible = std::sync::Arc::new(visible);
                         f.version = version;
-                        let pick = p.select.first();
+                        let pick = p.cursor_name();
                         f.sel = pick.and_then(|n| f.visible.iter().position(|&e| f.entries[e as usize].os == *n)).unwrap_or(0);
                     }
-                    _ => f.refilter(p.select.first().map(OsString::as_os_str)),
+                    _ => survived = f.refilter_carried(p.cursor_name().map(OsString::as_os_str)),
+                }
+                // Without marks, what's selected is the item it was asked to select, if it's
+                // here; nothing when it's gone (no other row is chosen in its place) or nothing
+                // was selected; a folder newly opened, its first row.
+                if !several {
+                    f.none = p.none
+                        || match (p.select.first(), &p.cursor) {
+                            (Some(x), _) => f.cursor_name().as_ref() != Some(x),
+                            (None, Some(_)) => true,
+                            (None, None) => f.visible.is_empty(),
+                        };
+                } else if !survived {
+                    // None of the items to select is here any more: nothing selected.
+                    f.none = true;
                 }
                 f.anchor = f.sel;
+                // The folder was read: its volume's free space, now that its identity says which
+                // volume it's on (`volinfo.rs`).
+                f.ask_free();
                 if p.nav == Nav::Show {
                     // Where it was when it was hidden (clamped if the folder shrank since).
                     tx.scroll_to_instant(f.list_key(), 0.0, p.scroll);
@@ -1140,6 +1275,9 @@ impl State {
                 }
             }
         }
+        if reread {
+            self.panes[ix].f.request_kept(Nav::Reload, false);
+        }
         self.sync_preview();
         true
     }
@@ -1148,6 +1286,29 @@ impl State {
 
     pub fn set_sort(&mut self, key: SortKey) {
         self.cur_mut().set_sort(key);
+    }
+
+    /// Folders First, on or off, for every tab of the window (and its closed tabs), each kept
+    /// at its cursor.
+    pub fn set_folders_first(&mut self, on: bool) {
+        self.folders_first = on;
+        for p in &mut self.panes {
+            p.f.set_dirs_first(on);
+            for m in p.tabs.iter_mut().flatten() {
+                m.sort.dirs_first = on;
+            }
+        }
+        for m in &mut self.closed {
+            m.sort.dirs_first = on;
+        }
+    }
+
+    /// The palette's Folders First: turned the other way, in this window, until it closes.
+    pub fn toggle_folders_first(&mut self) {
+        self.folders_set = true;
+        let on = !self.folders_first;
+        self.set_folders_first(on);
+        self.note = Some(if on { "Folders first".into() } else { "Folders sorted with files".into() });
     }
 
     pub fn toggle_hidden(&mut self) {
@@ -1311,12 +1472,16 @@ impl State {
     /// applies to every tab.
     /// `say`: this is the window that reloaded them, which says so in its status bar.
     fn apply_settings(&mut self, c: Config, say: bool, tx: &mut Tx) {
-        let (old, new) = (&self.settings, &c.settings);
-        if new.sort != old.sort {
+        let (old, new) = (self.settings.clone(), c.settings.clone());
+        if new.sort.dirs_first != old.sort.dirs_first {
+            self.set_folders_first(new.sort.dirs_first);
+        }
+        if (new.sort.key, new.sort.desc) != (old.sort.key, old.sort.desc) {
+            let sort = fs::Sort { dirs_first: self.folders_first, ..new.sort };
             for p in &mut self.panes {
-                p.f.apply_sort(new.sort);
+                p.f.apply_sort(sort);
                 for m in p.tabs.iter_mut().flatten() {
-                    m.sort = new.sort;
+                    m.sort = sort;
                 }
             }
         }
@@ -1332,10 +1497,9 @@ impl State {
         }
         // The settings' places are the default list: the user's own (sidebar.toml) stays.
         if new.places != old.places && !self.side.custom {
-            self.places = places_for(new);
+            self.places = places_for(&new);
             self.side.look_due = true;
         }
-        let new = c.settings.clone();
         self.apply_history_settings(&new);
         self.reveal(tx);
         if say {
@@ -1389,15 +1553,22 @@ pub(crate) const IN_OTHER_SEARCH: &str = "The other pane is showing search resul
 /// the read that shows it reads again, still restoring its selection and scroll.
 pub(crate) fn reload_folder(f: &mut Folder, names: Vec<OsString>, rename: bool) {
     if let Some(p) = f.pending.as_ref().filter(|p| p.nav == Nav::Show) {
-        let (keep, scroll) = (if names.is_empty() { p.select.clone() } else { names }, p.scroll);
-        f.request(f.cwd.clone(), Nav::Show, keep, false);
+        let (keep, cursor, ids) =
+            if names.is_empty() { (p.select.clone(), p.cursor.clone(), p.ids.clone()) } else { (names, None, Default::default()) };
+        let scroll = p.scroll;
+        f.request_chosen(f.cwd.clone(), Nav::Show, keep, cursor, ids, false);
         if let Some(p) = &mut f.pending {
             p.scroll = scroll;
         }
         return;
     }
-    let keep = if names.is_empty() { f.targets().iter().map(|e| e.os.clone()).collect() } else { names };
-    f.request(f.cwd.clone(), Nav::Reload, keep, rename);
+    // The selection as it is on screen, handed to the worker without copying a name; or the
+    // items named (what an operation made).
+    if names.is_empty() {
+        f.request_kept(Nav::Reload, rename);
+    } else {
+        f.request(f.cwd.clone(), Nav::Reload, names, rename);
+    }
 }
 
 pub fn is_path_like(s: &str) -> bool {

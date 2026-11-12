@@ -1666,6 +1666,16 @@ fn quick_presses_in_another_column_select_the_last_one() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Drops `file` at `at` and waits until its operation has started and ended. Rune holds a drop
+/// a frame when state changed since the last build (a free-space read landing, say), so one
+/// frame isn't always enough.
+fn drop_and_wait(rt: &mut Runtime<State>, file: &Path, at: (f32, f32)) {
+    rt.state.note = None;
+    rt.drop_files(vec![file.to_path_buf()], Some(at));
+    until(rt, |s| s.owns_job() || s.note.is_some());
+    until(rt, |s| !s.owns_job());
+}
+
 /// Files dropped on a column go into the folder that column listed, or nowhere: one put in its
 /// place since (moved away, another made with its name) is refused on the worker, as a paste
 /// into a replaced folder is, and nothing moves.
@@ -1680,9 +1690,7 @@ fn a_drop_on_a_column_refuses_a_replaced_folder() {
     let b = rect_of(&rt, &c.key()).unwrap();
     std::fs::rename(d.join("Docs"), d.join("Docs-away")).unwrap();
     std::fs::create_dir(d.join("Docs")).unwrap();
-    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 50.0, b[1] + 150.0)));
-    rt.frame(0.0);
-    until(&mut rt, |s| !s.owns_job());
+    drop_and_wait(&mut rt, &d.join("top.txt"), (b[0] + 50.0, b[1] + 150.0));
     assert!(d.join("top.txt").exists(), "nothing moved");
     assert!(!d.join("Docs/top.txt").exists() && !d.join("Docs-away/top.txt").exists());
     assert!(
@@ -1693,9 +1701,7 @@ fn a_drop_on_a_column_refuses_a_replaced_folder() {
     // The same drop on a column that's still its folder goes in.
     std::fs::remove_dir(d.join("Docs")).unwrap();
     std::fs::rename(d.join("Docs-away"), d.join("Docs")).unwrap();
-    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 50.0, b[1] + 150.0)));
-    rt.frame(0.0);
-    until(&mut rt, |s| !s.owns_job());
+    drop_and_wait(&mut rt, &d.join("top.txt"), (b[0] + 50.0, b[1] + 150.0));
     assert!(d.join("Docs/top.txt").exists(), "{:?}", rt.state.note);
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -1957,8 +1963,7 @@ fn every_drop_refuses_a_replaced_destination() {
     settle_columns(&mut rt);
     let b = row_box(&mut rt, "Folder Work");
     replace(&d, "Docs/Work");
-    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 40.0, b[1] + b[3] * 0.5)));
-    rt.frame(0.0);
+    drop_and_wait(&mut rt, &d.join("top.txt"), (b[0] + 40.0, b[1] + b[3] * 0.5));
     refused(&mut rt, &d, "Docs/Work", "a folder row in a column");
     // The active column's background.
     key(&mut rt, Key::Right, false);
@@ -1966,8 +1971,7 @@ fn every_drop_refuses_a_replaced_destination() {
     assert_eq!(rt.state.cur().cwd, d.join("Docs"));
     let b = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
     replace(&d, "Docs");
-    rt.drop_files(vec![d.join("top.txt")], Some((b[0] + 40.0, b[1] + 150.0)));
-    rt.frame(0.0);
+    drop_and_wait(&mut rt, &d.join("top.txt"), (b[0] + 40.0, b[1] + 150.0));
     refused(&mut rt, &d, "Docs", "the active column");
     let _ = std::fs::remove_dir_all(&d);
     // A folder row in the list and in the icon view, and the list's background.
@@ -1977,8 +1981,7 @@ fn every_drop_refuses_a_replaced_destination() {
         run(&mut rt, view);
         let row = rect_of(&rt, "f:Docs").unwrap();
         replace(&d, "Docs");
-        rt.drop_files(vec![d.join("top.txt")], Some((row[0] + 20.0, row[1] + row[3] * 0.5)));
-        rt.frame(0.0);
+        drop_and_wait(&mut rt, &d.join("top.txt"), (row[0] + 20.0, row[1] + row[3] * 0.5));
         refused(&mut rt, &d, "Docs", &format!("a folder row, {view:?}"));
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -1989,8 +1992,7 @@ fn every_drop_refuses_a_replaced_destination() {
     until(&mut rt, |s| !s.cur().is_loading());
     let list = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
     replace(&d, "Docs");
-    rt.drop_files(vec![d.join("top.txt")], Some((list[0] + 100.0, list[1] + list[3] - 40.0)));
-    rt.frame(0.0);
+    drop_and_wait(&mut rt, &d.join("top.txt"), (list[0] + 100.0, list[1] + list[3] - 40.0));
     refused(&mut rt, &d, "Docs", "the list's background");
     let _ = std::fs::remove_dir_all(&d);
     // A row dragged onto the other pane of a split.
@@ -2258,4 +2260,121 @@ fn two_idle_windows_draw_nothing() {
     b.update(|s, tx| s.run(Cmd::CloseTab, tx));
     assert_eq!(b.shell_request, Some(rune::Shell::Close));
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The list's header: a column header per shown column (a search's results add Folder), the
+/// edge before each a splitter whose value is its width (dragged to resize it), and a column
+/// shown from the palette joins them; the header's menu (Arbor's own on Linux) checks the
+/// shown columns and Folders First. The status bar says the selection's size and the free space.
+#[test]
+fn the_header_columns_menu_and_status_tree() {
+    let d = folder("header");
+    std::fs::write(d.join("notes.txt"), vec![b'x'; 1500]).unwrap();
+    let mut rt = runtime(&d);
+    let tree = rt.accessibility_json();
+    let head = find(&tree, "header").expect("header");
+    println!("{}", outline(head));
+    let mut heads = Vec::new();
+    all(head, "column-header", &mut heads);
+    assert_eq!(heads.iter().map(|h| h["name"].as_str().unwrap()).collect::<Vec<_>>(), ["Name", "Kind", "Size", "Modified"]);
+    let edge = find(head, "edge-size").expect("Size's edge");
+    assert_eq!((edge["role"].as_str(), edge["name"].as_str()), (Some("splitter"), Some("Size column width")), "{edge}");
+    assert_eq!(edge["range"][0].as_f64(), Some(80.0), "its width: {edge}");
+    run(&mut rt, Cmd::ColumnCreated);
+    run(&mut rt, Cmd::ColumnPermissions);
+    let tree = rt.accessibility_json();
+    let mut heads = Vec::new();
+    all(find(&tree, "header").unwrap(), "column-header", &mut heads);
+    let names: Vec<&str> = heads.iter().map(|h| h["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Name", "Kind", "Size", "Modified", "Created", crate::listcols::Field::Permissions.header()]);
+    // The rows say the new cells too (what's on screen).
+    let mut rows = Vec::new();
+    all(find(&tree, "list-0").unwrap(), "list-box-option", &mut rows);
+    let notes = rows.iter().find(|r| r["name"].as_str().is_some_and(|n| n.starts_with("notes.txt"))).unwrap();
+    // Its permissions (Unix, as `ls -l`) or attributes (Windows, as Explorer: a new file is
+    // ready for archiving).
+    let perms = if cfg!(windows) { " A" } else { "-rw" };
+    assert!(notes["name"].as_str().unwrap().contains(perms), "{notes}");
+    // The header's menu.
+    rt.update(|s, tx| {
+        let items = s.header_menu_items();
+        s.open_menu(items, rune::PointerPress { x: 300.0, y: 80.0 }, tx);
+    });
+    rt.frame(0.0);
+    let tree = rt.accessibility_json();
+    let m = find(&tree, "menu").expect("menu");
+    println!("{}", outline(m));
+    let mut boxes = Vec::new();
+    all(m, "menu-item-check-box", &mut boxes);
+    let checked: Vec<(&str, bool)> = boxes.iter().map(|b| (b["name"].as_str().unwrap(), states(b).contains(&"checked"))).collect();
+    assert_eq!(
+        checked[..5],
+        [("Kind", true), ("Extension", false), ("Size", true), ("Date Modified", true), ("Date Created", true)],
+        "{}",
+        outline(m)
+    );
+    assert_eq!(checked.last(), Some(&("Folders First", true)));
+    key(&mut rt, Key::Escape, false);
+    // A search's results: the Folder column, then the same columns.
+    rt.update(|s, tx| {
+        s.run(Cmd::Search, tx);
+        let id = s.cur().id;
+        s.cur_mut().search.as_mut().unwrap().edit.text = "notes".into();
+        s.search_changed(id, tx);
+    });
+    until(&mut rt, |s| s.cur().search.as_ref().is_some_and(|x| !x.walking()));
+    rt.frame(0.0);
+    let tree = rt.accessibility_json();
+    let mut heads = Vec::new();
+    all(find(&tree, "header").unwrap(), "column-header", &mut heads);
+    let names: Vec<&str> = heads.iter().map(|h| h["name"].as_str().unwrap()).collect();
+    assert_eq!(&names[..2], ["Name", "Folder"], "{names:?}");
+    assert!(names.contains(&"Created"), "{names:?}");
+    // The status bar: two selected and their size, then the free space once it's in.
+    rt.update(|s, tx| s.run(Cmd::Clear, tx));
+    until(&mut rt, |s| !s.cur().searching());
+    rt.update(|s, _| s.reload());
+    until(&mut rt, |s| s.cur().free().is_some() && !s.is_loading());
+    rt.update(|s, _| {
+        s.note = None;
+        let f = s.cur_mut();
+        f.select_all();
+    });
+    rt.frame(0.0);
+    let tree = rt.accessibility_json();
+    let counts = find(&tree, "counts").expect("the status bar's counts");
+    let said = counts["name"].as_str().or(counts["value"].as_str()).unwrap_or_default().to_string();
+    println!("{}", outline(counts));
+    assert!(said.starts_with("3 selected · 1.5 KB + 1 folder · 3 items · ") && said.ends_with(" free"), "{said:?}");
+}
+
+/// The header's menu from the keyboard: "Column Options…" (the palette) opens it just under the
+/// header, where the arrows and Enter work it like any menu (Arbor's own menu, where Rune has no
+/// native one; elsewhere the system's, which the keyboard works the same way).
+#[test]
+fn column_options_opens_the_header_menu_from_the_keyboard() {
+    let d = folder("column-options");
+    let mut rt = runtime(&d);
+    assert!(rt.state.unavailable(Cmd::ColumnOptions).is_none());
+    run(&mut rt, Cmd::ColumnOptions);
+    if rune::popup_menu_supported() {
+        return;
+    }
+    let list = rect_of(&rt, &rt.state.cur().list_key()).unwrap();
+    let m = rt.state.menu.as_ref().expect("the header's menu");
+    assert_eq!((m.x, m.y), (list[0] + 12.0, list[1]), "just under the header");
+    let titles: Vec<String> = m
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            crate::menu::Item::Act { title, .. } => Some(title.clone()),
+            crate::menu::Item::Separator => None,
+        })
+        .collect();
+    assert_eq!(titles[0], "Kind");
+    assert_eq!(titles.last().map(String::as_str), Some("Reset Columns"));
+    key(&mut rt, Key::Down, false);
+    key(&mut rt, Key::Enter, false);
+    assert!(!rt.state.cols().shown(crate::listcols::Field::Kind), "Enter on Kind hid it");
+    assert!(rt.state.menu.is_none());
 }

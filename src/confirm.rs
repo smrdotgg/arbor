@@ -255,6 +255,10 @@ impl State {
         if yes && a.cmd == Cmd::Delete {
             if self.busy() {
                 self.note = Some(self.busy_why().into());
+            } else if self.any_labelled(a.items.iter().map(|d| d.path.as_path())) {
+                // One shows a label since the dialog opened: it waits for the folder to be read
+                // again (the worker checks each item's identity right before deleting).
+                self.note = Some(crate::app::UPDATING.into());
             } else if !a.items.is_empty() {
                 self.start(Op::Delete { items: a.items });
             }

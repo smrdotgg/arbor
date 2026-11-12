@@ -85,6 +85,10 @@ pub const REVEAL: &str = if cfg!(target_os = "macos") {
     "Show in File Manager"
 };
 
+/// The Permissions column's command: Windows has attributes rather than permissions.
+pub const PERMISSIONS_COLUMN: &str =
+    if cfg!(windows) { "Show or Hide the Attributes Column" } else { "Show or Hide the Permissions Column" };
+
 /// "Empty Trash…" and "Go to Trash", by each platform's name for it.
 pub const EMPTY_TRASH: &str = if cfg!(windows) { "Empty the Recycle Bin…" } else { "Empty the Trash…" };
 pub const GO_TRASH: &str = if cfg!(windows) { "Go to the Recycle Bin" } else { "Go to the Trash" };
@@ -157,7 +161,9 @@ commands! {
     SortKind "view.sort_kind" "Sort by Kind", [];
     SortSize "view.sort_size" "Sort by Size", [];
     SortModified "view.sort_modified" "Sort by Date Modified", [];
+    SortCreated "view.sort_created" "Sort by Date Created", [];
     SortReverse "view.sort_reverse" "Reverse Sort Order", [];
+    FoldersFirst "view.folders_first" "Keep Folders First (Toggle)", [];
     TogglePreview "view.preview" "Quick Preview (Toggle)", ["space"];
     ClosePreview "view.close_preview" "Close Preview", [];
     AsList "view.as_list" "As List", ["cmd+alt+1"];
@@ -166,6 +172,14 @@ commands! {
     AsTiles "view.as_tiles" "As Tiles", ["cmd+alt+4"];
     LargerIcons "view.larger_icons" "Larger Icons", ["cmd+plus", "cmd+equal"];
     SmallerIcons "view.smaller_icons" "Smaller Icons", ["cmd+minus"];
+    ColumnKind "view.column_kind" "Show or Hide the Kind Column", [];
+    ColumnExtension "view.column_extension" "Show or Hide the Extension Column", [];
+    ColumnSize "view.column_size" "Show or Hide the Size Column", [];
+    ColumnModified "view.column_modified" "Show or Hide the Date Modified Column", [];
+    ColumnCreated "view.column_created" "Show or Hide the Date Created Column", [];
+    ColumnPermissions "view.column_permissions" PERMISSIONS_COLUMN, [];
+    ResetColumns "view.reset_columns" "Reset Columns", [];
+    ColumnOptions "view.column_options" "Column Options…", [];
 
     NewWindow "window.new" "New Window", ["cmd+n"];
     OpenInNewWindow "window.open_folder" "Open in New Window", [];
@@ -375,6 +389,7 @@ pub fn markdown_table() -> String {
                     Cmd::Reveal => "Show in Finder / Explorer / file manager",
                     Cmd::GoTrash => "Go to the Trash / Recycle Bin",
                     Cmd::EmptyTrash => "Empty the Trash / Recycle Bin…",
+                    Cmd::ColumnPermissions => "Show or Hide the Permissions (Windows: Attributes) Column",
                     _ => cmd.title(),
                 };
                 [title.into(), keys(cmd, KeyPlatform::Mac), keys(cmd, KeyPlatform::Windows), format!("`{}`", cmd.id())]

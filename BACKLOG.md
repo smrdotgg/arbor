@@ -3,6 +3,34 @@
 Owner requests waiting their turn. Newest first. Each item still has to meet NORTHSTAR (speed
 budgets, no caching, pay only for what you use) when it's built.
 
+## Large-folder performance (seventh review of `feature/columns-status`, 2026-11-12)
+
+Two steps on the window's thread go past the 1 ms budget at 500,000 entries, on `main` as much
+as on the branch, so they weren't fixed there. Release build, median of runs, same scenario on
+both:
+
+| Step at 500,000 entries | `main` (7131a5d) | branch (db36984) |
+| --- | --- | --- |
+| The "an inline rename is on its way" guard, every item selected (main: `busy && targets().any(pending)`, on each command check while an operation runs; branch: `Folder::updating`, while a label shows) | 64 ms | 25 ms |
+| A reload's listing landing, one pane | 45 ms | 48 ms |
+| The same, split on the folder | 44 ms | 14 ms (176 ms before db36984, fixed) |
+
+Plan, without caching anything:
+
+- **The guard, O(labels):** a label already keeps its row's index in the listing (`Label::at`;
+  give the shared-listing labels one too, from the rename's own row where it's known). The rows
+  are in listing order (`Rows` is increasing), so "is entry `i` selected" is a binary search for
+  its row, then a bit test in `Marked`: a few microseconds per label, however many are
+  selected, instead of building `targets()` (a 500,000-entry `Vec`) and looking through it.
+  Labels without an index (a rename from another window) look through the listing once on the
+  rename's landing, which belongs on the refresh read's worker.
+- **A listing landing, O(changed):** about 30 of the 45 ms is freeing the replaced listing (2
+  million strings) and the rest is making the rows again. Hand the old `Arc<Vec<Entry>>` to a
+  worker to drop (the window's thread only moves a pointer), and have the read's worker build
+  the rows (`Rows::of`) with the sort, filter and hidden-file rule it was asked with, the
+  window checking they still apply when it lands (else making them as today). The marks are
+  worked out on the worker already. Target: under 1 ms to land, any size.
+
 ## Process (owner, 2026-11-11)
 
 Each feature is built on its own branch (`feature/<name>`, in its own git worktree), goes through
