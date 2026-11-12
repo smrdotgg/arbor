@@ -127,7 +127,17 @@ Format: date · decision · why · how to undo.
     `Folder::path_of` (its name now, through a rename beside the listing), with the identity
     its listing read (a rename keeps it), so a folder made under the old name meanwhile is never
     what an open, a trash, a copy, a drag or Get Info acts on; and the renames go into the
-    listing as soon as no worker holds it (`absorb_renames`). Undo: `Folder::{labels, renames}`.
+    listing as soon as no worker holds it (`absorb_renames`). **Renames landing in any order
+    with reads (fifth review's model)**: a label is kept under the listing's name for the item,
+    with the identity it was read with, and survives a new listing only on that item; a read
+    that already has the item under its new name selects it there (`listing_replaced`), hidden
+    tabs carrying their labels; a rename onto a name the listing still shows replaces that
+    stale entry when the disk says so; Select by Pattern matches the shown name; opening a row
+    renamed beside its listing checks its identity first (only those rows: where identity
+    falls back to ctime, checking every open would refuse edited files); and a navigation that
+    replaced a reload and fails asks for the reload again. Typing to filter still matches a
+    renamed row's old name until the read lands (milliseconds). Undo: `Folder::{labels,
+    renames, reread}`, `Label`, `TabMemo::labels`.
   - **Narrow panes (after review):** once every other column is gone, Size narrows to its
     least and then goes, so Name keeps its 180 pt; a search's Folder column gets only what's
     past Name's least. Only on screen: the widths kept are the user's. Undo: `ListCols::fit`.
