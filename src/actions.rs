@@ -827,10 +827,7 @@ impl State {
                 }
             };
         }
-        let files: Vec<PathBuf> = {
-            let f = self.cur();
-            f.targets().iter().filter(|e| !e.is_dir).map(|e| f.cwd.join(&e.os)).collect()
-        };
+        let files = self.open_with_files();
         self.menu_apps = apps.map(|a| (files, a));
         tx.popup_menu(menu, press, |s: &mut State, picked, tx| {
             tx.instant();
@@ -845,11 +842,12 @@ impl State {
     pub(crate) fn run_act(&mut self, act: Act, tx: &mut Tx) {
         use crate::menu::PlaceAct;
         match act {
-            Act::Cmd(cmd) => {
-                if self.unavailable(cmd).is_none() {
-                    self.run(cmd, tx);
-                }
-            }
+            Act::Cmd(cmd) => match self.unavailable(cmd) {
+                None => self.run(cmd, tx),
+                // A menu left open on an item that shows a label now: refused, saying so.
+                Some(why) if why == crate::app::UPDATING => self.note = Some(why.into()),
+                Some(_) => {}
+            },
             Act::OpenWith(i) => {
                 if let Some((files, apps)) = self.menu_apps.take()
                     && let Some(h) = apps.get(i).cloned()

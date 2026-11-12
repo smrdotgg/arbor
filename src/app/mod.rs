@@ -234,7 +234,7 @@ pub struct State {
     pub(crate) next_open_with: u64,
     pub(crate) launch_job: Latest<Result<(), String>>,
     /// The files and apps a native context menu's Open With submenu was built with.
-    pub(crate) menu_apps: Option<(Vec<PathBuf>, Vec<crate::openwith::Handler>)>,
+    pub(crate) menu_apps: Option<(Vec<crate::openwith::Chosen>, Vec<crate::openwith::Handler>)>,
     /// The sidebar item a menu was opened on, when it's a volume: (its index then, the volume).
     pub(crate) menu_volume: Option<(usize, crate::volumes::Volume)>,
     /// Get Info's panel, while it's open (`info.rs`).
@@ -822,6 +822,18 @@ impl State {
             return;
         }
         self.reload_selecting(Vec::new(), false);
+    }
+
+    /// Whether one of `paths` (items chosen earlier: an open box's, a menu's, a dialog's) shows
+    /// a label in a pane on its folder now: acting on it waits for the folder to be read again.
+    pub(crate) fn any_labelled<'a>(&self, paths: impl IntoIterator<Item = &'a Path>) -> bool {
+        if self.panes.iter().all(|p| p.f.labels.is_empty()) {
+            return false;
+        }
+        paths.into_iter().any(|p| {
+            let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else { return false };
+            self.panes.iter().any(|q| q.f.cwd == dir && q.f.labels.contains_key(name))
+        })
     }
 
     /// An action on the selection while one of its items shows a label ([`Folder::updating`]):

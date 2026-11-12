@@ -128,27 +128,31 @@ pub fn windows_dialog(file: PathBuf) {
 
 // ---- the picker ---------------------------------------------------------------------------
 
-/// The Open With box, while it's open: the files it opens, and the apps once they're read.
+/// The Open With box, while it's open: the files it opens (each with the identity its listing
+/// read, checked again right before they're opened), and the apps once they're read.
 pub struct OpenWithBox {
-    pub files: Vec<PathBuf>,
+    pub files: Vec<Chosen>,
     pub apps: Option<Result<Vec<Handler>, String>>,
     pub sel: usize,
     /// Which read is waited for.
     req: u64,
 }
 
+/// A file chosen to open, with the identity its listing read.
+pub type Chosen = (PathBuf, Option<crate::fs::Ident>);
+
 impl State {
-    /// The files the selection holds (folders aren't opened with an app).
-    fn open_with_files(&self) -> Vec<PathBuf> {
+    /// The files the selection holds (folders aren't opened with an app), each with its identity.
+    pub(crate) fn open_with_files(&self) -> Vec<Chosen> {
         let f = self.cur();
-        f.targets().iter().filter(|e| !e.is_dir).map(|e| f.cwd.join(&e.os)).collect()
+        f.targets().iter().filter(|e| !e.is_dir).map(|e| (f.cwd.join(&e.os), e.id)).collect()
     }
 
     /// "Open With…": the box listing the apps for the selected files (read on a worker; the box
     /// waits at most a frame, then says it's looking). Windows: its own dialog.
     pub fn open_with(&mut self, tx: &mut Tx) {
         let files = self.open_with_files();
-        let Some(first) = files.first().cloned() else { return };
+        let Some(first) = files.first().map(|(p, _)| p.clone()) else { return };
         #[cfg(windows)]
         {
             let _ = tx;
@@ -175,7 +179,7 @@ impl State {
         if cfg!(windows) || !rune::popup_menu_supported() {
             return None;
         }
-        let first = self.open_with_files().into_iter().next()?;
+        let (first, _) = self.open_with_files().into_iter().next()?;
         self.next_open_with += 1;
         let req = self.next_open_with;
         self.read_apps(req, first).and_then(|(_, a)| a.ok())
@@ -213,14 +217,27 @@ impl State {
         }
     }
 
-    /// Opens `files` with `h` on a worker; a failure lands in the status bar.
-    pub(crate) fn launch_with(&mut self, h: Handler, files: Vec<PathBuf>) {
+    /// Opens `files` (chosen when the box or the menu opened) with `h` on a worker; a failure
+    /// lands in the status bar. Refused, saying so, while one shows a label (its rename on its
+    /// way, or the folder being read again); on the worker, right before opening, each must
+    /// still be the item chosen (by identity), or nothing opens.
+    pub(crate) fn launch_with(&mut self, h: Handler, files: Vec<Chosen>) {
+        if self.any_labelled(files.iter().map(|(p, _)| p.as_path())) {
+            self.note = Some(crate::app::UPDATING.into());
+            return;
+        }
         let what = match files.as_slice() {
-            [one] => format!("“{}”", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+            [(one, _)] => format!("“{}”", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
             many => format!("{} files", many.len()),
         };
         self.note = Some(format!("Opening {what} with {}", h.name));
-        self.launch_job.request((h, files), |(h, files)| launch(&h, &files).map_err(|e| format!("Couldn't open with {}: {e}", h.name)));
+        self.launch_job.request((h, files), |(h, files)| {
+            if let Some(why) = changed_since(&files) {
+                return Err(why);
+            }
+            let paths: Vec<PathBuf> = files.into_iter().map(|(p, _)| p).collect();
+            launch(&h, &paths).map_err(|e| format!("Couldn't open with {}: {e}", h.name))
+        });
     }
 
     /// The box's keys: ↑↓ move, Enter opens, Esc closes. It has every key while open.
@@ -245,6 +262,14 @@ impl State {
         }
         true
     }
+}
+
+/// Why `files` can't be acted on: one isn't the item chosen any more (renamed away, replaced,
+/// gone), by the identity its listing read. Reads the disk: on a worker.
+pub(crate) fn changed_since(files: &[Chosen]) -> Option<String> {
+    let (p, _) = files.iter().find(|(p, id)| id.is_some() && crate::fs::ident_at(p) != *id)?;
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    Some(format!("“{name}” changed since it was chosen, so nothing was opened: choose it again"))
 }
 
 /// A `Latest` for app lists, tagged with the request.

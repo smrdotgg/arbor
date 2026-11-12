@@ -138,7 +138,13 @@ Format: date · decision · why · how to undo.
     for the read. Kept from the overlay rounds: a navigation that replaced a reload and fails
     asks for the reload again (`Folder::reread`), and a rename onto a name the listing still
     shows (that item gone from outside) replaces the stale entry in place when the disk says
-    so. Undo: `Folder::labels`, `Label`, `find_named`, `Ids`, `UPDATING`.
+    so. **What captures items and acts later (seventh review)**: the Open With box and a context
+    menu's apps keep each file's identity from when they opened, and the launch's worker checks
+    it right before opening (a stat per file, off the window's thread); the delete dialog and
+    Batch Rename already hand identities to their worker. All of them, and a context menu's
+    commands, refuse with the Updating note an item that shows a label by the time they act
+    (`State::any_labelled`, looking up labels only). Get Info's Rename is the Rename command.
+    Undo: `Folder::labels`, `Label`, `find_named`, `Ids`, `UPDATING`, `openwith::changed_since`.
   - **Narrow panes (after review):** once every other column is gone, Size narrows to its
     least and then goes, so Name keeps its 180 pt; a search's Folder column gets only what's
     past Name's least. Only on screen: the widths kept are the user's. Undo: `ListCols::fit`.

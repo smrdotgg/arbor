@@ -55,7 +55,7 @@ pub(super) fn completion_view(s: &State, l: Look) -> Option<El> {
 /// click. Modal: Esc or a click outside closes it.
 pub(super) fn open_with_view(o: &crate::openwith::OpenWithBox, l: Look) -> El {
     let what = match o.files.as_slice() {
-        [one] => format!("Open “{}” with", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+        [(one, _)] => format!("Open “{}” with", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
         many => format!("Open {} files with", many.len()),
     };
     let msg = |m: String| text(m).role("status").font(BODY).color(l.t.text_secondary).px(16.0).py(10.0).wrap();

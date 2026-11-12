@@ -2498,3 +2498,119 @@ fn a_stale_row_doesnt_select_what_took_its_name() {
     settle_all(&mut s);
     assert_eq!(s.cur().target_paths(), [d.join("c")]);
 }
+
+/// A handler whose Exec line copies the file it's given to `out` (what it opened, read back).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn recorder(out: &Path) -> crate::openwith::Handler {
+    crate::openwith::Handler {
+        name: "recorder".into(),
+        id: "recorder".into(),
+        default: false,
+        exec: Some(format!("cp %f {}", out.display())),
+    }
+}
+
+/// Polls until the status bar says something other than `was` (or 5 s pass).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn note_after(s: &mut State, was: Option<String>) -> Option<String> {
+    let until = Instant::now() + Duration::from_secs(5);
+    while s.note == was && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(2));
+        s.poll(&mut Tx::default());
+    }
+    s.note.clone()
+}
+
+/// What captures items and acts on them later checks them again right before acting. The Open
+/// With box, open on a file another window then renames (split on the folder: the row shows a
+/// label) while something new is made under its old name: refused, saying so, and nothing
+/// opens. Not split (the rename goes into the listing), the newcomer under the old name isn't
+/// the file chosen (its identity): refused on the worker, nothing opened. The same for the
+/// apps of a context menu left open.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn a_box_open_on_an_item_checks_it_again_before_acting() {
+    for split in [true, false] {
+        let d = folder(if split { "openwith-labelled" } else { "openwith-replaced" }, 0);
+        std::fs::write(d.join("old"), "original").unwrap();
+        let out = d.with_extension("opened");
+        let _ = std::fs::remove_file(&out);
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        if split {
+            s.run(Cmd::Split, &mut Tx::default());
+        }
+        s.cur_mut().select(0);
+        s.open_with(&mut Tx::default());
+        s.open_with.as_mut().unwrap().apps = Some(Ok(vec![recorder(&out)]));
+        let mut b = s.new_window(d.clone());
+        settle_all(&mut b);
+        b.cur_mut().select(0);
+        b.start_rename();
+        b.rename.as_mut().unwrap().edit.text = "renamed".into();
+        b.commit_rename(&mut Tx::default());
+        wait_job(&mut b);
+        s.poll_inbox(&mut Tx::default());
+        assert_eq!(s.cur().updating(), split);
+        std::fs::write(d.join("old"), "WRONG-TARGET").unwrap();
+        s.note = None;
+        s.open_with_pick(0);
+        let note = if split { s.note.clone() } else { note_after(&mut s, Some("Opening “old” with recorder".into())) };
+        if split {
+            assert_eq!(note.as_deref(), Some(crate::app::UPDATING));
+        } else {
+            assert!(note.as_deref().is_some_and(|n| n.contains("changed since it was chosen")), "{note:?}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!out.exists(), "split {split}: nothing opened");
+        b.leave();
+    }
+    // A context menu's apps, left open while the file is replaced from outside.
+    let d = folder("menu-apps-replaced", 0);
+    std::fs::write(d.join("old"), "original").unwrap();
+    let out = d.with_extension("opened");
+    let _ = std::fs::remove_file(&out);
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.cur_mut().select(0);
+    s.menu_apps = Some((s.open_with_files(), vec![recorder(&out)]));
+    std::fs::rename(d.join("old"), d.join("aside")).unwrap();
+    std::fs::write(d.join("old"), "WRONG-TARGET").unwrap();
+    s.run_act(crate::menu::Act::OpenWith(0), &mut Tx::default());
+    let note = note_after(&mut s, Some("Opening “old” with recorder".into()));
+    assert!(note.as_deref().is_some_and(|n| n.contains("changed since it was chosen")), "{note:?}");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!out.exists(), "nothing opened");
+}
+
+/// The confirm dialog for a permanent delete, open on a file another window then renames (split:
+/// the row shows a label): Delete is refused, saying so, and nothing is deleted. A context menu
+/// left open: its command on that row is refused too, saying so.
+#[test]
+fn a_dialog_or_menu_open_on_an_item_labelled_since_is_refused() {
+    let d = folder("confirm-labelled", 0);
+    std::fs::write(d.join("old"), "original").unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.run(Cmd::Split, &mut Tx::default());
+    s.cur_mut().select(0);
+    s.ask(Cmd::Delete, &mut Tx::default());
+    assert!(s.asking.is_some());
+    let mut b = s.new_window(d.clone());
+    settle_all(&mut b);
+    b.cur_mut().select(0);
+    b.start_rename();
+    b.rename.as_mut().unwrap().edit.text = "renamed".into();
+    b.commit_rename(&mut Tx::default());
+    wait_job(&mut b);
+    s.poll_inbox(&mut Tx::default());
+    assert!(s.cur().updating());
+    s.answer(true, &mut Tx::default());
+    assert_eq!(s.note.as_deref(), Some(crate::app::UPDATING));
+    assert!(!s.owns_job(), "nothing started");
+    assert!(d.join("renamed").exists());
+    s.note = None;
+    s.run_act(crate::menu::Act::Cmd(Cmd::Copy), &mut Tx::default());
+    assert_eq!(s.note.as_deref(), Some(crate::app::UPDATING));
+    b.leave();
+}
