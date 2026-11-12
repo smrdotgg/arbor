@@ -1561,13 +1561,14 @@ fn a_big_reload_hands_its_selection_over_without_copying_names() {
 /// The selection, as identities, against a plain model of it under random runs of what changes
 /// it or the rows it's on: clicks, ⌘-clicks, ⇧-clicks, ⌘A, Invert, Select by Pattern (replace,
 /// add, remove), typing a filter and backspacing, an inline rename started and cancelled or
-/// committed (to a new name, or one that's taken), sorts, Folders First, hidden files, the column
-/// view, files added, removed, renamed and replaced by another kind of item on disk, the name a
-/// rename took an item from made again, reloads asked for and left in flight while any of those
-/// happen, a tab hidden (a rename landing meanwhile, or not) and shown again, and going into a
-/// folder and back; half the runs split on the folder, and the model sometimes holds the listing
-/// as a reload's worker does, so renames land on a shared listing (a label, every action on it
-/// refused) as often as in place.
+/// committed (to a new name, or one that's taken), sorts, Folders First, hidden files, the
+/// column view, files added, removed, renamed and replaced by another kind of item on disk, the
+/// name a rename took an item from made again, reloads asked for and left in flight while any
+/// of those happen, a tab hidden (a rename landing meanwhile, or not) and shown again, going
+/// into a folder and back, and going to a folder that isn't there (failing whenever it lands);
+/// half the runs split on the folder, and the model sometimes holds the listing as a reload's
+/// worker does, so renames land on a shared listing (a label, every action on it refused) as
+/// often as in place.
 ///
 /// Deterministic: every worker finishes before the next step (a read superseded too), what lands
 /// lands only when the model says (reads, the operation's outcome, both), and the files' times
@@ -1668,6 +1669,11 @@ fn the_selection_matches_a_model_whatever_happens() {
             if !s.owns_job() && !s.panes.iter().any(|p| p.f.loader.is_pending()) && s.panes.iter().all(|p| p.f.pending.is_none()) {
                 break;
             }
+        }
+        // A label always has a read on its way that clears it: once everything has landed,
+        // none is left.
+        if !s.owns_job() {
+            assert!(s.panes.iter().all(|p| p.f.labels.is_empty()), "a label outlived every read: {:?}", s.cur().labels);
         }
     }
     /// Times from the seed, so sorting by date is the same every run.
@@ -1937,6 +1943,12 @@ fn the_selection_matches_a_model_whatever_happens() {
                     }
                     stamp(&d.join(&n), r);
                     log.push(format!("disk: {n:?} made again"));
+                }
+                13 if r.one_in(3) => {
+                    // A navigation to a folder that isn't there, left on its way: it fails when
+                    // it lands, the folder on screen staying (and read again if it changed).
+                    s.go_to(d.join("not-here"));
+                    log.push("go to a missing folder".into());
                 }
                 _ => {
                     // The listing held as a reload's worker holds it, or let go.
@@ -2672,4 +2684,29 @@ fn a_row_dropped_on_the_sidebar_is_the_folder_it_shows() {
     s.drop_rows_on_sidebar(id, row, version);
     poll_until(&mut s, &|s| s.places.len() > before.len());
     assert!(s.places.iter().any(|(_, p)| *p == d.join("kept")), "{:?}", s.places);
+}
+
+/// A navigation started before a rename's outcome came back (split on the folder, so the row
+/// shows a label until the folder is read again), and that navigation fails: the folder is read
+/// again anyway, the label goes, and the item is selected under its new name.
+#[test]
+fn a_failed_navigation_never_strands_a_label() {
+    let d = folder("nav-before-outcome", 0);
+    std::fs::write(d.join("old"), "original").unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.run(Cmd::Split, &mut Tx::default());
+    s.cur_mut().select(0);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "renamed".into();
+    s.commit_rename(&mut Tx::default());
+    s.go_to(d.join("not-here"));
+    assert!(s.cur().pending.is_some());
+    wait_job(&mut s);
+    settle_all(&mut s);
+    settle_all(&mut s);
+    assert_eq!(s.cur().cwd, d);
+    assert!(s.cur().labels.is_empty(), "{:?}", s.cur().labels);
+    assert!(!s.cur().updating());
+    assert_eq!(s.cur().target_paths(), [d.join("renamed")]);
 }

@@ -604,6 +604,17 @@ impl State {
                 cols.reread(folders, false);
             }
             let going = f.pending.as_ref().is_some_and(|p| matches!(p.nav, Nav::New | Nav::Back | Nav::Forward));
+            // On its way elsewhere while the folder on screen changed: if that navigation fails,
+            // the folder is read again (`Folder::reread`), so nothing it shows (a label above
+            // all, whose actions wait for that read) is left as it was before the change.
+            if going
+                && folders.iter().any(|(path, id)| match (f.dir_id, id) {
+                    (Some(a), Some(b)) => a == *b,
+                    _ => *path == f.cwd,
+                })
+            {
+                f.reread = true;
+            }
             let (at, at_id) = match &f.pending {
                 // Not listed yet: its identity isn't known.
                 Some(p) if going => (p.path.clone(), None),
