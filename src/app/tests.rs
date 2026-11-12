@@ -1440,16 +1440,22 @@ fn hung_free_space_reads_never_hold_up_listings() {
         assert!(!s.is_loading(), "{} wasn't listed: free-space reads held up the listing", d.display());
         assert_eq!(&s.cur().cwd, d);
     }
-    // All on one volume: one read in flight for it, however many folders asked (it may wait
-    // behind another test's read on the same disk, so it's waited for).
+    // All on one volume: never more than one read in flight for it, however many folders
+    // asked. A folder's query joins a read of the volume already in flight, so another test's
+    // read of the same disk may answer for these folders (then none of theirs is started, and
+    // hangs); otherwise one of theirs is, and hangs.
     let started = || dirs.iter().map(|d| crate::fs::free_reads::of(d).len()).sum::<usize>();
     let t = Instant::now();
-    while started() == 0 && t.elapsed() < Duration::from_secs(10) {
+    while started() == 0 && s.cur().free().is_none() && t.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(2));
+        s.poll(&mut Tx::default());
     }
     std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(started(), 1, "one hung read per volume, not one per folder");
-    assert_eq!(s.cur().free(), None, "nothing known for the folder yet");
+    s.poll(&mut Tx::default());
+    let n = started();
+    let why = format!("reads started {n}; free {:?}; volume {:?}", s.cur().free(), s.cur().dir_id);
+    assert!(n <= 1, "one hung read per volume, not one per folder: {why}");
+    assert!(n == 1 || s.cur().free().is_some(), "asked about, and answered or hung: {why}");
     drop(gates);
 }
 
