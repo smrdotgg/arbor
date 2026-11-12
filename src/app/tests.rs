@@ -2710,3 +2710,38 @@ fn a_failed_navigation_never_strands_a_label() {
     assert!(!s.cur().updating());
     assert_eq!(s.cur().target_paths(), [d.join("renamed")]);
 }
+
+/// A reload's listing landing in a folder of 500,000 items split on two panes costs what it does
+/// in one: the listing it replaces, still the other pane's, isn't copied (it took 176 ms, four
+/// times the 45 ms of the rest of the landing). In a release build, held to twice the landing in
+/// one pane.
+#[test]
+fn a_listing_landing_in_a_split_copies_nothing() {
+    use crate::folder::{Answer, Nav};
+    let n = 500_000;
+    let big = || (0..n).map(|i| fs::Entry::test(&format!("{i:08}.txt"), false)).collect::<Vec<_>>();
+    let mut times = Vec::new();
+    for split in [false, true] {
+        let d = folder(if split { "big-land-split" } else { "big-land-own" }, 0);
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        s.cur_mut().entries = big().into();
+        s.cur_mut().refilter(None);
+        if split {
+            s.run(Cmd::Split, &mut Tx::default());
+            assert!(std::sync::Arc::ptr_eq(&s.panes[0].f.entries, &s.panes[1].f.entries), "the panes share the listing");
+        }
+        s.cur_mut().request(d.clone(), Nav::Reload, vec!["00000000.txt".into()], false);
+        let req = s.cur().pending.as_ref().unwrap().req;
+        let listing = fs::Listing { path: d.clone(), result: Ok(big()), dir_id: None, missing: false };
+        let a = Answer::new(req, s.cur().sort, listing);
+        let t = Instant::now();
+        assert!(s.land(s.active, a, &mut Tx::default()));
+        times.push(t.elapsed());
+        assert_eq!(s.cur().entries.len(), n);
+    }
+    eprintln!("500k landing: one pane {:?}, split {:?}", times[0], times[1]);
+    if !cfg!(debug_assertions) {
+        assert!(times[1] < times[0] * 2, "split {:?}, one pane {:?}", times[1], times[0]);
+    }
+}

@@ -1165,15 +1165,18 @@ impl State {
                 // listing, no filter): kept with their version rather than worked out again.
                 let own = |r: std::sync::Arc<crate::marked::Rows>| std::sync::Arc::try_unwrap(r).unwrap_or_else(|r| (*r).clone());
                 let old_rows = (left_from.is_some() && f.filter.is_empty()).then(|| (own(std::mem::take(&mut f.visible)), f.version));
+                // The listing replaced: let go of (the other pane on the folder may hold it still:
+                // then nothing is copied), unless it becomes a column.
                 let old_entries = std::mem::replace(&mut f.entries, std::sync::Arc::new(entries));
-                // Its own unless a reload's worker still holds it (then a copy).
-                let old_entries = std::sync::Arc::try_unwrap(old_entries).unwrap_or_else(|a| (*a).clone());
                 // The column view: the folder just left can be a column in the same frame (on
                 // the right after going up, on the left after going in), from this listing.
                 if let Some(old) = left_from
                     && let Some(cols) = f.cols.as_mut()
                     && !old_entries.is_empty()
                 {
+                    // Its own unless a reload's worker or the other pane still holds it (then a
+                    // copy).
+                    let old_entries = std::sync::Arc::try_unwrap(old_entries).unwrap_or_else(|a| (*a).clone());
                     // The column left takes the element the folder was drawn as; the folder, the
                     // one of the column it came from (`adopt_column`), or a new one.
                     let uid = f.col_uid.replace(adopt_uid.unwrap_or_else(crate::columns::next_uid));
