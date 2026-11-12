@@ -1070,6 +1070,8 @@ impl State {
             f.dir_id = None;
             f.bump();
         }
+        // A navigation that replaced a read of the folder on screen, and failed: that read again.
+        let reread = std::mem::take(&mut f.reread) && a.listing.result.is_err() && p.path != f.cwd;
         let jumped = self.jump_req.take_if(|&mut r| r == p.req).is_some();
         let placed = self.side.going.take_if(|(r, _)| *r == p.req).is_some();
         match a.listing.result {
@@ -1243,6 +1245,9 @@ impl State {
                     }
                 }
             }
+        }
+        if reread {
+            self.panes[ix].f.request_kept(Nav::Reload, false);
         }
         self.sync_preview();
         true

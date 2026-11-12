@@ -253,6 +253,10 @@ pub struct Folder {
     /// under their new names, and followed by the next reload's selection. The listing it
     /// brings replaces them.
     pub(crate) renames: Vec<(OsString, OsString)>,
+    /// A read of the folder on screen (after a change to it) was replaced by a navigation
+    /// elsewhere: asked again if that navigation fails, so the folder isn't left as it was
+    /// listed before the change.
+    pub(crate) reread: bool,
     /// How many times the user has picked a selection (a click, an arrow, ⌘A, Select by
     /// Pattern…): a reload asked for before the latest pick keeps it ([`Pending::picks`]).
     pub picks: u64,
@@ -360,6 +364,7 @@ impl Folder {
             carry: Bits::default(),
             labels: HashMap::new(),
             renames: Vec::new(),
+            reread: false,
             picks: 0,
             anchor: 0,
             filter: String::new(),
@@ -551,6 +556,7 @@ impl Folder {
         self.tiles = None;
         // A column being made active (`State::adopt_column`) is superseded.
         self.adopted = None;
+        self.reread = path != self.cwd && (self.reread || self.pending.as_ref().is_some_and(|p| p.path == self.cwd));
         let (sort, req, stop) = (self.sort, next_request(), self.stop_read());
         let picks = self.picks;
         self.pending = Some(Pending { req, path: path.clone(), nav, select, cursor, none, rename, scroll: 0.0, picks });
@@ -677,6 +683,7 @@ impl Folder {
         self.visible = Arc::default();
         self.labels.clear();
         self.renames.clear();
+        self.reread = false;
         self.marked.clear();
         self.sel = 0;
         self.anchor = 0;

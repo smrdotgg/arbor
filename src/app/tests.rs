@@ -2029,3 +2029,21 @@ fn a_hidden_tab_keeps_a_renamed_selection() {
     settle_all(&mut s);
     assert_eq!(s.cur().target_paths(), [d.join("renamed")]);
 }
+
+/// A navigation that replaces a read of the folder on screen (asked for after a change) and
+/// fails leaves the folder read again, never as it was listed before the change.
+#[test]
+fn a_failed_navigation_keeps_the_read_it_replaced() {
+    let d = folder("reread", 0);
+    std::fs::write(d.join("a"), "x").unwrap();
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    std::fs::write(d.join("new"), "x").unwrap();
+    s.reload();
+    s.go_to(d.join("not-there"));
+    settle_all(&mut s);
+    settle_all(&mut s);
+    assert_eq!(s.cur().cwd, d);
+    let names: Vec<&str> = s.cur().entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"new"), "read again: {names:?}");
+}
