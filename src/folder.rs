@@ -256,14 +256,21 @@ pub(crate) fn find_named(entries: &[Entry], select: Vec<Named>, cursor: Option<N
             }
         }
     }
-    let lost: HashMap<fs::Ident, OsString> =
-        want.iter().filter(|(n, _)| !here.contains(*n)).filter_map(|(n, id)| Some(((*id)?, n.to_os_string()))).collect();
+    // By volume and file id where an identity has them (Windows), else as an identity.
+    let mut by_object: HashMap<(u8, u64, u64), OsString> = HashMap::new();
+    let mut lost: HashMap<fs::Ident, OsString> = HashMap::new();
+    for (n, id) in want.iter().filter(|(n, _)| !here.contains(*n)) {
+        let Some(id) = *id else { continue };
+        match id.object_key() {
+            Some(k) => by_object.insert(k, n.to_os_string()),
+            None => lost.insert(id, n.to_os_string()),
+        };
+    }
     let mut moved: HashMap<OsString, OsString> = HashMap::new();
-    if !lost.is_empty() {
+    if !lost.is_empty() || !by_object.is_empty() {
         for e in entries {
-            if let Some(id) = e.id
-                && let Some(n) = lost.get(&id)
-            {
+            let Some(id) = e.id else { continue };
+            if let Some(n) = id.object_key().and_then(|k| by_object.get(&k)).or_else(|| lost.get(&id)) {
                 moved.insert(n.clone(), e.os.clone());
             }
         }

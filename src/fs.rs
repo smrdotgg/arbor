@@ -90,7 +90,9 @@ impl Entry {
 ///
 /// Windows: a creation time alone doesn't tell an item from one made under its name soon after
 /// it went (NTFS's name tunnelling hands the newcomer the old item's creation time, up to 15 s
-/// later). So every identity there that carries a selection or checks an item before acting has
+/// later, and an item renamed onto that name too, so the same item's creation time changes).
+/// Two identities with a volume and file id are equal when those are, whatever the creation
+/// times. So every identity there that carries a selection or checks an item before acting has
 /// the volume serial number and file id: a folder's listing and a search's walk read them from
 /// the directory enumeration (`win_dir`, `FileIdExtdDirectoryInfo`), and a check at a path opens
 /// the item for them ([`ident_here`], [`ident_of`], [`ident_of_file`]). Only where neither
@@ -120,6 +122,13 @@ pub struct Ident {
 
 impl PartialEq for Ident {
     fn eq(&self, o: &Ident) -> bool {
+        // Windows: the volume and file id are the object, when both sides have them; its
+        // creation time isn't (NTFS hands a renamed item the creation time of one removed under
+        // its new name moments before).
+        #[cfg(windows)]
+        if let (Some(a), Some(b)) = (self.handle, o.handle) {
+            return self.kind == o.kind && a == b;
+        }
         (self.node, self.kind, self.born) == (o.node, o.kind, o.born)
             && match (self.handle, o.handle) {
                 (Some(a), Some(b)) => a == b,
@@ -132,11 +141,29 @@ impl Eq for Ident {}
 
 impl std::hash::Hash for Ident {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        // Only what every equal pair shares (on Windows a pair can be equal by file id with two
+        // creation times): look one up by [`Ident::object_key`] where it has one.
+        #[cfg(windows)]
+        self.kind.hash(h);
+        #[cfg(not(windows))]
         (self.node, self.kind, self.born).hash(h);
     }
 }
 
 impl Ident {
+    /// What a map finds this identity by, as `==` tells it: on Windows its kind, volume and file
+    /// id, when it has them; `None` otherwise (then look it up as an [`Ident`]).
+    pub(crate) fn object_key(&self) -> Option<(u8, u64, u64)> {
+        #[cfg(windows)]
+        {
+            self.handle.map(|(v, f)| (self.kind, v, f))
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
     /// Whether both are the same kind of thing (a file, a folder, a link).
     pub fn same_kind(&self, o: &Ident) -> bool {
         self.kind == o.kind
@@ -1212,6 +1239,30 @@ pub fn kind_of(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows: a file renamed onto a name another file left moments before takes that file's
+    /// creation time (NTFS's name tunnelling), and is still the item it was: its identity, with
+    /// its volume and file id, is unchanged.
+    #[cfg(windows)]
+    #[test]
+    fn an_item_renamed_onto_a_freed_name_keeps_its_identity() {
+        let d = std::env::temp_dir().join(format!("arbor-tunnel-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for n in ["a", "b"] {
+            std::fs::write(d.join(n), n).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let before = ident_at(&d.join("a")).unwrap();
+        std::fs::remove_file(d.join("b")).unwrap();
+        std::fs::rename(d.join("a"), d.join("b")).unwrap();
+        let after = ident_at(&d.join("b")).unwrap();
+        eprintln!("creation time tunnelled: {}", before.born != after.born);
+        assert_eq!(after, before, "the same item");
+        std::fs::write(d.join("a"), "newcomer").unwrap();
+        assert_ne!(ident_at(&d.join("a")).unwrap(), before, "a newcomer under its old name isn't it");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn natural_order() {

@@ -837,7 +837,12 @@ Format: date · decision · why · how to undo.
   Get Info's walk and a delete's "still the same folder" check (now `fs::ident_here`/`ident_of`,
   one open each, on their workers). The creation time alone is left only where neither the
   enumeration nor a handle gives a file id (a listing read the `std` way where the fast way
-  fails; volumes without file ids). Undo: `search::walk::read_dir_ids`, `fs::ident_here`.
+  fails; volumes without file ids). Tunnelling also hands an item *renamed* onto a name freed
+  moments before that name's old creation time (main's next Windows run caught it: a rename onto
+  a freed name wasn't taken in place), so two identities with a file id are equal by it alone,
+  whatever their creation times (`Ident`'s `==`; its hash is the kind only on Windows, and a
+  selection's items are found by `Ident::object_key`). Undo: `search::walk::read_dir_ids`,
+  `fs::ident_here`, `Ident::object_key`.
 
 - **2026-11-09 · A drag starts with the rows as listed; a drop out to another app is that app's
   to check** (review: starting a drag stat'ed every selected item, and opened it on Windows, on
