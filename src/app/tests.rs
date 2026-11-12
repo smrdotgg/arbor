@@ -2145,3 +2145,81 @@ fn a_rename_onto_a_name_freed_on_disk_leaves_one_row() {
     assert_eq!(names.iter().filter(|n| **n == "b").count(), 1, "{names:?}");
     assert_eq!(s.cur().target_paths(), [d.join("b")]);
 }
+
+/// Lands pane `ix`'s reads (only those, not the file operation's outcome) until none is on its
+/// way.
+fn land_reads(s: &mut State, ix: usize) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while s.panes[ix].f.is_loading() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(2));
+        if let Some(a) = s.panes[ix].f.loader.take() {
+            s.land(ix, a, &mut Tx::default());
+        }
+    }
+    assert!(!s.panes[ix].f.is_loading(), "never landed");
+}
+
+/// Waits until `p` is on disk (a worker's operation done, its outcome not taken yet).
+fn wait_for(p: &Path) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while !p.exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(p.exists());
+}
+
+/// An inline rename done on disk, its old name made again from outside, and the folder read
+/// (a reload, or its hidden tab shown again) before the rename's outcome comes back: what's
+/// selected is the item, under its new name, never the newcomer under the old.
+#[test]
+fn a_read_after_the_rename_is_on_disk_follows_the_item() {
+    for hide in [false, true] {
+        let d = folder(if hide { "follow-tab" } else { "follow-reload" }, 0);
+        for n in ["a", "b"] {
+            std::fs::write(d.join(n), n).unwrap();
+        }
+        let mut s = state_in(&d);
+        settle_all(&mut s);
+        s.cur_mut().select(0);
+        s.start_rename();
+        s.rename.as_mut().unwrap().edit.text = "renamed".into();
+        s.commit_rename(&mut Tx::default());
+        if hide {
+            s.new_tab(&mut Tx::default());
+            land_reads(&mut s, 0);
+        }
+        wait_for(&d.join("renamed"));
+        std::fs::write(d.join("a"), "newcomer").unwrap();
+        if hide {
+            s.run(Cmd::PrevTab, &mut Tx::default());
+        } else {
+            s.reload();
+        }
+        land_reads(&mut s, 0);
+        assert!(s.owns_job(), "the outcome isn't in yet");
+        assert_eq!(s.cur().target_paths(), [d.join("renamed")], "hidden: {hide}");
+        finish_job(&mut s);
+        assert_eq!(s.cur().target_paths(), [d.join("renamed")], "hidden: {hide}, landed");
+    }
+}
+
+/// An inline rename that lands while its tab is hidden: shown again, the tab has the item
+/// selected under its new name.
+#[test]
+fn a_rename_landing_while_its_tab_is_hidden_keeps_it_selected() {
+    let d = folder("rename-hidden", 0);
+    for n in ["a", "b"] {
+        std::fs::write(d.join(n), n).unwrap();
+    }
+    let mut s = state_in(&d);
+    settle_all(&mut s);
+    s.cur_mut().select(0);
+    s.start_rename();
+    s.rename.as_mut().unwrap().edit.text = "renamed".into();
+    s.commit_rename(&mut Tx::default());
+    s.new_tab(&mut Tx::default());
+    finish_job(&mut s);
+    s.run(Cmd::PrevTab, &mut Tx::default());
+    settle_all(&mut s);
+    assert_eq!(s.cur().target_paths(), [d.join("renamed")]);
+}

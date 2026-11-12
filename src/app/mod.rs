@@ -1181,7 +1181,23 @@ impl State {
                 // The rows before were the old listing's; renames it didn't have are in this
                 // one (or weren't made); an inline rename still on its way keeps its label.
                 f.marked.clear();
-                f.listing_replaced();
+                // An inline rename this listing already has (read after it, before its outcome
+                // came back): what was selected under the old name is the item under the new
+                // one, never a newcomer under the old.
+                for (old, new, at) in f.listing_replaced() {
+                    let was = |n: &OsString| *n == old;
+                    if p.select.iter().any(was) || p.cursor.as_ref().is_some_and(was) {
+                        if let Some(m) = marks.as_mut().filter(|_| p.select.iter().any(was)) {
+                            if let Some(o) = f.entries.iter().position(|e| e.os == old) {
+                                m.unset(o);
+                            }
+                            m.set(at);
+                        }
+                        for n in p.select.iter_mut().chain(p.cursor.iter_mut()).filter(|n| **n == old) {
+                            *n = new.clone();
+                        }
+                    }
+                }
                 // Only names still here are selected: what was trashed or deleted isn't. The
                 // listing's worker marked them on their entries when this is what it was asked
                 // to select (a column made active, the only other way with two or more, is

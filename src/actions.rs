@@ -554,6 +554,17 @@ impl State {
                 } else {
                     p.f.renamed_paths(&renamed);
                 }
+                // A hidden tab on the folder keeps its selection by the new names (it's read
+                // again, by name, when it's shown).
+                for m in p.tabs.iter_mut().flatten() {
+                    for (from, to) in renamed.iter().filter(|(f, _)| f.parent() == Some(m.path.as_path())) {
+                        let (Some(old), Some(new)) = (from.file_name(), to.file_name()) else { continue };
+                        for n in m.select.iter_mut().chain(m.cursor.iter_mut()).filter(|n| n.as_os_str() == old) {
+                            *n = new.to_os_string();
+                        }
+                        m.labels.retain(|(n, _)| n.as_os_str() != old);
+                    }
+                }
             }
         }
         // An inline rename's label goes: the row renamed, or back to its own name. Rows of items

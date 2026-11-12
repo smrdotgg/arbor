@@ -97,6 +97,9 @@ pub struct TabMemo {
     pub search: Option<String>,
     /// List, icons, columns or tiles.
     pub view: crate::grid::ViewMode,
+    /// Inline renames on their way, by the items' names now ([`Folder::labels`]): the read
+    /// when it's shown follows an item one has renamed meanwhile.
+    pub labels: Vec<(OsString, Label)>,
 }
 
 /// A finished read, tagged with the request that asked for it and the sort it was sorted by.
@@ -633,6 +636,7 @@ impl Folder {
                 sort_set: self.sort_set,
                 search: None,
                 view: self.view,
+                labels: Vec::new(),
             };
         }
         // Hidden again before its read landed: keep what it was going to restore.
@@ -651,6 +655,7 @@ impl Folder {
                 sort_set: self.sort_set,
                 search: None,
                 view: self.view,
+                labels: self.labels.iter().map(|(k, l)| (k.clone(), l.clone())).collect(),
             };
         }
         // The selection exactly (in display order, so it reads back the same), and the cursor
@@ -673,6 +678,7 @@ impl Folder {
             sort_set: self.sort_set,
             search: None,
             view: self.view,
+            labels: self.labels.iter().map(|(k, l)| (self.current_os(k).to_os_string(), l.clone())).collect(),
         }
     }
 
@@ -692,7 +698,7 @@ impl Folder {
         self.adopted = None;
         self.entries = Arc::default();
         self.visible = Arc::default();
-        self.labels.clear();
+        self.labels = m.labels.into_iter().collect();
         self.renames.clear();
         self.reread = false;
         self.marked.clear();
@@ -1236,18 +1242,36 @@ impl Folder {
 
     /// A new listing landed: renames beside the old one are in it (or weren't made), and an
     /// inline rename still on its way keeps its label on the item it was started on (by its
-    /// name now and the identity it was read with: never a newcomer under its old name).
-    pub(crate) fn listing_replaced(&mut self) {
+    /// name now and the identity it was read with: never a newcomer under its old name). One
+    /// the listing already has under its new name (read after the rename, before Arbor heard
+    /// how it went) is done: returned as `(old, new, index of new)`, for the selection to
+    /// follow. Looks through the listing only while a rename is on its way.
+    pub(crate) fn listing_replaced(&mut self) -> Vec<(OsString, OsString, usize)> {
+        let mut done = Vec::new();
         if !self.labels.is_empty() {
             let labels = std::mem::take(&mut self.labels);
-            let entries = self.entries.clone();
-            self.labels = labels
-                .into_iter()
-                .map(|(old, l)| (self.current_os(&old).to_os_string(), l))
-                .filter(|(now, l)| entries.iter().any(|e| e.os == *now && (l.id.is_none() || e.id.is_none() || e.id == l.id)))
-                .collect();
+            let same = |l: &Label, e: &Entry| l.id.is_none() || e.id.is_none() || e.id == l.id;
+            for (old, l) in labels {
+                let now = self.current_os(&old).to_os_string();
+                let (mut here, mut there) = (false, None);
+                for (i, e) in self.entries.iter().enumerate() {
+                    if e.os == now && same(&l, e) {
+                        here = true;
+                    } else if e.os == OsStr::new(&l.name) && same(&l, e) {
+                        there = Some(i);
+                    }
+                }
+                match (here, there) {
+                    (true, _) => {
+                        self.labels.insert(now, l);
+                    }
+                    (false, Some(i)) => done.push((now, OsString::from(l.name), i)),
+                    (false, None) => {}
+                }
+            }
         }
         self.renames.clear();
+        done
     }
 
     /// Where entry `e` is on disk now ([`Folder::current_os`]): the path every action on it
