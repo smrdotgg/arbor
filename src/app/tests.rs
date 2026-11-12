@@ -1394,8 +1394,10 @@ fn free_space_is_read_off_the_window_thread_and_not_while_idle() {
     s.reload();
     until(&mut s, &|s| s.cur().free().is_some());
     assert!(s.cur().free().is_some_and(|n| n > 0));
+    // On a worker, never this thread. (Another test's read of the same disk, in flight when this
+    // folder asked, may be the one that answered: then none of this folder's own is counted.)
     let after_read = reads();
-    assert!(!after_read.is_empty() && !after_read.contains(&me), "on a worker: {after_read:?}");
+    assert!(!after_read.contains(&me), "on a worker: {after_read:?}");
     // Idle: polls (as wakes from elsewhere would make) read nothing more.
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(2));
