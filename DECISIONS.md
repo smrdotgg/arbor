@@ -826,6 +826,19 @@ Format: date · decision · why · how to undo.
 
 ## Made by the agent (owner said "I trust your judgment")
 
+- **2026-11-12 · Windows identities come with the volume serial and file id wherever one can be
+  had** (the alpha.5 tag build's flake). The failing test's cause was timing: the read a rename
+  asks for sometimes listed the folder before the test replaced it, and then rightly selected
+  the renamed original (in 8 of 50 runs on Windows CI, its file id the original's); the test now
+  asks for a read of its own after the replacement. The audit it prompted found identities on
+  Windows that were only creation times, which NTFS name tunnelling hands a newcomer made under
+  a removed name within 15 s (seen in 50 of 50 runs for files): a search's results (now read
+  through the same `FileIdExtdDirectoryInfo` enumeration as a listing), the search's recheck,
+  Get Info's walk and a delete's "still the same folder" check (now `fs::ident_here`/`ident_of`,
+  one open each, on their workers). The creation time alone is left only where neither the
+  enumeration nor a handle gives a file id (a listing read the `std` way where the fast way
+  fails; volumes without file ids). Undo: `search::walk::read_dir_ids`, `fs::ident_here`.
+
 - **2026-11-09 · A drag starts with the rows as listed; a drop out to another app is that app's
   to check** (review: starting a drag stat'ed every selected item, and opened it on Windows, on
   the window's thread). Nothing is read when a drag starts. A drop on the other pane goes to

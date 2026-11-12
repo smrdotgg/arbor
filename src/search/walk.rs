@@ -347,6 +347,12 @@ pub(super) fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
         }
         devices_for(&spec.root)
     });
+    // Windows: from the enumeration that gives each item's volume and file id, so a result's
+    // identity is never only its creation time (which NTFS can give a newcomer under its name).
+    #[cfg(windows)]
+    if read_dir_ids(s, t, buf) {
+        return;
+    }
     let rd = match std::fs::read_dir(&t.dir) {
         Ok(rd) => rd,
         Err(e) => {
@@ -450,21 +456,80 @@ pub(super) fn read_dir(s: &Shared, t: &Task, buf: &mut String) {
             room = walk.room();
         }
     }
-    if !subdirs.is_empty() && !walk.stop.load(Relaxed) {
-        walk.pending.fetch_add(subdirs.len(), Relaxed);
-        let n = subdirs.len();
-        if let Ok(mut q) = s.q.lock() {
-            q.tasks.extend(subdirs);
-        }
-        if n == 1 {
-            s.cv.notify_one();
-        } else {
-            s.cv.notify_all();
-        }
-    }
+    queue(s, walk, subdirs);
     #[cfg(test)]
     hook::left(&t.dir, walk.serial);
     walk.deliver(found, seen, false);
+}
+
+/// Queues the subfolders a read found, for the walking threads.
+fn queue(s: &Shared, walk: &Arc<Walk>, subdirs: Vec<Task>) {
+    if subdirs.is_empty() || walk.stop.load(Relaxed) {
+        return;
+    }
+    walk.pending.fetch_add(subdirs.len(), Relaxed);
+    let n = subdirs.len();
+    if let Ok(mut q) = s.q.lock() {
+        q.tasks.extend(subdirs);
+    }
+    if n == 1 {
+        s.cv.notify_one();
+    } else {
+        s.cv.notify_all();
+    }
+}
+
+/// [`read_dir`] on Windows, through `fs::win_dir::each`: every entry with what a listing shows
+/// and its volume and file id. False when the folder can't be read that way before any entry
+/// (`std`'s way then reads it, or says why it can't).
+#[cfg(windows)]
+fn read_dir_ids(s: &Shared, t: &Task, buf: &mut String) -> bool {
+    let walk = &t.walk;
+    let spec = &walk.spec;
+    let (mut found, mut subdirs, mut seen) = (Vec::new(), Vec::new(), 0u64);
+    let mut room = walk.room();
+    let read = fs::win_dir::each(&t.dir, |e| {
+        #[cfg(test)]
+        hook::entry(&t.dir, walk.serial);
+        if walk.stop.load(Relaxed) {
+            return false;
+        }
+        seen += 1;
+        if e.hidden && !spec.show_hidden {
+            return true;
+        }
+        // Not a link: a link to a folder is never entered (no loops); junctions and mounted
+        // volumes are links.
+        if e.is_dir && !e.is_link {
+            let path = t.dir.join(&e.os);
+            if !walk.skip.contains(&path) {
+                subdirs.push(Task { walk: walk.clone(), dir: path, rel: t.rel.join(&e.os) });
+            }
+        }
+        let lower = if spec.query.folds { fold(&e.name, buf) } else { "" };
+        if !spec.query.matches(&e.name, lower) {
+            return true;
+        }
+        let lower = if spec.query.folds { lower.to_string() } else { e.name.to_lowercase() };
+        let os = t.rel.join(&e.os).into_os_string();
+        found.push(Entry { lower, key: next_key(), os, ..e });
+        if found.len() >= room.min(CHUNK) {
+            walk.deliver(std::mem::take(&mut found), std::mem::take(&mut seen), false);
+            if walk.stop.load(Relaxed) {
+                return false;
+            }
+            room = walk.room();
+        }
+        true
+    });
+    if read == Err(false) {
+        return false;
+    }
+    queue(s, walk, subdirs);
+    #[cfg(test)]
+    hook::left(&t.dir, walk.serial);
+    walk.deliver(found, seen, false);
+    true
 }
 
 /// A folder's identity for [`Walk::entered`]: device and inode from its metadata (Unix);

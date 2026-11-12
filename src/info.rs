@@ -299,7 +299,7 @@ fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) ->
 fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) -> bool {
     let still = match root {
         Root::Picked(p, id) => {
-            p.symlink_metadata().is_ok_and(|m| m.is_dir() && !m.is_symlink() && id.is_none_or(|id| fs::ident(&m) == Some(id)))
+            p.symlink_metadata().is_ok_and(|m| m.is_dir() && !m.is_symlink() && id.is_none_or(|id| fs::ident_of(p, &m) == Some(id)))
         }
         Root::Here(p, id) => id.is_none_or(|id| crate::noclobber::dir_id(p) == Some(id)),
     };
@@ -314,9 +314,9 @@ fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) ->
         }
         #[cfg(test)]
         hook::at(&dir);
-        // The same folder (its object identity, which its times changing as things in it do
-        // don't touch).
-        if want.is_some() && !dir.symlink_metadata().is_ok_and(|m| m.is_dir() && !m.is_symlink() && fs::ident(&m) == want) {
+        // The same folder (its object identity, with its volume and file id: a creation time
+        // alone can be a predecessor's; its times changing as things in it do don't touch it).
+        if want.is_some() && !dir.symlink_metadata().is_ok_and(|m| m.is_dir() && !m.is_symlink() && fs::ident_of(&dir, &m) == want) {
             c.t.unreadable += 1;
             continue;
         }
@@ -344,7 +344,8 @@ fn walk_tree(root: &Root, fence: &Fence, c: &mut Counting, stop: &AtomicBool) ->
                         continue;
                     }
                     c.t.folders += 1;
-                    stack.push((p, fs::ident(&m)));
+                    let id = fs::ident_of(&p, &m);
+                    stack.push((p, id));
                 }
                 Ok(m) => {
                     c.t.files += 1;

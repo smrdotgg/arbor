@@ -298,6 +298,8 @@ mod imp {
         }
         let m = path.symlink_metadata().map_err(|e| fail(path, e))?;
         let ft = m.file_type();
+        // Its identity with its volume and file id (a creation time alone can be a predecessor's).
+        let id = if ft.is_dir() { crate::fs::ident_of(path, &m) } else { None };
         if inside.iter().any(|i| i == canon) || ft.is_symlink_dir() && volume_mount_point(path) {
             return Err(Halt::Mounted { at: path.to_path_buf() });
         }
@@ -309,10 +311,10 @@ mod imp {
                 let name = c.file_name().map(PathBuf::from).unwrap_or_default();
                 rm(&c, &canon.join(name), inside, go, removed)?;
             }
-            // Its name must still lead to it (as far as Windows says without opening it).
+            // Its name must still lead to it.
             match path.symlink_metadata() {
                 // The same folder (its object identity: its write time changed as its contents went).
-                Ok(now) if now.file_type().is_dir() && crate::fs::ident(&now) == crate::fs::ident(&m) => {}
+                Ok(now) if now.file_type().is_dir() && id.is_some() && crate::fs::ident_of(path, &now) == id => {}
                 _ => return Err(Halt::Changed { at: path.to_path_buf() }),
             }
         }

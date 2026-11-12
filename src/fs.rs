@@ -88,6 +88,15 @@ impl Entry {
 /// guesses. Limits: ext4 stamps from a clock that ticks every few ms, so a replacement made in
 /// the tick the original was made in reads as it.
 ///
+/// Windows: a creation time alone doesn't tell an item from one made under its name soon after
+/// it went (NTFS's name tunnelling hands the newcomer the old item's creation time, up to 15 s
+/// later). So every identity there that carries a selection or checks an item before acting has
+/// the volume serial number and file id: a folder's listing and a search's walk read them from
+/// the directory enumeration (`win_dir`, `FileIdExtdDirectoryInfo`), and a check at a path opens
+/// the item for them ([`ident_here`], [`ident_of`], [`ident_of_file`]). Only where neither
+/// gives one (a volume whose enumeration and handles have no file ids, or a listing read the
+/// `std` way because the fast way failed there) does it fall back to the creation time.
+///
 /// Comparing (`==`): device and inode, type and birth time must match; then the handles if both
 /// sides have one, else the ctimes (both `None` where there's a birth time). So it isn't
 /// transitive across identities with and without a handle: it's only ever used to compare one
@@ -259,6 +268,22 @@ pub fn ident(m: &std::fs::Metadata) -> Option<Ident> {
         // nothing is deleted on a guess).
         let b = born?;
         Some(Ident { node: (b as u64, u64::from(m.is_dir())), kind, born, changed: None, handle: None })
+    }
+}
+
+/// The identity of the item at `path` (metadata `m`) as everything that carries a selection or
+/// checks an item before acting needs it: on Windows with its volume and file id ([`ident_of`]:
+/// one open), since a creation time alone can be its predecessor's (NTFS gives an item made
+/// under a name removed less than 15 s before that item's creation time); elsewhere [`ident`].
+pub fn ident_here(path: &Path, m: &std::fs::Metadata) -> Option<Ident> {
+    #[cfg(windows)]
+    {
+        ident_of(path, m)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        ident(m)
     }
 }
 
@@ -553,55 +578,72 @@ pub(crate) mod win_dir {
     /// `Err` when the folder can't be read this way (then `std`'s way says why); `Ok(None)`
     /// when stopped.
     pub(crate) fn read(path: &Path, stop: &AtomicBool) -> Result<Option<Vec<Entry>>, ()> {
+        let (mut out, mut stopped) = (Vec::with_capacity(64), false);
+        each(path, |e| {
+            if stop.load(Relaxed) {
+                stopped = true;
+                return false;
+            }
+            out.push(e);
+            true
+        })
+        .map_err(|_| ())?;
+        Ok((!stopped).then_some(out))
+    }
+
+    /// Hands `path`'s entries to `f` as they're read, each with its volume and file id (false
+    /// from `f` ends the read). `Err(false)` when the folder can't be read this way, before any
+    /// entry (then `std`'s way says why); `Err(true)` when the read failed part way.
+    pub(crate) fn each(path: &Path, mut f: impl FnMut(Entry) -> bool) -> Result<(), bool> {
+        let mut handed = false;
         let dir = std::fs::OpenOptions::new()
             .access_mode(FILE_LIST_DIRECTORY)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(path)
-            .map_err(|_| ())?;
+            .map_err(|_| false)?;
         let h = dir.as_raw_handle();
         // SAFETY: a zeroed BY_HANDLE_FILE_INFORMATION is a valid out-buffer for an open handle.
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe { GetFileInformationByHandle(h, &mut info) } == 0 || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
-            return Err(());
+            return Err(false);
         }
         let volume = u64::from(info.dwVolumeSerialNumber);
         // u64s, so each record's 8-byte fields are aligned as the call writes them.
         let mut buf = vec![0u64; 64 * 1024 / 8];
         let len = buf.len() * 8;
         let fixed = std::mem::offset_of!(FILE_ID_EXTD_DIR_INFO, FileName);
-        let mut out = Vec::with_capacity(64);
         loop {
             // SAFETY: `buf` is writable for `len` bytes.
             if unsafe { GetFileInformationByHandleEx(h, FileIdExtdDirectoryInfo, buf.as_mut_ptr().cast(), len as u32) } == 0 {
                 if unsafe { GetLastError() } == ERROR_NO_MORE_FILES {
                     break;
                 }
-                return Err(());
+                return Err(handed);
             }
             // SAFETY: the call filled `buf`; it's read as bytes, each record bounds-checked.
             let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), len) };
             let mut at = 0;
             loop {
                 if at + fixed > len {
-                    return Err(());
+                    return Err(handed);
                 }
                 // SAFETY: `at + fixed` bytes are in `bytes`; the record is copied out unaligned.
                 let r: FILE_ID_EXTD_DIR_INFO = unsafe { std::ptr::read_unaligned(bytes.as_ptr().add(at).cast()) };
                 let n = r.FileNameLength as usize;
                 if at + fixed + n > len {
-                    return Err(());
+                    return Err(handed);
                 }
                 let wide: Vec<u16> = bytes[at + fixed..at + fixed + n].as_chunks::<2>().0.iter().map(|&c| u16::from_ne_bytes(c)).collect();
                 if wide != [0x2e] && wide != [0x2e, 0x2e] {
                     #[cfg(test)]
                     read_hook::entry(path);
-                    if stop.load(Relaxed) {
+                    handed = true;
+                    if !f(entry(path, OsString::from_wide(&wide), &r, volume)) {
                         #[cfg(test)]
                         read_hook::done(path);
-                        return Ok(None);
+                        return Ok(());
                     }
-                    out.push(entry(path, OsString::from_wide(&wide), &r, volume));
                 }
                 if r.NextEntryOffset == 0 {
                     break;
@@ -611,7 +653,7 @@ pub(crate) mod win_dir {
         }
         #[cfg(test)]
         read_hook::done(path);
-        Ok(Some(out))
+        Ok(())
     }
 
     /// One record as an [`Entry`], as `read_std` would make it (plus the file id).

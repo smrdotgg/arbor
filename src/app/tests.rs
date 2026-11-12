@@ -2272,6 +2272,9 @@ fn opening_a_renamed_row_waits_for_the_read() {
     s.run(Cmd::Into, &mut Tx::default());
     assert_eq!(s.cur().cwd, d, "not the newcomer");
     assert_eq!(s.note.as_deref(), Some(crate::app::UPDATING));
+    // The read the rename asked for may have read the folder before the replacement (then it
+    // rightly finds the renamed folder there): a read asked for now lists the newcomer.
+    s.reload();
     settle_all(&mut s);
     assert!(s.cur().targets().is_empty(), "{:?}", s.cur().target_paths());
 }

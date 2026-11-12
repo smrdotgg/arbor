@@ -1431,3 +1431,40 @@ fn search_selection_matches_a_model_whatever_happens() {
         }
     });
 }
+
+/// Windows: NTFS gives a file made under a name removed moments before (up to 15 s) the old
+/// file's creation time. A search result's identity, and a listing's, come with the volume and
+/// file id, so the newcomer is never taken for the result (or row) it replaced: an action on
+/// that result or row refuses it.
+#[cfg(windows)]
+#[test]
+fn a_newcomer_under_a_results_name_isnt_the_result() {
+    let d = tree("tunnel", &["victim.txt"]);
+    let pool = Pool::new(1);
+    let r = pool.start(Spec { root: d.clone(), query: Arc::new(q("victim")), show_hidden: false, cross_devices: false, max: 10 }, None);
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut all = Vec::new();
+    while Instant::now() < until {
+        let x = r.take();
+        all.extend(x.batch);
+        if x.done {
+            break;
+        }
+    }
+    let result = all.iter().find(|e| e.name == "victim.txt").and_then(|e| e.id).expect("found, with an identity");
+    let listed =
+        crate::fs::list_until(d.clone(), crate::fs::Sort::new(crate::fs::SortKey::Name, false), &std::sync::atomic::AtomicBool::new(false))
+            .and_then(|l| l.result.ok())
+            .and_then(|v| v.into_iter().find(|e| e.name == "victim.txt"))
+            .and_then(|e| e.id)
+            .expect("listed, with an identity");
+    let path = d.join("victim.txt");
+    let born = std::fs::metadata(&path).unwrap().created().unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, "newcomer").unwrap();
+    let now = crate::fs::ident_at(&path).expect("the newcomer's identity");
+    let tunnelled = std::fs::metadata(&path).unwrap().created().unwrap() == born;
+    eprintln!("creation time tunnelled: {tunnelled}");
+    assert_ne!(Some(result), Some(now), "the search result isn't the newcomer");
+    assert_ne!(Some(listed), Some(now), "the listed row isn't the newcomer");
+}
