@@ -15,6 +15,7 @@ mod archive;
 mod band;
 mod batch;
 mod bounded;
+mod coldstart;
 mod columns;
 mod commands;
 mod complete;
@@ -29,6 +30,7 @@ mod folder;
 #[cfg(test)]
 mod frame_bench;
 mod fs;
+mod gpu;
 mod grid;
 mod handler;
 mod incoming;
@@ -86,15 +88,25 @@ fn main() {
     }
     // ARBOR_TIMING / ARBOR_BENCH, read once. Off, Rune gets the plain callbacks and no frame hook.
     let timed = timing::init();
+    // Whether Rune will render offscreen (snapshots, scripts, traces) instead of opening a
+    // window, from the arguments, before `run`: `headless_run()` only answers once `run` has
+    // started one, too late for what follows.
+    let windowed = !rune::is_headless();
     // Windows: `arbor.exe <folder>` with an Arbor already running hands it the folder (a new
     // tab there) and exits before any window.
     #[cfg(windows)]
-    if !timing::benching() && rune::tooling::headless_run().is_none() && incoming::windows::hand_off_args() {
+    if !timing::benching() && windowed && incoming::windows::hand_off_args() {
         return;
     }
     // Both overlap the platform's app launch (about 80 ms on macOS before the window is made):
     // the GPU device and shaders, and the first folder's read.
-    rune::prewarm_gpu();
+    // Windows and Linux (where `prewarm_gpu` does nothing): the window's GPU device and renderer
+    // made on a thread while Rune builds its event loop and window (`gpu.rs`). Headless runs
+    // make no window, so neither.
+    if windowed {
+        rune::prewarm_gpu();
+        gpu::start();
+    }
     app::read_first_folder();
     // Linux: the window's app id (Wayland) and WM_CLASS (X11), matching arbor.desktop.
     rune::set_app_id("arbor");
@@ -108,9 +120,12 @@ fn main() {
     }
     let mut app = window::configure(App::new(spec), window::FIRST);
     window::register(window::FIRST, app.handle());
+    if timed {
+        timing::hold(app.handle());
+    }
     if timing::benching() {
         app = app.open_inactive(); // the bench never takes focus from what the user is doing
-    } else if rune::tooling::headless_run().is_none() {
+    } else if windowed {
         // Folders other apps ask for while Arbor runs (or that launched it): the window
         // focused last opens them.
         incoming::listen();
@@ -122,6 +137,8 @@ fn main() {
     } else {
         app.run()
     }
+    // Whatever `gpu::start` still holds (Rune made no device, or no window ever showed) goes.
+    gpu::release();
     // No window is on screen now: a file operation the last window's close cut short gets its
     // bounded cleanup, and what it left is recorded (`leftovers.rs`).
     leftovers::finish();

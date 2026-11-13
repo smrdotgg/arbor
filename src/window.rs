@@ -98,6 +98,9 @@ fn native(id: u64) -> Option<WindowHandle> {
 }
 
 fn set_native(id: u64, handle: &WindowHandle) {
+    if id == FIRST {
+        crate::timing::window_created();
+    }
     if let Some(e) = windows().iter_mut().find(|e| e.id == id) {
         e.native = Some(handle.clone());
     }
@@ -136,7 +139,12 @@ pub fn configure(app: App<State>, id: u64) -> App<State> {
     // Work the window doesn't need for its first frame waits until that frame is on screen
     // (the sidebar's look at each favorite).
     let shown = app.handle();
-    app.on_ready(move |_| shown.update(|s, _| s.first_frame_shown()))
+    app.on_ready(move |_| {
+        // The GPU devices held for the first window's start-up go, if Rune's device didn't
+        // already release them (`gpu.rs`).
+        crate::gpu::release();
+        shown.update(|s, _| s.first_frame_shown());
+    })
 }
 
 /// A window's close (Rune hides it once this returns): its searches stop, it leaves the

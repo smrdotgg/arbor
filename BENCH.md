@@ -33,6 +33,184 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-13, cold start on the owner's laptop, round 3: the adapter hold (`perf/fast-start` 4dcc24d)
+
+The same laptop (ASUS TUF A15, AMD Radeon integrated + RTX 3070 Laptop, the NVIDIA driving the
+display), CI's Windows artifact of 4dcc24d launched 7 times by a scheduled task in the owner's
+session, process creation → first frame:
+
+| Launch | Total | Before `main` | `setup` at | Adapters listed (`gpu_listed_at`) | GPU ready (`gpu_drew_at`) | Window at | First frame starts | `update` | `encode` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1st (a new exe: Defender scans it) | 732 ms | 19.4 | 32.3 | 371.8 | 663.3 | 674.8 | 692.2 | | |
+| 2nd–7th | 376–420 ms, **median ≈ 411 ms** | 8.6–10.6 | 21–25 | 251–268 (≈ 255) | 328–368 (≈ 330) | 328–376 (≈ 365) | ≈ 383 | ≈ 15 | ≈ 3 |
+
+So: **1,280 ms (alpha.4/.5) → 655 ms (LF checkout + `warm_gpu`) → 411 ms (adapter hold)**.
+Where the 411 ms goes now: before `main` ~10 ms; Arbor's listing of the DX12 adapters (a D3D12
+device on the NVIDIA, the AMD and Microsoft's software adapter) until ~255 ms; Rune's own DX12
+check and pick, now getting those devices back, its device and renderer until ~330 ms; the window
+(created at `setup` + a few ms, waiting on the GPU) ~365 ms; ~18 ms until the first frame starts
+(the first drawable); the frame itself ~18 ms (`update` 15, `encode` 3). The listing (~245 ms)
+is the largest part left; only Rune can avoid it (RUNE-GAPS.md, "Cold start on Windows and
+Linux").
+
+## 2026-11-13, cold start on the owner's laptop, round 2 (`perf/fast-start`)
+
+ASUS TUF A15: AMD Radeon integrated (driver 31.0.12024.2005) + NVIDIA GeForce RTX 3070 Laptop
+GPU (32.0.16.2114), the NVIDIA driving the display; Windows 11 26200. coldstart-probe-2
+(aca448c), process creation → first frame, median of 5 after one untimed launch:
+
+| Build | First launch | Median | Splits (median-ish) |
+| --- | --- | --- | --- |
+| arbor-base (alpha.4's startup: CRLF, FXC at every launch) | 1,646 ms | **1,280 ms** | `setup` at 22, window at ~1,250 |
+| **arbor** (LF checkout + `warm_gpu`) | 991 ms | **655 ms** | `setup` at 22, GPU ready (`gpu_drew`) ~600, window ~605–640, `update` 14–20, `encode` 3 |
+| rune-hello (LF, no warm-up) | 1,046 ms | 670 ms | device starts at ~360, window ~655 |
+
+`gpu_probe` (cold / again):
+
+| Rune's path (`gpu_probe rune`) | Cold | Again |
+| --- | --- | --- |
+| `Gpu::instance` (its DX12 check: a device on each of the 3 adapters, then dropped) | 438 ms | 296 ms |
+| `Gpu::try_new` (the pick lists the adapters again, making those devices again; then the device) | 302 ms | 293 ms |
+| `Renderer::new`, precompiled DXBC | 226 ms | 2.8 ms |
+| `Renderer::new`, WGSL through FXC | 1,019 ms | 933 ms |
+| configure and first present | 9.5 ms | 9.5 ms |
+
+| Plain wgpu (again) | DX12 (FXC) | Vulkan |
+| --- | --- | --- |
+| instance | 14 ms | 156 ms |
+| list adapters (NVIDIA, AMD, Microsoft Basic Render Driver; Vulkan: no software one) | **254 ms** | 9 ms |
+| list again, the first list still held | 2 ms | 5 ms |
+| device: NVIDIA / AMD / software | 51 / 32 / 1 ms | 50 / 20 ms |
+| renderer: DXBC / WGSL compiled | 2–3 / 590–650 ms | — / 10.5 ms (230 cold) |
+
+What it says: the line-ending fix took ~620 ms off (FXC 933 ms → DXBC 3 ms, cold 226 ms while
+the driver builds its own copy). What's left is Rune listing the adapters twice: listing makes a
+D3D12 device on every adapter (254 ms), Rune's check drops them, and its pick lists again
+(`try_new` 293 ms against 51 ms for the device). A D3D12 device is a singleton per adapter and
+process ("list again, the first list still held": 2 ms), so Arbor now lists once itself and holds
+the list until the first frame (`src/gpu.rs`): Rune's listings get the live devices back. On the
+runner (`gpu_probe rune-held`, three alternations) Rune's instance step went 22 → 1 ms and
+`try_new` 6.5 → 2 ms after a 13 ms listing; on this laptop it took 655 → 411 ms (round 3,
+above). Vulkan wouldn't help: its instance alone is
+156 ms here.
+
+## 2026-11-12, cold start on Windows: Rune's precompiled shader was never used (`perf/fast-start`)
+
+**The owner's laptop** (AMD Radeon integrated + NVIDIA GeForce RTX 3070 Laptop GPU, the NVIDIA
+driving the primary display; coldstart-probe-1, a620e33, v0.1.0-alpha.4's startup), process
+creation → first frame, medians after the first launch: win32-hello 28.3 ms, rune-hello
+1,104 ms, **Arbor 1,090 ms**. Arbor's splits: before `main` 8.4 ms, `init` at 6.4 ms (0.4 ms
+long), `setup` at 17.6 ms, **native window at 1,061.6 ms**, first frame `update` 13.2 ms,
+`encode` 3.9 ms. Rune drew with DX12 on the NVIDIA. So ~1,040 ms is Rune's window, adapter,
+device, renderer and surface.
+
+**Why, mostly:** every Windows build so far checked Rune out with CRLF line endings (Git for
+Windows' and the GitHub runner's `core.autocrlf true`; Rune has no `.gitattributes`). Rune loads
+its precompiled DXBC uber shader only when the WGSL it embeds hashes as committed, so it never
+did: every launch compiled the shader with FXC (the released arbor.exe embeds the WGSL with
+CRLF). Fixed: CI checks out with `core.autocrlf false`, and `build.rs` refuses a Windows build
+from a CRLF Rune checkout (RUNE-GAPS.md).
+
+`examples/gpu_probe.rs` times Rune's GPU path phase by phase (coldstart-probe-2). On GitHub's
+Windows runner (WARP, software; cold run, then again):
+
+| Phase (`gpu_probe rune`) | Cold | Again |
+| --- | --- | --- |
+| `Gpu::instance` (its "is there a DX12 adapter" probe: a device on each adapter) | 119.6 ms | 20.3 ms |
+| surface on a hidden window | 0.05 ms | 0.04 ms |
+| `Gpu::try_new` (pick and device) | 6.6 ms | 5.5 ms |
+| **`Renderer::new`, precompiled DXBC** | **47.6 ms** | **14.5 ms** |
+| **`Renderer::new`, WGSL through FXC** (what every build so far did) | **608.7 ms** | **583.1 ms** |
+| configure and first present | 6.8 ms | 6.8 ms |
+
+Plain wgpu DX12 (FXC): instance 7 ms, listing the adapters 12–14 ms (0.6–0.9 ms again), device
+1 ms, renderer 15–22 ms with the DXBC and 585–589 ms compiling. Vulkan: no adapter on the runner.
+
+Arbor, process creation → first frame, 15 alternating launches on the runner:
+
+| Build | Total | Before `main` | `setup` at | GPU ready (`gpu_drew_at`) | Window at | `update` | `encode` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| coldstart-probe-1 (alpha.4's startup) | 686.9 ms | 10.1 | 25.2 | | 652.0 | 11.3 | 12.8 |
+| **aca448c** (LF checkout + `warm_gpu`) | **110.4 ms** | 10.2 | 31.9 | 55–58 | 73.3 | 13.0 | 13.5 |
+
+rune-hello (LF, no warm-up): 329 ms → its device starts at 94 ms, window 115 ms, first draw
+130 ms. On the runner what's left for Arbor is: before `main` 10 ms, Rune's event loop and fonts
+to `setup` 32 ms, the warm-up thread's GPU (55 ms on WARP) and the window (73 ms), then a first
+frame whose `update` is 13 ms on Windows against 3 ms on Linux for the same folder size (Rune's
+DirectWrite text path on its first use, most likely) and whose `encode` is software rasterising.
+The laptop's breakdown comes from the owner's coldstart-probe-2 run.
+
+## 2026-11-11, cold start on Windows and Linux (`perf/fast-start`)
+
+The budget is now under 30 ms on Windows and Linux; the owner's v0.1.0-alpha.4 takes about a
+second on a Windows gaming laptop. **Not met on either platform yet**; most of what's left is in
+Rune (RUNE-GAPS.md, "Cold start on Windows and Linux").
+
+New measurement: `ARBOR_TIMING_FILE=<path>` (a release build on Windows has no console) with
+`ARBOR_EXIT_AFTER_FIRST_FRAME=1`, a total from the process's creation (`GetProcessTimes`, so the
+loader counts) and finer splits; two probes to compare against, `examples/win32_hello.rs` (bare
+Win32 + GDI, the floor) and `examples/rune_hello.rs` (one Rune text view, Arbor's features and
+`dist` profile). The pre-release `coldstart-probe-1` has all three, MSVC `dist` builds of
+a620e33 (v0.1.0-alpha.4's startup); `scripts/coldstart-probe.ps1` runs them (for the owner's
+laptop: `irm https://raw.githubusercontent.com/smrdotgg/arbor/coldstart-probe-1/scripts/coldstart-probe.ps1 | iex`),
+and `scripts/coldstart-ab.ps1` compares builds. The "Cold start (Windows)" workflow runs both on
+every push to a `perf/` branch.
+
+**GitHub's Windows runner** (Hyper-V VM, no GPU: DX12 through WARP, software, so GPU work is
+grossly inflated; CPU-side costs are real), process creation → first frame submitted, median of
+the launches after the first (the first of a new exe is Windows Defender's scan, +200 to +1000 ms):
+
+| Probe (a620e33) | Run 1 (10 launches) | Run 2 (5) |
+| --- | --- | --- |
+| win32-hello | 32.5 ms | 32.7 ms |
+| rune-hello | 889 ms | 886 ms |
+| arbor | 678 ms | 683 ms |
+
+Where Arbor's time goes there (a620e33, medians): process creation → `main` 11.7 ms (loading the
+24 MB exe and its 32 imported DLLs; win32-hello imports 12); `main` → Rune runs `init` 3.8 ms
+(event loop); `init` 0.4 ms; → Rune runs `setup` 29 ms (Rune's font discovery, about 25 ms);
+→ native window created ~610 ms (window, GPU adapter probing, device, renderer, surface: WARP);
+first frame `update` 11 ms and `encode` 12 ms (software raster). Rune picked "Microsoft Basic
+Render Driver" (lowest power).
+
+A/B in one job (a slower VM: win32-hello 46 ms), 15 alternating launches, process → frame:
+
+| Build | Total | Before `main` | `setup` at | Window at |
+| --- | --- | --- | --- | --- |
+| a620e33 (alpha.4's startup) | 840.7 ms | 11.7 | 46.3 | 800.6 |
+| `rune::warm_gpu` first in `main` | **785.5 ms** | 12.1 | 58.0 | 746.7 |
+| the same, 13 system DLLs `/DELAYLOAD`ed | 785.7 ms | 8.3 | 60.6 | 747.5 |
+
+A third job on a faster VM (a4cb912 against a620e33, 15 each): 466.1 → **441.1 ms** (before
+`main` 8.3 ms both, `setup` at 17.7 → 22.2, window at 438.8 → 414.9). So `warm_gpu` saves 25–55 ms
+on the runner, depending on the VM.
+
+`warm_gpu` makes the GPU device and renderer on a thread from the top of `main`, so they overlap
+the event loop, fonts and window (macOS's `prewarm_gpu` does nothing elsewhere). Delay-loading
+moves 3.8 ms from before `main` into the startup that needs the same DLLs anyway: not kept.
+
+**tabot-dev, Linux** (Xeon 8375C, Xvfb with lavapipe: software rendering again; release builds,
+21 alternating launches in a 2-entry folder, spawn → first frame):
+
+| Build | Total | `init` at | `setup` at | Window at | First `update` |
+| --- | --- | --- | --- | --- | --- |
+| before | 127 ms | 25.5 | 34.2 | 121.4 | 3.1 ms |
+| `warm_gpu` | **101 ms** | 39.1 | 48.1 | 95.0 | 3.3 ms |
+| rune-hello (no warm-up) | 129 ms | | | | |
+
+On Linux the warm-up thread slows Rune's event loop by ~14 ms (the Vulkan loader `dlopen`s every
+ICD while winit `dlopen`s Xlib and XKB: the dynamic loader's lock, most likely), and still wins
+26 ms. Before the window: X11 event loop 25 ms, Rune's font discovery (directory walk, `fc-list`,
+mapping fallback fonts) ~9 ms. A 10,000-entry folder adds ~7 ms to the first `update` (10.5 vs
+3.1 ms), Rune copying every row key (RUNE-GAPS.md).
+
+What a real GPU would see: lavapipe and WARP make the device, pipelines and frames slow; on real
+hardware the device takes tens of ms, now hidden behind the 30–60 ms of CPU-side startup above,
+so Linux would land around 45–60 ms and Windows with one GPU around 50–70 ms (estimates, not
+measured). A hybrid laptop pays Rune probing both GPUs with a D3D12 device (twice) before the
+window: hundreds of ms, the likely cause of the owner's second. Waiting on the owner's
+`coldstart-probe.ps1` numbers.
+
 ## 2026-11-11, `feature/archives` (Compress and Extract Here)
 
 Compress and Extract Here of a 1 GB folder of mixed files (21,620 files: 300 MB of Rust source

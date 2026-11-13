@@ -16,6 +16,122 @@ Newest first.
 
 ---
 
+## The precompiled DXBC uber shader is matched by the WGSL's bytes, so line endings turn it off, silently
+
+- **Feature:** cold start on Windows (NORTHSTAR: under 30 ms).
+- **What Rune is missing:** a check that survives an ordinary Windows checkout. Rune loads its
+  precompiled uber shader (`uber.vs.dxbc`, `uber.fs.dxbc`) only when the blake3 of the WGSL it
+  embeds (`clip.wgsl` + `shader.wgsl`, `include_str!`) equals `UBER_DXBC_WGSL_BLAKE3`. Rune has
+  no `.gitattributes`, and Git for Windows' default (`core.autocrlf true`, also GitHub's Windows
+  runner) checks the WGSL out with CRLF line endings: the hash differs, and `dxbc::uber` returns
+  `None` without a word, so every launch compiles the shader with FXC (Rune's own note: "about
+  250 ms on a desktop CPU"). Every Windows Arbor so far (v0.1.0-alpha.1 to .4, coldstart-probe-1)
+  was built that way: the released arbor.exe embeds the WGSL with CRLF.
+- **What we did instead:** CI sets `core.autocrlf false` before checking out Arbor and Rune
+  (`.github/workflows/`), and `build.rs` refuses to build for Windows from a Rune checkout whose
+  WGSL has a CR in it, saying how to fix the checkout.
+- **What users lose:** without the workaround, the FXC compile at every launch: on GitHub's
+  Windows runner `Renderer::new` takes 585–609 ms compiling against 15–48 ms with the DXBC, and
+  Arbor's cold start went from 687 to 110 ms with the fix (and `warm_gpu`); the owner's laptop
+  measured 1,090 ms before (BENCH.md, 2026-11-12).
+- **Suggested Rune change:** a `.gitattributes` with `*.wgsl text eol=lf` (and the `.dxbc` and
+  `.metallib` files `binary`); hash the WGSL with line endings normalized; and say so under
+  `RUNE_GPU_LOG` whenever the precompiled shader isn't used, and why (hash, ABI, refused).
+
+## Cold start on Windows and Linux: most of the 30 ms goes inside Rune, before the first frame
+
+- **Feature:** cold start to interactive window, under 30 ms on Windows and Linux (NORTHSTAR).
+  The owner's Windows gaming laptop (likely an integrated plus a discrete GPU) takes "damn near a
+  second" from the Start menu.
+- **What Rune is missing:** a launch whose fixed costs fit in 30 ms. Measured with
+  `ARBOR_TIMING_FILE` splits (`src/timing.rs`) and the probes `examples/rune_hello.rs` (one text
+  view, Arbor's features and profile) and `examples/win32_hello.rs` (bare Win32 + GDI), BENCH.md
+  2026-11-11 "Cold start on Windows and Linux". **The owner's laptop** (AMD Radeon integrated +
+  NVIDIA GeForce RTX 3070 Laptop GPU, the NVIDIA driving the primary display, coldstart-probe-1):
+  win32-hello 28 ms, rune-hello 1,104 ms, Arbor 1,090 ms (medians after the first launch);
+  Arbor's splits: process → `main` 8.4 ms, `init` at 6.4 ms (0.4 ms long), `setup` at 17.6 ms,
+  **native window at 1,061.6 ms**, first frame `update` 13 ms and `encode` 4 ms. So about
+  1,040 ms is Rune making the window, the adapter, the device, the renderer and the surface;
+  Arbor's own work is under 15 ms. Rune drew with DX12 on the NVIDIA ("the GPU driving the
+  primary display"). On GitHub's Windows runner (no GPU, WARP), process
+  creation → first frame is 33 ms for the bare Win32 window and 680 ms for Arbor (rune-hello
+  890 ms); on tabot-dev under Xvfb (lavapipe) 127 ms for Arbor. Four parts are Rune's:
+  1. **Windows: every GPU adapter is probed with a D3D12 device, twice, before the real one.**
+     `Gpu::wgpu_instance` asks whether any DX12 adapter exists (`enumerate_adapters(DX12)`), and
+     on a window `gpu::pick` enumerates them all again to find the one driving the primary
+     display; wgpu-hal's DX12 `Adapter::expose` creates a `D3D12CreateDevice` on each adapter it
+     lists. On a hybrid laptop that wakes the sleeping discrete GPU and loads its driver (NVIDIA's
+     D3D12 driver alone is a few tens of MB and ~37 threads, pick.rs's own note) even though the
+     panel is driven by the integrated GPU, which is the one picked: typically hundreds of ms.
+     Rune's own comment puts the probe at "over 100 ms" on a desktop. On the runner, Rune's
+     `setup` → native window (window, adapter, device, renderer, surface) is ~610 ms.
+  2. **Font discovery on the UI thread before the window** (`TextSystem::new`, inside
+     `runtime_for`): walks the system font directories with a `stat` per file, maps up to 16 CJK
+     font files and the symbol and emoji fonts (Segoe UI Symbol and Emoji on Windows), and on
+     Linux runs `fc-list` as a subprocess. Windows runner: `init` → `setup` 25 ms (Arbor's `init`
+     is 0.4 ms of it); Linux: ~9 ms. Nothing in `AppSpec` turns it off (`fonts` only replaces
+     Inter).
+  3. **X11 event loop: 25 ms** from `main` to `init` on tabot-dev (Xlib, XKB and the compose
+     tables, loaded with `dlopen`). Windows: 4 ms.
+  4. **A new row set in `virtual_rows` copies and dedups every key** (`runtime/commit/measure.rs`:
+     `into_owned()` per row, then `rename_duplicates`), so the first frame of a 10,000-entry
+     folder costs ~7 ms more than an empty one on tabot-dev (`update_ms` 10.5 vs 3.1), and every
+     navigation into a big folder pays it again. (The likely cause; not profiled, no `perf` here.)
+- **What we did instead:** `rune::warm_gpu` from the top of `main` on Windows and Linux
+  (`src/gpu.rs`), which makes the device and renderer on a thread while the event loop, fonts
+  and window are made (macOS's `prewarm_gpu` does nothing elsewhere): Linux 127 → 101 ms.
+  Windows builds check Rune out with LF line endings (the entry above): together, the owner's
+  laptop went **1,280 → 655 ms** (round 2, BENCH.md 2026-11-13). And on Windows Arbor lists the
+  DX12 adapters itself first and holds the list until the first frame (`src/gpu.rs`): a D3D12
+  device is a singleton per adapter and process, so Rune's two listings get the live devices
+  back (runner: Rune's instance step 22 → 1 ms, `try_new` 6.5 → 2 ms); on the laptop **655 →
+  411 ms** (median of 6 launches after a first at 732 ms, which Defender's scan of a new exe
+  inflates; round 3, BENCH.md). Its splits: adapters listed ≈ 255 ms, GPU ready ≈ 330, window
+  ≈ 365, first frame starts ≈ 383, `update` 15 ms, `encode` 3 ms. The hold is in release builds
+  only (a debug build's D3D12 debug layer, enabled after devices exist, would remove them) and
+  goes once Rune's device exists.
+- **What users lose:** on the owner's laptop (AMD Radeon integrated + RTX 3070 Laptop, the
+  NVIDIA driving the display), round 2's 655 ms is: before `main` 9 ms, Rune's event loop and
+  fonts to `setup` 22 ms, then the warm-up thread's GPU work ~600 ms (`Gpu::instance` 296 ms: the
+  DX12 check lists the adapters, a D3D12 device on each of NVIDIA, AMD and Microsoft's software
+  one, 254 ms of it, then drops them; `try_new` 293 ms: the pick lists them again, making them
+  again, then the 51 ms device; the renderer 3 ms with the DXBC), then the first frame
+  (`update` 14–20 ms, `encode` 3 ms). The window stays cloaked (invisible) all that time.
+- **Suggested Rune changes, ranked by what they'd save on that laptop:**
+  1. **List the adapters once, and hold the devices until the device is made** (what Arbor's
+     `gpu.rs` does from outside: measured 655 → 411 ms on the laptop). Better still,
+  2. **choose the adapter without making devices**: DXGI alone gives each adapter's LUID and
+     which one drives the primary display (or `IDXGIFactory6::EnumAdapterByGpuPreference`),
+     then expose only that adapter to wgpu (wgpu-hal keeps `dx12::Adapter::expose` private, so
+     this needs a small wgpu-hal API, or `request_adapter` taking a LUID), and drop the separate
+     "is there a DX12 adapter" check (fall back to Vulkan if DX12 fails on the chosen adapter).
+     That skips the AMD and software devices and their drivers' start: part of the ~245 ms
+     listing that is now the largest piece of the 411 ms, which can't be split from outside
+     (estimate 80–150 ms).
+  3. **Show the window before the GPU is ready**: today it's created early but cloaked until
+     the first frame, and the UI thread blocks in `Gpu::for_surface`. Painting the window's
+     background colour without the GPU (GDI `FillRect` in `WM_PAINT`, or the class brush) and
+     uncloaking at creation would put a window on screen at ~25–35 ms here (`setup` is at
+     22 ms), the GPU-drawn first frame following. Perceived start: ~30–60 ms.
+  4. **Make the precompiled shader robust** (the entry above: normalized hash,
+     `.gitattributes`, a log line when it isn't used): 600–900 ms whenever a checkout breaks it.
+  5. Load system fallback fonts on a thread or at the first glyph the app's fonts lack (Windows
+     runner: ~25 ms before `setup`; Linux ~9 ms, including `fc-list`).
+  6. The first frame's `update`: 14–20 ms on the laptop and 13 ms on the runner against 3 ms on
+     Linux for a similar folder (Rune's DirectWrite text path on first use, most likely; not
+     profiled). And `virtual_rows` copying every key into an owned `String` for a new row set
+     (~7 ms per 10,000 rows on tabot-dev).
+  7. Make only the pipelines the first frame needs before it; a driver's own shader cache
+     already makes DXBC → GPU code cheap after the first launch (226 → 3 ms here). Whether
+     Arbor may use wgpu's `PipelineCache` (an app-owned file, Vulkan only) is a question for
+     the owner under NORTHSTAR's no-caching rule (DECISIONS.md).
+
+  With 1–2 and 5–6, this laptop would land around 150–250 ms to a GPU-drawn first frame (the
+  NVIDIA device and driver start, ~50–150 ms, can't go). **Under 30 ms to a GPU-drawn first
+  frame on Windows isn't reachable with D3D12 device creation on the critical path**; it needs
+  the window-first approach (3), with the first GPU frame following, or a much cheaper first
+  device (D3D11 on the default adapter, as Flutter's ANGLE does).
+
 ## macOS Quit ends the process inside the windows' close callbacks
 
 - **Feature:** quitting while a file operation runs (`feature/new-window`): the operation is
@@ -562,7 +678,10 @@ Newest first.
   (or `Cx::clipboard_kinds`), answered from the platform's type list without reading data, and
   `None` where it can't be known cheaply (the web).
 
-## Cold start: most of the 100 ms budget goes before the app's code runs
+## Cold start on macOS: most of the 100 ms budget goes before the app's code runs
+
+(The macOS budget is now "within 25 ms of a bare native window", met: BENCH.md 2026-11-09.
+Windows and Linux: the entry "Cold start on Windows and Linux" above.)
 
 - **Feature:** cold start to interactive window, budget 100 ms (NORTHSTAR speed budgets).
 - **What Rune is missing:** a launch fast enough to leave the app room, and a way to see where

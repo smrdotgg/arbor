@@ -59,7 +59,8 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `incoming/` | Folders other apps send (`mac.rs` Apple events, `linux.rs` D-Bus, `windows.rs` a pipe) |
 | UI | `view/` | Every element: root and status bar (`mod.rs`), `sidebar`, `pane` (path bar, tabs, view switch), `list` (rows, item presses and drags, the selection rectangle), `grid` (the icon and tiles views, type icons), `columns` (the column view), `panels`, `overlays`, `batch` |
 | Shared | `bounded.rs`, `persist.rs`, `mounts.rs`, `dirfd.rs`, `ffi.rs`, `fs.rs` | See [Patterns](#patterns-to-reuse); folder reads, sorting, formatting |
-| Tooling | `timing.rs` | Opt-in speed logs (`ARBOR_TIMING`, the bench) |
+| | `gpu.rs` | The window's GPU made early: Rune's warm-up, and on Windows the held adapter list |
+| Tooling | `timing.rs`, `coldstart.rs` | Opt-in speed logs (`ARBOR_TIMING`, `ARBOR_TIMING_FILE`, the bench); the cold-start probes' clock and line, shared with `examples/win32_hello.rs` and `examples/rune_hello.rs`; `examples/gpu_probe.rs` times Rune's GPU setup phase by phase |
 | Tests only | `a11y_tests.rs`, `frame_bench.rs`, `packaging_tests.rs`, `prop.rs` | Accessibility tree, per-key cost, install scripts, seeded property tests (a PRNG and a runner) |
 
 ## Threads
@@ -70,6 +71,12 @@ Nothing runs in the background unless the user did something, and nothing polls.
   `config.toml`, `sidebar.toml`, `columns.toml`, then the first folder. A later window reads nothing but its
   folder (`State::new_window`). The first window waits at most
   `FIRST_PAINT_WAIT` (8 ms) for it, then lands it in `poll`.
+- **GPU warm-up** (`gpu.rs`, Windows and Linux): started first thing in `main`, Rune's
+  `rune-gpu-warm` (`rune::warm_gpu`) makes the window's GPU device and renderer while Rune builds
+  the event loop and window, which take them. On Windows (release builds) `arbor-gpu` first
+  lists the DX12 adapters and holds them until Rune's device exists (else the first frame, else
+  quitting), so Rune's own listings reuse their D3D12 devices; `arbor-gpu-drop` drops them.
+  macOS does the same through `rune::prewarm_gpu`. Headless runs start none of it.
 - **`rune::Latest` workers**: Rune's shared pool (≤ 4 threads) runs every latest-wins request:
   folder listings (`Folder::loader`, and each column's of the column view), settings reload, typed-path checks, completion, Get
   Info's metadata, Open With's list, batch rename's reads and plans, search rechecks, volume

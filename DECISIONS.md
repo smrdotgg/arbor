@@ -9,6 +9,69 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-13 · Windows: Arbor lists the DX12 adapters itself and holds them until the first
+  frame (`src/gpu.rs`; Review).** wgpu's DX12 backend makes a D3D12 device on every adapter to
+  list it, and Rune lists twice (its "is there a DX12 adapter" check drops the list, then the
+  pick lists again: about 290 ms of `try_new` on the owner's laptop against 51 ms for the device
+  itself). A D3D12 device is a singleton per adapter and process, so while Arbor holds the first
+  list, Rune's listings get the live devices back: on the runner Rune's instance step went 22 →
+  1 ms and `try_new` 6.5 → 2 ms (`gpu_probe rune-held`); on the owner's laptop 655 → 411 ms
+  (BENCH.md, round 3). The held devices (one per adapter, the integrated GPU's and Microsoft's
+  software one too) go as soon as Rune's device exists, else at the first frame or at quit; a
+  listing that lands after a release drops its adapters; release builds only (the review of
+  4dcc24d: a debug build's D3D12 debug layer would remove them). Risk: a driver that doesn't
+  return the existing device would only make the listing cost what it did. Undo: make
+  `gpu::start` call `rune::warm_gpu` alone.
+  - **Headless runs** (snapshots, scripts, traces) are decided from the arguments before `run`
+    (`rune::is_headless`): no GPU warm-up, adapter hold, prewarm, hand-off or listeners. Before,
+    `headless_run()` was asked before `run` had set it, so they all started anyway.
+  - **Not done:** showing the window before the GPU is ready. Rune cloaks the new window until
+    its first frame (DWM would show it white) and offers no hook before the GPU is made;
+    uncloaking it from another thread would show white for the whole wait. A Rune change
+    (RUNE-GAPS.md).
+  - **Rebased onto main** (37eec29) as one commit plus this one; the probe releases' commits
+    stay reachable through their tags, and the release-publishing steps and round 1's script
+    are gone from the branch (kept at the tags).
+
+- **2026-11-12 · Windows builds check Rune out with LF line endings; `build.rs` refuses CRLF
+  (Review: the build guard).** Every Windows Arbor so far embedded Rune's WGSL with CRLF (the
+  runner's `core.autocrlf true`), so Rune never loaded its precompiled DXBC uber shader and FXC
+  compiled it at every launch: on the runner 687 → 110 ms with the fix and `warm_gpu`. CI sets
+  `core.autocrlf false` before checkout; `build.rs` panics for a Windows target when Rune's
+  `shader.wgsl` or `clip.wgsl` contains a CR, with the commands that fix the checkout (a local
+  Windows checkout made with Git for Windows' default hits it once). Undo: drop the CI step and
+  `refuse_crlf_shaders`.
+  - **Not done:** an environment-variable workaround. Rune makes its wgpu instance without
+    reading wgpu's environment (`WGPU_BACKEND`, `WGPU_DX12_COMPILER` have no effect); the knobs it
+    reads choose the adapter (`WGPU_POWER_PREF`, `WGPU_ADAPTER_NAME`), and on the owner's laptop
+    the NVIDIA drives the display, so the integrated GPU would present across adapters (Rune's
+    notes: 50–160 ms per swapchain and more memory) and still probe every adapter.
+  - **Not done:** shipping DXC (`dxcompiler.dll`). Its source is NCSA, but Microsoft's binary kit
+    carries Microsoft's license terms beside it without saying which file each covers; not
+    accepted on the owner's behalf. With the DXBC loading, Rune compiles nothing at launch on
+    DX12 anyway. `gpu_probe dx12-dxc` runs if a `dxcompiler.dll` is put beside it.
+  - **Question for the owner:** a GPU driver's own shader cache (on disk, the driver's) is like
+    the OS thumbnail cache, outside Arbor. wgpu's `PipelineCache` (Vulkan only) would be a file
+    Arbor writes and reads: a cache under NORTHSTAR's rule? Not used; Rune doesn't use it either.
+  - **coldstart-probe-2** (pre-release, aca448c): gpu_probe, this round's Arbor, round 1's Arbor
+    as `arbor-base.exe`, rune-hello and win32-hello, with `scripts/coldstart-probe-2.ps1`. Not a
+    release of Arbor; delete it and its tag when done.
+
+- **2026-11-11 · Cold start on Windows and Linux: what Arbor did, and what's left for Rune
+  (`perf/fast-start`; Review: the probe release).**
+  - **`rune::warm_gpu` first thing in `main` on Windows and Linux**: the window's GPU device and
+    renderer made on Rune's warm-up thread while the event loop, fonts and window are made
+    (Windows runner 841 → 786 and 466 → 441 ms on two VMs, Linux under Xvfb 127 → 101 ms; BENCH.md). Arbor gains `wgpu`
+    as a direct dependency on those platforms, only for `wgpu::Features::empty()` (the same crate
+    Rune builds; no new crate in the lock file). Undo: remove the call and the dependency.
+  - **The pre-release `coldstart-probe-1`** (MSVC builds of a620e33 by the "Cold start
+    (Windows)" workflow: win32-hello, rune-hello, Arbor with `ARBOR_TIMING_FILE`) and
+    `scripts/coldstart-probe.ps1` (kept at the tag) for the owner's laptop. Not a release of
+    Arbor; delete the release and the tag when done. The publishing steps are gone from the
+    workflow.
+  - **Not done:** delaying the system DLLs (`/DELAYLOAD`), measured as no gain; not waiting for
+    the first folder (8 ms at most, unchanged); everything in the GPU adapter choice and font
+    discovery, which is Rune's (RUNE-GAPS.md, "Cold start on Windows and Linux").
 - **2026-11-12 · columns-status merged with a known +11% at 500k entries (Review).** The final
   review found no wrong-target issues; at 500,000 entries a one-pane listing landing is 47.1 ms
   vs main's 42.5 ms (both far over the 8 ms frame budget, a pre-existing large-folder cost), while

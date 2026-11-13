@@ -19,14 +19,27 @@ else
   run() { ssh "$HOST" "$1"; }; R="$HOST:"
 fi
 
+# Rune's files exactly as committed (LF), whatever the staging machine's Git does with line
+# endings: on Windows Rune loads its precompiled shader only while the WGSL it embeds hashes as
+# committed (build.rs). An existing clone is reset to the committed bytes, since a checkout
+# alone keeps files Git thinks unchanged.
 run "set -e
   mkdir -p ~/arbor-deps && cd ~/arbor-deps
-  [ -d rune ] || git clone -q https://github.com/anomalyco/rune
-  cd rune && git fetch -q origin && git checkout -q $REV && git log -1 --format='rune %h %cd' >&2"
+  [ -d rune ] || git clone -q -c core.autocrlf=false https://github.com/anomalyco/rune
+  cd rune && git config core.autocrlf false && git config core.eol lf
+  git fetch -q origin && git checkout -q $REV
+  git rm -rq --cached . && git reset -q --hard
+  git log -1 --format='rune %h %cd' >&2"
 sha=$(run "git -C ~/arbor-deps/rune rev-parse HEAD") && echo "$sha" > RUNE_REV
 
 mkdir -p vendor # a fresh clone has none, and rsync won't make two levels
 rsync -az --delete --exclude .git --exclude demo "${R}arbor-deps/rune/" vendor/rune/
+# The same check build.rs makes on Windows, here for every platform's vendored copy.
+if crlf=$(grep -rlI --include='*.wgsl' $'\r' vendor/rune); then
+  echo "vendor/rune has WGSL with CRLF line endings (Rune would compile its shader at every launch on Windows):" >&2
+  echo "$crlf" >&2
+  exit 1
+fi
 # Vendor in a copy without .cargo/, so cargo reads crates.io rather than vendor/crates. The
 # exclude also shields the staging side from --delete, so remove a stale offline config there
 # (only that file, only in the staging copy) before cargo runs.

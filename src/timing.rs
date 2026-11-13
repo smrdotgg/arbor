@@ -90,18 +90,51 @@
 //! is called rather than at an OS event. The window opens without taking focus and ignores real
 //! keys, so typing in another app while it runs can't reach it (and its ⌘⌫ can't trash anything).
 //!
-//! Off, nothing here runs: `main` reads the two variables once and, unless one is set, hands
+//! `ARBOR_TIMING_FILE=<path>` (implies timing) appends the lines to that file instead of
+//! stderr, for a release build on Windows, which has no console; at the first frame it also
+//! appends `arbor <ms> from=process|main epoch_us=<µs>`, the cold-start probes' line
+//! (`coldstart.rs`: on Windows from the process's creation, so it counts the loader too).
+//! `ARBOR_EXIT_AFTER_FIRST_FRAME=1` (read only when timing is on) quits right after that frame.
+//! The `first-frame` line splits the launch: `before_main_ms` (Windows: process creation to
+//! `main`), `init_at_ms` (`State::new` starts: Rune's event loop is up), `setup_at_ms` (Rune
+//! runs `setup`, before the native window), `window_at_ms` (the native window exists,
+//! `App::on_window`), `frame_start_ms` (the first frame starts: GPU device, surface and
+//! drawable ready), then `update_ms` and `encode_ms` up to `main_ms` (submitted), all but the
+//! first from the top of `main`; and Rune's GPU events (`rune::on_gpu`, registered only when
+//! timing is on): `gpu_listed_at_ms` (Windows: Arbor has listed the DX12 adapters, `gpu.rs`),
+//! `gpu_starting_at_ms` (it starts making a device) and `gpu_drew_at_ms` (the
+//! device first drew: with `warm_gpu`, its warm-up pass, so the device and renderer are ready).
+//!
+//! Off, nothing here runs: `main` reads the variables once and, unless one is set, hands
 //! Rune the plain callbacks and registers no frame hook. No flag is checked per frame or per key.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use rune::{FrameEncoded, FrameOutcome, Key, KeyEvent, Mods, Tx};
+use rune::{AppHandle, FrameEncoded, FrameOutcome, Key, KeyEvent, Mods, Tx};
 
 use crate::app::{Nav, State};
+use crate::coldstart;
 use crate::commands::Cmd;
+
+/// `ARBOR_TIMING_FILE`: the file the lines are appended to instead of stderr (a release build
+/// on Windows has no console).
+static FILE: OnceLock<OsString> = OnceLock::new();
+
+/// One line of the log, to `ARBOR_TIMING_FILE` or stderr.
+fn emit(line: &str) {
+    match FILE.get() {
+        Some(path) => coldstart::append(path, line),
+        None => eprintln!("{line}"),
+    }
+}
+
+macro_rules! say {
+    ($($t:tt)*) => { emit(&format!($($t)*)) };
+}
 
 /// Runs `cmd` as its key would. True when it could run.
 fn run(s: &mut State, cmd: Cmd, tx: &mut Tx) -> bool {
@@ -114,6 +147,13 @@ fn run(s: &mut State, cmd: Cmd, tx: &mut Tx) -> bool {
 
 /// When `main` started, on both clocks.
 static MAIN: OnceLock<(Instant, SystemTime)> = OnceLock::new();
+/// How long the process had existed when `main` started (Windows: the loader, DLL imports and
+/// static initialisers before it), where the OS says.
+static BEFORE_MAIN_MS: OnceLock<Option<f64>> = OnceLock::new();
+/// Rune's GPU events (`rune::on_gpu`), the first of each: it starts making a device, and a
+/// device first draws (with `warm_gpu`, its warm-up pass: the device and renderer are ready).
+static GPU_STARTING: OnceLock<Instant> = OnceLock::new();
+static GPU_DREW: OnceLock<Instant> = OnceLock::new();
 /// Wakes the window between bench steps.
 static WAKER: OnceLock<rune::Waker> = OnceLock::new();
 
@@ -188,6 +228,13 @@ thread_local! {
     static INIT_MS: Cell<f64> = const { Cell::new(0.0) };
     /// When `State::new` started, from the top of `main` (Rune's event loop setup before it).
     static INIT_AT_MS: Cell<f64> = const { Cell::new(0.0) };
+    /// When Rune ran the first window's `setup` (before the native window), and when the native
+    /// window existed (`App::on_window`), from the top of `main`.
+    static SETUP_AT_MS: Cell<f64> = const { Cell::new(f64::NAN) };
+    static WINDOW_AT_MS: Cell<f64> = const { Cell::new(f64::NAN) };
+    /// `ARBOR_EXIT_AFTER_FIRST_FRAME`: quit once the first frame is drawn, through this handle.
+    static EXIT: RefCell<Option<AppHandle<State>>> = const { RefCell::new(None) };
+    static EXIT_ASKED: Cell<bool> = const { Cell::new(false) };
     /// Bench steps left, and the step counter.
     static BENCH: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     /// The last preview bench step waits for its preview to land.
@@ -224,10 +271,23 @@ pub fn benching() -> bool {
 pub fn init() -> bool {
     let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty() && v != "0");
     let rounds = std::env::var("ARBOR_BENCH").ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
-    if !set("ARBOR_TIMING") && rounds == 0 {
+    let file = std::env::var_os("ARBOR_TIMING_FILE").filter(|v| !v.is_empty());
+    if !set("ARBOR_TIMING") && rounds == 0 && file.is_none() {
         return false;
     }
     MAIN.get_or_init(|| (Instant::now(), SystemTime::now()));
+    BEFORE_MAIN_MS.get_or_init(coldstart::since_process_created);
+    rune::on_gpu(|event| {
+        let slot = match event {
+            rune::GpuEvent::Starting => &GPU_STARTING,
+            rune::GpuEvent::Drew => &GPU_DREW,
+        };
+        slot.get_or_init(Instant::now);
+    });
+    if let Some(file) = file {
+        let _ = FILE.set(file);
+    }
+    EXIT_ASKED.set(set("ARBOR_EXIT_AFTER_FIRST_FRAME"));
     TABS.set(set("ARBOR_BENCH_TABS"));
     PREVIEW.set(set("ARBOR_BENCH_PREVIEW"));
     JUMP.set(set("ARBOR_BENCH_JUMP"));
@@ -278,7 +338,28 @@ pub fn init_state() -> State {
     s
 }
 
+/// Since the top of `main`, in milliseconds.
+fn since_main() -> f64 {
+    MAIN.get().map_or(f64::NAN, |(m, _)| m.elapsed().as_secs_f64() * 1000.0)
+}
+
+/// `main` hands over the first window's handle, which quits the app after its first frame
+/// when `ARBOR_EXIT_AFTER_FIRST_FRAME` asked.
+pub fn hold(app: AppHandle<State>) {
+    if EXIT_ASKED.get() {
+        EXIT.set(Some(app));
+    }
+}
+
+/// The first window's native window was just created (`App::on_window`).
+pub fn window_created() {
+    if on() && WINDOW_AT_MS.get().is_nan() {
+        WINDOW_AT_MS.set(since_main());
+    }
+}
+
 pub fn setup(s: &mut State, waker: rune::Waker) {
+    SETUP_AT_MS.set(since_main());
     let _ = WAKER.set(waker.clone());
     FIRST_ENTRIES.set(s.cur().entries.len());
     if s.is_loading() {
@@ -347,7 +428,7 @@ pub fn window_frame(f: &FrameEncoded) {
         && first
     {
         let since = |at: Option<Instant>| at.map_or(f64::NAN, |at| at.saturating_duration_since(t).as_secs_f64() * 1000.0);
-        eprintln!(
+        say!(
             "arbor-timing window-up ms={:.2} made_ms={:.2} setup_ms={:.2} update_ms={:.2} encode_ms={:.2}",
             since(Some(f.at())),
             since(WINDOW_MADE.get()),
@@ -359,7 +440,7 @@ pub fn window_frame(f: &FrameEncoded) {
     let (Some(t), Some(n)) = (WINDOW_ASKED.get(), WINDOW_LISTED.get()) else { return };
     let inside = first;
     WINDOW_ASKED.set(None);
-    eprintln!(
+    say!(
         "arbor-timing window ms={:.2} entries={n} same_frame={} update_ms={:.2} encode_ms={:.2}",
         f.at().saturating_duration_since(t).as_secs_f64() * 1000.0,
         u8::from(inside),
@@ -603,7 +684,7 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
         if IDLE.get().is_some() {
             // Left alone from here on: the bench measures, then kills it.
             if !IDLE_READY.replace(true) {
-                eprintln!("arbor-timing idle-ready view={:?}", s.cur().view);
+                say!("arbor-timing idle-ready view={:?}", s.cur().view);
             }
         } else if n > 0 {
             tx.quit();
@@ -866,13 +947,31 @@ pub fn frame(f: &FrameEncoded) {
             Some((_, n, _, _)) if BOOT_LATE.replace(false) => n,
             _ => FIRST_ENTRIES.get(),
         };
-        eprintln!(
-            "arbor-timing first-frame main_ms={:.2} init_at_ms={init_at:.2} init_ms={init:.2} epoch_us={epoch} entries={n} {split}",
-            ms(main)
+        let since = |t: Option<Instant>| t.map_or(f64::NAN, |t| t.saturating_duration_since(main).as_secs_f64() * 1000.0);
+        say!(
+            "arbor-timing first-frame main_ms={:.2} before_main_ms={:.2} init_at_ms={init_at:.2} init_ms={init:.2} setup_at_ms={:.2} \
+             window_at_ms={:.2} frame_start_ms={:.2} gpu_listed_at_ms={:.2} gpu_starting_at_ms={:.2} gpu_drew_at_ms={:.2} epoch_us={epoch} entries={n} {split}",
+            ms(main),
+            BEFORE_MAIN_MS.get().copied().flatten().unwrap_or(f64::NAN),
+            SETUP_AT_MS.get(),
+            WINDOW_AT_MS.get(),
+            since(f.started()),
+            since(crate::gpu::listed_at()),
+            since(GPU_STARTING.get().copied()),
+            since(GPU_DREW.get().copied()),
         );
+        // The cold-start probes' line (`coldstart.rs`): from the process's creation where known.
+        let total = match BEFORE_MAIN_MS.get().copied().flatten() {
+            Some(before) => format!("{:.2} from=process", before + ms(main)),
+            None => format!("{:.2} from=main", ms(main)),
+        };
+        say!("arbor {total} epoch_us={epoch}");
+        if let Some(app) = EXIT.take() {
+            app.quit();
+        }
     } else {
         if let Some(t) = key {
-            eprintln!(
+            say!(
                 "arbor-timing key ms={:.2} {split} preview={} search={} thumbs={} reads={}",
                 ms(t),
                 u8::from(KEY_PREVIEW.get()),
@@ -882,43 +981,33 @@ pub fn frame(f: &FrameEncoded) {
             );
         }
         if let Some(t) = tile_first {
-            eprintln!("arbor-timing thumb-first ms={:.2} {split}", ms(t));
+            say!("arbor-timing thumb-first ms={:.2} {split}", ms(t));
         }
         if let Some((t, n)) = tile_done {
-            eprintln!("arbor-timing thumb-screen ms={:.2} thumbs={n} {split}", ms(t));
+            say!("arbor-timing thumb-screen ms={:.2} thumbs={n} {split}", ms(t));
         }
         if let Some((t, found)) = search_first {
-            eprintln!("arbor-timing search-first ms={:.2} found={found} {split}", ms(t));
+            say!("arbor-timing search-first ms={:.2} found={found} {split}", ms(t));
         }
         if let Some((t, found, visited, stopped)) = search_done {
-            eprintln!("arbor-timing search-done ms={:.2} found={found} visited={visited} stopped={} {split}", ms(t), u8::from(stopped));
+            say!("arbor-timing search-done ms={:.2} found={found} visited={visited} stopped={} {split}", ms(t), u8::from(stopped));
         }
         if let Some((t, cold, folders, inside)) = jump {
-            eprintln!(
-                "arbor-timing jump ms={:.2} cold={} folders={folders} same_frame={} {split}",
-                ms(t),
-                u8::from(cold),
-                u8::from(inside)
-            );
+            say!("arbor-timing jump ms={:.2} cold={} folders={folders} same_frame={} {split}", ms(t), u8::from(cold), u8::from(inside));
         }
         if let Some((t, items, inside, regex)) = rename {
-            eprintln!(
-                "arbor-timing rename ms={:.2} items={items} same_frame={} regex={} {split}",
-                ms(t),
-                u8::from(inside),
-                u8::from(regex)
-            );
+            say!("arbor-timing rename ms={:.2} items={items} same_frame={} regex={} {split}", ms(t), u8::from(inside), u8::from(regex));
         }
         if let Some((t, opened, kind)) = preview {
-            eprintln!("arbor-timing preview ms={:.2} from={} kind={kind} {split}", ms(t), if opened { "open" } else { "move" });
+            say!("arbor-timing preview ms={:.2} from={} kind={kind} {split}", ms(t), if opened { "open" } else { "move" });
         }
         if let Some((t, n, kind, inside)) = landed {
             if BOOT_LATE.replace(false) {
-                eprintln!("arbor-timing first-listing main_ms={:.2} entries={n} {split}", ms(t));
+                say!("arbor-timing first-listing main_ms={:.2} entries={n} {split}", ms(t));
             } else if kind == Kind::Tab {
-                eprintln!("arbor-timing tab ms={:.2} entries={n} {split} same_frame={}", ms(t), u8::from(inside));
+                say!("arbor-timing tab ms={:.2} entries={n} {split} same_frame={}", ms(t), u8::from(inside));
             } else {
-                eprintln!("arbor-timing nav ms={:.2} entries={n} {split}", ms(t));
+                say!("arbor-timing nav ms={:.2} entries={n} {split}", ms(t));
             }
         }
     }
