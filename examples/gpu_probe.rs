@@ -4,19 +4,23 @@
 //! `<phase> <ms> [detail]` as it ends. Run one mode per process, so each starts cold:
 //!
 //! ```text
-//! gpu_probe rune       Rune's window path: Gpu::instance (its "is there a DX12 adapter" probe),
-//!                      a hidden window and its surface, Gpu::try_new (the adapter pick and the
+//! gpu_probe rune       Rune's window path: Gpu::instance (on Windows, since Rune #625, DXGI's
+//!                      adapter list, with no device made), a hidden window and its surface,
+//!                      Gpu::try_new (the adapter pick from DXGI's descriptions and the one
 //!                      device), Renderer::new (the precompiled DXBC uber shader where it
-//!                      applies), Renderer::new again compiling the WGSL (RUNE_DISABLE_DXBC),
+//!                      applies), Renderer::new_classic (the Classic uber shader macOS starts
+//!                      with; elsewhere Rune starts with Windfoil), Renderer::new again
+//!                      compiling the WGSL (RUNE_DISABLE_DXBC),
 //!                      then configuring the surface and presenting one cleared frame.
-//! gpu_probe rune-held  The same after listing the DX12 adapters and holding them, as Arbor
-//!                      does (src/gpu.rs): a D3D12 device is a singleton per adapter, so Rune's
-//!                      own listings get the live devices back.
+//! gpu_probe rune-held  The same after listing the DX12 adapters through wgpu and holding them,
+//!                      as Arbor did before Rune picked from DXGI's list (wgpu's listing makes a
+//!                      D3D12 device on every adapter): what that workaround would cost now.
 //! gpu_probe dx12-fxc   wgpu DX12 with FXC (Rune's setting): the instance, listing the adapters
 //!                      (twice: wgpu makes a device on each to list it), then on every adapter a
 //!                      device, Renderer::new with the DXBC and with the WGSL, and a first submit.
 //! gpu_probe dx12-dxc   The same with DXC (dxcompiler.dll beside the exe).
-//! gpu_probe vulkan     The same on Vulkan (WGSL to SPIR-V through naga, then the driver).
+//! gpu_probe vulkan     The same on Vulkan (WGSL to SPIR-V through naga, then the driver). Linux
+//!                      only now: Rune no longer builds wgpu's Vulkan backend for Windows.
 //! ```
 //!
 //! `cargo build --profile dist --example gpu_probe`; BENCH.md has what it found. Windows and
@@ -198,6 +202,9 @@ mod probe {
         );
         let Ok(gpu) = gpu else { return };
         timed("rune_renderer_dxbc", || drop(renderer(&gpu.device, false)), quiet);
+        // The Classic uber shader macOS starts with (Rune's hidden hook for checking that path):
+        // what a Linux renderer would cost without Windfoil.
+        timed("rune_renderer_classic", || drop(Renderer::new_classic(&gpu.device, wgpu::TextureFormat::Bgra8Unorm)), quiet);
         timed("rune_renderer_wgsl", || drop(renderer(&gpu.device, true)), quiet);
         match &surface {
             Some(surface) => {
@@ -228,8 +235,8 @@ mod probe {
         println!("mode {mode}");
         match mode.as_str() {
             "rune" => rune_path(),
-            // Arbor's workaround (src/gpu.rs): the DX12 adapters listed first and held, so Rune's
-            // own listings get the live D3D12 devices back.
+            // Arbor's old workaround (src/gpu.rs before Rune's DXGI pick): the DX12 adapters
+            // listed first and held, so Rune's own listings got the live D3D12 devices back.
             "rune-held" => {
                 let inst = instance(wgpu::Backends::DX12, None);
                 let held = timed("hold_list", || block_on(inst.enumerate_adapters(wgpu::Backends::DX12)), |a| format!("count={}", a.len()));

@@ -134,7 +134,7 @@ pub fn at_exit<M: Send + 'static>(tx: &Sender<M>, flush_msg: fn(Sender<()>) -> M
 }
 
 /// Gives each writer up to [`DRAIN_WAIT`] to finish what's queued: called as the window closes
-/// and after the app's loop ends, so the last changes aren't lost (a slow disk costs the exit
+/// and once no window is on screen (`main`'s `last`), so the last changes aren't lost (a slow disk costs the exit
 /// that long at most, and what's still queued then is lost).
 pub fn drain_at_exit() {
     if let Ok(all) = AT_EXIT.lock() {

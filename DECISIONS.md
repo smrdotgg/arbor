@@ -9,8 +9,76 @@ Format: date · decision · why · how to undo.
 
 ## Waiting for owner review
 
+- **2026-11-13 · Rune moved from 78d22ed to a7e2f2f, Rune's latest `dev` (657 commits;
+  `chore/rune-bump`; Review).** Arbor compiled against it unchanged on all three platforms;
+  the judgment calls:
+  - **Rune's patched crates through `[patch.crates-io]`** (winit, wgpu-hal, parley_engine,
+    accesskit_windows), as `path`s into `vendor/rune/vendor/`, not Rune's suggested `git` + rev:
+    CI already clones Rune at `RUNE_REV` into `vendor/rune` and the Mac builds offline, so one pin
+    covers both and the patches can't drift from the Rune they belong to. Without the wgpu-hal
+    patch Windows keeps the old adapter probe on every GPU (Rune #625). Undo: drop the section.
+  - **Windows: Arbor starts no GPU work** (`src/gpu.rs`). Rune now draws the first frame on the
+    CPU and shows it before any GPU exists, then makes the GPU on a below-normal thread after
+    that frame (#689). Arbor's `warm_gpu` from `main` would make the GPU beside the first frame
+    (CPU and the loader lock) for a hand-over nobody sees; the CI A/B with rune-hello measures
+    it (BENCH.md). The adapter hold (2026-11-13 below) is gone: Rune picks from DXGI's list
+    without a device on any other adapter (#625), so listing them through wgpu would wake every
+    GPU for nothing. Linux keeps `warm_gpu` (no CPU-first window there), macOS `prewarm_gpu`.
+    Undo: `gpu::start` calling `rune::warm_gpu` on Windows too.
+  - **Quit goes through `rune::fast_exit`.** Rune now ends the process once a quit is done
+    (windows hidden, hooks run) without returning from `App::run` (#831), so the code after
+    `run` (a cut-short operation's cleanup and record, the writers' drain) would never have run.
+    It moved into `last` (`src/main.rs`), which Rune runs before ending the process on every
+    quit, macOS Quit included: that closes RUNE-GAPS' "macOS Quit ends the process inside the
+    windows' close callbacks". Undo: `rune::orderly_exit()` before `run` and the old tail.
+  - **Shutdown is one idempotent step, `State::shut_down`, from `on_close` and Rune's `on_quit`**
+    (review of 4ff226a): `Tx::quit`/`AppHandle::quit` exit Rune's loop and run only `on_quit`,
+    so the operation was cancelled and recorded only when the last window's close ran. Now any
+    window's quit hook cancels the running operation (whoever owns it) and hands it to the quit
+    thread; ⌘Q and a Windows logoff run both hooks, the second does nothing. Read from Rune's
+    `window/app_events.rs` (`quit`), `window.rs` (`exiting`), `window/lifecycle.rs` (a handle's
+    quit) and `quit/mac.rs` (macOS Quit: `applicationShouldTerminate:`, then
+    `applicationWillTerminate:` → `exiting`).
+  - **SIGTERM, SIGINT and SIGHUP quit as ⌘Q does** (`src/signals.rs`, Unix): the handler writes
+    the signal's number to a non-blocking self-pipe and nothing else; `arbor-signals` reads it
+    and calls `window::quit_app` (Rune's quit, the hooks above, then `last`). The signals go back
+    to their default action first, so a second one kills at once. The process then exits 0, not
+    128 + the signal. Windows: a logoff or shutdown already reaches Rune's quit hooks
+    (`WM_QUERYENDSESSION`/`WM_ENDSESSION`, Rune's `quit/win32.rs`); release builds have no
+    console, so console-close events don't apply (a debug build's console Ctrl+C still ends the
+    process at once). Undo: drop the `signals::forward` call.
+  - **The volume watcher starts at the first frame on screen** (`window::configure`'s
+    `on_ready`), not before `run`: Rune's "Launching fast" defers what the first frame doesn't
+    need, and on Windows it makes a hidden top-level window that was made beside the first one.
+    A drive plugged in during the first frame is picked up by the next refresh. Undo: call
+    `volumes::watch()` from `main` again.
+  - **`build.rs` no longer refuses a CRLF Rune checkout**: Rune reads its WGSL's CRLF as LF and
+    has a `.gitattributes` (#711). CI keeps `core.autocrlf false` (harmless). Undo: restore
+    `refuse_crlf_shaders` from main.
+  - **Linux regresses, from Rune** (approved by the owner, 2026-11-13): this Rune compiles its larger
+    Windfoil uber shader from WGSL at every launch on Linux and builds glyph outline records in
+    the first frame. On the owner's Linux laptop (Intel UHD 620) 100.8 → 119.0 ms, the first
+    frame's `update` 7.7 → 41.7 ms; under Xvfb/lavapipe 94.5 → 225 ms (rune-hello the same;
+    BENCH.md). The Windows laptop went 330.9 → 59.3 ms, on screen 32.6 ms after `main`. Nothing in Arbor can choose
+    the smaller shader; RUNE-GAPS.md has the ask. Windows went 152.7 → 71.5 ms on the runner.
+    Kept the bump anyway (it's what the owner asked for, and the Windows and quit fixes need it).
+    **Owner approved merging with this Linux regression on 2026-11-13** ("Feel free to merge"),
+    after seeing the laptop numbers; tracked in RUNE-GAPS.md until Rune has a Linux CPU-first
+    window or precompiled SPIR-V.
+    Investigated from inside Arbor (review of 4ff226a): no switch to Rune's Classic shader
+    (chosen by `cfg!(target_os = "macos")` alone), no CPU-first window off Windows, and
+    `warm_gpu` already starts the compile at the top of `main` (it hides 8 ms). naga is 5 ms of
+    the 162; the driver's compile is the rest. So no Arbor change; RUNE-GAPS.md has the numbers
+    per option and a draft upstream issue for the owner to file or not.
+  - **Not adopted yet** (each changes behaviour, so a change of its own): `Tx::focus` to focus
+    the list at launch for screen readers (#384), `Tx::announce` for the status notes (#732),
+    `Tx::assistive_technology` (#778). RUNE-GAPS.md lists them.
+  - **Measurement tooling:** `ARBOR_TIMING` adds `drawn_by=cpu|gpu`, `launch-marks` (Rune's
+    `rune::marks`) at exit and `ARBOR_EXIT_AFTER_MS`; the "Cold start (Windows)" workflow now
+    measures main's CI build against this one and uploads `coldstart-probes-3-windows`.
+
 - **2026-11-13 · Windows: Arbor lists the DX12 adapters itself and holds them until the first
-  frame (`src/gpu.rs`; Review).** wgpu's DX12 backend makes a D3D12 device on every adapter to
+  frame (`src/gpu.rs`; Review). Superseded by the Rune bump above: removed.** wgpu's DX12 backend makes a D3D12 device on every adapter to
   list it, and Rune lists twice (its "is there a DX12 adapter" check drops the list, then the
   pick lists again: about 290 ms of `try_new` on the owner's laptop against 51 ms for the device
   itself). A D3D12 device is a singleton per adapter and process, so while Arbor holds the first

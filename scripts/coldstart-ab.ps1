@@ -52,11 +52,14 @@ try {
         if (Test-Path -LiteralPath $logs[$e]) { $lines = @(Get-Content -Path $logs[$e]) }
         $totals = @($lines | Where-Object { $_ -match '^[a-z0-9-]+ [0-9.]+ from=' } | ForEach-Object { [double](($_ -split ' ')[1]) })
         $out = "$e  runs=$($totals.Count)  total=$(Median $totals)"
-        $splits = @($lines | Where-Object { $_ -like 'arbor-timing first-frame*' })
-        foreach ($k in 'before_main_ms', 'init_at_ms', 'setup_at_ms', 'window_at_ms', 'frame_start_ms', 'update_ms', 'encode_ms', 'main_ms') {
+        $splits = @($lines | Where-Object { $_ -like 'arbor-timing first-frame*' -or $_ -like 'rune-hello *' })
+        foreach ($k in 'before_main_ms', 'init_at_ms', 'setup_at_ms', 'window_at_ms', 'frame_start_ms', 'uncloaked_at_ms', 'gpu_starting_at_ms', 'gpu_drew_at_ms', 'update_ms', 'encode_ms', 'main_ms', 'gpu_starting_ms', 'window_ms', 'gpu_drew_ms') {
             $v = @($splits | ForEach-Object { if ($_ -match " $k=([0-9.]+)") { [double]$Matches[1] } })
             if ($v.Count) { $out += "  $k=$(Median $v)" }
         }
+        # Which renderer drew the first frame (Windows: the CPU, before the GPU exists).
+        $drawn = @($splits | ForEach-Object { if ($_ -match ' drawn_by=([a-z]+)') { $Matches[1] } })
+        if ($drawn.Count) { $out += "  drawn_by=" + (($drawn | Group-Object | ForEach-Object { "$($_.Name):$($_.Count)" }) -join ',') }
         Write-Host $out
     }
 } finally {

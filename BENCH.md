@@ -33,6 +33,95 @@ frame reached the screen (see [`RUNE-GAPS.md`](RUNE-GAPS.md)). So "under" below 
 submission proxy is under the budget. It is **not** a pass of the "keypress to updated pixels"
 or "listing visible" budgets, which can't be verified yet.
 
+## 2026-11-13, Rune 78d22ed → a7e2f2f (`chore/rune-bump`)
+
+**Real hardware** (the owner's machines; process creation → first frame report, median of 10
+alternating launches after a warm-up):
+
+| Machine | Build | Total | Window at | `uncloaked_at` | `update` / `encode` | Drawn by |
+| --- | --- | --- | --- | --- | --- | --- |
+| Windows laptop (Ryzen + RTX 3070 Laptop, the NVIDIA driving the display; coldstart-probes-3-windows) | main (alpha.6) | 330.9 ms | 300.9 | | 15.6 / 3.7 | GPU (`gpu_drew_at` 322.6) |
+| | **this branch** | **59.3 ms** | 9.0 | **32.6** | 17.7 / 22.0 (CPU paint) | CPU, 10 of 10 |
+| | rune-hello | 42.4 ms | | | | CPU |
+| | win32-hello | 28.5 ms | | | | |
+| Linux laptop (i7-8650U, Intel UHD 620 through Mesa ANV, X11/XFCE; release tarballs, a 42-entry folder) | main (alpha.6) | 100.8 ms (min 85.3) | 71.2 | | 7.7 / 4.6 | GPU (`gpu_drew_at` 42.8) |
+| | this branch (CI run 43431394415) | 119.0 ms (min 114.5) | 66.1 | | **41.7** / 4.9 | GPU (`gpu_drew_at` 51.0) |
+
+Windows: the window is on screen with its CPU-drawn first frame 32.6 ms after `main` (≈ 42 ms
+from process creation), 5.6× sooner than before; Arbor is ~17 ms over a bare Rune window, about
+its first frame's `update`. Linux on real hardware loses 18 ms (not lavapipe's 130): the
+renderer is ready before the first frame (`gpu_drew_at` 51 < window 66), and the extra time is
+the first frame's `update`, 7.7 → 41.7 ms.
+
+What's in that `update` (Rune's first-frame totals, now in `launch-marks`; Xvfb here, a
+42-entry folder, `update` 27 ms against 3 on main): Windfoil's glyph outline records
+(`text.outline_ns`) 13.7 ms, for 160 of the frame's 166 glyphs, which the GPU fills from
+outlines (Classic rasterised on the CPU, mostly cached across launches by Rune); a fontconfig
+fallback lookup 7.3 ms (`text.fallback.*`: old Rune did its font discovery before `setup`, now
+on the first glyph Inter lacks; the folder marker `▸` is one, but swapping it alone saved
+~1 ms, as the lookup still ran); text shaping 9.5 ms for 81 texts (overlapping the lookup).
+Arbor's own share is small: 40 more rows cost ~4 ms (23 → 27 ms). The shader isn't compiled
+inside the frame. On the Windows laptop the same `launch-marks` totals will say how the 17.7 ms
+splits (not in this run's results).
+
+The new Rune draws a Windows window's first frame on the CPU and shows it before the GPU exists
+(#689), picks the adapter from DXGI's list (#625) and loads FXC only to compile (#631). Arbor
+now starts no GPU work on Windows (`src/gpu.rs`); Linux keeps `warm_gpu`.
+
+**GitHub's Windows runner** ("Cold start (Windows)" run 43425593497, bd9260e; 4 vCPU EPYC 7763,
+WARP), process creation → first frame report, 15 alternating launches each after one untimed:
+
+| Build | Total | Before `main` | `setup` at | Window at | First frame `update` / `encode` | Drawn by |
+| --- | --- | --- | --- | --- | --- | --- |
+| main (2902ccd, its CI package) | 152.7 ms | 11.9 | 54.4 | 106.4 | 16.6 / 16.7 | GPU |
+| **this branch** | **71.5 ms** | 12.3 | 4.5 | 6.5 | 17.7 / 35.4 (CPU paint) | CPU, 15 of 15 |
+| rune-hello | 51.1 ms | | | | | CPU |
+| rune-hello with `warm_gpu` first | 58.5 ms | | | | | CPU |
+| win32-hello (this VM's floor) | 42.4 ms | | | | | |
+
+A second run on a faster VM (run 43429137353, d656378, which adds `uncloaked_at_ms`): main
+110.1 → **52.4 ms**, window at 4.8 ms, **uncloaked with its first frame at 23.5 ms after `main`**
+(≈ 33 ms from process creation; win32-hello, the floor, 31.0 ms on this VM), `update` 13.0,
+`encode` 24.9 (CPU paint), drawn by the CPU 15 of 15; rune-hello 38.8 ms, with `warm_gpu`
+40.9 ms.
+
+Rune's launch marks (5 launches kept open 3 s, ms from `main`): window made at ~6, first frame
+laid out at ~25 and painted at ~27, **copied in and uncloaked at ~32** (≈ 44 ms from process
+creation: the window is on screen with its content then; the frame report the totals above end
+at comes ~25 ms later, after the window's activation), then the GPU: its thread starts at ~72,
+device ~96 (160 cold), ready ~120, its first frame ~140, and the hand-over at ~800 (WARP draws
+slowly; the CPU frames stay live meanwhile). `warm_gpu` beside the CPU frame costs rune-hello
+7 ms on this VM, so Arbor doesn't call it on Windows. `gpu_probe rune`: Rune's instance 6 ms,
+`try_new` (DXGI pick and device) 14 ms (85 cold), the precompiled renderer 25 ms; with the old
+adapter hold, 13 + 0.2 + 2 ms: the same on a runner with one adapter, and on a two-GPU laptop it
+would wake the second GPU for nothing. The owner's laptop: coldstart-probes-3-windows (below).
+
+**tabot-dev, Linux** (Xvfb with lavapipe, software Vulkan; release builds; 21 alternating
+launches in a 2-entry folder, spawn → first frame):
+
+| Build | Total | `init` at | `setup` at | Window at | First `update` |
+| --- | --- | --- | --- | --- | --- |
+| main (2902ccd) | 94.5 ms | 32.4 | 41.4 | 89.0 | 3.2 ms |
+| this branch | **225.0 ms** | 32.6 | 33.0 | 199.2 | 23.1 ms |
+| rune-hello | 225.0 ms | | | | |
+
+**A regression on Linux, all Rune's** (rune-hello matches Arbor): renderers off macOS now start
+with the larger Windfoil uber shader, which Linux compiles from WGSL at every launch
+(`gpu_probe rune`: `Renderer::new` 50 → 161 ms, three alternations); the window waits for it
+(`gpu.begin` 36 → `renderer.begin` 202 ms). The first `update` grew by 20 ms, 7.5 of them a
+fontconfig fallback lookup (`text.fallback.*`). Setup is 8 ms sooner (fonts, #766). RUNE-GAPS.md
+has the entry; a real GPU compiles faster and Mesa caches its compile, so this is lavapipe's
+worst case, not measured on hardware. The 10k bench (`bench 7 10`, alternating twice): cold start
+108–112 → 241–243 ms; listing visible 42–44 → 42–43 ms; key → frame 6.6–6.8 → 7.2 ms. Idle
+(`bench 1 2 --idle 3`): 0.00–0.01 s per 5 s in every view, both windows.
+
+The options inside Arbor, measured the same way (review of 4ff226a; RUNE-GAPS.md): Rune's
+Classic shader on the same device 47 ms against Windfoil's 162 (`gpu_probe rune`, now with
+`rune_renderer_classic`), but nothing lets an app choose it; naga's WGSL → SPIR-V 5.2 ms of the
+162 (3.7 for Classic); Mesa's shader cache fresh, warm or disabled 161–165 ms; `warm_gpu` saves
+8 ms (rune-hello 227.0 → 219.0 ms, Arbor 226.4 ms, 15 alternating launches each); the CPU-first
+window is Windows-only.
+
 ## 2026-11-13, cold start on the owner's laptop, round 3: the adapter hold (`perf/fast-start` 4dcc24d)
 
 The same laptop (ASUS TUF A15, AMD Radeon integrated + RTX 3070 Laptop, the NVIDIA driving the

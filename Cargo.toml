@@ -59,8 +59,8 @@ serde_json = "1"
 libc = "0.2"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-# Only for the type `rune::warm_gpu` takes (src/main.rs): the wgpu Rune already builds, with
-# Rune's features.
+# The wgpu Rune already builds, with Rune's features: for the type `rune::warm_gpu` takes on Linux
+# (src/gpu.rs), and examples/gpu_probe.rs on Windows.
 wgpu = { version = "30", default-features = false }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
@@ -116,6 +116,19 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Rune builds these crates as published plus a patch of its own (vendor/rune/vendor/*.patch; Rune's
+# Cargo.toml and AGENTS.md, "Layout"), and a dependency's [patch] doesn't apply to the workspace
+# that uses it, so Arbor patches them too, from the same Rune checkout (RUNE_REV; CI clones it into
+# vendor/rune). Without them Arbor builds with the published crates and loses what the patches do:
+# wgpu-hal: on Windows the window's adapter picked from DXGI's list with no D3D12 device made on the
+# others, and FXC loaded only on a first compile; winit: no TaskbarList COM call when a window is
+# made; parley_engine: UAX #9 L1 and cheaper shaping; accesskit_windows: headings and landmarks.
+[patch.crates-io]
+accesskit_windows = { path = "vendor/rune/vendor/accesskit_windows" }
+parley_engine = { path = "vendor/rune/vendor/parley_engine" }
+wgpu-hal = { path = "vendor/rune/vendor/wgpu-hal" }
+winit = { path = "vendor/rune/vendor/winit" }
 
 [profile.dev.package."*"]
 opt-level = 2

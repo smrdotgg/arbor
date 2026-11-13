@@ -1,12 +1,13 @@
 name: Cold start (Windows)
 
-# The cold-start probes, round 2 (`examples/gpu_probe.rs`, `examples/rune_hello.rs`,
-# `examples/win32_hello.rs`, Arbor with ARBOR_TIMING_FILE, and round 1's arbor.exe as the
-# baseline) built from the `dist` profile on a Windows runner, zipped as
-# coldstart-probes-2-windows.zip (an artifact) and measured here with the script the owner runs
-# (scripts/coldstart-probe-2.ps1). The pre-releases `coldstart-probe-1` (a620e33) and
-# `coldstart-probe-2` (aca448c) were published from this workflow's earlier form. The runner has
-# no real GPU (WARP), so its GPU numbers aren't a laptop's; its CPU-side numbers are.
+# Cold-start probes built from the `dist` profile on a Windows runner and measured there:
+# this commit's Arbor (ARBOR_TIMING_FILE), the main branch's arbor.exe (the latest successful
+# CI run's Windows package) as the baseline, rune-hello (one text view; as rune-hello-warm.exe
+# it also calls `rune::warm_gpu` first), win32-hello (bare Win32 + GDI) and gpu_probe (Rune's GPU
+# path phase by phase). All zipped as the artifact coldstart-probes-3-windows, which runs as-is
+# on another machine (scripts/coldstart-ab.ps1). Earlier rounds (`coldstart-probe-1`,
+# `coldstart-probe-2`) are kept at their tags. The runner has no real GPU (WARP), so its GPU
+# numbers aren't a laptop's; its CPU-side numbers are.
 
 on:
   push:
@@ -16,6 +17,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   probes:
     runs-on: windows-latest
@@ -23,10 +28,10 @@ jobs:
       run:
         shell: bash
     steps:
-      # Files exactly as committed, LF line endings on Windows too: Rune loads its precompiled
-      # DXBC uber shader only when the WGSL it embeds hashes as committed. With the Windows
-      # runner's default (core.autocrlf true) every launch compiled it with FXC instead
-      # (BENCH.md, 2026-11-12); build.rs now refuses such a checkout.
+      # Files exactly as committed, LF line endings on Windows too. Rune's precompiled DXBC uber
+      # shader once needed it (a CRLF checkout made every launch compile it with FXC, BENCH.md
+      # 2026-11-12); Rune now reads its WGSL's CRLF as LF and has a .gitattributes, and this
+      # keeps both checkouts byte-identical to their commits anyway.
       - name: Check out without converting line endings
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
@@ -48,54 +53,69 @@ jobs:
       - name: Build the probes (dist profile)
         run: cargo build --profile dist --locked --bin arbor --example rune_hello --example win32_hello --example gpu_probe
 
-      # coldstart-probes-2-windows.zip: gpu_probe (a console program), this commit's Arbor and
-      # rune-hello, win32-hello, and coldstart-probe-1's arbor.exe as arbor-base.exe
-      # (v0.1.0-alpha.4's startup, built from a Rune checkout with CRLF line endings).
+      # The baseline: arbor.exe from main's latest successful CI run (its Windows package).
+      - name: Main's arbor.exe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main --status success --limit 1 --json databaseId,headSha -q '.[0] | "\(.databaseId) \(.headSha)"')
+          echo "main: run ${run% *}, commit ${run#* }"
+          gh run download "${run% *}" --repo "$GITHUB_REPOSITORY" -n arbor-Windows -D main-pkg
+          mkdir -p main && unzip -q -o main-pkg/*.zip -d main && find main -name arbor.exe
+
       - name: Zip
         shell: pwsh
         run: |
-          Invoke-WebRequest https://github.com/smrdotgg/arbor/releases/download/coldstart-probe-1/coldstart-probes-windows.zip -OutFile base.zip
-          Expand-Archive base.zip base
           New-Item -ItemType Directory probes | Out-Null
           Copy-Item target/dist/arbor.exe probes/arbor.exe
+          Copy-Item (Get-ChildItem main -Recurse -Filter arbor.exe | Select-Object -First 1).FullName probes/arbor-main.exe
           Copy-Item target/dist/examples/rune_hello.exe probes/rune-hello.exe
+          Copy-Item target/dist/examples/rune_hello.exe probes/rune-hello-warm.exe
           Copy-Item target/dist/examples/win32_hello.exe probes/win32-hello.exe
           Copy-Item target/dist/examples/gpu_probe.exe probes/gpu_probe.exe
-          Copy-Item base/arbor.exe probes/arbor-base.exe
+          Copy-Item scripts/coldstart-ab.ps1 probes/coldstart-ab.ps1
           Get-ChildItem probes | Format-Table Name, Length
-          Compress-Archive -Path probes/*.exe -DestinationPath coldstart-probes-2-windows.zip
+          Compress-Archive -Path probes/* -DestinationPath coldstart-probes-3-windows.zip
           Get-CimInstance Win32_VideoController | Format-List Name, DriverVersion, AdapterRAM
           Get-CimInstance Win32_Processor | Format-List Name, NumberOfLogicalProcessors
 
       - uses: actions/upload-artifact@v4
         with:
-          name: coldstart-probes-2-windows
-          path: coldstart-probes-2-windows.zip
+          name: coldstart-probes-3-windows
+          path: coldstart-probes-3-windows.zip
           if-no-files-found: error
 
-      # The owner's script on the zip just built: Windows PowerShell 5.1, then PowerShell 7.
-      - name: Measure (Windows PowerShell 5.1)
-        shell: powershell
-        run: |
-          $env:ARBOR_PROBE_ZIP = (Resolve-Path coldstart-probes-2-windows.zip).Path
-          ./scripts/coldstart-probe-2.ps1
-
-      - name: Measure (PowerShell 7)
-        shell: pwsh
-        run: |
-          $env:ARBOR_PROBE_ZIP = (Resolve-Path coldstart-probes-2-windows.zip).Path
-          ./scripts/coldstart-probe-2.ps1
-
-      # Baseline (coldstart-probe-1's arbor.exe: v0.1.0-alpha.4's startup) against this commit,
-      # alternating. (Delay-loading the system DLLs was tried here: 3.8 ms less before `main`,
-      # the same total; BENCH.md.)
-      - name: A/B against coldstart-probe-1
+      # Process creation to first frame, alternating, after one untimed launch each.
+      - name: A/B, main against this commit
         continue-on-error: true
         shell: pwsh
-        run: ./scripts/coldstart-ab.ps1 -Runs 15 probes/arbor-base.exe probes/arbor.exe
+        run: ./scripts/coldstart-ab.ps1 -Runs 15 probes/arbor-main.exe probes/arbor.exe
 
-      # Rune's GPU path, then the same with the DX12 adapters listed first and held (what
-      # src/gpu.rs does), alternating, three times each.
+      # Whether making the GPU beside Rune's CPU-drawn first frame slows that frame (what Arbor
+      # did on Windows with `warm_gpu` before this commit).
+      - name: A/B, rune-hello without and with warm_gpu
+        continue-on-error: true
+        shell: pwsh
+        run: ./scripts/coldstart-ab.ps1 -Runs 15 probes/rune-hello.exe probes/rune-hello-warm.exe probes/win32-hello.exe
+
+      # What happens after the first frame: Arbor kept open 3 s, then its launch marks (the
+      # window shown, the first frame's renderer, the GPU made and taking over).
+      - name: Hand-over to the GPU
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'handover.txt'
+          $env:ARBOR_TIMING_FILE = $log
+          $env:ARBOR_EXIT_AFTER_MS = '3000'
+          foreach ($i in 1..5) {
+            $p = Start-Process -FilePath probes/arbor.exe -WorkingDirectory $HOME -PassThru
+            if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch { } }
+            Start-Sleep -Milliseconds 300
+          }
+          Get-Content $log | Where-Object { $_ -like 'arbor-timing first-frame*' -or $_ -like 'arbor-timing launch-marks*' -or $_ -match '^arbor ' }
+
+      # Rune's GPU path, then the same with the DX12 adapters listed through wgpu first and held
+      # (Arbor's workaround before this commit), alternating, three times each.
       - name: gpu_probe rune vs rune-held
         continue-on-error: true
         shell: pwsh

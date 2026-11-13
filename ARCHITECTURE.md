@@ -59,7 +59,7 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `incoming/` | Folders other apps send (`mac.rs` Apple events, `linux.rs` D-Bus, `windows.rs` a pipe) |
 | UI | `view/` | Every element: root and status bar (`mod.rs`), `sidebar`, `pane` (path bar, tabs, view switch), `list` (rows, item presses and drags, the selection rectangle), `grid` (the icon and tiles views, type icons), `columns` (the column view), `panels`, `overlays`, `batch` |
 | Shared | `bounded.rs`, `persist.rs`, `mounts.rs`, `dirfd.rs`, `ffi.rs`, `fs.rs` | See [Patterns](#patterns-to-reuse); folder reads, sorting, formatting |
-| | `gpu.rs` | The window's GPU made early: Rune's warm-up, and on Windows the held adapter list |
+| | `gpu.rs` | The window's GPU made early: Rune's prewarm (macOS) and warm-up (Linux); nothing on Windows, where Rune draws the first frame on the CPU |
 | Tooling | `timing.rs`, `coldstart.rs` | Opt-in speed logs (`ARBOR_TIMING`, `ARBOR_TIMING_FILE`, the bench); the cold-start probes' clock and line, shared with `examples/win32_hello.rs` and `examples/rune_hello.rs`; `examples/gpu_probe.rs` times Rune's GPU setup phase by phase |
 | Tests only | `a11y_tests.rs`, `frame_bench.rs`, `packaging_tests.rs`, `prop.rs` | Accessibility tree, per-key cost, install scripts, seeded property tests (a PRNG and a runner) |
 
@@ -71,12 +71,12 @@ Nothing runs in the background unless the user did something, and nothing polls.
   `config.toml`, `sidebar.toml`, `columns.toml`, then the first folder. A later window reads nothing but its
   folder (`State::new_window`). The first window waits at most
   `FIRST_PAINT_WAIT` (8 ms) for it, then lands it in `poll`.
-- **GPU warm-up** (`gpu.rs`, Windows and Linux): started first thing in `main`, Rune's
-  `rune-gpu-warm` (`rune::warm_gpu`) makes the window's GPU device and renderer while Rune builds
-  the event loop and window, which take them. On Windows (release builds) `arbor-gpu` first
-  lists the DX12 adapters and holds them until Rune's device exists (else the first frame, else
-  quitting), so Rune's own listings reuse their D3D12 devices; `arbor-gpu-drop` drops them.
-  macOS does the same through `rune::prewarm_gpu`. Headless runs start none of it.
+- **GPU warm-up** (`gpu.rs`): started first thing in `main`. On Linux Rune's `rune-gpu-warm`
+  (`rune::warm_gpu`) makes the window's GPU device and renderer while Rune builds the event loop
+  and window, which take them; macOS does the same through `rune::prewarm_gpu`. On Windows Arbor
+  starts nothing: Rune draws the window's first frame on the CPU and shows it, then makes the
+  GPU on its own below-normal thread (`rune-gpu-window`) and hands over to it. Headless runs
+  start none of it.
 - **`rune::Latest` workers**: Rune's shared pool (≤ 4 threads) runs every latest-wins request:
   folder listings (`Folder::loader`, and each column's of the column view), settings reload, typed-path checks, completion, Get
   Info's metadata, Open With's list, batch rename's reads and plans, search rechecks, volume
@@ -107,20 +107,25 @@ Nothing runs in the background unless the user did something, and nothing polls.
 - **Listeners** (not in tests or the bench): `incoming::listen` (macOS open-documents events,
   Linux `arbor-dbus` serving `org.freedesktop.FileManager1`, Windows `arbor-pipe`) and
   `volumes::watch` (macOS mount notifications, Windows `arbor-devices` hidden window). Each
-  blocks on its source; none polls. Both reach the window focused last (`window::route`).
+  blocks on its source; none polls. Both reach the window focused last (`window::route`). The
+  volume watcher starts at the first window's first frame on screen (Rune's `on_ready`).
 - **The operation worker** (`ops::start`): one thread per file operation; only one runs at a
   time in the whole app, held by `Shared` (`Shared::job`), shown and landed by its owner (the
   window that started it), which tells the others what changed. The worker wakes whichever
   window owns it (`Shared::op_wake`): a window closing mid-operation makes another the owner
   on the spot (`State::leave`), and a window whose operation's owner is gone lands it. The
   last window's close cancels it and hands it to `arbor-quit` (`leftovers.rs`), which waits
-  ≤ 2 s for its cleanup and records what it left (`arbor-leftovers` writes the record); `main`
-  waits for it after Rune's loop ends.
+  ≤ 2 s for its cleanup and records what it left (`arbor-leftovers` writes the record); `main`'s
+  `last` waits for it once no window is on screen (Rune's `fast_exit` runs it before ending the
+  process, on every quit).
 - **The Trash's count** (`arbor-trash-count`, `trash::contents::Counting`): while Empty
   Trash's dialog is open, one thread lists the items, then adds up their size, waking the
   window after each, and ends; closing the dialog stops it.
 - **Favorite looks** (`sidebar::Lookers`): at most two threads sharing a queue, started from
   Rune's `on_ready` (the first frame on screen), ending when it's empty.
+- **Termination signals** (`arbor-signals`, `signals.rs`, Unix, not in tests or headless runs):
+  sleeps on a self-pipe the SIGTERM/SIGINT/SIGHUP handler writes to; the first signal quits as
+  ⌘Q does (`window::quit_app`), and ends.
 - Short-lived threads: reaping launched processes (`fs::reap`, `openwith`).
 
 ## Patterns to reuse

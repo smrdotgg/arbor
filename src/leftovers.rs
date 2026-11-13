@@ -6,12 +6,12 @@
 //!
 //! 1. Right after the close, the quit thread writes a provisional record naming what's only
 //!    partly there (the copy being made, and anything cleanup already had to leave). The close
-//!    callback itself writes nothing: on macOS, Quit ends the process right after it
-//!    (RUNE-GAPS.md), and then even this record may be lost.
+//!    callback itself writes nothing (the UI thread does no record I/O).
 //! 2. A thread waits for the cleanup; when it's done, or `QUIT_WAIT` passes, the record is
 //!    made exact: what cleanup left and why, or, if it didn't finish, what was still partly
-//!    there. `main` waits for that thread after Rune's loop ends, when no window is on screen
-//!    ([`finish`]).
+//!    there. `main`'s `last` waits for that thread when no window is on screen ([`finish`]):
+//!    Rune runs it before ending the process however the quit came, macOS Quit included
+//!    (`rune::fast_exit`).
 //! 3. The next launch reads the record on the startup thread ([`look`]) and offers only what's
 //!    still as Arbor made it; the first window says it, with a button that shows the item, and
 //!    only once that frame has been presented (or the user typed or started an operation) is
@@ -302,8 +302,9 @@ pub fn quitting(run: crate::ops::Running, file: PathBuf, wait: Duration) {
 
 /// Waits for the quit thread, if one started, to write the record: at most until its deadline
 /// and [`WRITE_MARGIN`] more, so Arbor exits in that time even when the disk doesn't answer
-/// (what wasn't written then is lost). Called by `main` after Rune's loop ends: no window is on
-/// screen by then.
+/// (what wasn't written then is lost). Called from `main`'s `last`, Rune's step before it ends
+/// the process (`rune::fast_exit`), on every platform and macOS Quit too: no window is on screen
+/// by then.
 pub fn finish() {
     let all = QUITTING.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
     for (done, deadline) in all {

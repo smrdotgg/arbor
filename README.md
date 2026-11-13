@@ -170,7 +170,9 @@ the icon and version information into a resource file the linker takes (no resou
 no extra crate). Release builds on Windows are windowed programs, so no console opens with them.
 `scripts/vendor.sh` refreshes them through a fast remote machine (default `smr@tabot-dev`) and
 syncs them back. When it runs on that machine itself (or with `HOST=local`) it skips ssh. Rune's
-commit is pinned in `RUNE_REV`; `REV=origin/dev scripts/vendor.sh` moves the pin.
+commit is pinned in `RUNE_REV`; `REV=origin/dev scripts/vendor.sh` moves the pin. Rune builds
+a few crates with patches of its own (`vendor/rune/vendor/`: winit, wgpu-hal, parley_engine,
+accesskit_windows), and `Cargo.toml` patches crates.io with the same copies.
 
 CI (`.github/workflows/ci.yml`) runs on every push and pull request on macOS, Linux and Windows:
 `cargo build --release --locked`, `cargo test --release --locked` and `cargo clippy -D warnings`,
@@ -187,13 +189,14 @@ it. All times end at frame submission, a proxy: pixels reach the screen at least
 it costs nothing: `main` reads the variable once and Rune gets the plain callbacks and no frame
 hook. `ARBOR_TIMING_FILE=<path>` appends the same lines to a file (Windows release builds have
 no console), plus `arbor <ms>`, from the process's creation to the first frame on Windows;
-`ARBOR_EXIT_AFTER_FIRST_FRAME=1` quits right after that frame. On Windows,
-`scripts/coldstart-probe-2.ps1` times Arbor against a bare Rune window (`examples/rune_hello.rs`)
-and runs `examples/gpu_probe.rs` (Rune's GPU setup phase by phase, and plain wgpu per backend
-and adapter); `examples/win32_hello.rs` is the bare Win32 floor, and `scripts/coldstart-ab.ps1`
-compares builds. A Windows build needs Rune checked out
-with LF line endings (`core.autocrlf false`): `build.rs` stops otherwise, since Rune then
-compiles its main shader at every launch. Showing a hidden tab is logged as `tab`, with `same_frame=1` when its fresh read landed
+`ARBOR_EXIT_AFTER_FIRST_FRAME=1` quits right after that frame (`ARBOR_EXIT_AFTER_MS=N`: N ms
+after it), and the first-frame line says which renderer drew it (`drawn_by=cpu` on Windows,
+where Rune shows a CPU-drawn first frame before the GPU exists); on quitting, `launch-marks`
+lists Rune's launch steps (`rune::marks`). On Windows, the "Cold start (Windows)" workflow
+builds the probes (`coldstart-probes-3-windows`): `scripts/coldstart-ab.ps1` compares builds
+(main's against this one), a bare Rune window (`examples/rune_hello.rs`) and the bare Win32
+floor (`examples/win32_hello.rs`), and `examples/gpu_probe.rs` times Rune's GPU setup phase by
+phase. Showing a hidden tab is logged as `tab`, with `same_frame=1` when its fresh read landed
 in time for the key's own frame. `scripts/bench.sh` cold-starts Arbor on a 10,000-entry folder
 several times and reports median and p95 against each budget (`--tabs N` adds N runs timing a
 tab switch to that folder, and `--preview N` adds N runs timing the quick preview of a 256 KB

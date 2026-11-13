@@ -255,9 +255,45 @@ impl State {
         self.shared.windows()
     }
 
+    /// This window goes: its background work stops and it leaves the others. When `app_quits`
+    /// (the whole app is ending: Rune's `on_quit`, whatever started the quit) or it's the last
+    /// window, the running file operation stops whichever window owns it: its cleanup (a
+    /// cancelled copy removing what it made) goes on off this thread, and what it can't finish is
+    /// recorded for the next launch (`leftovers.rs`); otherwise another window (the one focused
+    /// last) takes it over. The user-data writers then get their moment. Never waits for the
+    /// operation, writes no record on this thread. Once per window: Rune runs both `on_quit` and
+    /// `on_close` on some quits (macOS Quit, a Windows logoff), only `on_quit` on others
+    /// (`Tx::quit`, `AppHandle::quit`), only `on_close` when the last window closes. True when the
+    /// app is ending (it quits, or this was the last window).
+    pub fn shut_down(&mut self, app_quits: bool) -> bool {
+        if !self.shared.has(self.win) {
+            return app_quits || self.shared.windows() == 0;
+        }
+        self.stop_background();
+        if app_quits {
+            self.stop_job_for_quit();
+        }
+        let last = self.leave();
+        if app_quits || last {
+            crate::persist::drain_at_exit();
+        }
+        app_quits || last
+    }
+
+    /// The app is ending: the running operation, in any window, is cancelled and handed to the
+    /// quit thread. Nothing if none runs (or another window's quit hook did it already).
+    fn stop_job_for_quit(&mut self) {
+        let Some(job) = self.shared.job.borrow_mut().take() else { return };
+        job.run.cancel();
+        match self.quit_record.clone() {
+            Some(file) => crate::leftovers::quitting(job.run, file, self.quit_wait),
+            None => drop(job),
+        }
+    }
+
     /// This window is closing: it leaves the others, making one of them (the one focused last)
     /// the owner of its running file operation, if any, which shows and lands it from then on.
-    /// True when it was the last.
+    /// When it was the last, the operation stops as for a quit. True when it was the last.
     pub fn leave(&mut self) -> bool {
         // A free-space answer still on its way isn't wanted: it would wake a window that's gone.
         for p in &self.panes {
@@ -267,19 +303,8 @@ impl State {
         if self.owns_job() {
             match crate::window::most_recent(&others).or_else(|| others.last().copied()) {
                 Some(to) => self.shared.own_job(to),
-                // The last window: the app is quitting. The operation stops; its cleanup (a
-                // cancelled copy removing what it made) goes on off this thread, and what it
-                // can't finish is recorded for the next launch (`leftovers.rs`). The window
-                // closes now.
-                None => {
-                    if let Some(job) = self.shared.job.borrow_mut().take() {
-                        job.run.cancel();
-                        match self.quit_record.clone() {
-                            Some(file) => crate::leftovers::quitting(job.run, file, self.quit_wait),
-                            None => drop(job),
-                        }
-                    }
-                }
+                // The last window: the app is quitting. The window closes now.
+                None => self.stop_job_for_quit(),
             }
         }
         self.shared.leave(self.win);

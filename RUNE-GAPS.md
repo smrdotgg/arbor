@@ -14,9 +14,89 @@ Each entry:
 
 Newest first.
 
+**Re-checked against Rune a7e2f2f (2026-11-13, `chore/rune-bump`).** Fixed in Rune, with the
+workaround gone from Arbor: the CRLF shader check (#711), Windows cold start's adapter probes,
+GPU-before-window and FXC load (#625, #600, #689, #631), font discovery off Windows (#766, #879),
+macOS Quit's missing exit hook (#617, #831), and a release-build launch breakdown (#569).
+Available in Rune but not adopted yet (adopting changes behaviour; a follow-up): `Tx::focus`
+(#384), `Tx::announce` (#732), `Tx::assistive_technology` (#778). Each entry says which; every
+other entry is still open at a7e2f2f. New with this Rune: Linux compiles its Windfoil uber
+shader at every launch (the first entry).
+
 ---
 
+## Linux: every launch compiles the bigger Windfoil uber shader before the first frame
+
+- **Feature:** cold start on Linux (NORTHSTAR: under 30 ms).
+- **What Rune is missing:** a Linux launch that doesn't wait for its largest shader. Since this
+  Rune (a7e2f2f), `Renderer::new` starts the Windfoil uber shader everywhere but macOS
+  (`render.rs`: `create(.., cfg!(target_os = "macos"))`; `render/variant.rs` `start_windfoil`,
+  `build_windfoil`). Windows loads it as precompiled DXBC and macOS starts Classic, but Linux
+  builds Windfoil from WGSL synchronously, and the window waits for that renderer.
+- **What we did instead:** nothing could help from outside (2026-11-13, each measured on Xvfb
+  with Mesa 25.2's lavapipe, the only Vulkan here):
+  - *A switch to Classic:* none. Classic is chosen by `cfg!(target_os = "macos")` alone;
+    `Renderer::new_classic` is a hidden test hook, the window makes its renderer itself, and no
+    environment variable reaches the choice (`RUNE_DISABLE_DXBC` and `RUNE_DISABLE_METALLIB`
+    are Windows' and macOS'). What Classic would give, on the same Rune and device
+    (`gpu_probe rune`, three runs): `Renderer::new_classic` 47 ms against 162 ms for Windfoil.
+  - *The CPU-first window (#689) on Linux:* Windows only (`window.rs`:
+    `#[cfg(target_os = "windows")] mod cpu_frame`; the CPU painter is public, but only Rune can
+    present into its window). On the Windows runner it puts the window on screen 23.5 ms after
+    `main` with WARP's GPU arriving hundreds of ms later.
+  - *Starting the compile earlier:* `warm_gpu` already starts it 0.16 ms into `main`, and the
+    renderer is the critical path from there (instance 21 ms, device 28, renderer 162). It saves
+    8 ms now (a one-view Rune app 227 → 219 ms, 15 alternating launches each).
+  - *Where the time goes:* naga's WGSL → SPIR-V is 5.2 ms for Windfoil (3.7 for Classic; parse
+    3.9, validate 0.6, write 0.8); the other ~155 ms is the driver compiling the pipelines.
+    Mesa's shader cache doesn't change it on lavapipe (fresh, warm or disabled: 161–165 ms). A
+    hardware driver compiles faster and keeps its own disk cache, so there the cost is mostly
+    the first launch after an install or driver update; not measured (no GPU here).
+- **What users lose:** on real hardware (an i7-8650U laptop, Intel UHD 620 through Mesa ANV,
+  X11) 100.8 → 119.0 ms, all of it in the first frame's `update`, 7.7 → 41.7 ms: the renderer
+  is ready before the frame there, and the frame now builds Windfoil's glyph outline records
+  (13.7 ms of a 27 ms `update` under Xvfb) and does a fontconfig fallback lookup old Rune did
+  before `setup` (7.3 ms). Under lavapipe the compile is on the critical path too: 94.5 → 226 ms
+  (a one-view Rune app the same 227 ms). BENCH.md, 2026-11-13.
+- **Suggested Rune change:** the CPU-first window on Linux (#689's, which on Windows puts this
+  app on screen 32.6 ms after `main` on the owner's laptop): it hides the compile and the GPU
+  glyph work both. Short of that, start Linux renderers Classic, as on macOS, and build Windfoil
+  on a thread the first time text asks for outlines (~115 ms under lavapipe, and the outline
+  records out of the first frame). A precompiled SPIR-V would save only naga's ~5 ms.
+
+Draft for an upstream issue (the owner decides whether to file it):
+
+> **Linux: the first frame is later with Windfoil, and a CPU-first window would hide it**
+>
+> Since renderers off macOS start with Windfoil (`Renderer::new` → `start_windfoil`), a Linux
+> window's first frame waits for Windfoil's pipeline, which Linux builds from WGSL at every
+> launch (Windows loads precompiled DXBC; macOS starts Classic), and then builds glyph outline
+> records for the GPU fill on the UI thread. Between 78d22ed and a7e2f2f, a file manager's
+> first frame on an i7-8650U laptop with Intel UHD 620 (Mesa ANV, X11) went from 100.8 to
+> 119.0 ms after process start (median of 10), all of it in the first frame's update
+> (7.7 → 41.7 ms); in a profile of the same frame, outline records were 13.7 ms and a fontconfig
+> fallback lookup, formerly done before the window, 7.3 ms. On Mesa 25.2 lavapipe (Vulkan, a
+> 4-vCPU x86-64 VM under Xvfb) the compile is on the critical path too: a minimal app with one
+> text view went from about 95 ms to 227 ms from spawn to first frame.
+> `Renderer::new` takes 162 ms against 47 ms for `Renderer::new_classic` on the same device
+> (three runs each). naga's WGSL → SPIR-V is 5.2 ms of it (3.7 ms for Classic); the rest is the
+> driver compiling the pipelines, and Mesa's shader cache doesn't shorten it on lavapipe.
+> `warm_gpu` from the top of `main` only hides 8 ms, since the renderer is the critical path.
+> Hardware drivers compile faster and cache, so there it's mostly the first launch after an
+> install or driver update.
+>
+> Suggested fix: show Linux windows CPU-first as Windows does (#689), so the first frame waits
+> for no GPU work (on Windows the same app is on screen ~33 ms after `main`). Short of that,
+> start Linux renderers Classic, as macOS does, and build Windfoil on a thread the first time
+> text asks for outlines (`Event::OutlinesWanted`). A precompiled SPIR-V like the DXBC and
+> metallib would save only naga's ~5 ms here.
+
 ## The precompiled DXBC uber shader is matched by the WGSL's bytes, so line endings turn it off, silently
+
+**Fixed in Rune #711 (a7e2f2f):** a `.gitattributes` (`*.wgsl text eol=lf`, the `.dxbc` and
+`.metallib` files binary), and Rune's `build.rs` reads the WGSL's CRLF as LF before hashing, so a
+CRLF checkout loads the precompiled shader too. Arbor's `build.rs` guard is gone (DECISIONS.md,
+2026-11-13); CI still checks out with `core.autocrlf false`, which is harmless.
 
 - **Feature:** cold start on Windows (NORTHSTAR: under 30 ms).
 - **What Rune is missing:** a check that survives an ordinary Windows checkout. Rune loads its
@@ -39,6 +119,21 @@ Newest first.
   `RUNE_GPU_LOG` whenever the precompiled shader isn't used, and why (hash, ABI, refused).
 
 ## Cold start on Windows and Linux: most of the 30 ms goes inside Rune, before the first frame
+
+**Mostly fixed in Rune (a7e2f2f):** (1) the adapter is picked from DXGI's list and only that one
+goes to wgpu, no device made on the others (#625, through Rune's patched wgpu-hal, which Arbor's
+`Cargo.toml` now patches in too), and "is there a DX12 adapter" is read from DXGI (#600);
+(3 below, "show the window before the GPU") a window's first frame is drawn on the CPU and shown
+before its GPU exists, the GPU taking over after it with no visible change (#689; #724, #747,
+#781, #794 make the hand-over always end); FXC loads only on a first compile from source (#631);
+(2) fallback fonts come from fontconfig and CoreText, no folder walk or `fc-list` (#766), and a
+view's text measures no longer load a second text system (#879); on the Windows runner `main` →
+`setup` went 54 → 4.5 ms, on Linux 41 → 33 ms. Arbor dropped its own adapter
+list and hold (`src/gpu.rs`) and its Windows `warm_gpu` (which would make the GPU beside the
+CPU-drawn first frame); Linux keeps `warm_gpu`. Numbers: BENCH.md, 2026-11-13 (`chore/rune-bump`).
+**Still open:** the X11 event loop's ~25 ms (3), `virtual_rows` copying every key of a new row
+set (4, and suggestion 6), and the first frame's `update` on Windows (6); and on Linux there is no
+CPU-first window, so the window still waits for the GPU there.
 
 - **Feature:** cold start to interactive window, under 30 ms on Windows and Linux (NORTHSTAR).
   The owner's Windows gaming laptop (likely an integrated plus a discrete GPU) takes "damn near a
@@ -133,6 +228,15 @@ Newest first.
   device (D3D11 on the default adapter, as Flutter's ANGLE does).
 
 ## macOS Quit ends the process inside the windows' close callbacks
+
+**Fixed in Rune #617 and #831 (a7e2f2f):** a quit hides every window, runs the quit and close
+hooks, then ends the process itself (`rune::fast_exit`, now every app's default), first running
+the app's `last` step: on every platform and however the quit came, macOS Quit included (it runs
+inside `applicationWillTerminate`, before AppKit ends the process). `App::run` no longer returns
+after a quit, so Arbor's exit work (`leftovers::finish`, the writers' drain) moved into that step
+(`last` in `src/main.rs`): a cancelled copy's cleanup and its record now get their time after ⌘Q
+too. Rune's quit watch reports on stderr if a quit runs past 3 s; nothing kills it unless the app
+arms `rune::exit_deadline`.
 
 - **Feature:** quitting while a file operation runs (`feature/new-window`): the operation is
   cancelled at the close, and its cleanup gets up to 2 s after the windows have gone, with what
@@ -350,6 +454,11 @@ Newest first.
 
 ## Accessibility: no way to put keyboard focus on an element from a handler
 
+**In Rune since #384 (a7e2f2f), not adopted yet:** `Tx::focus(key, ring)` focuses an element from
+a handler, and `El::autofocus` names the control a modal opens on. Arbor could focus the list at
+launch and on a pane switch with it; that changes what a screen reader hears and the a11y
+snapshots, so it's a follow-up (DECISIONS.md, 2026-11-13). The workaround below still works.
+
 - **Feature:** screen-reader use of the file list (milestone 11; NORTHSTAR "zero learning to
   start", for everyone). A reader follows the selection only while the list holds focus (its
   active descendant is the cursor's row).
@@ -373,6 +482,10 @@ Newest first.
 
 ## Accessibility: no announcements on demand, and no "several can be selected"
 
+**Half fixed (a7e2f2f):** `Tx::announce(text, LiveRegion)` (#732) says a note without a live
+region of the app's own, so the same note twice would be heard twice; not adopted yet (a
+follow-up). `El::multiselectable` is still missing.
+
 - **Feature:** the status bar announcing operation results and errors; the file list's
   multi-selection.
 - **What Rune is missing:** a `Tx::announce(text, politeness)` (AccessKit's adapters announce
@@ -388,6 +501,9 @@ Newest first.
   `Announcement`), and `El::multiselectable(bool)`.
 
 ## Accessibility: per-frame labels can't be lazy, and the app can't tell a reader is there
+
+**Half fixed (a7e2f2f):** `Tx::assistive_technology()` (#778) says whether a client reads the
+tree, but only in handlers: `view` (`Cx`) still can't ask, and labels still can't be lazy.
 
 - **Feature:** what Arbor names for assistive technology must cost nothing when no reader is
   connected (NORTHSTAR: pay only for what you use).
@@ -679,6 +795,11 @@ Newest first.
   `None` where it can't be known cheaply (the web).
 
 ## Cold start on macOS: most of the 100 ms budget goes before the app's code runs
+
+**The breakdown is fixed (a7e2f2f):** `rune::marks` (#569, #721) records each step to a window's
+first frame in every build (event loop, window made, adapter, device, surface, renderer, fonts,
+first frame built, encoded, presented, shown). `ARBOR_TIMING` prints them when Arbor quits
+(`arbor-timing launch-marks`). Rune's own launch time before `init` is unchanged.
 
 (The macOS budget is now "within 25 ms of a bare native window", met: BENCH.md 2026-11-09.
 Windows and Linux: the entry "Cold start on Windows and Linux" above.)

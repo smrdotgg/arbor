@@ -83,6 +83,15 @@ pub fn route(f: impl FnOnce(&mut State, &mut Tx) + Send + 'static) -> Option<App
     Some(app)
 }
 
+/// Quits the app as ⌘Q does, from any thread (a termination signal, `signals.rs`): Rune runs
+/// every window's quit hook (`State::shut_down`), then `main`'s `last`. False when no window is
+/// registered yet or any more.
+#[cfg(unix)]
+pub fn quit_app() -> bool {
+    let app = windows().first().map(|e| e.app.clone());
+    app.inspect(|app| app.quit()).is_some()
+}
+
 /// Closes every window but `keep` (the bench's windows).
 pub fn close_all_but(keep: u64) {
     let apps: Vec<AppHandle<State>> = windows().iter().filter(|e| e.id != keep).map(|e| e.app.clone()).collect();
@@ -129,6 +138,11 @@ pub fn configure(app: App<State>, id: u64) -> App<State> {
     let app = app
         .chrome(chrome)
         .on_close(|s, _| closing(s))
+        // Every quit, whatever started it (⌘Q, the menu, `Tx::quit`, `AppHandle::quit`, a
+        // logoff), runs this in every open window; some quits run no close hook at all.
+        .on_quit(|s, _| {
+            quitting(s);
+        })
         .on_focus(|s, on, _| {
             if on {
                 focused(s.win);
@@ -137,26 +151,42 @@ pub fn configure(app: App<State>, id: u64) -> App<State> {
         })
         .on_window(move |h| set_native(id, h));
     // Work the window doesn't need for its first frame waits until that frame is on screen
-    // (the sidebar's look at each favorite).
+    // (the sidebar's look at each favorite, the volume watcher): Rune's "Launching fast".
     let shown = app.handle();
     app.on_ready(move |_| {
-        // The GPU devices held for the first window's start-up go, if Rune's device didn't
-        // already release them (`gpu.rs`).
-        crate::gpu::release();
+        if WATCH_VOLUMES.load(std::sync::atomic::Ordering::Relaxed) {
+            // Once per process (a second call does nothing); on Windows it makes a hidden window
+            // of its own on a thread, which would otherwise be made beside the first window.
+            crate::volumes::watch();
+        }
         shown.update(|s, _| s.first_frame_shown());
     })
 }
 
+/// Whether a window's first frame on screen starts the volume watcher (`main`: not in the bench
+/// or a headless run).
+static WATCH_VOLUMES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Volumes coming and going, where the OS says so without polling, watched from the first
+/// window's first frame on screen.
+pub fn watch_volumes_when_shown() {
+    WATCH_VOLUMES.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// A window's close (Rune hides it once this returns): its searches stop, it leaves the
-/// others, and when it's the last, what's queued for the Jump history's and the sidebar's
-/// writers gets its moment (`persist::DRAIN_WAIT` each: on macOS, Quit ends the process right
-/// after this, RUNE-GAPS.md). It never waits for a file operation and writes no record: one cut
-/// short goes on cleaning up, and is recorded, off this thread (`leftovers.rs`).
+/// others, and when it's the last, the running operation stops and what's queued for the Jump
+/// history's and the sidebar's writers gets its moment (`State::shut_down`). It never waits for
+/// a file operation and writes no record: one cut short goes on cleaning up, and is recorded,
+/// off this thread (`leftovers.rs`), which `main`'s `last` waits for.
 pub(crate) fn closing(s: &mut State) {
-    s.stop_background();
-    if s.leave() {
-        crate::persist::drain_at_exit();
-    }
+    s.shut_down(false);
+}
+
+/// The app is quitting (Rune's `on_quit`, in every open window): as a last window's close,
+/// whichever window owns the running operation. Once per window, so a close hook after it does
+/// nothing more. Always true: the app is ending.
+pub(crate) fn quitting(s: &mut State) -> bool {
+    s.shut_down(true)
 }
 
 /// Opens `state` (made by `State::new_window`) in a window of its own, beside the window
@@ -637,6 +667,77 @@ pub(crate) mod tests {
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!((&got[0].path, got[0].why.as_str()), (&partly, crate::leftovers::UNFINISHED));
         drop(stall);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A quit that runs no close hook (`Tx::quit`, `AppHandle::quit`: Rune exits the loop and
+    /// runs only `on_quit`) still stops the operation and records what it left (review: a
+    /// stalled copy quit this way left a partial file and no record).
+    #[test]
+    fn a_quit_without_a_close_stops_the_operation_and_records_it() {
+        let (d, mut a, go) = stalled_copy("quit-hook", crate::ops::gate::Unmake::Refuse);
+        let progress = a.shared.job.borrow().as_ref().unwrap().run.progress.clone();
+        let t = Instant::now();
+        assert!(quitting(&mut a), "the app is ending");
+        assert!(t.elapsed() < Duration::from_millis(50), "the quit hook took {:?}", t.elapsed());
+        assert!(progress.cancel.load(std::sync::atomic::Ordering::SeqCst), "cancelled by the quit hook");
+        assert!(!a.busy());
+        go.send(()).unwrap();
+        let kept = d.join("into/payload/02.txt");
+        let got = record(&d, |g| g.iter().any(|l| l.path == kept));
+        assert_eq!(got.iter().map(|l| &l.path).collect::<Vec<_>>(), [&kept], "{got:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Every window runs the quit hook, in no particular order: the first one stops the
+    /// operation even when another window owns it, rather than handing it to a window that's
+    /// quitting too.
+    #[test]
+    fn a_quit_hook_in_a_window_that_doesnt_own_the_operation_stops_it() {
+        let (d, mut a, go) = stalled_copy("quit-other", crate::ops::gate::Unmake::Refuse);
+        let mut b = a.new_window(d.clone());
+        settle_all(&mut b);
+        b.poll(&mut Tx::default());
+        assert!(a.owns_job() && !b.owns_job());
+        let progress = a.shared.job.borrow().as_ref().unwrap().run.progress.clone();
+        assert!(quitting(&mut b));
+        assert!(progress.cancel.load(std::sync::atomic::Ordering::SeqCst), "cancelled, not handed over");
+        assert!(!a.busy() && !a.owns_job());
+        assert!(quitting(&mut a));
+        go.send(()).unwrap();
+        let kept = d.join("into/payload/02.txt");
+        let got = record(&d, |g| g.iter().any(|l| l.path == kept));
+        assert_eq!(got.len(), 1, "{got:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// macOS Quit and a Windows logoff run the quit hook, then each window's close hook: the
+    /// second does nothing more (one record, nothing handed on, the window already gone).
+    #[test]
+    fn a_close_after_the_quit_hook_does_nothing_more() {
+        let (d, mut a, go) = stalled_copy("quit-then-close", crate::ops::gate::Unmake::Refuse);
+        assert!(quitting(&mut a));
+        assert!(!a.shared.has(a.win));
+        closing(&mut a);
+        assert!(quitting(&mut a), "still the app ending");
+        go.send(()).unwrap();
+        let kept = d.join("into/payload/02.txt");
+        let got = record(&d, |g| g.iter().any(|l| l.path == kept));
+        assert_eq!(got.len(), 1, "{got:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A quit with no operation running stops each window's background work and leaves no
+    /// record.
+    #[test]
+    fn a_quit_with_nothing_running_records_nothing() {
+        let d = folder("quit-idle", &[]);
+        let (mut a, mut b) = two(&d);
+        a.quit_record = Some(d.join("leftovers.txt"));
+        assert!(quitting(&mut a));
+        assert!(quitting(&mut b));
+        assert_eq!(a.windows(), 0);
+        assert!(!d.join("leftovers.txt").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 

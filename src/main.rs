@@ -57,6 +57,8 @@ mod rename;
 mod search;
 mod select;
 mod sidebar;
+#[cfg(unix)]
+mod signals;
 mod thumb;
 mod tiles;
 mod timing;
@@ -99,12 +101,10 @@ fn main() {
         return;
     }
     // Both overlap the platform's app launch (about 80 ms on macOS before the window is made):
-    // the GPU device and shaders, and the first folder's read.
-    // Windows and Linux (where `prewarm_gpu` does nothing): the window's GPU device and renderer
-    // made on a thread while Rune builds its event loop and window (`gpu.rs`). Headless runs
-    // make no window, so neither.
+    // the GPU device and shaders (macOS and Linux; Windows draws its first frame on the CPU and
+    // makes the GPU after it, `gpu.rs`), and the first folder's read. Headless runs make no
+    // window, so no GPU.
     if windowed {
-        rune::prewarm_gpu();
         gpu::start();
     }
     app::read_first_folder();
@@ -120,6 +120,14 @@ fn main() {
     }
     let mut app = window::configure(App::new(spec), window::FIRST);
     window::register(window::FIRST, app.handle());
+    // SIGTERM, SIGINT and SIGHUP quit as ⌘Q does (`signals.rs`): the running operation is
+    // cancelled and recorded, the writers drain. (Windows: a logoff reaches Rune's quit hooks.)
+    #[cfg(unix)]
+    if windowed {
+        signals::forward(|_| {
+            window::quit_app();
+        });
+    }
     if timed {
         timing::hold(app.handle());
     }
@@ -127,20 +135,35 @@ fn main() {
         app = app.open_inactive(); // the bench never takes focus from what the user is doing
     } else if windowed {
         // Folders other apps ask for while Arbor runs (or that launched it): the window
-        // focused last opens them.
+        // focused last opens them. (Volumes coming and going are watched from the first
+        // frame on screen: `window::configure`.)
         incoming::listen();
-        // Volumes coming and going, where the OS says so without polling: every window.
-        volumes::watch();
+        window::watch_volumes_when_shown();
     }
+    // Rune ends the process as soon as a quit is done (every window hidden and its hooks run),
+    // without returning from `run`: `last` is the app's step before that, on every platform and
+    // however the quit came (the last window's close, macOS Quit, a logoff).
+    rune::fast_exit(last);
     if timed {
         app.on_frame_encoded(timing::frame).run()
     } else {
         app.run()
     }
-    // Whatever `gpu::start` still holds (Rune made no device, or no window ever showed) goes.
-    gpu::release();
-    // No window is on screen now: a file operation the last window's close cut short gets its
-    // bounded cleanup, and what it left is recorded (`leftovers.rs`).
+    // `run` returned without a fast exit (a headless run, or no display to open a window on).
+    last();
+}
+
+/// What Arbor does once no window is on screen and before the process ends: a file operation
+/// the last window's close cut short gets its bounded cleanup, and what it left is recorded
+/// (`leftovers.rs`); the user-data writers get their last moment. Once.
+fn last() {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if timing::on() {
+        timing::launch_marks();
+    }
     leftovers::finish();
     persist::drain_at_exit();
 }
