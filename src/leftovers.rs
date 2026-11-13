@@ -242,6 +242,25 @@ fn apply(c: Change) {
 #[cfg(test)]
 pub(crate) static WRITES: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
 
+/// Test only: the records whose quit thread made its last write (the exact record).
+#[cfg(test)]
+pub(crate) static FINISHED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Test only: waits up to `limit` for the quit thread writing `file` to make its last write.
+#[cfg(test)]
+pub(crate) fn wait_finished(file: &Path, limit: Duration) -> bool {
+    let end = std::time::Instant::now() + limit;
+    loop {
+        if FINISHED.lock().is_ok_and(|f| f.iter().any(|p| p == file)) {
+            return true;
+        }
+        if std::time::Instant::now() > end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Test only: a record whose next write waits until told (a stuck disk).
 #[cfg(test)]
 pub(crate) static STALL: Mutex<Vec<(PathBuf, std::sync::mpsc::Receiver<()>)>> = Mutex::new(Vec::new());
@@ -290,7 +309,13 @@ pub fn quitting(run: crate::ops::Running, file: PathBuf, wait: Duration) {
             sure.extend(unfinished(&p));
         }
         let drop = provisional.iter().map(|l| l.path.clone()).filter(|p| !sure.iter().any(|s| s.path == *p)).collect();
+        #[cfg(test)]
+        let record = file.clone();
         apply(Change { file, add: sure, drop });
+        #[cfg(test)]
+        if let Ok(mut f) = FINISHED.lock() {
+            f.push(record);
+        }
         let _ = done.send(());
     });
     if thread.is_ok()

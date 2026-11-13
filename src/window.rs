@@ -883,9 +883,13 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(!d.join("into/payload").exists(), "cleaned up");
-        let got = record(&d, |g| g.is_empty());
+        // The quit thread's last write, not just a moment with no record: the cleanup can finish
+        // before its provisional record lands (Windows CI flake: the record wasn't there yet,
+        // then the provisional one was, until the last write removed it).
+        assert!(crate::leftovers::wait_finished(&d.join("leftovers.txt"), Duration::from_secs(10)), "the quit thread finished");
+        let got = crate::leftovers::read(&d.join("leftovers.txt"));
         assert!(got.is_empty(), "{got:?}");
-        assert!(!d.join("leftovers.txt").exists());
+        assert!(!d.join("leftovers.txt").exists(), "an empty record is removed, not left for the next launch");
         let _ = std::fs::remove_dir_all(&d);
     }
 
