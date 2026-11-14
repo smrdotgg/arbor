@@ -1,6 +1,6 @@
 # Architecture
 
-A map for finding your way. What Arbor does is in `README.md`; why, and what it must never do,
+A map for finding your way. What Satchel does is in `README.md`; why, and what it must never do,
 in `NORTHSTAR.md`. Each module's own `//!` comment says more about it.
 
 ## The shape
@@ -55,12 +55,12 @@ A folder is a module whose parts got their own files; `mod.rs` holds its interfa
 | | `marked.rs` | The rows on screen with running sums of their sizes, and the selection as bits over them, with its totals |
 | | `volinfo.rs` | The status bar's free space: at most four threads, one query in flight per volume |
 | | `listcols.rs` | The list's columns after the name: which show, their widths, how they fit a pane, `columns.toml` and its writer, the header's drag |
-| Platform glue | `handler/` | Making Arbor the default for folders, and restoring (`linux.rs`, `windows.rs`, `mac.rs`) |
+| Platform glue | `handler/` | Making Satchel the default for folders, and restoring (`linux.rs`, `windows.rs`, `mac.rs`) |
 | | `incoming/` | Folders other apps send (`mac.rs` Apple events, `linux.rs` D-Bus, `windows.rs` a pipe) |
 | UI | `view/` | Every element: root and status bar (`mod.rs`), `sidebar`, `pane` (path bar, tabs, view switch), `list` (rows, item presses and drags, the selection rectangle), `grid` (the icon and tiles views, type icons), `columns` (the column view), `panels`, `overlays`, `batch` |
 | Shared | `bounded.rs`, `persist.rs`, `mounts.rs`, `dirfd.rs`, `ffi.rs`, `fs.rs` | See [Patterns](#patterns-to-reuse); folder reads, sorting, formatting |
 | | `gpu.rs` | The window's GPU made early: Rune's prewarm (macOS) and warm-up (Linux); nothing on Windows, where Rune draws the first frame on the CPU |
-| Tooling | `timing.rs`, `coldstart.rs` | Opt-in speed logs (`ARBOR_TIMING`, `ARBOR_TIMING_FILE`, the bench); the cold-start probes' clock and line, shared with `examples/win32_hello.rs` and `examples/rune_hello.rs`; `examples/gpu_probe.rs` times Rune's GPU setup phase by phase |
+| Tooling | `timing.rs`, `coldstart.rs` | Opt-in speed logs (`SATCHEL_TIMING`, `SATCHEL_TIMING_FILE`, the bench); the cold-start probes' clock and line, shared with `examples/win32_hello.rs` and `examples/rune_hello.rs`; `examples/gpu_probe.rs` times Rune's GPU setup phase by phase |
 | Tests only | `a11y_tests.rs`, `frame_bench.rs`, `packaging_tests.rs`, `prop.rs` | Accessibility tree, per-key cost, install scripts, seeded property tests (a PRNG and a runner) |
 
 ## Threads
@@ -73,7 +73,7 @@ Nothing runs in the background unless the user did something, and nothing polls.
   `FIRST_PAINT_WAIT` (8 ms) for it, then lands it in `poll`.
 - **GPU warm-up** (`gpu.rs`): started first thing in `main`. On Linux Rune's `rune-gpu-warm`
   (`rune::warm_gpu`) makes the window's GPU device and renderer while Rune builds the event loop
-  and window, which take them; macOS does the same through `rune::prewarm_gpu`. On Windows Arbor
+  and window, which take them; macOS does the same through `rune::prewarm_gpu`. On Windows Satchel
   starts nothing: Rune draws the window's first frame on the CPU and shows it, then makes the
   GPU on its own below-normal thread (`rune-gpu-window`) and hands over to it. Headless runs
   start none of it.
@@ -81,32 +81,32 @@ Nothing runs in the background unless the user did something, and nothing polls.
   folder listings (`Folder::loader`, and each column's of the column view), settings reload, typed-path checks, completion, Get
   Info's metadata, Open With's list, batch rename's reads and plans, search rechecks, volume
   lists, eject, launching apps. An older answer never lands over a newer one.
-- **Preview worker** (`arbor-preview`, `preview::Worker`): one thread, started by the first
+- **Preview worker** (`satchel-preview`, `preview::Worker`): one thread, started by the first
   preview; one job at a time, at most one waiting; a stop flag checked between reads and rows.
-- **Thumbnail workers** (`arbor-thumb-0`, `-1`, `tiles::Pool`): two threads, started by the
+- **Thumbnail workers** (`satchel-thumb-0`, `-1`, `tiles::Pool`): two threads, started by the
   first icon view with an image (or, on macOS and Windows, a document) on screen; one decode
   each from a shared queue. Rune's `on_visible_rows` says which grid rows are on screen; cells
   that leave have their requests taken out of the queue or stopped (a flag per request, the
   workers' bells rung for an OS wait). Idle between grids.
 - **Search pool** (`search::Pool`): up to four walker threads, started by the first search,
   below the window's priority, sharing one queue and a stop flag per walk.
-- **Writers**: `arbor-history` (`jump::history`: appends, load, compaction, clear, under a
-  lock file), `arbor-sidebar` (`sidebar::Writer`: edits merged into the file under its
-  lock, then an atomic rewrite) and `arbor-columns` (`listcols::Writer`: the whole file, the
+- **Writers**: `satchel-history` (`jump::history`: appends, load, compaction, clear, under a
+  lock file), `satchel-sidebar` (`sidebar::Writer`: edits merged into the file under its
+  lock, then an atomic rewrite) and `satchel-columns` (`listcols::Writer`: the whole file, the
   last change queued, an atomic rewrite), each started by its first write. One of each for every window (`Shared`), waking the open window
   focused last (`Shared::live_waker`): nothing shared holds a window's own waker or handle
   (the operation's waker is moved to its new owner, `Shared::own_job`). Each registers with
-  `persist::at_exit` and gets up to 100 ms when Arbor quits (`persist::drain_at_exit`).
-- **Free space** (`arbor-volume`, `volinfo.rs`): the status bar's `statvfs`, never on Rune's
+  `persist::at_exit` and gets up to 100 ms when Satchel quits (`persist::drain_at_exit`).
+- **Free space** (`satchel-volume`, `volinfo.rs`): the status bar's `statvfs`, never on Rune's
   pool (it can't be stopped, and a dead network volume never answers). At most four threads in
   the whole app, below the window's priority, ending when nothing waits; volumes by device, one
   query in flight per volume (its answer goes to every folder that asked about it); while all
   four are stuck nothing new starts. Asked when a listing lands and after a file operation.
-- **Get Info's total** (`arbor-info`): one walk per request, waking the window at most every
+- **Get Info's total** (`satchel-info`): one walk per request, waking the window at most every
   30 ms.
 - **Listeners** (not in tests or the bench): `incoming::listen` (macOS open-documents events,
-  Linux `arbor-dbus` serving `org.freedesktop.FileManager1`, Windows `arbor-pipe`) and
-  `volumes::watch` (macOS mount notifications, Windows `arbor-devices` hidden window). Each
+  Linux `satchel-dbus` serving `org.freedesktop.FileManager1`, Windows `satchel-pipe`) and
+  `volumes::watch` (macOS mount notifications, Windows `satchel-devices` hidden window). Each
   blocks on its source; none polls. Both reach the window focused last (`window::route`). The
   volume watcher starts at the first window's first frame on screen (Rune's `on_ready`).
 - **The operation worker** (`ops::start`): one thread per file operation; only one runs at a
@@ -114,16 +114,16 @@ Nothing runs in the background unless the user did something, and nothing polls.
   window that started it), which tells the others what changed. The worker wakes whichever
   window owns it (`Shared::op_wake`): a window closing mid-operation makes another the owner
   on the spot (`State::leave`), and a window whose operation's owner is gone lands it. The
-  last window's close cancels it and hands it to `arbor-quit` (`leftovers.rs`), which waits
-  ≤ 2 s for its cleanup and records what it left (`arbor-leftovers` writes the record); `main`'s
+  last window's close cancels it and hands it to `satchel-quit` (`leftovers.rs`), which waits
+  ≤ 2 s for its cleanup and records what it left (`satchel-leftovers` writes the record); `main`'s
   `last` waits for it once no window is on screen (Rune's `fast_exit` runs it before ending the
   process, on every quit).
-- **The Trash's count** (`arbor-trash-count`, `trash::contents::Counting`): while Empty
+- **The Trash's count** (`satchel-trash-count`, `trash::contents::Counting`): while Empty
   Trash's dialog is open, one thread lists the items, then adds up their size, waking the
   window after each, and ends; closing the dialog stops it.
 - **Favorite looks** (`sidebar::Lookers`): at most two threads sharing a queue, started from
   Rune's `on_ready` (the first frame on screen), ending when it's empty.
-- **Termination signals** (`arbor-signals`, `signals.rs`, Unix, not in tests or headless runs):
+- **Termination signals** (`satchel-signals`, `signals.rs`, Unix, not in tests or headless runs):
   sleeps on a self-pipe the SIGTERM/SIGINT/SIGHUP handler writes to; the first signal quits as
   ⌘Q does (`window::quit_app`), and ends.
 - Short-lived threads: reaping launched processes (`fs::reap`, `openwith`).
@@ -153,7 +153,7 @@ Nothing runs in the background unless the user did something, and nothing polls.
   item is touched (`fs::ident_of`, which on Windows reads the file id through a handle). An item
   replaced since is left alone ("…was replaced since the folder was read; press ⌘R"), and one
   with no identity is never deleted. Size and times of change aren't in it, so a file edited
-  after its folder was listed is still the item (Arbor watches nothing). Device and inode alone
+  after its folder was listed is still the item (Satchel watches nothing). Device and inode alone
   aren't enough: ext4 hands a new file the inode just freed; the birth time tells them apart, and
   where there's none, Linux's file handle (inode and generation) or else the ctime does (on such
   systems an edit then refuses too). Left: a replacement made in the original's clock tick (ext4),
@@ -171,7 +171,7 @@ Nothing runs in the background unless the user did something, and nothing polls.
   trashes). Search uses device numbers alone (`search::devices_for`).
 - **User data on disk** (`persist.rs`). `replace` rewrites a file atomically (`Durable` also
   flushes it first, for the handler backup); `locked` holds a file's lock file around a
-  read-then-write so two Arbor processes don't interleave; a writer thread reports a run of
+  read-then-write so two Satchel processes don't interleave; a writer thread reports a run of
   failures once (`Failures`) and registers its flush for exit.
 - **Walking without following links** (`dirfd.rs`, Unix): folders opened with `O_NOFOLLOW`,
   checked against the identity they were listed with, entries `lstat`ed through the

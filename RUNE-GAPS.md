@@ -1,12 +1,12 @@
 # Rune gaps
 
-Arbor uses Rune exactly as it is (pinned to the commit in `RUNE_REV`). We don't patch it. When a feature ends
+Satchel uses Rune exactly as it is (pinned to the commit in `RUNE_REV`). We don't patch it. When a feature ends
 up worse than it should be because Rune is missing something, it gets an entry here. The owner
 reviews this file with the Rune team at Anomaly.
 
 Each entry:
 
-- **Feature:** the Arbor feature that hit the gap
+- **Feature:** the Satchel feature that hit the gap
 - **What Rune is missing:** the API or behaviour we needed
 - **What we did instead:** the workaround, with file references
 - **What users lose:** how much better the experience would be with it (be concrete)
@@ -15,7 +15,7 @@ Each entry:
 Newest first.
 
 **Re-checked against Rune a7e2f2f (2026-11-13, `chore/rune-bump`).** Fixed in Rune, with the
-workaround gone from Arbor: the CRLF shader check (#711), Windows cold start's adapter probes,
+workaround gone from Satchel: the CRLF shader check (#711), Windows cold start's adapter probes,
 GPU-before-window and FXC load (#625, #600, #689, #631), font discovery off Windows (#766, #879),
 macOS Quit's missing exit hook (#617, #831), and a release-build launch breakdown (#569).
 Available in Rune but not adopted yet (adopting changes behaviour; a follow-up): `Tx::focus`
@@ -95,7 +95,7 @@ Draft for an upstream issue (the owner decides whether to file it):
 
 **Fixed in Rune #711 (a7e2f2f):** a `.gitattributes` (`*.wgsl text eol=lf`, the `.dxbc` and
 `.metallib` files binary), and Rune's `build.rs` reads the WGSL's CRLF as LF before hashing, so a
-CRLF checkout loads the precompiled shader too. Arbor's `build.rs` guard is gone (DECISIONS.md,
+CRLF checkout loads the precompiled shader too. Satchel's `build.rs` guard is gone (DECISIONS.md,
 2026-11-13); CI still checks out with `core.autocrlf false`, which is harmless.
 
 - **Feature:** cold start on Windows (NORTHSTAR: under 30 ms).
@@ -105,14 +105,14 @@ CRLF checkout loads the precompiled shader too. Arbor's `build.rs` guard is gone
   no `.gitattributes`, and Git for Windows' default (`core.autocrlf true`, also GitHub's Windows
   runner) checks the WGSL out with CRLF line endings: the hash differs, and `dxbc::uber` returns
   `None` without a word, so every launch compiles the shader with FXC (Rune's own note: "about
-  250 ms on a desktop CPU"). Every Windows Arbor so far (v0.1.0-alpha.1 to .4, coldstart-probe-1)
-  was built that way: the released arbor.exe embeds the WGSL with CRLF.
-- **What we did instead:** CI sets `core.autocrlf false` before checking out Arbor and Rune
+  250 ms on a desktop CPU"). Every Windows Satchel so far (v0.1.0-alpha.1 to .4, coldstart-probe-1)
+  was built that way: the released satchel.exe embeds the WGSL with CRLF.
+- **What we did instead:** CI sets `core.autocrlf false` before checking out Satchel and Rune
   (`.github/workflows/`), and `build.rs` refuses to build for Windows from a Rune checkout whose
   WGSL has a CR in it, saying how to fix the checkout.
 - **What users lose:** without the workaround, the FXC compile at every launch: on GitHub's
   Windows runner `Renderer::new` takes 585–609 ms compiling against 15–48 ms with the DXBC, and
-  Arbor's cold start went from 687 to 110 ms with the fix (and `warm_gpu`); the owner's laptop
+  Satchel's cold start went from 687 to 110 ms with the fix (and `warm_gpu`); the owner's laptop
   measured 1,090 ms before (BENCH.md, 2026-11-12).
 - **Suggested Rune change:** a `.gitattributes` with `*.wgsl text eol=lf` (and the `.dxbc` and
   `.metallib` files `binary`); hash the WGSL with line endings normalized; and say so under
@@ -121,14 +121,14 @@ CRLF checkout loads the precompiled shader too. Arbor's `build.rs` guard is gone
 ## Cold start on Windows and Linux: most of the 30 ms goes inside Rune, before the first frame
 
 **Mostly fixed in Rune (a7e2f2f):** (1) the adapter is picked from DXGI's list and only that one
-goes to wgpu, no device made on the others (#625, through Rune's patched wgpu-hal, which Arbor's
+goes to wgpu, no device made on the others (#625, through Rune's patched wgpu-hal, which Satchel's
 `Cargo.toml` now patches in too), and "is there a DX12 adapter" is read from DXGI (#600);
 (3 below, "show the window before the GPU") a window's first frame is drawn on the CPU and shown
 before its GPU exists, the GPU taking over after it with no visible change (#689; #724, #747,
 #781, #794 make the hand-over always end); FXC loads only on a first compile from source (#631);
 (2) fallback fonts come from fontconfig and CoreText, no folder walk or `fc-list` (#766), and a
 view's text measures no longer load a second text system (#879); on the Windows runner `main` →
-`setup` went 54 → 4.5 ms, on Linux 41 → 33 ms. Arbor dropped its own adapter
+`setup` went 54 → 4.5 ms, on Linux 41 → 33 ms. Satchel dropped its own adapter
 list and hold (`src/gpu.rs`) and its Windows `warm_gpu` (which would make the GPU beside the
 CPU-drawn first frame); Linux keeps `warm_gpu`. Numbers: BENCH.md, 2026-11-13 (`chore/rune-bump`).
 **Still open:** the X11 event loop's ~25 ms (3), `virtual_rows` copying every key of a new row
@@ -139,18 +139,18 @@ CPU-first window, so the window still waits for the GPU there.
   The owner's Windows gaming laptop (likely an integrated plus a discrete GPU) takes "damn near a
   second" from the Start menu.
 - **What Rune is missing:** a launch whose fixed costs fit in 30 ms. Measured with
-  `ARBOR_TIMING_FILE` splits (`src/timing.rs`) and the probes `examples/rune_hello.rs` (one text
-  view, Arbor's features and profile) and `examples/win32_hello.rs` (bare Win32 + GDI), BENCH.md
+  `SATCHEL_TIMING_FILE` splits (`src/timing.rs`) and the probes `examples/rune_hello.rs` (one text
+  view, Satchel's features and profile) and `examples/win32_hello.rs` (bare Win32 + GDI), BENCH.md
   2026-11-11 "Cold start on Windows and Linux". **The owner's laptop** (AMD Radeon integrated +
   NVIDIA GeForce RTX 3070 Laptop GPU, the NVIDIA driving the primary display, coldstart-probe-1):
-  win32-hello 28 ms, rune-hello 1,104 ms, Arbor 1,090 ms (medians after the first launch);
-  Arbor's splits: process → `main` 8.4 ms, `init` at 6.4 ms (0.4 ms long), `setup` at 17.6 ms,
+  win32-hello 28 ms, rune-hello 1,104 ms, Satchel 1,090 ms (medians after the first launch);
+  Satchel's splits: process → `main` 8.4 ms, `init` at 6.4 ms (0.4 ms long), `setup` at 17.6 ms,
   **native window at 1,061.6 ms**, first frame `update` 13 ms and `encode` 4 ms. So about
   1,040 ms is Rune making the window, the adapter, the device, the renderer and the surface;
-  Arbor's own work is under 15 ms. Rune drew with DX12 on the NVIDIA ("the GPU driving the
+  Satchel's own work is under 15 ms. Rune drew with DX12 on the NVIDIA ("the GPU driving the
   primary display"). On GitHub's Windows runner (no GPU, WARP), process
-  creation → first frame is 33 ms for the bare Win32 window and 680 ms for Arbor (rune-hello
-  890 ms); on tabot-dev under Xvfb (lavapipe) 127 ms for Arbor. Four parts are Rune's:
+  creation → first frame is 33 ms for the bare Win32 window and 680 ms for Satchel (rune-hello
+  890 ms); on tabot-dev under Xvfb (lavapipe) 127 ms for Satchel. Four parts are Rune's:
   1. **Windows: every GPU adapter is probed with a D3D12 device, twice, before the real one.**
      `Gpu::wgpu_instance` asks whether any DX12 adapter exists (`enumerate_adapters(DX12)`), and
      on a window `gpu::pick` enumerates them all again to find the one driving the primary
@@ -163,7 +163,7 @@ CPU-first window, so the window still waits for the GPU there.
   2. **Font discovery on the UI thread before the window** (`TextSystem::new`, inside
      `runtime_for`): walks the system font directories with a `stat` per file, maps up to 16 CJK
      font files and the symbol and emoji fonts (Segoe UI Symbol and Emoji on Windows), and on
-     Linux runs `fc-list` as a subprocess. Windows runner: `init` → `setup` 25 ms (Arbor's `init`
+     Linux runs `fc-list` as a subprocess. Windows runner: `init` → `setup` 25 ms (Satchel's `init`
      is 0.4 ms of it); Linux: ~9 ms. Nothing in `AppSpec` turns it off (`fonts` only replaces
      Inter).
   3. **X11 event loop: 25 ms** from `main` to `init` on tabot-dev (Xlib, XKB and the compose
@@ -176,7 +176,7 @@ CPU-first window, so the window still waits for the GPU there.
   (`src/gpu.rs`), which makes the device and renderer on a thread while the event loop, fonts
   and window are made (macOS's `prewarm_gpu` does nothing elsewhere): Linux 127 → 101 ms.
   Windows builds check Rune out with LF line endings (the entry above): together, the owner's
-  laptop went **1,280 → 655 ms** (round 2, BENCH.md 2026-11-13). And on Windows Arbor lists the
+  laptop went **1,280 → 655 ms** (round 2, BENCH.md 2026-11-13). And on Windows Satchel lists the
   DX12 adapters itself first and holds the list until the first frame (`src/gpu.rs`): a D3D12
   device is a singleton per adapter and process, so Rune's two listings get the live devices
   back (runner: Rune's instance step 22 → 1 ms, `try_new` 6.5 → 2 ms); on the laptop **655 →
@@ -193,7 +193,7 @@ CPU-first window, so the window still waits for the GPU there.
   again, then the 51 ms device; the renderer 3 ms with the DXBC), then the first frame
   (`update` 14–20 ms, `encode` 3 ms). The window stays cloaked (invisible) all that time.
 - **Suggested Rune changes, ranked by what they'd save on that laptop:**
-  1. **List the adapters once, and hold the devices until the device is made** (what Arbor's
+  1. **List the adapters once, and hold the devices until the device is made** (what Satchel's
      `gpu.rs` does from outside: measured 655 → 411 ms on the laptop). Better still,
   2. **choose the adapter without making devices**: DXGI alone gives each adapter's LUID and
      which one drives the primary display (or `IDXGIFactory6::EnumAdapterByGpuPreference`),
@@ -218,7 +218,7 @@ CPU-first window, so the window still waits for the GPU there.
      (~7 ms per 10,000 rows on tabot-dev).
   7. Make only the pipelines the first frame needs before it; a driver's own shader cache
      already makes DXBC → GPU code cheap after the first launch (226 → 3 ms here). Whether
-     Arbor may use wgpu's `PipelineCache` (an app-owned file, Vulkan only) is a question for
+     Satchel may use wgpu's `PipelineCache` (an app-owned file, Vulkan only) is a question for
      the owner under NORTHSTAR's no-caching rule (DECISIONS.md).
 
   With 1–2 and 5–6, this laptop would land around 150–250 ms to a GPU-drawn first frame (the
@@ -233,7 +233,7 @@ CPU-first window, so the window still waits for the GPU there.
 hooks, then ends the process itself (`rune::fast_exit`, now every app's default), first running
 the app's `last` step: on every platform and however the quit came, macOS Quit included (it runs
 inside `applicationWillTerminate`, before AppKit ends the process). `App::run` no longer returns
-after a quit, so Arbor's exit work (`leftovers::finish`, the writers' drain) moved into that step
+after a quit, so Satchel's exit work (`leftovers::finish`, the writers' drain) moved into that step
 (`last` in `src/main.rs`): a cancelled copy's cleanup and its record now get their time after ⌘Q
 too. Rune's quit watch reports on stderr if a quit runs past 3 s; nothing kills it unless the app
 arms `rune::exit_deadline`.
@@ -269,7 +269,7 @@ arms `rune::exit_deadline`.
 - **What we did instead:** the new window's state sends itself a message
   (`State::new_window` in `src/app/mod.rs`) that its waker delivers as soon as `setup` runs
   (`Shared::set_waker`), and its first `poll` sets the title.
-- **What users lose:** the window is titled "Arbor" until its first `poll`, a frame or so
+- **What users lose:** the window is titled "Satchel" until its first `poll`, a frame or so
   (in the Dock's window list, the Windows taskbar, Alt-Tab).
 - **Suggested Rune change:** `WindowSpec::title(impl Into<String>)` (or `App::title`), the
   window's title from creation.
@@ -285,7 +285,7 @@ arms `rune::exit_deadline`.
   `live_dirty`, and only `latch_live` (`runtime/motion/live_latch.rs`) or a commit's
   `subscribe_live` clears it. `latch_live` returns early, leaving it set, when the window has no
   live subscriptions, so `live_pending()` stays true, and the window draws a frame every refresh
-  (`window/presented.rs`, with `poll` each frame) until something commits. In Arbor that's the
+  (`window/presented.rs`, with `poll` each frame) until something commits. In Satchel that's the
   list view (no `Pixels`, live text or bound values) after the first layout report with no
   commit after it: the Mac window taking its size after the first frame, As List, a scroll, a
   folder opened. On the M4, 0.8–1.1 s of CPU per 10 s while idle; on Linux (lavapipe), 8.9 s
@@ -296,7 +296,7 @@ arms `rune::exit_deadline`.
   says `live_only`: a report that changed nothing commits a cheap view instead, and the press
   and release around it commit anyway. The column view's sideways wheel said it too when a delta
   scrolled nothing (too small, or at an end): 3.46 s of CPU per 5 s after one such wheel, until
-  the next key; it now lets Rune commit instead. No other `live_only` in Arbor is unbounded: each
+  the next key; it now lets Rune commit instead. No other `live_only` in Satchel is unbounded: each
   is in a drag's `Move` (rows, tabs, favorites, the rectangle), and the drag's release commits.
   Guarded by `an_idle_window_draws_nothing`, `the_views_are_idle_after_each_kind_of_input`
   (`src/a11y_tests.rs`) and `bench --idle`.
@@ -313,7 +313,7 @@ arms `rune::exit_deadline`.
   of children on screen changes (as `on_visible_rows` gives a virtual list, rows of children
   laid out along x). Its offset reaches the app only through `on_scroll_offset`, which runs
   with no state and no commit, so scrolling can't start or stop anything.
-- **What we did instead:** the columns scroll by whole columns under Arbor's control
+- **What we did instead:** the columns scroll by whole columns under Satchel's control
   (`Columns::first`, `src/columns.rs`): as many as fit the pane at the column width, the deepest
   after every move, the horizontal wheel (and Shift + wheel) taken by an `on_wheel` on the strip
   and turned into a column at a time (`State::columns_wheel`), and a "‹ N" button at the left
@@ -347,7 +347,7 @@ arms `rune::exit_deadline`.
   edge without a timer: an auto-scroll on drags (as AppKit's `autoscroll:` and Windows'
   drag-scroll do, driven by the system's own repeating drag events), or `Phase::Move` repeated
   while a captured press is held outside its element. Rune sends `on_drag` only when the pointer
-  moves, and Arbor runs no timers (NORTHSTAR: no polling).
+  moves, and Satchel runs no timers (NORTHSTAR: no polling).
 - **What we did instead:** each pointer move past the edge scrolls one step, further the further
   out the pointer is (half the distance, 2 to 48 pt; `Band::edge_step` in `src/band.rs`), with
   `Tx::scroll_to_instant`, and the rectangle and its hits follow from geometry.
@@ -367,14 +367,14 @@ arms `rune::exit_deadline`.
   posted (a mouse utility re-posting the wheel, Screen Sharing, an automation tool such as the
   QA session's): that arrives as a vertical delta with Shift held, and Rune scrolls down. Rune
   does deliver horizontal deltas (a tilt wheel, a trackpad swipe, with pixel deltas and phases)
-  to `scroll_xy` viewports correctly; Arbor's tests feed both.
+  to `scroll_xy` viewports correctly; Satchel's tests feed both.
 - **What we did instead:** the preview's text has an `on_wheel` that takes an unturned
   Shift + wheel delta (not precise, no horizontal part) and scrolls sideways itself with
   `Tx::scroll_to_instant`, adding up several notches in one frame (`preview_shift_wheel` in
   `src/view/panels.rs`). Off macOS Rune has already turned it, so the handler leaves it alone.
 - **What users lose:** within one wheel gesture (0.1 s without phases), letting go of Shift while
   still turning drops those notches instead of scrolling down; and every other `scroll_x`/
-  `scroll_xy` viewport would need the same handler (the preview is Arbor's only one).
+  `scroll_xy` viewport would need the same handler (the preview is Satchel's only one).
 - **Suggested Rune change:** on macOS, turn a non-precise delta with Shift held and no horizontal
   part as other platforms do (a delta the system turned already has one, so nothing turns twice).
 
@@ -390,7 +390,7 @@ arms `rune::exit_deadline`.
   mouse-up (which Rune ignores: the press's capture went with the drag-out), and the session
   then waits for a release that already happened: it eats every key (⌘J, F2, anything) until
   Esc or another click ends it, and `on_drag_end` doesn't run until then. It takes a quick
-  drag: a flick, Screen Sharing, an automation tool. `ARBOR_DRAG_LOG=1` on the M4 Pro (QA at
+  drag: a flick, Screen Sharing, an automation tool. `SATCHEL_DRAG_LOG=1` on the M4 Pro (QA at
   2beefb5): offered at 14127 ms, the window got `LeftMouseDragged` at 14143 and
   `LeftMouseUp` at 14144, Rune reported the session started at 14166, and it ended Cancelled
   at 61764 on Esc. A drag held half a second ended normally on its release: no event reached
@@ -399,9 +399,9 @@ arms `rune::exit_deadline`.
   from the release itself) was wrong: Rune's `drag_event` already refuses that.
 - **What we did instead:** the row's `on_drag_start` (which Rune runs in the frame after it
   began the session) asks the window server which buttons are down
-  (`NSEvent.pressedMouseButtons`); if the left one isn't, Arbor posts a left-mouse-up at the
+  (`NSEvent.pressedMouseButtons`); if the left one isn't, Satchel posts a left-mouse-up at the
   pointer to the front of its own event queue (`-[NSApplication postEvent:atStart:]`,
-  in-process), which the session takes as its drop: over Arbor's own window, which takes none of
+  in-process), which the session takes as its drop: over Satchel's own window, which takes none of
   its own drags, so it ends Cancelled and the status bar says how to move files
   (`State::drag_out_started` in `src/actions.rs`).
 - **What users lose:** little, if the session has taken over the mouse by the time Rune reports
@@ -409,7 +409,7 @@ arms `rune::exit_deadline`.
   between that report and the takeover would still be missed. Every Rune app with `drag_out`
   would need the same workaround. Synthetic input from automation tools may not set
   `pressedMouseButtons` (the logs read 0 mid-drag), so for such a drag still held when the
-  session starts, Arbor ends it at once (it ends Cancelled with the same hint).
+  session starts, Satchel ends it at once (it ends Cancelled with the same hint).
 - **Suggested Rune change:** when the session's first tracking event arrives (or right before
   `beginDraggingSession`, and again when a left-mouse-up reaches the window while a session is
   pending), check `NSEvent.pressedMouseButtons`; if the button is up, end the session (post the
@@ -423,7 +423,7 @@ arms `rune::exit_deadline`.
 - **What Rune is missing:** a way to hear that volumes changed: macOS's NSWorkspace
   `didMount`/`didUnmount` notifications, Windows' `WM_DEVICECHANGE` (sent to top-level windows;
   Rune's window procedure doesn't pass it on), and on Linux udisks' D-Bus signals.
-- **What we did instead:** on macOS Arbor registers its own observer with NSWorkspace's
+- **What we did instead:** on macOS Satchel registers its own observer with NSWorkspace's
   notification center (`volumes::mac_watch`); on Windows it makes a hidden top-level window of
   its own on a thread that sleeps in `GetMessage` (`volumes::win_watch`). Each refreshes the list
   on a worker. Linux refreshes by hand (a sidebar right-click, ⌘R).
@@ -443,7 +443,7 @@ arms `rune::exit_deadline`.
   open menu. `PopupMenu` is fixed when `Tx::popup_menu` is called.
 - **What we did instead:** the right-click on a file asks a worker for the apps and waits at
   most a frame (`State::apps_for_menu` in `src/openwith.rs`); if they're in, the menu has an
-  Open With submenu, otherwise an "Open With…" item that opens Arbor's own list, which fills in
+  Open With submenu, otherwise an "Open With…" item that opens Satchel's own list, which fills in
   when the worker answers.
 - **What users lose:** every right-click on a file lists the apps whether or not the submenu is
   opened (a few ms on a worker), and on a slow Launch Services the submenu becomes a separate
@@ -455,7 +455,7 @@ arms `rune::exit_deadline`.
 ## Accessibility: no way to put keyboard focus on an element from a handler
 
 **In Rune since #384 (a7e2f2f), not adopted yet:** `Tx::focus(key, ring)` focuses an element from
-a handler, and `El::autofocus` names the control a modal opens on. Arbor could focus the list at
+a handler, and `El::autofocus` names the control a modal opens on. Satchel could focus the list at
 launch and on a pane switch with it; that changes what a screen reader hears and the a11y
 snapshots, so it's a follow-up (DECISIONS.md, 2026-11-13). The workaround below still works.
 
@@ -464,11 +464,11 @@ snapshots, so it's a follow-up (DECISIONS.md, 2026-11-13). The workaround below 
   active descendant is the cursor's row).
 - **What Rune is missing:** a `Tx::focus(key)` for any focusable element. Text fields take focus
   through their `TextEdit::focused`, and focus returns to a keyed element when an overlay or a
-  `focus_return` element goes away, but nothing else moves it: not at launch, not when Arbor
+  `focus_return` element goes away, but nothing else moves it: not at launch, not when Satchel
   switches panes.
 - **What we did instead:** the list is focusable and hands every key to the window's own
   handler (`list` in `src/view.rs`, `timing::key`), so keys behave the same focused or not; Tab
-  puts focus there when the window has one pane (Arbor passes Tab on), a click does in any
+  puts focus there when the window has one pane (Satchel passes Tab on), a click does in any
   case, and overlays give it back when they close. In a split window both lists name the
   active pane's cursor row as their active descendant (`active_row`), so whichever holds focus,
   a reader hears the row the keys move.
@@ -505,7 +505,7 @@ follow-up). `El::multiselectable` is still missing.
 **Half fixed (a7e2f2f):** `Tx::assistive_technology()` (#778) says whether a client reads the
 tree, but only in handlers: `view` (`Cx`) still can't ask, and labels still can't be lazy.
 
-- **Feature:** what Arbor names for assistive technology must cost nothing when no reader is
+- **Feature:** what Satchel names for assistive technology must cost nothing when no reader is
   connected (NORTHSTAR: pay only for what you use).
 - **What Rune is missing:** a way to build labels only when the tree is built (a label closure,
   or `Cx::accessibility_active()`). `El::label` and `El::description` take a `String`, made
@@ -531,9 +531,9 @@ tree, but only in handlers: `view` (`Cx`) still can't ask, and labels still can'
   `SPI_GETHIGHCONTRAST`; GNOME's `high-contrast`) and its text-size preference (Windows' "Text
   size", GNOME's `text-scaling-factor`; macOS has no global one). `Cx` reports dark mode,
   accent, reduced motion, scroll-bar style and Full Keyboard Access only.
-- **What we did instead:** nothing: Arbor draws its normal theme and sizes. Reduced motion is
-  moot (Arbor never animates).
-- **What users lose:** someone who turned on increased contrast or larger text gets Arbor's
+- **What we did instead:** nothing: Satchel draws its normal theme and sizes. Reduced motion is
+  moot (Satchel never animates).
+- **What users lose:** someone who turned on increased contrast or larger text gets Satchel's
   default greys (secondary text, dimmed rows, the grey selection of the inactive pane) and
   13 pt text, unlike native apps.
 - **Suggested Rune change:** `Cx::increased_contrast()` and `Cx::text_scale()` (re-running the
@@ -541,21 +541,21 @@ tree, but only in handlers: `view` (`Cx`) still can't ask, and labels still can'
 
 ## Opening folders from Finder: no "open documents" hook
 
-- **Feature:** Arbor as the place folders open (NORTHSTAR scope: "the default handler for
-  opening and revealing folders"): "Open With → Arbor" in Finder, `open -a Arbor dir`, and
-  Arbor as the default for folders.
+- **Feature:** Satchel as the place folders open (NORTHSTAR scope: "the default handler for
+  opening and revealing folders"): "Open With → Satchel" in Finder, `open -a Satchel dir`, and
+  Satchel as the default for folders.
 - **What Rune is missing:** a hook for the files and folders macOS opens with the app. macOS
   sends them as an "open documents" Apple event (`kAEOpenDocuments`), to the running app or the
   one it launched for them (the path isn't in `argv`). Rune handles only the "open URL" event
   (`App::on_open_url`, `open_url/incoming.rs`), and winit 0.30 has no `application:openURLs:`.
-- **What we did instead:** Arbor installs its own handler for the event (`src/incoming.rs`,
+- **What we did instead:** Satchel installs its own handler for the event (`src/incoming.rs`,
   `mac`): an Objective-C object registered with `NSAppleEventManager` when
   `NSApplicationWillFinishLaunchingNotification` arrives (AppKit installs its own handler while
   it launches, so earlier would be overwritten; the launch's event comes after). It reads the
   event's file URLs, sorts folders from files on a thread, and hands them to the window through
-  `AppHandle::update` (and `AppHandle::open`). Checked on the M4 Pro: the folder Arbor is
+  `AppHandle::update` (and `AppHandle::open`). Checked on the M4 Pro: the folder Satchel is
   launched for, and one sent to it while running.
-- **What users lose:** nothing today. The cost is that Arbor carries Objective-C runtime code
+- **What users lose:** nothing today. The cost is that Satchel carries Objective-C runtime code
   for something every document-opening Rune app needs, and depends on AppKit's launch order.
 - **Suggested Rune change:** `App::on_open_files(|s, paths: &[PathBuf], tx|)` on macOS, fed
   from the same Apple-event inbox as `on_open_url` (with the launch's files kept until a window
@@ -564,7 +564,7 @@ tree, but only in handlers: `view` (`Cx`) still can't ask, and labels still can'
 
 ## Wakes: one raised while Rune drains wakes is handled in the same run-loop turn
 
-- **Feature:** the speed bench (`ARBOR_BENCH`, `src/timing.rs`), which drives Arbor one step per
+- **Feature:** the speed bench (`SATCHEL_BENCH`, `src/timing.rs`), which drives Satchel one step per
   frame from `App::on_frame_encoded`, and anything else that wakes the window from a frame hook
   or from `poll`.
 - **What Rune is missing:** wakes raised during the drain going to the next turn. On macOS a
@@ -591,7 +591,7 @@ tree, but only in handlers: `view` (`Cx`) still can't ask, and labels still can'
 ## Truncated text: each width tried shapes the whole string again
 
 - **Feature:** Jump to Folder's rows and Search's folder column, which show long paths cut at the
-  start ("…/projects/arbor"), so the folder's own name stays in view (NORTHSTAR: every key within
+  start ("…/projects/satchel"), so the folder's own name stays in view (NORTHSTAR: every key within
   a frame).
 - **What Rune is missing:** a cheap head (or middle, or end) truncation. `truncated()`
   (`runtime/commit/text_layout.rs:198–255`) binary-searches the cut, and each probe builds the
@@ -600,7 +600,7 @@ tree, but only in handlers: `view` (`Cx`) still can't ask, and labels still can'
   M4 Pro, with a fresh Jump query each round over ~85-character paths, it was 45% of a frame:
   keys took 6.3–8.6 ms of `update_ms` hot and 14–19 ms once the CPU cooled, against 1.1–1.7 ms
   for the same history with short paths (FINDINGS of the 2026-11-08 Mac investigation).
-- **What we did instead:** Arbor cuts long paths itself to whole trailing folders that fit,
+- **What we did instead:** Satchel cuts long paths itself to whole trailing folders that fit,
   "…/" first, before Rune sees them (`fit_path` in `src/view.rs`), estimating widths from
   per-character advances of the font measured once per thread (`char_advance`, through
   `rune::text::advance`), with 3% to spare. The bold match ranges move with the cut
@@ -608,7 +608,7 @@ tree, but only in handlers: `view` (`Cx`) still can't ask, and labels still can'
   search folder column got a width of its own (the same share of the row) so the cut knows its
   room.
 - **What users lose:** a little room: the estimate leaves up to a few percent unused, and a path
-  is cut at a folder boundary, so "…/projects/arbor" may show where "…ojects/arbor/src" would
+  is cut at a folder boundary, so "…/projects/satchel" may show where "…ojects/satchel/src" would
   have fit (which also reads better). A row with a character outside ASCII is estimated with
   the widest ASCII advance, so it's cut a little shorter.
 - **Suggested Rune change:** shape the string once and find the cut from the clusters' advances
@@ -622,9 +622,9 @@ tree, but only in handlers: `view` (`Cx`) still can't ask, and labels still can'
   it works like Finder or Explorer: click, double-click, drag, right-click, menus").
 - **What Rune is missing:** a native pop-up menu off macOS and Windows. `Tx::popup_menu` answers
   `None` at once on Linux (`popup_menu/mod.rs`: `popup_menu_supported()` is false; the host
-  there shows nothing), so the native menu Arbor opens on macOS and Windows never appears.
+  there shows nothing), so the native menu Satchel opens on macOS and Windows never appears.
 - **What we did instead:** where `rune::popup_menu_supported()` is false, the same items, from the
-  same table (`State::menu_items` in `src/actions.rs`), open in Arbor's own menu in the window
+  same table (`State::menu_items` in `src/actions.rs`), open in Satchel's own menu in the window
   (`src/menu.rs`, `menu_view` in `src/view.rs`): a small card at the pointer, flipped at the
   window's edges, with each command's keys; ↑↓, Home, End and a letter move, Enter or Space
   runs, Esc or a click outside closes. Checked under X11 (Xvfb, XTest).
@@ -731,19 +731,19 @@ tree, but only in handlers: `view` (`Cx`) still can't ask, and labels still can'
   so one gesture can't be "inside the window, then out to Finder". Off macOS, `drag_out` starts
   no system drag at all, so there's nothing to drop either.
 - **What we did instead:** while the window is split, rows drop `drag_out` and use `on_drag`,
-  Arbor's own drag inside the window: the pane under the pointer comes from the panes' laid-out
+  Satchel's own drag inside the window: the pane under the pointer comes from the panes' laid-out
   x (`Panes::at` and `file_row` in `src/view.rs`), the target pane gets a drop highlight, and the
   release goes through the same code as a file drop (`State::drop_on_pane` in `src/panes.rs`:
   same disk moves, another copies, ⌥ copies). Unsplit, rows keep `drag_out` as before. Checked
   under X11 (Xvfb, XTest pointer).
 - **Unsplit, too:** a row dropped on a folder row of the same window does nothing on macOS (the
   QA session's "folder-row drop does nothing"): the OS drag offers nothing to its own window.
-  Arbor can't even tell that's where it was let go: AppKit passes the end point to
+  Satchel can't even tell that's where it was let go: AppKit passes the end point to
   `draggingSession:endedAtPoint:operation:` (`drag_out/macos.rs`), but `on_drag_end` gets only
   the outcome. So any drag nothing took now says how to move files instead ("Nothing took the
   drop. To move files into a folder in this window, cut and paste them (⌘X, ⌘V) or use split
   view (⌘\\)", `State::drag_out_ended` in `src/actions.rs`), also after an Escape or a refused
-  drop elsewhere. Starting every row drag as Arbor's own and handing it to the OS only when the
+  drop elsewhere. Starting every row drag as Satchel's own and handing it to the OS only when the
   pointer leaves the window isn't possible either: which of the two a press becomes is fixed per
   element when it starts (above).
 - **The sidebar, too (milestone 12):** rows dragged onto the sidebar add their folders through
@@ -752,7 +752,7 @@ tree, but only in handlers: `view` (`Cx`) still can't ask, and labels still can'
 - **The column view, too:** its columns are one pane of one window, so a file dragged from one
   column onto a folder or another column would be a drop in its own window, which the system's
   drag can't make ("Nothing took the drop" on the Mac). In the column view rows always use
-  Arbor's in-window drag, as when split: the column and row under the pointer come from each
+  Satchel's in-window drag, as when split: the column and row under the pointer come from each
   column's laid-out rect and scroll (`State::column_drop_at` in `src/columns.rs`), the folder
   row (or column) gets a drop highlight, and the release goes through the checked drop
   (`State::drop_rows_into`). So, as when split, a row can't be dragged out to Finder or another
@@ -798,8 +798,8 @@ tree, but only in handlers: `view` (`Cx`) still can't ask, and labels still can'
 
 **The breakdown is fixed (a7e2f2f):** `rune::marks` (#569, #721) records each step to a window's
 first frame in every build (event loop, window made, adapter, device, surface, renderer, fonts,
-first frame built, encoded, presented, shown). `ARBOR_TIMING` prints them when Arbor quits
-(`arbor-timing launch-marks`). Rune's own launch time before `init` is unchanged.
+first frame built, encoded, presented, shown). `SATCHEL_TIMING` prints them when Satchel quits
+(`satchel-timing launch-marks`). Rune's own launch time before `init` is unchanged.
 
 (The macOS budget is now "within 25 ms of a bare native window", met: BENCH.md 2026-11-09.
 Windows and Linux: the entry "Cold start on Windows and Linux" above.)
@@ -809,16 +809,16 @@ Windows and Linux: the entry "Cold start on Windows and Linux" above.)
   launch time goes in a release build. On an M4 Pro (macOS 27.2), `main` → first frame
   submitted is about 123 ms (median) whether the folder has 1 entry or 10,000. `AppSpec::init`
   starts 65–80 ms after `main`, and window, Metal surface and first frame take about 40 ms more.
-  Arbor's own share is about 3 ms (`init` 0.2 ms, first view build 2–4 ms). Rune's launch
+  Satchel's own share is about 3 ms (`init` 0.2 ms, first view build 2–4 ms). Rune's launch
   breakdown (`perf_warn::launch`) exists only in debug builds and only warns past 100 ms of app
   time, so the 65–80 ms before `init` can't be split further from outside Rune.
 - **What we did instead:** call `rune::prewarm_gpu()` first thing in `main` and read the first
   folder on a thread started there, so both overlap AppKit's launch (`src/main.rs`,
   `app::read_first_folder` in `src/app.rs`). That took the 10k-folder case from ~140 ms to
-  ~123 ms `main` → frame. `ARBOR_TIMING=1` logs `init_at_ms` and `init_ms` to show the split
+  ~123 ms `main` → frame. `SATCHEL_TIMING=1` logs `init_at_ms` and `init_ms` to show the split
   (`src/timing.rs`). Numbers are in `BENCH.md`.
 - **What users lose:** every launch takes about 140 ms from click to window instead of under
-  100 ms. Opening a folder from another app (Arbor as the default folder handler) feels like
+  100 ms. Opening a folder from another app (Satchel as the default folder handler) feels like
   launching an app instead of switching to one.
 - **Suggested Rune change:** an opt-in release-build launch breakdown, for example phases added
   to the `RUNE_READY_DIR` JSON (event loop built, did-finish-launching, window created, surface
@@ -827,7 +827,7 @@ Windows and Linux: the entry "Cold start on Windows and Linux" above.)
 
 ## Frame timing: no "presented at" for a frame
 
-- **Feature:** measuring "keypress to updated pixels under 8 ms" (`ARBOR_TIMING`, `scripts/bench.sh`).
+- **Feature:** measuring "keypress to updated pixels under 8 ms" (`SATCHEL_TIMING`, `scripts/bench.sh`).
 - **What Rune is missing:** when a frame actually reached the screen. `FrameEncoded::at()` is
   when the commands were submitted, and `presents_at()` is the display link's target, known only
   for display-paced macOS frames. It's `None` for the first frame after a key press, which is

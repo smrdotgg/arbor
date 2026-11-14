@@ -1,9 +1,11 @@
-# Arbor
+# Satchel
+
+_The project was called Arbor until 14 November 2026._
 
 A small, fast file manager for macOS, Linux and Windows, built on [Rune](https://github.com/anomalyco/rune)
 (native GPU UI in Rust).
 
-![Arbor](shots/dark.png)
+![Satchel](shots/dark.png)
 
 ## Design rules
 
@@ -62,87 +64,87 @@ maps the modules, the threads, the patterns they share and where platform code l
 ## Install
 
 `scripts/package.sh` builds the package for the platform it runs on into `dist/`, and CI builds
-all three on every push to `main`: they're the run's artifacts (`arbor-macOS`, `arbor-Linux`,
-`arbor-Windows`). A tag starting with `v` also publishes them as a GitHub Release.
+all three on every push to `main`: they're the run's artifacts (`satchel-macOS`, `satchel-Linux`,
+`satchel-Windows`). A tag starting with `v` also publishes them as a GitHub Release.
 
 - **macOS** (Apple silicon and Intel, macOS 11 or later): unzip
-  `Arbor-<version>-macos-universal.zip` and move `Arbor.app` to Applications. One binary holds
+  `Satchel-<version>-macos-universal.zip` and move `Satchel.app` to Applications. One binary holds
   both: an Apple silicon slice and an Intel one. It's signed ad hoc, not notarized (that needs an Apple Developer
   account), so the first time, right-click it, choose Open, and Open again (or run
-  `xattr -d com.apple.quarantine /Applications/Arbor.app`). Finder then lists it under "Open
+  `xattr -d com.apple.quarantine /Applications/Satchel.app`). Finder then lists it under "Open
   With" for folders.
-- **Windows** (x64): unzip `arbor-<version>-windows-x86_64.zip` into a folder that stays put
-  (`%LOCALAPPDATA%\Arbor`, say) and run `arbor.exe`. It isn't signed, so SmartScreen may say
+- **Windows** (x64): unzip `satchel-<version>-windows-x86_64.zip` into a folder that stays put
+  (`%LOCALAPPDATA%\Satchel`, say) and run `satchel.exe`. It isn't signed, so SmartScreen may say
   "Windows protected your PC": choose More info, then Run anyway.
-- **Linux** (x86-64): `tar xzf arbor-<version>-linux-x86_64.tar.gz`, then `./install.sh` in the
-  folder it made. It installs for you only, no root: `~/.local/bin/arbor`, `arbor.desktop` in
+- **Linux** (x86-64): `tar xzf satchel-<version>-linux-x86_64.tar.gz`, then `./install.sh` in the
+  folder it made. It installs for you only, no root: `~/.local/bin/satchel`, `satchel.desktop` in
   `~/.local/share/applications` (so menus list it) and its icons (the desktop file names the
   binary by its full path, quoted as the Desktop Entry spec says, so any home folder works).
-  `./uninstall.sh` removes them, putting back the folder default first if Arbor has it: with
-  the installed Arbor, or the one beside the script if that's gone, or with neither, by putting
+  `./uninstall.sh` removes them, putting back the folder default first if Satchel has it: with
+  the installed Satchel, or the one beside the script if that's gone, or with neither, by putting
   back the D-Bus activation file and folder default the backup recorded itself (or removing
-  Arbor's when there was none) and saying what it did; a damaged backup stops it before
+  Satchel's when there was none) and saying what it did; a damaged backup stops it before
   anything changes, and the backup stays until everything is back. Running under X11 needs
   `libxkbcommon-x11` (see [Platform notes](#platform-notes)).
 
-Installing never makes Arbor the default for anything. That's a command:
+Installing never makes Satchel the default for anything. That's a command:
 
-### Make Arbor the default for folders
+### Make Satchel the default for folders
 
-**"Make Arbor the Default for Folders…"** (in the palette) has other apps open folders in Arbor,
-and **"Restore the System Default for Folders…"** undoes it. Both ask first, in Arbor's dialog,
+**"Make Satchel the Default for Folders…"** (in the palette) has other apps open folders in Satchel,
+and **"Restore the System Default for Folders…"** undoes it. Both ask first, in Satchel's dialog,
 saying what changes and how to undo it. Before the first change, whatever it replaces is saved in
 `folder-handler-backup.txt` beside the settings file, and flushed to the disk before anything is
 changed: if it can't be saved, nothing changes. A change that fails halfway (a registry write
 refused, say) puts back what it had written and says nothing was changed; on Windows the
 commands are written before what makes them the default, so a default never points at a
 missing command. Restore puts exactly the backup back, but only where the setting is still
-Arbor's (anything changed since is left alone, and the status bar says so), then deletes the
-backup. Without a backup, Restore still takes back what Arbor wrote; a backup that's empty,
+Satchel's (anything changed since is left alone, and the status bar says so), then deletes the
+backup. Without a backup, Restore still takes back what Satchel wrote; a backup that's empty,
 cut short or missing an entry is refused, and nothing changes.
-`arbor --restore-folder-default` does the same without opening a window (the uninstall script
+`satchel --restore-folder-default` does the same without opening a window (the uninstall script
 runs it).
 
-Folders other apps send open in the running Arbor where the platform passes them to it (macOS,
-Linux through D-Bus, and Windows through a named pipe: a second `arbor.exe <folder>` hands the
+Folders other apps send open in the running Satchel where the platform passes them to it (macOS,
+Linux through D-Bus, and Windows through a named pipe: a second `satchel.exe <folder>` hands the
 folder to the first and exits before opening a window): each in a new tab of the active pane,
-or, when Arbor was started for it and nobody has used the window yet, in its first tab. "Show
-item" requests open the item's folder with the item selected. On Windows, `arbor.exe` without a
+or, when Satchel was started for it and nobody has used the window yet, in its first tab. "Show
+item" requests open the item's folder with the item selected. On Windows, `satchel.exe` without a
 folder still opens a window of its own, and two started at the same instant may both open. A
-running Arbor that doesn't answer within a second (hung, say) doesn't hold the new one up: it
+running Satchel that doesn't answer within a second (hung, say) doesn't hold the new one up: it
 opens its own window.
 
-- **macOS:** LaunchServices' viewer for folders (`public.folder`) becomes `gg.smr.arbor`, which
-  only works from `Arbor.app` (the bare program says so). Restore sets back the viewer you had
+- **macOS:** LaunchServices' viewer for folders (`public.folder`) becomes `gg.smr.satchel`, which
+  only works from `Satchel.app` (the bare program says so). Restore sets back the viewer you had
   chosen, or Finder: LaunchServices' answer when nobody chose one is a guess among apps that
-  declare folders (Archive Utility on the Mac here), so that isn't kept. In Arbor: `open ~/dir`,
+  declare folders (Archive Utility on the Mac here), so that isn't kept. In Satchel: `open ~/dir`,
   Open With, and apps that open a folder through macOS. **Still Finder** (macOS doesn't let
   another app take these): double-clicking in Finder and on the desktop, the Dock's folders,
   "Show in Finder" or "Reveal in Finder" from other apps (`activateFileViewerSelectingURLs`),
-  and Arbor's own Show in Finder.
-- **Linux:** `inode/directory=arbor.desktop` in `~/.config/mimeapps.list` (the freedesktop.org
+  and Satchel's own Show in Finder.
+- **Linux:** `inode/directory=satchel.desktop` in `~/.config/mimeapps.list` (the freedesktop.org
   file `xdg-mime` and `gio` write), and a D-Bus activation file,
   `~/.local/share/dbus-1/services/org.freedesktop.FileManager1.service`, after which the session
-  bus is asked to reload. In Arbor: `xdg-open` and `gio open` on a folder, and "Show in folder"
+  bus is asked to reload. In Satchel: `xdg-open` and `gio open` on a folder, and "Show in folder"
   (or "Open containing folder") in browsers, editors and other apps that ask
   `org.freedesktop.FileManager1` (ShowFolders, ShowItems; ShowItemProperties selects the item,
-  since Arbor has no properties window). While Arbor runs it owns that name and opens a tab
+  since Satchel has no properties window). While Satchel runs it owns that name and opens a tab
   (from the moment Make succeeds, and it lets the name go when Restore does); when it doesn't
   run, the bus starts it. **Limits:** a desktop's own list (`gnome-mimeapps.list`, say)
   wins over `mimeapps.list` (Make says so when it finds one); a file manager already running
   that holds the D-Bus name and won't give it up (Nautilus running in the background on GNOME)
-  keeps it until it exits; `xdg-open` on a folder starts a new Arbor window rather than a tab; and
-  Arbor's own Show in File Manager opens the default, Arbor itself once it is.
+  keeps it until it exits; `xdg-open` on a folder starts a new Satchel window rather than a tab; and
+  Satchel's own Show in File Manager opens the default, Satchel itself once it is.
 - **Windows:** under `HKEY_CURRENT_USER\Software\Classes` only (no administrator rights, no
-  other accounts): folders (`Directory`) and drives (`Drive`) get an "Open in Arbor" verb as
-  their default (`"arbor.exe" "%1"`), and Win+E runs Arbor (This PC's `opennewwindow` verb, with
+  other accounts): folders (`Directory`) and drives (`Drive`) get an "Open in Satchel" verb as
+  their default (`"satchel.exe" "%1"`), and Win+E runs Satchel (This PC's `opennewwindow` verb, with
   an empty `DelegateExecute`), as Explorer replacements do. Not the `Folder` class: it also
-  covers Control Panel, the Recycle Bin and other virtual folders Arbor can't show. Restore
-  writes every saved value back exactly, type included, and removes the keys Arbor made once
-  they're empty. In Arbor: opening a folder or drive in Explorer or on the desktop, Win+E, and
-  apps that open a folder through the shell; with Arbor already running, each opens as a new
+  covers Control Panel, the Recycle Bin and other virtual folders Satchel can't show. Restore
+  writes every saved value back exactly, type included, and removes the keys Satchel made once
+  they're empty. In Satchel: opening a folder or drive in Explorer or on the desktop, Win+E, and
+  apps that open a folder through the shell; with Satchel already running, each opens as a new
   tab there (below). **Still Explorer:** "Show in folder" from apps that call `SHOpenFolderAndSelectItems`,
-  Explorer's own navigation pane, and Arbor's own Show in Explorer. Moving or deleting `arbor.exe`
+  Explorer's own navigation pane, and Satchel's own Show in Explorer. Moving or deleting `satchel.exe`
   while it's the default stops folders opening: restore first. Never run on a real Windows machine
   yet; CI writes and restores the same plan under a test-only key.
 
@@ -151,21 +153,21 @@ opens its own window.
 ```sh
 cargo run --release                 # opens the current dir (or ~ when launched from /)
 cargo run --release -- ~/Downloads  # open a folder
-cargo build --profile dist          # stripped, LTO build: target/dist/arbor
+cargo build --profile dist          # stripped, LTO build: target/dist/satchel
 ```
 
 Builds are fully offline. Dependencies are vendored in `vendor/` (see `.cargo/config.toml`).
 `vendor/` is gitignored because it's about 550 MB, so a fresh clone runs `scripts/vendor.sh` first.
 `scripts/package.sh` makes the package (see [Install](#install)); on a Mac it builds a
-universal `Arbor.app`: this Mac's slice as usual and the other with `--target` (once:
+universal `Satchel.app`: this Mac's slice as usual and the other with `--target` (once:
 `rustup target add x86_64-apple-darwin` on Apple silicon), joined with `lipo`, both built for
 macOS 11 (`MACOSX_DEPLOYMENT_TARGET`, matching the Info.plist's `LSMinimumSystemVersion`);
-`ARCH=native` builds this Mac's slice alone. `arbor --version` prints the version without a
+`ARCH=native` builds this Mac's slice alone. `satchel --version` prints the version without a
 window. CI checks both slices and their minimum version, and, best effort when its runner has
 (or can install) Rosetta, runs the Intel slice's `--version` under it; without Rosetta it
 warns and the slice is only checked, not run. The icon is drawn by
 `scripts/icon.py` (an original tree glyph; pure Python) into `assets/icon/`, and
-`scripts/package.sh --icns` turns it into `Arbor.icns` on a Mac. On Windows, `build.rs` writes
+`scripts/package.sh --icns` turns it into `Satchel.icns` on a Mac. On Windows, `build.rs` writes
 the icon and version information into a resource file the linker takes (no resource compiler,
 no extra crate). Release builds on Windows are windowed programs, so no console opens with them.
 `scripts/vendor.sh` refreshes them through a fast remote machine (default `smr@tabot-dev`) and
@@ -181,15 +183,15 @@ instead of `vendor/`.
 
 ## Measuring speed
 
-`ARBOR_TIMING=1 arbor` logs to stderr how long the first frame took from `main`, each key press
+`SATCHEL_TIMING=1 satchel` logs to stderr how long the first frame took from `main`, each key press
 to its frame, and each navigation to the frame showing the new listing (`src/timing.rs`). The
 window waits at most 8 ms for the first folder; when it's slower, the listing's own frame is
-logged as `first-listing`, and `ARBOR_SLOW_FIRST_READ_MS=N` (timing only) slows that read to try
+logged as `first-listing`, and `SATCHEL_SLOW_FIRST_READ_MS=N` (timing only) slows that read to try
 it. All times end at frame submission, a proxy: pixels reach the screen at least a refresh later. Off,
 it costs nothing: `main` reads the variable once and Rune gets the plain callbacks and no frame
-hook. `ARBOR_TIMING_FILE=<path>` appends the same lines to a file (Windows release builds have
-no console), plus `arbor <ms>`, from the process's creation to the first frame on Windows;
-`ARBOR_EXIT_AFTER_FIRST_FRAME=1` quits right after that frame (`ARBOR_EXIT_AFTER_MS=N`: N ms
+hook. `SATCHEL_TIMING_FILE=<path>` appends the same lines to a file (Windows release builds have
+no console), plus `satchel <ms>`, from the process's creation to the first frame on Windows;
+`SATCHEL_EXIT_AFTER_FIRST_FRAME=1` quits right after that frame (`SATCHEL_EXIT_AFTER_MS=N`: N ms
 after it), and the first-frame line says which renderer drew it (`drawn_by=cpu` on Windows,
 where Rune shows a CPU-drawn first frame before the GPU exists); on quitting, `launch-marks`
 lists Rune's launch steps (`rune::marks`). On Windows, the "Cold start (Windows)" workflow
@@ -197,7 +199,7 @@ builds the probes (`coldstart-probes-3-windows`): `scripts/coldstart-ab.ps1` com
 (main's against this one), a bare Rune window (`examples/rune_hello.rs`) and the bare Win32
 floor (`examples/win32_hello.rs`), and `examples/gpu_probe.rs` times Rune's GPU setup phase by
 phase. Showing a hidden tab is logged as `tab`, with `same_frame=1` when its fresh read landed
-in time for the key's own frame. `scripts/bench.sh` cold-starts Arbor on a 10,000-entry folder
+in time for the key's own frame. `scripts/bench.sh` cold-starts Satchel on a 10,000-entry folder
 several times and reports median and p95 against each budget (`--tabs N` adds N runs timing a
 tab switch to that folder, and `--preview N` adds N runs timing the quick preview of a 256 KB
 text file and a 12 MP JPEG from Space to the frame showing it, and keys while it's open, and
@@ -252,7 +254,7 @@ Off macOS, ⌘ is Ctrl. Mouse: click to select, ⇧-click and ⌘-click to selec
 double-click to open, click a breadcrumb or place to jump there (in a narrow pane the
 leading folders fold into “…”, which opens the deepest hidden one), click a column header to sort
 (click again to reverse). Right-click opens a context menu: native on macOS and Windows, and on
-Linux, where Rune has none, Arbor's own in the window with the same items (↑↓, Home, End or a
+Linux, where Rune has none, Satchel's own in the window with the same items (↑↓, Home, End or a
 letter move, Enter or Space runs, Esc or a click outside closes; see `RUNE-GAPS.md`). Drag rows
 out to Finder or other apps (macOS). A row let go where nothing takes it (a folder row in the same
 window, one pane) says how to move it instead: ⌘X, ⌘V, or split view. Drop files on a folder row
@@ -287,7 +289,7 @@ whole: the deepest are shown after every move; the horizontal wheel (or Shift + 
 "‹ N" at the left edge show the ones before, as far as the active column stays on screen. Drag
 any column's divider to change every column's width (this session). Space turns the column
 view's preview off and on. Drag a file from one column onto a folder or another column to move it
-there (Arbor's own drag in the window, as between split panes; on macOS that means rows can't be
+there (Satchel's own drag in the window, as between split panes; on macOS that means rows can't be
 dragged out to Finder from the column view, as when split: another view brings it back). A search shows its results as a list.
 
 Images (PNG, JPEG, GIF, WebP, BMP) show **thumbnails** in the icon view, decoded by the quick
@@ -304,7 +306,7 @@ icons. A press
 on a name or icon, or anywhere on a row that's already selected, still acts on the item (a drag
 drags files). ⇧ adds what the rectangle touches to the selection; ⌘ (Ctrl) toggles it; Esc puts
 the selection back. Dragged above or below the list it scrolls, a step for each pointer move
-(holding still doesn't scroll: Arbor runs no timers). A click in empty space below the rows
+(holding still doesn't scroll: Satchel runs no timers). A click in empty space below the rows
 clears a multiple selection.
 
 ### List columns, Folders First and the status bar
@@ -327,11 +329,11 @@ one costs nothing more per item; Date Created shows "—" where the disk keeps n
 
 The columns and their widths are the same in every window and every tab, and are kept in
 `columns.toml` beside the settings file (user data; `config.toml`, which you edit, is never
-rewritten). Arbor rewrites it, whole, when you show, hide or resize a column (a resize when you
+rewritten). Satchel rewrites it, whole, when you show, hide or resize a column (a resize when you
 let go); delete it to go back to the defaults. A file that can't be read or isn't valid gives
 the defaults and a note in the status bar, and your next change replaces it.
 
-**Folders First** keeps folders above files whatever the sort, as Arbor always has (Explorer's
+**Folders First** keeps folders above files whatever the sort, as Satchel always has (Explorer's
 way; Finder's default mixes them). Turn it off with "Turn Off Folders First" in the palette or
 the header's menu: folders then sort among the files (by name, size, date, or as the kind
 "folder"). That lasts until the window closes; `folders_first = false` in the settings starts
@@ -363,7 +365,7 @@ strip it goes where you let go, anywhere else in the pane at the end. **Move Tab
 Other Pane** (⇧⌘\\) the second. A moved tab keeps its folder, history, selection, scroll,
 filter and sort (the same lightweight state a hidden tab keeps); moved into the other pane it's
 shown there, read fresh, and that pane becomes active. Moving a pane's only tab closes that
-pane. The drag is Arbor's own inside the window, so it works the same on every platform (see
+pane. The drag is Satchel's own inside the window, so it works the same on every platform (see
 `RUNE-GAPS.md`).
 When they don't all fit, the bar shows the tabs around the active one, with "‹ 3" and "5 ›"
 for how many are hidden on each side (click one to show the nearest).
@@ -377,8 +379,8 @@ worker, never over anything, undoable), and rows can be dragged from one pane on
 (same disk moves, another copies, ⌥ copies).
 
 Closing a split pane's last tab closes that pane. On the last tab of a window's last pane, ⌘W
-closes the window when other Arbor windows are open; in the only window it does nothing, on every
-platform: closing it would quit Arbor and lose every tab's history, which a habit of pressing ⌘W
+closes the window when other Satchel windows are open; in the only window it does nothing, on every
+platform: closing it would quit Satchel and lose every tab's history, which a habit of pressing ⌘W
 to tidy tabs shouldn't do. The window's close button still closes it.
 
 No caching: only the visible tab of each pane has a listing. A hidden tab keeps its path,
@@ -394,7 +396,7 @@ in memory for ⇧⌘T, never on disk.
 **⌘N** (Ctrl+N) opens a **new window** on the folder on screen, and **Open in New Window** (in
 the context menu of a folder, a favorite or a volume, and in the palette) on that folder. Each
 window is independent: its own panes, tabs, selection, back and forward history, view (list,
-icons, tiles or columns, with its own thumbnails and columns) and preview. Every window is a real one of the system's, in the same Arbor (one process).
+icons, tiles or columns, with its own thumbnails and columns) and preview. Every window is a real one of the system's, in the same Satchel (one process).
 
 What there's one of is shared: the settings and keys (Reload Settings in any window applies in
 all), the Jump history, the sidebar's favorites and Locations (a change in one window shows in
@@ -407,9 +409,9 @@ what it made) gets up to 2 s after the window has gone, and anything it couldn't
 in the status bar at the next launch, with a Show button. When an operation
 lands, every window showing a folder it changed reads it again (by the folder's identity, as
 panes do, in any of its columns too; a hidden tab reads when it's shown). A window closed while its operation runs hands
-it to another window, which lands it. Folders other apps ask Arbor to show (Open With, "Show in
-folder", a second `arbor.exe <folder>` on Windows) open as a tab in the window used last.
-Arbor's own drags (rows between panes and columns, tabs) stay inside their window. Rows drag from
+it to another window, which lands it. Folders other apps ask Satchel to show (Open With, "Show in
+folder", a second `satchel.exe <folder>` on Windows) open as a tab in the window used last.
+Satchel's own drags (rows between panes and columns, tabs) stay inside their window. Rows drag from
 one window to another where they drag out to other apps (macOS), arriving as a drop from outside
 that goes only into the folder as it was listed there; elsewhere ⌘X in one window and ⌘V in the
 other moves them.
@@ -418,7 +420,7 @@ A second window costs nothing until it's used: an idle window does no work and d
 and a window only does what it shows. It reads its folder for itself while the system makes
 the window (⌘N itself takes well under a millisecond), so a local folder is in its first frame;
 a slow one shows "Loading…" until it lands, as a navigation does.
-Windows aren't remembered: Arbor starts with one window, as before (BACKLOG.md).
+Windows aren't remembered: Satchel starts with one window, as before (BACKLOG.md).
 
 ### The sidebar: favorites and Locations
 
@@ -439,7 +441,7 @@ The sidebar lists **Favorites**, in your order, then **Locations**, the volumes 
   reads the first folder, never the window's, and written by a thread of its own after each
   change (a temporary file renamed over the old one; several changes in a row are written
   once; quitting gives it up to 100 ms). Each change is applied to the file as it is then,
-  holding its lock file (`sidebar.lock`), so two Arbor windows keep each other's changes,
+  holding its lock file (`sidebar.lock`), so two Satchel windows keep each other's changes,
   and each shows the other's after its own next change. A failed write shows in the status bar. A file that
   can't be read gives the default list and says so; the next change replaces it. Delete the
   file to go back to the defaults; while it exists, the settings' `places` are left alone.
@@ -449,9 +451,9 @@ The sidebar lists **Favorites**, in your order, then **Locations**, the volumes 
   them, never the window), never again until the next launch, and never watched. One that vanishes later is marked when a click finds it gone.
 - **Trash**, below the favorites (not one of them: no ⌘ number, no reordering): opens the
   Trash folder, on Linux the home trash's `files/` (`~/.local/share/Trash/files`; "The Trash is
-  empty" before anything has gone there) and on macOS `~/.Trash` (which macOS lets Arbor read
+  empty" before anything has gone there) and on macOS `~/.Trash` (which macOS lets Satchel read
   only with Full Disk Access; the status bar says how to grant it). Right-click it for
-  **Empty the Trash…**. Windows has none: the Recycle Bin is a shell folder, not one Arbor can
+  **Empty the Trash…**. Windows has none: the Recycle Bin is a shell folder, not one Satchel can
   list. "Go to the Trash" in the palette does the same.
 - **Locations**: on macOS what's mounted in `/Volumes` (not the boot volume's alias, or a
   folder left there with nothing mounted); on Linux the mounts under `/media/$USER`,
@@ -460,7 +462,7 @@ The sidebar lists **Favorites**, in your order, then **Locations**, the volumes 
   which can take seconds when disconnected). They're read on a worker once the first frame is
   up, and again only when asked: opening a sidebar item's menu, ⌘R, after an eject, and when
   the OS says a volume came or went, where it can without polling (macOS's mount
-  notifications; Windows' `WM_DEVICECHANGE`, through a hidden window of Arbor's own). Linux
+  notifications; Windows' `WM_DEVICECHANGE`, through a hidden window of Satchel's own). Linux
   has no such notification short of watching, so there it's a right-click or ⌘R.
 - **Eject** (⏏ beside the volume, its menu, or ⌘E for the volume the active pane is on): a pane
   showing the volume goes to the home folder first, and searches that could walk into it stop;
@@ -514,7 +516,7 @@ wheel, Shift + the wheel, or ← → once it has focus), lines over 1,000 charac
 - **PDF, video, audio, office and iWork documents, fonts, HEIC, TIFF, RAW, and any other file
   that isn't text or one of the images above**: the OS's own thumbnail, sized to the panel in
   device pixels, shown like an image under the same header (`src/thumb.rs`). Video shows a still
-  frame and audio its artwork, whatever the OS's thumbnailer gives; nothing plays. Arbor stores
+  frame and audio its artwork, whatever the OS's thumbnailer gives; nothing plays. Satchel stores
   nothing; the OS may keep what it makes in its own thumbnail cache, the one Finder and Explorer
   fill. When the OS has nothing (a broken file, nothing that reads it), the card says "Can't
   preview this file", never a blank panel; a request that hasn't answered in 10 s is cancelled
@@ -527,7 +529,7 @@ wheel, Shift + the wheel, or ← → once it has focus), lines over 1,000 charac
     Making a new one can't be cancelled once it starts, so it's off until the owner decides on a
     NORTHSTAR exception: `UNCANCELLABLE_WINDOWS_THUMBNAILS` in `src/thumb.rs` (a build-time
     flag, `false`) turns it on, after the cache is asked.
-  - **Linux:** none. Its thumbnailers keep a thumbnail cache, and Arbor keeps no caches, so the
+  - **Linux:** none. Its thumbnailers keep a thumbnail cache, and Satchel keeps no caches, so the
     card says there's no preview for these formats.
 - **Everything else**, and folders: name, kind, size and date, and for a folder how many items
   it has (one read of it).
@@ -608,8 +610,8 @@ runs off the window's thread too.
 **⌘J** opens a box over the window. Type parts of a folder's path and it ranks the folders
 you've been to, best first, with the matched letters in bold; ↑↓ move, Enter (or a click) goes
 there in the active pane, Esc closes. Each word must appear in the path in order, case aside,
-and the last word should be in the folder's own name: "proj arb" finds `~/projects/arbor`
-before `~/projects/arbor/src`. Among matches, folders you go to often and lately come first
+and the last word should be in the folder's own name: "proj sat" finds `~/projects/satchel`
+before `~/projects/satchel/src`. Among matches, folders you go to often and lately come first
 (frecency, as zoxide does: every visit adds 1, weighted ×4 within the hour, ×2 within the day,
 ×½ within the week, ×¼ after; when the total passes 10,000, all shrink to 90% and folders
 under 1 are forgotten). Typing a path (`/…`, `~/…`, or `C:\…` on Windows) works as go-to does:
@@ -622,7 +624,7 @@ until Jump opens:
   not reloads or tab switches) sends its folder to one writer thread, which appends a line.
   The window does no disk I/O for it, and nothing is read at startup. A write that fails (a
   full disk, a read-only folder) shows in the status bar. The writer holds a lock file
-  (`history.lock`) while it appends, compacts or clears, so two Arbor processes never lose each
+  (`history.lock`) while it appends, compacts or clears, so two Satchel processes never lose each
   other's visits, and quitting gives it up to 100 ms to finish what's queued.
 - The first time Jump opens, the writer reads and adds up the log. The box waits at most 8 ms
   for it, then says "Loading history…" until it lands. It then stays in memory for the session.
@@ -630,7 +632,7 @@ until Jump opens:
 - Nothing checks that the folders still exist. Going to one that's gone says so and forgets it.
 - `[jump] enabled = false` stops recording and reading it (and Jump says it's off);
   `[jump] exclude` lists globs of folders never recorded. "Clear Jump History…" forgets it all.
-  It can't be undone, so it asks first, in Arbor's one dialog (only for actions that can't be
+  It can't be undone, so it asks first, in Satchel's one dialog (only for actions that can't be
   undone): it says so plainly, and Cancel has the focus, so Enter (or Esc, or a click outside)
   cancels. Tab or ← → moves to "Clear History", and Enter (or a click on it) clears. Starting
   with Cancel means an Enter pressed twice, or out of habit, can't destroy anything.
@@ -691,7 +693,7 @@ Renaming is one file operation on the worker, with progress, and Esc cancels it:
   name of another item in the batch. Otherwise nothing is renamed, and the status bar says
   which item and why.
 - Swaps and chains (a → b and b → a; a → b and b → c) work: an item whose new name is another
-  item's old one (or its own in another case) first steps aside to a temporary `.arbor-…` name
+  item's old one (or its own in another case) first steps aside to a temporary `.satchel-…` name
   in its folder, the others take their new names, then it takes its own. Every step is a
   no-replace rename (`src/noclobber.rs`).
 - Each item is checked against that fingerprint again right before each of its own steps: one
@@ -721,7 +723,7 @@ batch is put back.
 
 **⌘⌫** (or Delete) moves the selection to the Trash (the Recycle Bin on Windows), and ⌘Z puts it
 back on macOS and Linux. **A trash never silently becomes a permanent delete.** When an item's
-disk has no trash that will take it, it stays where it is, and Arbor asks, in its one dialog,
+disk has no trash that will take it, it stays where it is, and Satchel asks, in its one dialog,
 whether to delete it permanently ("“a.txt” and “b.txt” can't go to the Trash: … Delete them
 permanently? This can't be undone."). With several items, those that can go to the trash go
 first (that part can be undone as usual), and the rest are gathered into that one question,
@@ -746,12 +748,12 @@ Cancel has the focus, and Esc keeps them.
   links, junctions or mounted volumes; Esc stops it). An item the bin wouldn't keep (turned off,
   bigger than the bin, or any of it unknown, as on most removable drives, which have no bin) gets
   the question instead; a removable drive with a bin of its own is used. Then the shell's
-  `IFileOperation` recycles each item, and Arbor stops the
+  `IFileOperation` recycles each item, and Satchel stops the
   delete before it begins unless the shell says it's about to recycle the item (it doesn't for
   an item too big for the bin, a bin turned off for the drive, or a virtual drive such as
   Cryptomator's or another WinFsp one that doesn't support it). If the shell ever deleted an item
   without putting it in the bin anyway, the status bar says so plainly. Restore from the Recycle
-  Bin: Windows doesn't say where an item went, so Arbor can't undo it.
+  Bin: Windows doesn't say where an item went, so Satchel can't undo it.
 
 **Empty the Trash…** (palette, or the sidebar's Trash) deletes what's in the Trash for good, so
 it asks first, in the same dialog, saying it can't be undone. The dialog opens at once, saying
@@ -769,21 +771,21 @@ what stopped it. There's no undo.
 
 - **Linux:** the home trash and, on each local disk mounted now, `$top/.Trash/$uid` (under a
   sticky `.Trash` that isn't a link) and `$top/.Trash-$uid` (each a real folder of yours), the
-  trashes Arbor's own Move to Trash uses. Network shares and FUSE mounts other than `fuseblk`
+  trashes Satchel's own Move to Trash uses. Network shares and FUSE mounts other than `fuseblk`
   (sshfs, rclone, gvfs) aren't looked at (a dead one could hang the count); empty their trash
   from the share itself.
 - **macOS:** `~/.Trash`, and `.Trashes/<your uid>` on each local volume under `/Volumes` (from
   `getmntinfo` without waiting on any file system). Recent macOS lets an app read `~/.Trash`
-  only with Full Disk Access; without it, the dialog says: "Arbor needs Full Disk Access to see
+  only with Full Disk Access; without it, the dialog says: "Satchel needs Full Disk Access to see
   what's in the Trash: open System Settings → Privacy & Security → Full Disk Access, turn on
-  Arbor (or the app you started it from), then quit and reopen Arbor", with **Open Privacy
+  Satchel (or the app you started it from), then quit and reopen Satchel", with **Open Privacy
   Settings** (Full Disk Access's pane) and Close, and no Empty Trash button. When a volume's
   trash can be read but `~/.Trash` can't, it counts what can be emptied, names the trash it
   can't read, still says it can't be undone, and empties only the readable ones. Finder isn't
-  asked (through AppleScript), so nothing outside Arbor's own dialog shows.
+  asked (through AppleScript), so nothing outside Satchel's own dialog shows.
 - **Windows:** the Recycle Bin of every drive: `SHQueryRecycleBinW` counts it for the dialog,
-  and `SHEmptyRecycleBinW` empties it after Arbor's dialog, with no confirmation of its own,
-  no progress window (Arbor's status bar shows it, and a second window would be a second
+  and `SHEmptyRecycleBinW` empties it after Satchel's dialog, with no confirmation of its own,
+  no progress window (Satchel's status bar shows it, and a second window would be a second
   dialog) and no sound. The shell empties in one call, so Esc can't stop it (the status bar says
   so). Afterwards it's counted again, and the result says if anything is still in it.
 
@@ -795,7 +797,7 @@ says so ("“report.txt” went back as “report 2.txt”: “report.txt” is 
 whose folder isn't there any more stays in the Trash, said so. It runs on the worker, the items'
 records go once they're out, and ⌘Z puts them in the Trash again. macOS has no public way for
 an app to do Finder's Put Back (Finder keeps where each item came from to itself), so there
-it's dimmed and says to use Finder; Windows doesn't let Arbor list the Recycle Bin.
+it's dimmed and says to use Finder; Windows doesn't let Satchel list the Recycle Bin.
 
 **Delete Permanently…** (⌥⌘⌫ on macOS, as in Finder; Shift+Delete on Windows and Linux, as in
 Explorer and Files) always asks first. The dialog names the count and the first few items, says
@@ -839,9 +841,9 @@ the extension, so the link keeps its type for opening, icons and previews), `Pro
 folder, `… link 2` when taken; never over anything. It points at the item's **absolute** path, so
 it keeps working when you move the link alone (to another folder or the Desktop), as Finder's
 aliases do; moving or renaming the original breaks it. Each item must still be the one listed.
-⌘Z removes the links, each only while it's still the link Arbor made (same identity, time and
+⌘Z removes the links, each only while it's still the link Satchel made (same identity, time and
 target), and ⇧⌘Z makes them again. On Windows a symbolic link needs Developer Mode (or an
-administrator); without it, or on a drive with no links (FAT), Arbor makes a shortcut
+administrator); without it, or on a drive with no links (FAT), Satchel makes a shortcut
 (`photo link.jpg.lnk`) instead and says so in the status bar.
 
 **Show Original** (palette, and the context menu of a symbolic link) selects what the link
@@ -871,7 +873,7 @@ edited, and the undo refuses and says so), and ⇧⌘Z takes it back out.
   deflate (level 3), except formats that already are (JPEG, PNG, MP4, ZIP, DOCX…), which are
   stored, as is a big file whose first 256 KB don't compress. Archives over 4 GB, or files over
   4 GB, use ZIP64; names are UTF-8 (flagged so); times are kept to the second. A cancelled or
-  failed archive's temporary file is removed, only while it's still the file Arbor wrote.
+  failed archive's temporary file is removed, only while it's still the file Satchel wrote.
 - **Extract Here reads the whole list first** and refuses the archive, writing nothing, when any
   entry's path would land outside its folder: an absolute path, `..`, a drive letter, a UNC path
   or a NUL in a name. A link is judged by its target alone, never by other entries' names: it
@@ -896,7 +898,7 @@ edited, and the undo refuses and says so), and ⇧⌘Z takes it back out.
 - **A damaged archive leaves nothing behind:** a bad CRC (a `.tar.gz`'s gzip CRC and length
   too, read after the tar's end), a cut-off file or a broken stream stops
   the extraction, and everything it made is removed again, each item only while it's still what
-  Arbor made (anything another app put there stays, and the status bar says so). A cancel does
+  Satchel made (anything another app put there stays, and the status bar says so). A cancel does
   the same. Encrypted entries and compression methods other than deflate (bzip2, LZMA,
   Zstandard, AES…) are refused by name, as are archives split across files.
 - **Formats:** ZIP (stored and deflate, ZIP64, data descriptors, UTF-8 and code page 437 names,
@@ -971,7 +973,7 @@ search walks again, and nothing is kept once it ends.
   before the Jump history's last write.
 
 Every command, with its default keys (generated from `src/commands.rs`; a test keeps it in sync,
-`ARBOR_WRITE_README=1 cargo test readme` rewrites it):
+`SATCHEL_WRITE_README=1 cargo test readme` rewrites it):
 
 <!-- commands:start -->
 | Command | macOS | Windows, Linux | Id |
@@ -994,7 +996,7 @@ Every command, with its default keys (generated from `src/commands.rs`; a test k
 | Command Palette | ⌘K, ⇧⌘P | Ctrl+K, Ctrl+Shift+P | `app.palette` |
 | Open Settings File | ⌘, | Ctrl+, | `app.settings` |
 | Reload Settings |  |  | `app.reload_settings` |
-| Make Arbor the Default for Folders… |  |  | `app.make_default` |
+| Make Satchel the Default for Folders… |  |  | `app.make_default` |
 | Restore the System Default for Folders… |  |  | `app.restore_default` |
 | Clear Filter and Selection | ⎋ | Esc | `app.clear` |
 | Copy | ⌘C | Ctrl+C | `file.copy` |
@@ -1090,9 +1092,9 @@ a running copy or move.
 
 ## Accessibility
 
-Rune exposes Arbor's window to each platform's accessibility API through AccessKit
+Rune exposes Satchel's window to each platform's accessibility API through AccessKit
 (VoiceOver and Voice Control on macOS, Narrator, NVDA and JAWS on Windows, Orca on Linux), and
-Arbor gives every part a role and a name (`src/view/`; `src/a11y_tests.rs` checks the tree):
+Satchel gives every part a role and a name (`src/view/`; `src/a11y_tests.rs` checks the tree):
 
 - **The file list** is a list box named for its folder ("Files in Downloads"). Each row is an
   option named from its cells in reading order (name, kind, size, modified: "notes.txt, txt,
@@ -1112,7 +1114,7 @@ Arbor gives every part a role and a name (`src/view/`; `src/a11y_tests.rs` check
   Folder, dimmed when they can't) and the breadcrumbs as links; **the tab strip** a tab list
   with the shown tab selected; the column headers say which one sorts and which way, and the
   edge before each is a splitter named "Size column width" whose value is its width. The
-  header's menu (Arbor's own on Linux) has its columns and Folders First as checkbox items,
+  header's menu (Satchel's own on Linux) has its columns and Folders First as checkbox items,
   checked when on; native menus on macOS and Windows show the same checks.
 - **The status bar's note is a live region**: results ("Moved 3 items to the Trash", "Restored
   1 item", "Redid 2 items") are announced when the user is idle, and failures (a refused undo,
@@ -1146,15 +1148,15 @@ ring on the dialog's focused button, the menu's highlight, and Rune's focus ring
 preview's contents.
 
 **The tree is built only when a screen reader asks.** Rune builds it only when an assistive
-client asks for it (`AccessibilityLink`; until then a frame builds no tree), and Arbor adds no
+client asks for it (`AccessibilityLink`; until then a frame builds no tree), and Satchel adds no
 per-row work for it: rows are named from the text they already draw. What does cost everyone a
 little is the roles and labels on the window's chrome, which Rune can't build lazily
 (`RUNE-GAPS.md`): about 0.05 ms per key, measured (BENCH.md, milestone 11). The test
 `nothing_is_built_until_a_client_asks` checks that nothing is sent before activation and
 nothing on an idle frame after it.
 
-**OS settings.** Arbor never animates, so reduce motion changes nothing. Rune doesn't report
-increased contrast or a larger text size, so those settings don't change Arbor yet
+**OS settings.** Satchel never animates, so reduce motion changes nothing. Rune doesn't report
+increased contrast or a larger text size, so those settings don't change Satchel yet
 (`RUNE-GAPS.md`). **Limits** (`RUNE-GAPS.md`): Rune can't move keyboard focus from a handler, so
 at launch focus is on the window until the first Tab or click puts it in the list (in a split
 window, a click: Tab switches panes); readers aren't told the list allows several selected; a
@@ -1169,9 +1171,9 @@ file: run "Reload Settings" after saving (or restart).
 
 | Platform | File |
 | --- | --- |
-| macOS | `~/Library/Application Support/Arbor/config.toml` |
-| Linux | `$XDG_CONFIG_HOME/arbor/config.toml` (default `~/.config/arbor/config.toml`) |
-| Windows | `%APPDATA%\Arbor\config.toml` |
+| macOS | `~/Library/Application Support/Satchel/config.toml` |
+| Linux | `$XDG_CONFIG_HOME/satchel/config.toml` (default `~/.config/satchel/config.toml`) |
+| Windows | `%APPDATA%\Satchel\config.toml` |
 
 ```toml
 [general]
@@ -1180,7 +1182,7 @@ sort = "name"              # "name", "kind", "size", "modified" or "created"
 sort_descending = false    # default: size and the dates sort largest and newest first
 folders_first = true       # folders above files under any sort ("Folders First" toggles it)
 start_folder = "~"         # when none is given on the command line
-places = ["~", "~/Projects", "/"]   # the sidebar's default favorites (until you change them in Arbor)
+places = ["~", "~/Projects", "/"]   # the sidebar's default favorites (until you change them in Satchel)
 
 [jump]
 enabled = true                              # remember visited folders for Jump (⌘J)
@@ -1206,7 +1208,7 @@ In a key, `cmd` is ⌘ on macOS and Ctrl elsewhere; `ctrl`, `alt` (`option`), `s
 `super` name those keys. A binding takes its key from any command that had it by default, and if
 two lines bind the same key the later one gets it (and the status bar says so). Off macOS
 `cmd+g` and `ctrl+g` are the same key. Only `[]` unbinds: a list whose keys are all typos keeps
-the defaults. Mistakes never stop Arbor: the status bar shows the first one ("Settings: line 12:
+the defaults. Mistakes never stop Satchel: the status bar shows the first one ("Settings: line 12:
 unknown command 'file.trahs' (did you mean 'file.trash'?)"), everything valid still applies, and
 the rest keeps its default. A line that isn't valid TOML is skipped. `places` is the sidebar's default list: once you add,
 remove or move a favorite, the list lives in `sidebar.toml` beside this file (see
@@ -1232,8 +1234,8 @@ All three build, pass tests and pass clippy in CI. How much has been run for rea
   Under Xvfb too: the in-window context menu, Delete Permanently, and a trash on a disk with no
   usable trash (a folder on `/`, which this user can't write, with the home trash on another
   disk) asking before it deletes. Also under Xvfb, from the tarball installed into a fresh home:
-  the desktop file's `Exec` opens the folder, "Make Arbor the Default for Folders…" through the
-  palette and its dialog, a ShowItems call starting Arbor through D-Bus activation with the item
+  the desktop file's `Exec` opens the folder, "Make Satchel the Default for Folders…" through the
+  palette and its dialog, a ShowItems call starting Satchel through D-Bus activation with the item
   selected, a second call opening a tab in it, and `--restore-folder-default`. Milestone 12 under
   Xvfb: the sidebar with a custom favorite, a missing one dimmed and a Locations entry
   (`/mnt/local`), its context menus, dragging a favorite to reorder (and the file rewritten),
@@ -1248,9 +1250,9 @@ All three build, pass tests and pass clippy in CI. How much has been run for rea
   `SHEmptyRecycleBinW`, and dragging tabs with a real pointer. The universal package's Intel
   slice is run only on CI's macOS runner, and only when that runner has Rosetta (otherwise CI
   warns and goes on); the M4 Pro here has no Rosetta.
-- **macOS packaging**, checked on the M4 Pro: `Arbor.app` passes `plutil -lint` and `codesign
+- **macOS packaging**, checked on the M4 Pro: `Satchel.app` passes `plutil -lint` and `codesign
   --verify`, its icon has every size, it launches with `open` and quits, a folder passed at
-  launch (`open -a Arbor.app dir`) opens in its first tab, and one sent to the running app opens
+  launch (`open -a Satchel.app dir`) opens in its first tab, and one sent to the running app opens
   a new tab. Making it the default wasn't tried there (it would change the Mac's real setting);
   the logic is tested with a stand-in for LaunchServices, and reading the current viewer is
   tested for real.
@@ -1284,19 +1286,19 @@ On the Mac, check:
 - [ ] ⌥⌘N in each view (list, icons, columns, tiles): `untitled.txt` with "untitled" selected
       for renaming. Make Symbolic Link on a file: `… link.txt` opens the file from Finder too, and moved to the
       Desktop it still does. Show Original on it selects the file.
-- [ ] On an Intel Mac (or `arch -x86_64` with Rosetta), the universal `Arbor.app` opens.
+- [ ] On an Intel Mac (or `arch -x86_64` with Rosetta), the universal `Satchel.app` opens.
 - [ ] Drag a tab along its strip, and onto the other pane of a split window.
 - [ ] Flick a file row a short way and let go at once (one pane), then press ⌘J: Jump opens,
-      and the status bar says how to move files. Run it with `ARBOR_DRAG_LOG=1` (from a
+      and the status bar says how to move files. Run it with `SATCHEL_DRAG_LOG=1` (from a
       terminal) to log the drag's events: each drag-out asked, started (with the buttons down
-      then, and "released" when Arbor gave the session its release) and ended, the run loop's
+      then, and "released" when Satchel gave the session its release) and ended, the run loop's
       mode as it changes, every key and click AppKit dispatches, and every key that reaches
-      Arbor (`src/draglog.rs`).
+      Satchel (`src/draglog.rs`).
 
 ### Test by hand on Windows
 
 CI builds and tests Windows (including a real Recycle Bin trash of a file on `C:` and a refused
-one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine, check:
+one through `\\localhost\C$`), but nobody has run Satchel there. On a real machine, check:
 
 - [ ] Trash a file and a folder on `C:`: they're in the Recycle Bin, and Restore puts them back.
 - [ ] Trash on a USB stick: the "Can't Move to the Recycle Bin" question appears; Cancel keeps
@@ -1309,11 +1311,11 @@ one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine
 - [ ] Shift+Delete asks, names the items, and deletes; a read-only file and a folder with a
       junction inside (the junction's target stays) go too.
 - [ ] Right-click opens the native menu with the same items as on macOS.
-- [ ] With Arbor running, `arbor.exe C:\Users` from a terminal (and a folder opened from
-      Explorer once Arbor is the default) opens a tab in the running window, which comes to
+- [ ] With Satchel running, `satchel.exe C:\Users` from a terminal (and a folder opened from
+      Explorer once Satchel is the default) opens a tab in the running window, which comes to
       the front, and no second window opens.
-- [ ] `arbor.exe` shows its icon in Explorer and the taskbar, and Properties → Details shows
-      Arbor and its version; no console window opens with it.
+- [ ] `satchel.exe` shows its icon in Explorer and the taskbar, and Properties → Details shows
+      Satchel and its version; no console window opens with it.
 - [ ] Plug in a USB stick: its drive appears under Locations by itself (`WM_DEVICECHANGE`), with
       its label. Eject it (⏏): "Ejected “…”"; with a file on it open in Notepad, it says it's in
       use. A card reader with no card adds no "insert a disk" dialog.
@@ -1325,8 +1327,8 @@ one through `\\localhost\C$`), but nobody has run Arbor there. On a real machine
       they're shortcuts, and double-clicking `… link.lnk` in Explorer opens the item; with
       Developer Mode on, they're symbolic links (`dir` shows `<SYMLINK>` and `<SYMLINKD>`).
       ⌘Z (Ctrl+Z) removes them either way; Ctrl+Y makes them again.
-- [ ] "Make Arbor the Default for Folders…": double-clicking a folder in Explorer, a drive in
-      This PC and Win+E open Arbor; "Restore the System Default for Folders…" brings Explorer
+- [ ] "Make Satchel the Default for Folders…": double-clicking a folder in Explorer, a drive in
+      This PC and Win+E open Satchel; "Restore the System Default for Folders…" brings Explorer
       back for all three, and `reg query HKCU\Software\Classes\Directory\shell` is as before.
 
 ## Not yet
