@@ -942,8 +942,12 @@ _The project was called Arbor until 14 November 2026._
 - **2026-11-14 · The project is renamed from Arbor to Satchel (owner's decision;
   `feature/rename-satchel`).** Why: the old name collided with an existing UK/EU trademark for
   computer software and with an existing Rust file manager of the same name; "Satchel" had no
-  live US or EU software marks. Everything named after the project changes with it: the package
-  and binary (`satchel`), the `SATCHEL_*` environment variables and the `satchel-timing` /
+  live US or EU software marks. **Kept knowing the UK isn't clear** (owner, 2026-11-14): the UK
+  register has an education-software company's registered "satchel:" mark and its "Satchel …"
+  family (since 2017), whose class 9 goods include plain "software", and a pending application
+  (2026-10-08) for the plain word "Satchel" covering computer software in general. Sened and
+  Copse, clear in all three registers, were offered instead. Everything named after the project
+  changes with it: the package and binary (`satchel`), the `SATCHEL_*` environment variables and the `satchel-timing` /
   `satchel-drag` / `satchel:` log lines (and the scripts that read them), thread names, the macOS
   bundle (`Satchel.app`, `gg.smr.satchel`), the Windows pipe, registry verb and version
   resources, the Linux desktop and app id (`satchel.desktop`, `set_app_id("satchel")`), the
