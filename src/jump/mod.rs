@@ -17,7 +17,7 @@
 //!   records the drop). Nothing stats the whole list.
 //! - All history I/O runs on that one thread, in order, so a load sees every visit sent before
 //!   it. Every append, load (with its compaction) and clear holds the history's lock file, so
-//!   two Arbor processes never interleave them: a compaction can't drop another process's
+//!   two Satchel processes never interleave them: a compaction can't drop another process's
 //!   append, and each writes through a temporary file of its own.
 //! - Failures are said: a write that fails shows in the status bar (once, until one works
 //!   again), and Clear says "cleared" only when the writer has removed the log (and any

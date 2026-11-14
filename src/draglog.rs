@@ -1,28 +1,28 @@
-//! `ARBOR_DRAG_LOG=1`: what happens around a row's drag, one line per event on stderr, for a
+//! `SATCHEL_DRAG_LOG=1`: what happens around a row's drag, one line per event on stderr, for a
 //! run on a real Mac (where a drag can't be driven from a test):
 //!
 //! ```text
-//! arbor-drag t=1234.5 drag-out ask row="a.txt" ev=LeftMouseDragged pressed=1 mode=kCFRunLoopDefaultMode -> offered
-//! arbor-drag t=1250.9 drag-out row="a.txt"
-//! arbor-drag t=1250.9 drag-out started pressed=0 -> released (posted a left-mouse-up)
-//! arbor-drag t=1251.3 drag-out end row="a.txt" outcome=Cancelled ev=LeftMouseUp pressed=0 mode=kCFRunLoopDefaultMode
-//! arbor-drag t=1803.0 loop mode=kCFRunLoopDefaultMode
-//! arbor-drag t=2101.4 appkit KeyDown chars="j" mode=kCFRunLoopDefaultMode
-//! arbor-drag t=2101.6 key Command('j') cmd -> Jump
+//! satchel-drag t=1234.5 drag-out ask row="a.txt" ev=LeftMouseDragged pressed=1 mode=kCFRunLoopDefaultMode -> offered
+//! satchel-drag t=1250.9 drag-out row="a.txt"
+//! satchel-drag t=1250.9 drag-out started pressed=0 -> released (posted a left-mouse-up)
+//! satchel-drag t=1251.3 drag-out end row="a.txt" outcome=Cancelled ev=LeftMouseUp pressed=0 mode=kCFRunLoopDefaultMode
+//! satchel-drag t=1803.0 loop mode=kCFRunLoopDefaultMode
+//! satchel-drag t=2101.4 appkit KeyDown chars="j" mode=kCFRunLoopDefaultMode
+//! satchel-drag t=2101.6 key Command('j') cmd -> Jump
 //! ```
 //!
 //! - `drag-out ask`: Rune asked a row what to drag (the pointer crossed the threshold), with
 //!   the AppKit event being handled, the mouse buttons the window server says are down
 //!   (`pressed`, a bit mask; synthetic input from automation tools may not set it) and the run
 //!   loop's mode. `drag-out started` (when Rune says the system's session began, a frame
-//!   later, with the buttons down then, and whether Arbor gave a session left behind by its
+//!   later, with the buttons down then, and whether Satchel gave a session left behind by its
 //!   release that release again) and `drag-out end` bracket the session.
 //! - `loop`: the main run loop's mode, each time it changes, seen from `poll` (every frame's).
 //!   `NSEventTrackingRunLoopMode` is a tracking loop running (a drag session, a menu).
 //! - `appkit`: every key press and left-button press, drag and release AppKit dispatches to the
 //!   app (a local event monitor). A nested tracking loop takes its events without dispatching
 //!   them, so a key typed while a drag session is still running shows no `appkit` line.
-//! - `key`: a key that reached Arbor, and the command it ran (or `unhandled`).
+//! - `key`: a key that reached Satchel, and the command it ran (or `unhandled`).
 //! - `drop-hover` and `drop`: a drag over a folder row or the list, and a drop on one.
 //! - `note`: the status bar told about a drag nothing took, for a drag-out that was refused.
 //!
@@ -33,15 +33,15 @@ use std::time::Instant;
 
 static ON: OnceLock<Option<Instant>> = OnceLock::new();
 
-/// Whether `ARBOR_DRAG_LOG` is on (read once).
+/// Whether `SATCHEL_DRAG_LOG` is on (read once).
 pub fn on() -> bool {
-    ON.get_or_init(|| std::env::var_os("ARBOR_DRAG_LOG").is_some_and(|v| !v.is_empty() && v != "0").then(Instant::now)).is_some()
+    ON.get_or_init(|| std::env::var_os("SATCHEL_DRAG_LOG").is_some_and(|v| !v.is_empty() && v != "0").then(Instant::now)).is_some()
 }
 
 /// Logs a line (built only when on).
 pub fn log(line: impl FnOnce() -> String) {
     if let Some(Some(start)) = ON.get() {
-        eprintln!("arbor-drag t={:.1} {}", start.elapsed().as_secs_f64() * 1000.0, line());
+        eprintln!("satchel-drag t={:.1} {}", start.elapsed().as_secs_f64() * 1000.0, line());
     }
 }
 
@@ -195,7 +195,7 @@ pub fn install() {
 
 #[cfg(test)]
 mod tests {
-    /// Off (tests never set `ARBOR_DRAG_LOG`), a line isn't even built.
+    /// Off (tests never set `SATCHEL_DRAG_LOG`), a line isn't even built.
     #[test]
     fn off_builds_nothing() {
         assert!(!super::on());

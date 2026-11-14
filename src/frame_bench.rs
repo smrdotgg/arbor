@@ -1,4 +1,4 @@
-//! What a key costs Arbor and Rune before the GPU: the handler, the view, layout and commit,
+//! What a key costs Satchel and Rune before the GPU: the handler, the view, layout and commit,
 //! in a headless runtime over a 10,000-entry folder (no window, no rendering). Steadier than
 //! the windowed bench on a busy machine, since it times CPU work alone; used to compare two
 //! builds (BENCH.md, milestone 11).
@@ -27,7 +27,7 @@ fn init() -> State {
 #[test]
 #[ignore]
 fn frame_cost() {
-    let d = std::env::temp_dir().join(format!("arbor-frame-cost-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-frame-cost-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     for i in 0..250 {
@@ -43,7 +43,7 @@ fn frame_cost() {
         let spec = AppSpec::<State> {
             poll: Some(|s, _, tx| s.poll(tx)),
             on_key: Some(|s, ev, tx| s.on_key(ev, tx)),
-            ..AppSpec::new("Arbor", (w, 620.0), init, crate::view::view)
+            ..AppSpec::new("Satchel", (w, 620.0), init, crate::view::view)
         };
         let mut rt = App::new(spec).headless_runtime((w, 620.0), Env::new(false, 2.0));
         if all {
@@ -99,7 +99,7 @@ fn column_cost() {
 
 /// [`column_cost`] in a folder of `entries` (250 folders, the rest files).
 fn column_cost_in(entries: usize) {
-    let root = std::env::temp_dir().join(format!("arbor-column-cost-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("satchel-column-cost-{}", std::process::id()));
     let d = root.join("big");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&d).unwrap();
@@ -113,7 +113,7 @@ fn column_cost_in(entries: usize) {
     let spec = AppSpec::<State> {
         poll: Some(|s, _, tx| s.poll(tx)),
         on_key: Some(|s, ev, tx| s.on_key(ev, tx)),
-        ..AppSpec::new("Arbor", (980.0, 620.0), init, crate::view::view)
+        ..AppSpec::new("Satchel", (980.0, 620.0), init, crate::view::view)
     };
     let mut rt = App::new(spec).headless_runtime((980.0, 620.0), Env::new(false, 2.0));
     // The columns start at the bench folder's parent, as a sidebar place.

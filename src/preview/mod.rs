@@ -1,7 +1,7 @@
 //! Quick preview (NORTHSTAR Core: "on demand, no cache"). Space opens a panel showing the
 //! active pane's selected item: the head of a text file, an image shrunk to the panel, the OS's
 //! own thumbnail of anything else it can show (PDF, video, office documents, fonts: Quick Look
-//! on macOS, the shell's thumbnail cache on Windows; see `thumb.rs`), or a card of what Arbor
+//! on macOS, the shell's thumbnail cache on Windows; see `thumb.rs`), or a card of what Satchel
 //! knows about it (a folder's item count).
 //!
 //! It's view-triggered background work, so it follows every NORTHSTAR rule for that:
@@ -448,7 +448,7 @@ pub(crate) fn load_with(job: &Job, stop: &AtomicBool, bell: &Arc<Bell>) -> Optio
     let mut out = if job.is_dir {
         Loaded::body(count(&job.path, stop)?)
     } else if let Some(what) = platform_kind(&job.ext) {
-        // Straight to the OS: these are never text or an image Arbor decodes (and a PDF's first
+        // Straight to the OS: these are never text or an image Satchel decodes (and a PDF's first
         // bytes can pass for text).
         match os_preview(job, stop, bell) {
             Some(Thumb::Image(px)) => thumbnail(px),
@@ -487,8 +487,8 @@ fn count(path: &Path, stop: &AtomicBool) -> Option<Body> {
 }
 
 /// Formats that go straight to the OS's thumbnailer, by extension, and what to call them.
-/// Anything else that isn't text or an image Arbor decodes (found by its bytes) goes to it too,
-/// after Arbor's own look at its first bytes; this list is for what that look could take for
+/// Anything else that isn't text or an image Satchel decodes (found by its bytes) goes to it too,
+/// after Satchel's own look at its first bytes; this list is for what that look could take for
 /// text (PDF, RTF) and for the card's note where the OS has no thumbnailer. Extensions that are
 /// also common text files (`.key` for Keynote and for keys, `.ts` for video and TypeScript)
 /// aren't here: their bytes decide.
@@ -509,12 +509,12 @@ pub(crate) fn platform_kind(ext: &str) -> Option<&'static str> {
 /// The card's note when the OS's thumbnailer has nothing for a file it should know.
 const CANT: &str = "Can't preview this file.";
 
-/// The card's note where the OS has no thumbnailer Arbor uses (Linux).
+/// The card's note where the OS has no thumbnailer Satchel uses (Linux).
 fn no_preview_here(what: &str) -> String {
-    format!("{what}: no preview on this system. Its thumbnailers keep a thumbnail cache, and Arbor keeps no caches.")
+    format!("{what}: no preview on this system. Its thumbnailers keep a thumbnail cache, and Satchel keeps no caches.")
 }
 
-/// The OS's thumbnail for the job's file: `None` where the OS has no thumbnailer Arbor uses.
+/// The OS's thumbnail for the job's file: `None` where the OS has no thumbnailer Satchel uses.
 fn os_preview(job: &Job, stop: &AtomicBool, bell: &Arc<Bell>) -> Option<Thumb> {
     #[cfg(test)]
     {
@@ -672,7 +672,7 @@ fn file(job: &Job, stop: &AtomicBool, bell: &Arc<Bell>) -> Option<Loaded> {
 
 /// An image file shrunk to `fit` (device pixels) for the icon view's thumbnail: the preview's
 /// own decoders, with the same caps (a too-large image, and WebP over its 4 MP, gives `None`, as
-/// does anything that isn't an image Arbor decodes, or a stop). Only regular files are opened,
+/// does anything that isn't an image Satchel decodes, or a stop). Only regular files are opened,
 /// without blocking, and each read checks `stop`.
 pub(crate) fn image_thumbnail(path: &Path, fit: [u32; 2], stop: &AtomicBool) -> Option<thumb::Rgba> {
     let f = open_regular(path).ok()??;

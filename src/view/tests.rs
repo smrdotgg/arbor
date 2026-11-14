@@ -43,13 +43,13 @@ fn seven(s: &str) -> f32 {
     s.chars().count() as f32 * 7.0
 }
 
-const DEEP: &str = "/home/smr/arbor-smoke/m3demo/Photos";
+const DEEP: &str = "/home/smr/smoke-tests/m3demo/Photos";
 
 #[cfg(unix)]
 #[test]
 fn crumbs_are_the_path_with_separators_after_the_root() {
     let c = crumbs_of(Path::new(DEEP));
-    assert_eq!(c.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["/", "home", "smr", "arbor-smoke", "m3demo", "Photos"]);
+    assert_eq!(c.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["/", "home", "smr", "smoke-tests", "m3demo", "Photos"]);
     assert_eq!(c.iter().map(|c| c.sep).collect::<Vec<_>>(), [false, false, true, true, true, true]);
     assert_eq!(c[2].target, Path::new("/home/smr"));
 }

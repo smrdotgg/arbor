@@ -172,7 +172,7 @@ impl<R: Read> Reader<R> {
                     self.skip(stop)?;
                     continue;
                 }
-                // Global pax headers set defaults for every entry; nothing Arbor uses.
+                // Global pax headers set defaults for every entry; nothing Satchel uses.
                 b'g' => {
                     self.skip(stop)?;
                     continue;
@@ -215,7 +215,7 @@ impl<R: Read> Reader<R> {
                 b'1' => Kind::Skip("hard links aren't extracted"),
                 b'S' => Kind::Skip("sparse files aren't extracted"),
                 b'3' | b'4' | b'6' => Kind::Skip("devices and FIFOs aren't extracted"),
-                _ => Kind::Skip("it's a kind of entry Arbor doesn't know"),
+                _ => Kind::Skip("it's a kind of entry Satchel doesn't know"),
             };
             return Ok(Some(Entry { name, kind, mode, mtime: mtime.and_then(super::from_unix), lossy }));
         }
@@ -269,7 +269,7 @@ fn read_full(r: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
     Ok(n)
 }
 
-/// The records of a pax extended header ("<length> <key>=<value>\n") Arbor uses.
+/// The records of a pax extended header ("<length> <key>=<value>\n") Satchel uses.
 fn pax(d: &[u8], p: &mut Pending) -> Result<(), Error> {
     let mut rest = d;
     while !rest.is_empty() {
@@ -377,7 +377,7 @@ impl<R: Read> Read for Counted<R> {
 }
 
 /// Reads every entry of the tar in `r`, checking the running total against the limits as it
-/// goes; `stop` is asked between entries (tests: Arbor lists through [`list_from`]).
+/// goes; `stop` is asked between entries (tests: Satchel lists through [`list_from`]).
 #[cfg(test)]
 pub fn list(r: impl Read, stop: &dyn Fn() -> bool) -> Result<Vec<Entry>, Error> {
     list_from(&mut Reader::new(r), stop, None)

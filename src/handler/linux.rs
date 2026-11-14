@@ -2,16 +2,16 @@ use super::{Backup, Change, NOT_DEFAULT, kept_note, remove_backup, write_file};
 use std::path::{Path, PathBuf};
 
 /// Installed by the tarball's `install.sh`.
-pub const DESKTOP_ID: &str = "arbor.desktop";
+pub const DESKTOP_ID: &str = "satchel.desktop";
 pub const MIME: &str = "inode/directory";
 pub const BUS_NAME: &str = "org.freedesktop.FileManager1";
-/// The first line of the D-Bus activation file Arbor writes: how it knows the file is its own.
-pub const MARKER: &str = "# Written by Arbor";
+/// The first line of the D-Bus activation file Satchel writes: how it knows the file is its own.
+pub const MARKER: &str = "# Written by Satchel";
 const SECTION: &str = "[Default Applications]";
 const MIME_KEY: &str = "mimeapps.list inode/directory";
 const SERVICE_KEY: &str = "dbus-1/services/org.freedesktop.FileManager1.service";
 
-/// Where the desktop keeps things, and Arbor's own path.
+/// Where the desktop keeps things, and Satchel's own path.
 pub struct Dirs {
     pub config_home: PathBuf,
     pub data_home: PathBuf,
@@ -42,7 +42,7 @@ impl Dirs {
             config_home: env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")),
             data_home: data_home().ok_or("HOME isn't set")?,
             data_dirs,
-            exe: std::env::current_exe().map_err(|e| format!("Can't tell where Arbor is: {e}"))?,
+            exe: std::env::current_exe().map_err(|e| format!("Can't tell where Satchel is: {e}"))?,
             desktops: std::env::var("XDG_CURRENT_DESKTOP")
                 .unwrap_or_default()
                 .split(':')
@@ -64,7 +64,7 @@ pub fn service_file(data_home: &Path) -> PathBuf {
     data_home.join(SERVICE_KEY)
 }
 
-/// Whether Arbor wrote this activation file (so it should serve the name).
+/// Whether Satchel wrote this activation file (so it should serve the name).
 pub fn is_ours(text: &str) -> bool {
     is_ours_bytes(text.as_bytes())
 }
@@ -73,11 +73,11 @@ fn is_ours_bytes(b: &[u8]) -> bool {
     b.starts_with(MARKER.as_bytes())
 }
 
-/// The activation file: the session bus runs Arbor when something asks for the name and
+/// The activation file: the session bus runs Satchel when something asks for the name and
 /// nothing owns it.
 pub fn service_text(exe: &Path) -> String {
     format!(
-        "{MARKER} (\"Make Arbor the Default for Folders\"). \"Restore the System Default for Folders\" removes it.\n[D-BUS Service]\nName={BUS_NAME}\nExec={}\n",
+        "{MARKER} (\"Make Satchel the Default for Folders\"). \"Restore the System Default for Folders\" removes it.\n[D-BUS Service]\nName={BUS_NAME}\nExec={}\n",
         quote(&exe.to_string_lossy())
     )
 }
@@ -175,9 +175,9 @@ fn first(value: &str) -> &str {
     value.split(';').next().unwrap_or("").trim()
 }
 
-/// A key file Arbor edits (`mimeapps.list`): its text, `None` when there's none. One that
+/// A key file Satchel edits (`mimeapps.list`): its text, `None` when there's none. One that
 /// isn't UTF-8 (the spec says it is) is an error: rewriting it would turn every byte that isn't
-/// into U+FFFD, changing lines of the user's that aren't Arbor's.
+/// into U+FFFD, changing lines of the user's that aren't Satchel's.
 fn read(path: &Path) -> Result<Option<String>, String> {
     match read_bytes(path)? {
         Some(b) => {
@@ -212,7 +212,7 @@ pub(crate) fn saved_default(b: &Backup, backup: &Path) -> Result<Option<String>,
     }
 }
 
-/// Where `arbor.desktop` is installed, if it is.
+/// Where `satchel.desktop` is installed, if it is.
 fn desktop_file(d: &Dirs) -> Option<PathBuf> {
     std::iter::once(&d.data_home).chain(&d.data_dirs).map(|p| p.join("applications").join(DESKTOP_ID)).find(|p| p.is_file())
 }
@@ -227,7 +227,7 @@ pub fn run(change: Change, d: &Dirs, backup: &Path) -> Result<String, String> {
 fn make(d: &Dirs, backup: &Path) -> Result<String, String> {
     if desktop_file(d).is_none() {
         return Err(format!(
-            "Install Arbor first: the download's install.sh puts {DESKTOP_ID} where the desktop finds it (~/.local/share/applications)"
+            "Install Satchel first: the download's install.sh puts {DESKTOP_ID} where the desktop finds it (~/.local/share/applications)"
         ));
     }
     let mimeapps = d.config_home.join("mimeapps.list");
@@ -247,7 +247,7 @@ fn make(d: &Dirs, backup: &Path) -> Result<String, String> {
     let new_text = set_default_app(&text, MIME, Some(DESKTOP_ID));
     let written = write_file(&mimeapps, new_text.as_bytes()).and_then(|()| write_file(&service, service_text(&d.exe).as_bytes()));
     if let Err(e) = written {
-        // Halfway: the folder default goes back to what it was (if it's still what Arbor
+        // Halfway: the folder default goes back to what it was (if it's still what Satchel
         // wrote), and a backup made just now goes too.
         let back = match read(&mimeapps) {
             Ok(Some(now)) if now == new_text && now != text => {
@@ -264,10 +264,10 @@ fn make(d: &Dirs, backup: &Path) -> Result<String, String> {
                 if fresh {
                     let _ = remove_backup(backup);
                 }
-                format!("Couldn't make Arbor the default for folders ({e}), so nothing was changed")
+                format!("Couldn't make Satchel the default for folders ({e}), so nothing was changed")
             }
             Err(e2) => format!(
-                "Couldn't make Arbor the default for folders ({e}), and putting the folder default back failed too ({e2}): run Restore the System Default for Folders once that's fixed"
+                "Couldn't make Satchel the default for folders ({e}), and putting the folder default back failed too ({e2}): run Restore the System Default for Folders once that's fixed"
             ),
         });
     }
@@ -283,7 +283,7 @@ fn make(d: &Dirs, backup: &Path) -> Result<String, String> {
         }
     }
     Ok(format!(
-        "Arbor is now the default for folders{note}. \"Show in folder\" in other apps opens it too. Restore the System Default for Folders undoes it."
+        "Satchel is now the default for folders{note}. \"Show in folder\" in other apps opens it too. Restore the System Default for Folders undoes it."
     ))
 }
 

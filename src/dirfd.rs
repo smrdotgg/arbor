@@ -327,7 +327,7 @@ mod tests {
     /// an error (then the end), never a quiet end of the folder.
     #[test]
     fn names_stream_and_tell_errors_from_the_end() {
-        let d = std::env::temp_dir().join(format!("arbor-dirfd-names-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-dirfd-names-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for i in 0..20 {

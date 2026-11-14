@@ -1,6 +1,6 @@
 //! Cold-start probe: a bare Win32 window (RegisterClass, CreateWindowEx, "hello" painted with
 //! GDI in WM_PAINT), no GPU: the floor any Windows app starts from. Appends `win32-hello <ms> …`
-//! to `ARBOR_TIMING_FILE` at the end of its first WM_PAINT, then closes (see
+//! to `SATCHEL_TIMING_FILE` at the end of its first WM_PAINT, then closes (see
 //! `src/coldstart.rs` for what `ms` counts). Windows only; elsewhere it says so.
 //!
 //! ```text
@@ -59,7 +59,7 @@ mod win {
                 if !PAINTED.replace(true) {
                     let main = MAIN.get().unwrap_or_else(Instant::now);
                     let line = coldstart::line("win32-hello", main);
-                    match std::env::var_os("ARBOR_TIMING_FILE") {
+                    match std::env::var_os("SATCHEL_TIMING_FILE") {
                         Some(path) => coldstart::append(&path, &line),
                         None => eprintln!("{line}"),
                     }

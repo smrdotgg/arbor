@@ -28,31 +28,31 @@ fn frecency_weighs_recent_visits_more() {
 fn words_match_in_order_and_the_last_one_names_the_folder() {
     let now = 10 * WEEK;
     let mut f = Frecency::default();
-    visit(&mut f, "/home/u/projects/arbor", now - 100, 3);
-    visit(&mut f, "/home/u/projects/arbor/src", now - 100, 10);
+    visit(&mut f, "/home/u/projects/satchel", now - 100, 3);
+    visit(&mut f, "/home/u/projects/satchel/src", now - 100, 10);
     visit(&mut f, "/home/u/archive/old-projects", now - 100, 5);
     visit(&mut f, "/home/u/projects/rune", now - 100, 1);
-    // "proj arb": arbor first, though src is visited more (its name doesn't match "arb").
-    assert_eq!(top(&f, "proj arb", now)[0], p("/home/u/projects/arbor"));
-    // Order matters: "arb proj" needs arb before proj in the path.
-    assert!(top(&f, "arb proj", now).is_empty());
+    // "proj sat": satchel first, though src is visited more (its name doesn't match "sat").
+    assert_eq!(top(&f, "proj sat", now)[0], p("/home/u/projects/satchel"));
+    // Order matters: "sat proj" needs sat before proj in the path.
+    assert!(top(&f, "sat proj", now).is_empty());
     // A single word: the folder named that, then the deeper one that matches only a parent.
-    assert_eq!(top(&f, "arbor", now), [p("/home/u/projects/arbor"), p("/home/u/projects/arbor/src")]);
+    assert_eq!(top(&f, "satchel", now), [p("/home/u/projects/satchel"), p("/home/u/projects/satchel/src")]);
     // Case doesn't matter.
     assert_eq!(top(&f, "RUNE", now), [p("/home/u/projects/rune")]);
     // Nothing typed: by frecency.
-    assert_eq!(top(&f, "", now)[0], p("/home/u/projects/arbor/src"));
+    assert_eq!(top(&f, "", now)[0], p("/home/u/projects/satchel/src"));
     // Frecency still counts among good matches: old-projects (5 visits) ranks above
-    // projects/arbor/src for "proj"? No: src's last word doesn't name "proj"; both lose
+    // projects/satchel/src for "proj"? No: src's last word doesn't name "proj"; both lose
     // to folders whose own name has it.
     assert_eq!(top(&f, "proj", now)[0], p("/home/u/archive/old-projects"));
 }
 
 #[test]
 fn a_longer_word_or_another_word_narrows_a_query() {
-    assert!(narrows("", "a") && narrows("pro", "proj") && narrows("proj", "proj arb") && narrows("proj a", "proj arb"));
-    assert!(narrows("proj  arb", "proj arb ") && narrows("proj", "proj"));
-    assert!(!narrows("proj", "pro") && !narrows("proj arb", "proj") && !narrows("proj arb", "proj xarb") && !narrows("ab", "ba"));
+    assert!(narrows("", "a") && narrows("pro", "proj") && narrows("proj", "proj sat") && narrows("proj s", "proj sat"));
+    assert!(narrows("proj  sat", "proj sat ") && narrows("proj", "proj"));
+    assert!(!narrows("proj", "pro") && !narrows("proj sat", "proj") && !narrows("proj sat", "proj xsat") && !narrows("ab", "ba"));
 }
 
 /// Ranking among the last query's matches gives what ranking everything gives, key after
@@ -61,13 +61,13 @@ fn a_longer_word_or_another_word_narrows_a_query() {
 fn typing_on_ranks_among_the_last_matches_and_gets_the_same_rows() {
     let now = 10 * WEEK;
     let mut f = Frecency::default();
-    let words = ["projects", "arbor", "src", "photos", "2024", "work"];
+    let words = ["projects", "satchel", "src", "photos", "2024", "work"];
     for i in 0..600u64 {
         let path = format!("/h/{}/{}-{i}/{}", words[(i % 6) as usize], words[(i / 6 % 6) as usize], words[(i / 36 % 6) as usize]);
         visit(&mut f, &path, now - i * 600, 1 + (i % 5) as usize);
     }
     let (mut last, mut matched): (String, Vec<u32>) = (String::new(), (0..f.len() as u32).collect());
-    for q in ["p", "pr", "pro", "proj", "proj a", "proj ar", "proj arb", "proj arb s"] {
+    for q in ["p", "pr", "pro", "proj", "proj s", "proj sa", "proj sat", "proj sat s"] {
         assert!(narrows(&last, q));
         let (hits, m) = f.rank_in(q, now, LIMIT, Some(&matched));
         let whole = f.rank(q, now, LIMIT);
@@ -76,20 +76,20 @@ fn typing_on_ranks_among_the_last_matches_and_gets_the_same_rows() {
     }
     // The box: a visit lands between two keys, so the next key ranks everything again.
     let mut j = (String::from("proj"), f.generation());
-    visit(&mut f, "/h/projects/new-one/arbor", now, 50);
+    visit(&mut f, "/h/projects/new-one/satchel", now, 50);
     assert_ne!(j.1, f.generation());
-    j.0.push_str(" arb");
-    assert_eq!(f.rank("proj arb", now, 1)[0].path.as_ref(), p("/h/projects/new-one/arbor").as_path());
+    j.0.push_str(" sat");
+    assert_eq!(f.rank("proj sat", now, 1)[0].path.as_ref(), p("/h/projects/new-one/satchel").as_path());
 }
 
 #[test]
 fn matched_characters_are_marked_in_the_shown_path() {
     let now = 1000;
     let mut f = Frecency::default();
-    visit(&mut f, "/srv/Projects/Arbor", now, 1);
-    let h = &f.rank("proj arb", now, 1)[0];
-    let marked: Vec<&str> = h.marks(&words("proj arb")).iter().map(|&(a, b)| &h.shown[a..b]).collect();
-    assert_eq!(marked, ["Proj", "Arb"]);
+    visit(&mut f, "/srv/Projects/Satchel", now, 1);
+    let h = &f.rank("proj sat", now, 1)[0];
+    let marked: Vec<&str> = h.marks(&words("proj sat")).iter().map(|&(a, b)| &h.shown[a..b]).collect();
+    assert_eq!(marked, ["Proj", "Sat"]);
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn exclude_globs_keep_folders_out() {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-jump-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-jump-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d.join("history.log")
@@ -408,7 +408,7 @@ fn a_slow_load_doesnt_hold_up_the_box() {
 // ---- through the app -----------------------------------------------------------------
 
 fn dirs(name: &str, subs: &[&str]) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-jump-app-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-jump-app-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     for s in subs {
         std::fs::create_dir_all(d.join(s)).unwrap();
@@ -443,10 +443,10 @@ fn startup_does_no_history_io_and_a_visit_appends() {
 
 #[test]
 fn jump_goes_to_the_best_match_and_drops_a_folder_thats_gone() {
-    let d = dirs("go", &["projects/arbor", "projects/rune", "gone"]);
+    let d = dirs("go", &["projects/satchel", "projects/rune", "gone"]);
     let mut s = crate::app::tests::state_in(&d);
     let mut tx = Tx::default();
-    for sub in ["projects/arbor", "projects/rune", "gone", "projects/arbor"] {
+    for sub in ["projects/satchel", "projects/rune", "gone", "projects/satchel"] {
         s.go(d.join(sub), Nav::New, None);
         crate::app::tests::settle_all(&mut s);
     }
@@ -455,13 +455,13 @@ fn jump_goes_to_the_best_match_and_drops_a_folder_thats_gone() {
     s.run(Cmd::Jump, &mut tx);
     assert!(s.jump.as_ref().is_some_and(|j| !j.loading), "a small history loads within the wait");
     assert_eq!(s.jump.as_ref().unwrap().hits.len(), 4, "everything visited, by frecency");
-    s.jump_edit().insert("proj arb");
+    s.jump_edit().insert("proj sat");
     s.jump_changed(&mut tx);
-    assert_eq!(*s.jump.as_ref().unwrap().hits[0].path, *d.join("projects/arbor"));
+    assert_eq!(*s.jump.as_ref().unwrap().hits[0].path, *d.join("projects/satchel"));
     s.jump_pick(0, &mut tx);
     assert!(s.jump.is_none());
     crate::app::tests::settle_all(&mut s);
-    assert_eq!(s.cur().cwd, d.join("projects/arbor"));
+    assert_eq!(s.cur().cwd, d.join("projects/satchel"));
     // A folder deleted since: going there says so and forgets it.
     std::fs::remove_dir(d.join("gone")).unwrap();
     s.run(Cmd::Jump, &mut tx);
@@ -470,7 +470,7 @@ fn jump_goes_to_the_best_match_and_drops_a_folder_thats_gone() {
     assert_eq!(*s.jump.as_ref().unwrap().hits[0].path, *d.join("gone"));
     s.jump_pick(0, &mut tx);
     crate::app::tests::settle_all(&mut s);
-    assert_eq!(s.cur().cwd, d.join("projects/arbor"), "stays put");
+    assert_eq!(s.cur().cwd, d.join("projects/satchel"), "stays put");
     assert!(s.note.as_deref().is_some_and(|n| n.contains("no longer exists")), "{:?}", s.note);
     assert!(s.shared.history.borrow().agg.as_ref().unwrap().get(&d.join("gone")).is_none());
 }
@@ -507,13 +507,13 @@ fn jump_off_records_nothing_and_cant_open() {
 fn rank_speed() {
     let now = now();
     let mut f = Frecency::default();
-    let words = ["projects", "arbor", "src", "photos", "2024", "work", "client", "notes", "music", "build"];
+    let words = ["projects", "satchel", "src", "photos", "2024", "work", "client", "notes", "music", "build"];
     for i in 0..5_000u64 {
         let path =
             format!("/home/user/{}/{}-{i}/{}", words[(i % 10) as usize], words[(i / 10 % 10) as usize], words[(i / 100 % 10) as usize]);
         visit(&mut f, &path, now - i * 600, 1 + (i % 7) as usize);
     }
-    for q in ["", "a", "proj arb", "photos 20"] {
+    for q in ["", "a", "proj sat", "photos 20"] {
         let t = std::time::Instant::now();
         let n = 20;
         for _ in 0..n {
@@ -531,7 +531,7 @@ fn open_speed() {
     let mut s = crate::app::tests::state_in(&d);
     let now = now();
     let mut log = String::new();
-    let words = ["projects", "arbor", "src", "photos", "2024", "work", "client", "notes", "music", "build"];
+    let words = ["projects", "satchel", "src", "photos", "2024", "work", "client", "notes", "music", "build"];
     for i in 0..5_000usize {
         let w = |k: usize| words[(i / k) % 10];
         log.push_str(&format!("{}\t1\t{}\n", now - i as u64 * 517, d.join(w(1)).join(format!("{}-{i}", w(10))).join(w(100)).display()));
@@ -572,7 +572,7 @@ fn whole_lines(b: &[u8]) -> Vec<&[u8]> {
     let mut v: Vec<&[u8]> = b.split_inclusive(|&c| c == b'\n').filter(|l| l.ends_with(b"\n")).collect();
     for l in &mut v {
         *l = &l[..l.len() - 1];
-        // The reader drops every CR before the line break (Arbor never writes one in a path).
+        // The reader drops every CR before the line break (Satchel never writes one in a path).
         while l.ends_with(b"\r") {
             *l = &l[..l.len() - 1];
         }

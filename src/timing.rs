@@ -1,12 +1,12 @@
 //! Opt-in measurement of the speed budgets in NORTHSTAR.md.
 //!
-//! `ARBOR_TIMING=1` logs to stderr, one line per event:
+//! `SATCHEL_TIMING=1` logs to stderr, one line per event:
 //!
 //! ```text
-//! arbor-timing first-frame main_ms=41.2 init_at_ms=3.1 init_ms=12.0 epoch_us=1762591234567890 entries=10000
-//! arbor-timing key ms=1.9 update_ms=1.1 encode_ms=0.6 refresh_hz=120
-//! arbor-timing nav ms=9.4 update_ms=3.2 encode_ms=0.7 entries=10000
-//! arbor-timing tab ms=12.1 update_ms=3.0 encode_ms=0.7 entries=10000 same_frame=1
+//! satchel-timing first-frame main_ms=41.2 init_at_ms=3.1 init_ms=12.0 epoch_us=1762591234567890 entries=10000
+//! satchel-timing key ms=1.9 update_ms=1.1 encode_ms=0.6 refresh_hz=120
+//! satchel-timing nav ms=9.4 update_ms=3.2 encode_ms=0.7 entries=10000
+//! satchel-timing tab ms=12.1 update_ms=3.0 encode_ms=0.7 entries=10000 same_frame=1
 //! ```
 //!
 //! - `first-frame`: from the top of `main` to the first frame submitted. `epoch_us` is that
@@ -37,7 +37,7 @@
 //!   `thumbs=N` when N thumbnails were waiting or decoding as it was handled.
 //! - `first-listing`: only when the first folder was too slow for the first frame (the window
 //!   waits at most `app::FIRST_PAINT_WAIT` for it): from the top of `main` to the frame showing
-//!   it. `ARBOR_SLOW_FIRST_READ_MS=N` (read only when timing is on) slows that read by N ms to
+//!   it. `SATCHEL_SLOW_FIRST_READ_MS=N` (read only when timing is on) slows that read by N ms to
 //!   try it.
 //!
 //! "Submitted" is when Rune handed the frame to the GPU (`FrameEncoded::at`): a proxy for
@@ -45,57 +45,57 @@
 //! `frame/present_time.rs`, runs two to three frames behind). Rune doesn't report when a frame
 //! reached the screen (see RUNE-GAPS.md).
 //!
-//! `ARBOR_BENCH=N` (implies timing) drives the app itself: after the first frame it does N
+//! `SATCHEL_BENCH=N` (implies timing) drives the app itself: after the first frame it does N
 //! rounds of "go to the parent, come back, press ↓", each step started by the previous step's
-//! frame (no timers), then quits. With `ARBOR_BENCH_PREVIEW=1` (in a folder whose first two
+//! frame (no timers), then quits. With `SATCHEL_BENCH_PREVIEW=1` (in a folder whose first two
 //! files are a text file and an image) each round is: Space (preview the text), Space, ↓,
 //! Space (preview the image), ↑, ↓, ↑ (the last two while it's open, the ↑ while the image
-//! decodes), Space; opening waits for the preview to land. With `ARBOR_BENCH_JUMP=1` each
+//! decodes), Space; opening waits for the preview to land. With `SATCHEL_BENCH_JUMP=1` each
 //! round opens Jump to Folder (waiting for the history to land; the first open of a run reads
 //! and aggregates the log, the rest rank what's in memory), types two letters (a different
 //! pair each round, from [`JUMP_QUERIES`], so no round repeats the last one's rows), and closes
-//! it with Esc. With `ARBOR_BENCH_SEARCH=1` each round opens Search in This Folder, types `1`
+//! it with Esc. With `SATCHEL_BENCH_SEARCH=1` each round opens Search in This Folder, types `1`
 //! (in a large tree, so the walk streams for many frames), presses ↓ once a frame while it
-//! streams, and leaves with Esc once it's done. With `ARBOR_BENCH_RENAME=1` each round selects
+//! streams, and leaves with Esc once it's done. With `SATCHEL_BENCH_RENAME=1` each round selects
 //! everything, opens Batch Rename (waiting for the folder's read), types `e`, turns on regex,
-//! types `$` (each waiting for its preview) and closes it with Esc. With `ARBOR_BENCH_GRID=1` the
+//! types `$` (each waiting for its preview) and closes it with Esc. With `SATCHEL_BENCH_GRID=1` the
 //! first step switches to the icon view (As Icons); then each round presses Page Down and ↓.
-//! `ARBOR_BENCH_GRID=2` (a folder of photos) waits after As Icons for the first screen's
-//! thumbnails, then pages while the next screens' stream in; `ARBOR_BENCH_GRID=3` does the
-//! same in the tiles view (As Tiles). With `ARBOR_BENCH_COLUMNS=1` the first step switches to
+//! `SATCHEL_BENCH_GRID=2` (a folder of photos) waits after As Icons for the first screen's
+//! thumbnails, then pages while the next screens' stream in; `SATCHEL_BENCH_GRID=3` does the
+//! same in the tiles view (As Tiles). With `SATCHEL_BENCH_COLUMNS=1` the first step switches to
 //! the column view (As Columns) in the 10k folder; then each round presses ← (to its parent,
 //! the 10k folder becoming the column on the right), ↓ (onto the next folder, read for the
 //! column on the right), ↑ (back onto the 10k folder, read again) and → (into it). A `key` line has
 //! `reads=1` when the key started a folder read in the column view (a column's, or the folder's
-//! own). With `ARBOR_BENCH_TABS=1` it opens a second tab on the
+//! own). With `SATCHEL_BENCH_TABS=1` it opens a second tab on the
 //! parent folder instead, then does N rounds of "previous tab (the start folder), next tab".
 //! A step starts only once the previous step's frame was drawn: a frame that wasn't (the window
 //! covered or not yet visible, no drawable in time) asks for nothing, and Rune draws again when
 //! it can. (A wake from an undrawn frame was handled in the same run-loop turn, so AppKit never
 //! got to say the window was visible, and the bench spun: RUNE-GAPS.md.)
-//! `ARBOR_BENCH_IDLE=list` (or `icons`, `tiles`, `columns`) checks that an idle window costs
+//! `SATCHEL_BENCH_IDLE=list` (or `icons`, `tiles`, `columns`) checks that an idle window costs
 //! nothing: the first step switches to the icon view, `list`'s second back to the list (each
 //! switch once left Rune drawing every frame until the next key; `tiles` switches to the tiles
-//! view, `columns` to the column view and then presses ↓), then it logs `arbor-timing idle-ready` and does
+//! view, `columns` to the column view and then presses ↓), then it logs `satchel-timing idle-ready` and does
 //! nothing more, never quitting: the bench measures its CPU time from outside, then kills it.
-//! With `ARBOR_BENCH_WINDOW=1` each round opens a new window (⌘N, on the folder on screen) and
+//! With `SATCHEL_BENCH_WINDOW=1` each round opens a new window (⌘N, on the folder on screen) and
 //! closes it once its first frame showing the folder is drawn: `window` is from the step to that
 //! frame, with `entries=N` and `same_frame=1` when that was the window's first drawn frame.
 //! `window-up` is the window's first drawn frame, with when ⌘N's handler had made it
-//! (`made_ms`) and when Rune ran its `setup` (`setup_ms`, before the native window exists). `ARBOR_BENCH_IDLE_WINDOWS=2` with
-//! `ARBOR_BENCH_IDLE` first opens a second window and waits for its frame, then idles both.
-//! `ARBOR_BENCH_PACE_MS=N` spaces the steps at least N ms apart, as a person types (a thread
+//! (`made_ms`) and when Rune ran its `setup` (`setup_ms`, before the native window exists). `SATCHEL_BENCH_IDLE_WINDOWS=2` with
+//! `SATCHEL_BENCH_IDLE` first opens a second window and waits for its frame, then idles both.
+//! `SATCHEL_BENCH_PACE_MS=N` spaces the steps at least N ms apart, as a person types (a thread
 //! sleeps and wakes the window; nothing polls), so the CPU cools between keys as it does for a
 //! real user. The ↓ is synthetic, so its `key` time starts when the handler
 //! is called rather than at an OS event. The window opens without taking focus and ignores real
 //! keys, so typing in another app while it runs can't reach it (and its ⌘⌫ can't trash anything).
 //!
-//! `ARBOR_TIMING_FILE=<path>` (implies timing) appends the lines to that file instead of
+//! `SATCHEL_TIMING_FILE=<path>` (implies timing) appends the lines to that file instead of
 //! stderr, for a release build on Windows, which has no console; at the first frame it also
-//! appends `arbor <ms> from=process|main epoch_us=<µs>`, the cold-start probes' line
+//! appends `satchel <ms> from=process|main epoch_us=<µs>`, the cold-start probes' line
 //! (`coldstart.rs`: on Windows from the process's creation, so it counts the loader too).
-//! `ARBOR_EXIT_AFTER_FIRST_FRAME=1` (read only when timing is on) quits right after that frame;
-//! `ARBOR_EXIT_AFTER_MS=N` instead quits N ms after it (a one-shot sleeping thread), so what
+//! `SATCHEL_EXIT_AFTER_FIRST_FRAME=1` (read only when timing is on) quits right after that frame;
+//! `SATCHEL_EXIT_AFTER_MS=N` instead quits N ms after it (a one-shot sleeping thread), so what
 //! Rune does after the first frame shows in the marks (Windows: the GPU taking over from the CPU).
 //! The `first-frame` line splits the launch: `before_main_ms` (Windows: process creation to
 //! `main`), `init_at_ms` (`State::new` starts: Rune's event loop is up), `setup_at_ms` (Rune
@@ -107,7 +107,7 @@
 //! device first drew: with `warm_gpu`, its warm-up pass, so the device and renderer are ready);
 //! `drawn_by=cpu|gpu`, which renderer drew that first frame (Windows draws it on the CPU and
 //! makes the GPU after it); and `uncloaked_at_ms` (Windows: the window came on screen with that
-//! frame in it, which is before Rune's frame report, where the line is written). When Arbor quits, `arbor-timing launch-marks` lists every step Rune
+//! frame in it, which is before Rune's frame report, where the line is written). When Satchel quits, `satchel-timing launch-marks` lists every step Rune
 //! marked on the way (`rune::marks`: the window made, shown and uncloaked, the first frame built,
 //! painted, copied or presented, the GPU's adapter, device and hand-over), in ms from `main`.
 //!
@@ -126,11 +126,11 @@ use crate::app::{Nav, State};
 use crate::coldstart;
 use crate::commands::Cmd;
 
-/// `ARBOR_TIMING_FILE`: the file the lines are appended to instead of stderr (a release build
+/// `SATCHEL_TIMING_FILE`: the file the lines are appended to instead of stderr (a release build
 /// on Windows has no console).
 static FILE: OnceLock<OsString> = OnceLock::new();
 
-/// One line of the log, to `ARBOR_TIMING_FILE` or stderr.
+/// One line of the log, to `SATCHEL_TIMING_FILE` or stderr.
 fn emit(line: &str) {
     match FILE.get() {
         Some(path) => coldstart::append(path, line),
@@ -171,9 +171,9 @@ thread_local! {
     /// A navigation whose listing lands in the frame being built: when it was asked for, how
     /// many entries it has, what asked, and whether it landed inside the key.
     static LANDED: Cell<Option<(Instant, usize, Kind, bool)>> = const { Cell::new(None) };
-    /// `ARBOR_BENCH_TABS`: the bench switches tabs instead of navigating.
+    /// `SATCHEL_BENCH_TABS`: the bench switches tabs instead of navigating.
     static TABS: Cell<bool> = const { Cell::new(false) };
-    /// `ARBOR_BENCH_PREVIEW`: the bench opens and moves the quick preview.
+    /// `SATCHEL_BENCH_PREVIEW`: the bench opens and moves the quick preview.
     static PREVIEW: Cell<bool> = const { Cell::new(false) };
     /// A preview read in flight: when its key came, and whether that key opened the preview.
     static PREVIEW_ASKED: Cell<Option<(Instant, bool)>> = const { Cell::new(None) };
@@ -181,9 +181,9 @@ thread_local! {
     static PREVIEW_LANDED: Cell<Option<(Instant, bool, &'static str)>> = const { Cell::new(None) };
     /// The handled key's frame shows an open preview.
     static KEY_PREVIEW: Cell<bool> = const { Cell::new(false) };
-    /// `ARBOR_BENCH_JUMP`: the bench opens Jump to Folder and types in it.
+    /// `SATCHEL_BENCH_JUMP`: the bench opens Jump to Folder and types in it.
     static JUMP: Cell<bool> = const { Cell::new(false) };
-    /// `ARBOR_BENCH_SEARCH`: the bench searches and moves through the results as they stream.
+    /// `SATCHEL_BENCH_SEARCH`: the bench searches and moves through the results as they stream.
     static SEARCH: Cell<bool> = const { Cell::new(false) };
     /// Where the search bench is in its round: ⌘F, the query, ↓ while it streams.
     static SEARCH_PHASE: Cell<u8> = const { Cell::new(0) };
@@ -199,18 +199,18 @@ thread_local! {
     static JUMP_ASKED: Cell<Option<(Instant, bool)>> = const { Cell::new(None) };
     /// Jump's rows land in the frame being built: the open's time, cold, folders, same frame.
     static JUMP_LANDED: Cell<Option<(Instant, bool, usize, bool)>> = const { Cell::new(None) };
-    /// `ARBOR_BENCH_RENAME`: the bench selects everything, opens Batch Rename and types in it.
+    /// `SATCHEL_BENCH_RENAME`: the bench selects everything, opens Batch Rename and types in it.
     static RENAME: Cell<bool> = const { Cell::new(false) };
-    /// `ARBOR_BENCH_GRID`: the bench switches to the icon view and pages through it; `=2` in a
+    /// `SATCHEL_BENCH_GRID`: the bench switches to the icon view and pages through it; `=2` in a
     /// folder of photos, whose first screen of thumbnails it waits for.
     static GRID: Cell<bool> = const { Cell::new(false) };
     static GRID_PHOTOS: Cell<bool> = const { Cell::new(false) };
-    /// `ARBOR_BENCH_IDLE`: the view the bench leaves the window idle in, and whether it has.
+    /// `SATCHEL_BENCH_IDLE`: the view the bench leaves the window idle in, and whether it has.
     static IDLE: Cell<Option<crate::grid::ViewMode>> = const { Cell::new(None) };
     static IDLE_READY: Cell<bool> = const { Cell::new(false) };
-    /// `ARBOR_BENCH_GRID=3`: the grid bench in the tiles view.
+    /// `SATCHEL_BENCH_GRID=3`: the grid bench in the tiles view.
     static GRID_TILES: Cell<bool> = const { Cell::new(false) };
-    /// `ARBOR_BENCH_COLUMNS`: the bench moves in and out of the 10k folder in the column view.
+    /// `SATCHEL_BENCH_COLUMNS`: the bench moves in and out of the 10k folder in the column view.
     static COLUMNS: Cell<bool> = const { Cell::new(false) };
     /// As Icons asked for thumbnails: when, and whether the first one showed yet.
     static TILE_ASKED: Cell<Option<(Instant, bool)>> = const { Cell::new(None) };
@@ -238,7 +238,7 @@ thread_local! {
     /// window existed (`App::on_window`), from the top of `main`.
     static SETUP_AT_MS: Cell<f64> = const { Cell::new(f64::NAN) };
     static WINDOW_AT_MS: Cell<f64> = const { Cell::new(f64::NAN) };
-    /// `ARBOR_EXIT_AFTER_FIRST_FRAME` (or `ARBOR_EXIT_AFTER_MS`): quit once the first frame is
+    /// `SATCHEL_EXIT_AFTER_FIRST_FRAME` (or `SATCHEL_EXIT_AFTER_MS`): quit once the first frame is
     /// drawn (or that long after), through this handle.
     static EXIT: RefCell<Option<AppHandle<State>>> = const { RefCell::new(None) };
     static EXIT_AFTER: Cell<Option<std::time::Duration>> = const { Cell::new(None) };
@@ -248,12 +248,12 @@ thread_local! {
     static WAIT_PREVIEW: Cell<bool> = const { Cell::new(false) };
     /// The last bench step's frame was drawn: the next may start.
     static STEP_SHOWN: Cell<bool> = const { Cell::new(true) };
-    /// `ARBOR_BENCH_PACE_MS`, the least time between steps, and when the last one started.
+    /// `SATCHEL_BENCH_PACE_MS`, the least time between steps, and when the last one started.
     static PACE_MS: Cell<u64> = const { Cell::new(0) };
     static LAST_STEP: Cell<Option<Instant>> = const { Cell::new(None) };
     /// A pacing thread is asleep and will wake the window.
     static PACE_ARMED: Cell<bool> = const { Cell::new(false) };
-    /// `ARBOR_BENCH_WINDOW`: the bench opens and closes windows; `ARBOR_BENCH_IDLE_WINDOWS=2`:
+    /// `SATCHEL_BENCH_WINDOW`: the bench opens and closes windows; `SATCHEL_BENCH_IDLE_WINDOWS=2`:
     /// the idle bench idles two.
     static WINDOW: Cell<bool> = const { Cell::new(false) };
     static IDLE_TWO: Cell<bool> = const { Cell::new(false) };
@@ -269,17 +269,17 @@ thread_local! {
     static WINDOW_SETUP: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
-/// Whether `ARBOR_BENCH` is driving the app (after `init`).
+/// Whether `SATCHEL_BENCH` is driving the app (after `init`).
 pub fn benching() -> bool {
     BENCH.get() != (0, 0)
 }
 
-/// Reads `ARBOR_TIMING` and `ARBOR_BENCH` once. True when timing is on.
+/// Reads `SATCHEL_TIMING` and `SATCHEL_BENCH` once. True when timing is on.
 pub fn init() -> bool {
     let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty() && v != "0");
-    let rounds = std::env::var("ARBOR_BENCH").ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
-    let file = std::env::var_os("ARBOR_TIMING_FILE").filter(|v| !v.is_empty());
-    if !set("ARBOR_TIMING") && rounds == 0 && file.is_none() {
+    let rounds = std::env::var("SATCHEL_BENCH").ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
+    let file = std::env::var_os("SATCHEL_TIMING_FILE").filter(|v| !v.is_empty());
+    if !set("SATCHEL_TIMING") && rounds == 0 && file.is_none() {
         return false;
     }
     MAIN.get_or_init(|| (Instant::now(), SystemTime::now()));
@@ -294,24 +294,24 @@ pub fn init() -> bool {
     if let Some(file) = file {
         let _ = FILE.set(file);
     }
-    let exit_after_ms = std::env::var("ARBOR_EXIT_AFTER_MS").ok().and_then(|v| v.trim().parse::<u64>().ok());
+    let exit_after_ms = std::env::var("SATCHEL_EXIT_AFTER_MS").ok().and_then(|v| v.trim().parse::<u64>().ok());
     EXIT_AFTER.set(match exit_after_ms {
         Some(ms) => Some(std::time::Duration::from_millis(ms)),
-        None => set("ARBOR_EXIT_AFTER_FIRST_FRAME").then_some(std::time::Duration::ZERO),
+        None => set("SATCHEL_EXIT_AFTER_FIRST_FRAME").then_some(std::time::Duration::ZERO),
     });
-    TABS.set(set("ARBOR_BENCH_TABS"));
-    PREVIEW.set(set("ARBOR_BENCH_PREVIEW"));
-    JUMP.set(set("ARBOR_BENCH_JUMP"));
-    SEARCH.set(set("ARBOR_BENCH_SEARCH"));
-    RENAME.set(set("ARBOR_BENCH_RENAME"));
-    GRID.set(set("ARBOR_BENCH_GRID"));
-    GRID_PHOTOS.set(std::env::var("ARBOR_BENCH_GRID").is_ok_and(|v| v.trim() == "2"));
-    IDLE.set(std::env::var("ARBOR_BENCH_IDLE").ok().and_then(|v| crate::grid::ViewMode::named(v.trim())));
-    GRID_TILES.set(std::env::var("ARBOR_BENCH_GRID").is_ok_and(|v| v.trim() == "3"));
-    COLUMNS.set(set("ARBOR_BENCH_COLUMNS"));
-    WINDOW.set(set("ARBOR_BENCH_WINDOW"));
-    IDLE_TWO.set(std::env::var("ARBOR_BENCH_IDLE_WINDOWS").is_ok_and(|v| v.trim() == "2"));
-    PACE_MS.set(std::env::var("ARBOR_BENCH_PACE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0));
+    TABS.set(set("SATCHEL_BENCH_TABS"));
+    PREVIEW.set(set("SATCHEL_BENCH_PREVIEW"));
+    JUMP.set(set("SATCHEL_BENCH_JUMP"));
+    SEARCH.set(set("SATCHEL_BENCH_SEARCH"));
+    RENAME.set(set("SATCHEL_BENCH_RENAME"));
+    GRID.set(set("SATCHEL_BENCH_GRID"));
+    GRID_PHOTOS.set(std::env::var("SATCHEL_BENCH_GRID").is_ok_and(|v| v.trim() == "2"));
+    IDLE.set(std::env::var("SATCHEL_BENCH_IDLE").ok().and_then(|v| crate::grid::ViewMode::named(v.trim())));
+    GRID_TILES.set(std::env::var("SATCHEL_BENCH_GRID").is_ok_and(|v| v.trim() == "3"));
+    COLUMNS.set(set("SATCHEL_BENCH_COLUMNS"));
+    WINDOW.set(set("SATCHEL_BENCH_WINDOW"));
+    IDLE_TWO.set(std::env::var("SATCHEL_BENCH_IDLE_WINDOWS").is_ok_and(|v| v.trim() == "2"));
+    PACE_MS.set(std::env::var("SATCHEL_BENCH_PACE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0));
     let steps = if let Some(view) = IDLE.get() {
         u32::from(IDLE_TWO.get())
             + match view {
@@ -336,7 +336,7 @@ pub fn init() -> bool {
         rounds * 3
     };
     BENCH.set((steps, 0));
-    let slow = std::env::var("ARBOR_SLOW_FIRST_READ_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+    let slow = std::env::var("SATCHEL_SLOW_FIRST_READ_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
     crate::app::SLOW_FIRST_READ_MS.store(slow, std::sync::atomic::Ordering::Relaxed);
     true
 }
@@ -359,12 +359,12 @@ fn mark(name: &str) -> Option<Instant> {
     rune::marks::marks().into_iter().find(|(n, _)| *n == name).map(|(_, at)| at)
 }
 
-/// When Arbor quits: every step Rune marked on the way to the first frame and after
-/// (`rune::marks`), in ms from the top of `main`, as `arbor-timing launch-marks name=ms …`,
+/// When Satchel quits: every step Rune marked on the way to the first frame and after
+/// (`rune::marks`), in ms from the top of `main`, as `satchel-timing launch-marks name=ms …`,
 /// then Rune's first-frame totals (`text.shape_ns` …) and notes (`uber`).
 pub fn launch_marks() {
     let Some((main, _)) = MAIN.get().copied() else { return };
-    let mut line = String::from("arbor-timing launch-marks");
+    let mut line = String::from("satchel-timing launch-marks");
     for (name, at) in rune::marks::marks() {
         let ms =
             if at >= main { at.duration_since(main).as_secs_f64() * 1000.0 } else { -(main.duration_since(at).as_secs_f64() * 1000.0) };
@@ -382,7 +382,7 @@ pub fn launch_marks() {
 }
 
 /// `main` hands over the first window's handle, which quits the app after its first frame
-/// when `ARBOR_EXIT_AFTER_FIRST_FRAME` (or `ARBOR_EXIT_AFTER_MS`) asked.
+/// when `SATCHEL_EXIT_AFTER_FIRST_FRAME` (or `SATCHEL_EXIT_AFTER_MS`) asked.
 pub fn hold(app: AppHandle<State>) {
     if EXIT_AFTER.get().is_some() {
         EXIT.set(Some(app));
@@ -467,7 +467,7 @@ pub fn window_frame(f: &FrameEncoded) {
     {
         let since = |at: Option<Instant>| at.map_or(f64::NAN, |at| at.saturating_duration_since(t).as_secs_f64() * 1000.0);
         say!(
-            "arbor-timing window-up ms={:.2} made_ms={:.2} setup_ms={:.2} update_ms={:.2} encode_ms={:.2}",
+            "satchel-timing window-up ms={:.2} made_ms={:.2} setup_ms={:.2} update_ms={:.2} encode_ms={:.2}",
             since(Some(f.at())),
             since(WINDOW_MADE.get()),
             since(WINDOW_SETUP.get()),
@@ -479,7 +479,7 @@ pub fn window_frame(f: &FrameEncoded) {
     let inside = first;
     WINDOW_ASKED.set(None);
     say!(
-        "arbor-timing window ms={:.2} entries={n} same_frame={} update_ms={:.2} encode_ms={:.2}",
+        "satchel-timing window ms={:.2} entries={n} same_frame={} update_ms={:.2} encode_ms={:.2}",
         f.at().saturating_duration_since(t).as_secs_f64() * 1000.0,
         u8::from(inside),
         f.update_ms().unwrap_or(0.0),
@@ -647,7 +647,7 @@ pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     changed
 }
 
-/// Whether `ARBOR_BENCH_PACE_MS` has passed since the last step. If not, a thread sleeps out
+/// Whether `SATCHEL_BENCH_PACE_MS` has passed since the last step. If not, a thread sleeps out
 /// the rest and wakes the window (once).
 fn paced() -> bool {
     let pace = std::time::Duration::from_millis(PACE_MS.get());
@@ -722,7 +722,7 @@ fn bench_step(s: &mut State, tx: &mut Tx) -> bool {
         if IDLE.get().is_some() {
             // Left alone from here on: the bench measures, then kills it.
             if !IDLE_READY.replace(true) {
-                say!("arbor-timing idle-ready view={:?}", s.cur().view);
+                say!("satchel-timing idle-ready view={:?}", s.cur().view);
             }
         } else if n > 0 {
             tx.quit();
@@ -987,7 +987,7 @@ pub fn frame(f: &FrameEncoded) {
         };
         let since = |t: Option<Instant>| t.map_or(f64::NAN, |t| t.saturating_duration_since(main).as_secs_f64() * 1000.0);
         say!(
-            "arbor-timing first-frame main_ms={:.2} before_main_ms={:.2} init_at_ms={init_at:.2} init_ms={init:.2} setup_at_ms={:.2} \
+            "satchel-timing first-frame main_ms={:.2} before_main_ms={:.2} init_at_ms={init_at:.2} init_ms={init:.2} setup_at_ms={:.2} \
              window_at_ms={:.2} frame_start_ms={:.2} uncloaked_at_ms={:.2} gpu_starting_at_ms={:.2} gpu_drew_at_ms={:.2} drawn_by={} epoch_us={epoch} entries={n} {split}",
             ms(main),
             BEFORE_MAIN_MS.get().copied().flatten().unwrap_or(f64::NAN),
@@ -1005,16 +1005,16 @@ pub fn frame(f: &FrameEncoded) {
             Some(before) => format!("{:.2} from=process", before + ms(main)),
             None => format!("{:.2} from=main", ms(main)),
         };
-        say!("arbor {total} epoch_us={epoch}");
+        say!("satchel {total} epoch_us={epoch}");
         if let Some(app) = EXIT.take() {
             match EXIT_AFTER.get().filter(|d| !d.is_zero()) {
                 Some(after) => {
-                    let spawned = std::thread::Builder::new().name("arbor-timing-exit".into()).spawn(move || {
+                    let spawned = std::thread::Builder::new().name("satchel-timing-exit".into()).spawn(move || {
                         std::thread::sleep(after);
                         app.quit();
                     });
                     if let Err(e) = spawned {
-                        say!("arbor-timing exit thread failed: {e}");
+                        say!("satchel-timing exit thread failed: {e}");
                     }
                 }
                 None => app.quit(),
@@ -1023,7 +1023,7 @@ pub fn frame(f: &FrameEncoded) {
     } else {
         if let Some(t) = key {
             say!(
-                "arbor-timing key ms={:.2} {split} preview={} search={} thumbs={} reads={}",
+                "satchel-timing key ms={:.2} {split} preview={} search={} thumbs={} reads={}",
                 ms(t),
                 u8::from(KEY_PREVIEW.get()),
                 u8::from(KEY_SEARCH.get()),
@@ -1032,33 +1032,33 @@ pub fn frame(f: &FrameEncoded) {
             );
         }
         if let Some(t) = tile_first {
-            say!("arbor-timing thumb-first ms={:.2} {split}", ms(t));
+            say!("satchel-timing thumb-first ms={:.2} {split}", ms(t));
         }
         if let Some((t, n)) = tile_done {
-            say!("arbor-timing thumb-screen ms={:.2} thumbs={n} {split}", ms(t));
+            say!("satchel-timing thumb-screen ms={:.2} thumbs={n} {split}", ms(t));
         }
         if let Some((t, found)) = search_first {
-            say!("arbor-timing search-first ms={:.2} found={found} {split}", ms(t));
+            say!("satchel-timing search-first ms={:.2} found={found} {split}", ms(t));
         }
         if let Some((t, found, visited, stopped)) = search_done {
-            say!("arbor-timing search-done ms={:.2} found={found} visited={visited} stopped={} {split}", ms(t), u8::from(stopped));
+            say!("satchel-timing search-done ms={:.2} found={found} visited={visited} stopped={} {split}", ms(t), u8::from(stopped));
         }
         if let Some((t, cold, folders, inside)) = jump {
-            say!("arbor-timing jump ms={:.2} cold={} folders={folders} same_frame={} {split}", ms(t), u8::from(cold), u8::from(inside));
+            say!("satchel-timing jump ms={:.2} cold={} folders={folders} same_frame={} {split}", ms(t), u8::from(cold), u8::from(inside));
         }
         if let Some((t, items, inside, regex)) = rename {
-            say!("arbor-timing rename ms={:.2} items={items} same_frame={} regex={} {split}", ms(t), u8::from(inside), u8::from(regex));
+            say!("satchel-timing rename ms={:.2} items={items} same_frame={} regex={} {split}", ms(t), u8::from(inside), u8::from(regex));
         }
         if let Some((t, opened, kind)) = preview {
-            say!("arbor-timing preview ms={:.2} from={} kind={kind} {split}", ms(t), if opened { "open" } else { "move" });
+            say!("satchel-timing preview ms={:.2} from={} kind={kind} {split}", ms(t), if opened { "open" } else { "move" });
         }
         if let Some((t, n, kind, inside)) = landed {
             if BOOT_LATE.replace(false) {
-                say!("arbor-timing first-listing main_ms={:.2} entries={n} {split}", ms(t));
+                say!("satchel-timing first-listing main_ms={:.2} entries={n} {split}", ms(t));
             } else if kind == Kind::Tab {
-                say!("arbor-timing tab ms={:.2} entries={n} {split} same_frame={}", ms(t), u8::from(inside));
+                say!("satchel-timing tab ms={:.2} entries={n} {split} same_frame={}", ms(t), u8::from(inside));
             } else {
-                say!("arbor-timing nav ms={:.2} entries={n} {split}", ms(t));
+                say!("satchel-timing nav ms={:.2} entries={n} {split}", ms(t));
             }
         }
     }

@@ -36,7 +36,7 @@ impl Store {
         let count = io.clone();
         persist::at_exit(&tx, Msg::Flush);
         std::thread::Builder::new()
-            .name("arbor-history".into())
+            .name("satchel-history".into())
             .spawn(move || {
                 // Without a file (tests), the log is kept here.
                 let mut memory = String::new();
@@ -87,7 +87,7 @@ impl Store {
     }
 }
 
-/// Runs `f` holding the history's lock file (`history.lock` beside it), so two Arbor processes
+/// Runs `f` holding the history's lock file (`history.lock` beside it), so two Satchel processes
 /// never interleave a compaction (read, then rewrite) with an append or a clear.
 pub(super) fn locked<T>(p: &Path, f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
     persist::locked(p, f)

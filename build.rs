@@ -1,4 +1,4 @@
-//! Windows only: gives `arbor.exe` its icon and version information, with no resource compiler
+//! Windows only: gives `satchel.exe` its icon and version information, with no resource compiler
 //! and no extra crate. It writes a compiled resource file (`.res`: the icon images, their icon
 //! group and a `VS_VERSIONINFO` with the version from Cargo.toml) into `OUT_DIR` and hands it to
 //! MSVC's linker, which takes `.res` files as input. Other targets: nothing.
@@ -22,14 +22,14 @@ fn main() {
     let images: Vec<(u32, Vec<u8>)> = SIZES
         .iter()
         .map(|&n| {
-            let p = root.join(format!("assets/icon/png/arbor-{n}.png"));
+            let p = root.join(format!("assets/icon/png/satchel-{n}.png"));
             (n, std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display())))
         })
         .collect();
     let version = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
     let res = resource_file(&images, &version);
-    let out = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("arbor.res");
-    std::fs::write(&out, res).expect("writing arbor.res");
+    let out = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("satchel.res");
+    std::fs::write(&out, res).expect("writing satchel.res");
     println!("cargo:rustc-link-arg-bins={}", out.display());
 }
 
@@ -123,12 +123,12 @@ fn version_info(version: &str) -> Vec<u8> {
     }
     let strings: Vec<Vec<u8>> = [
         ("CompanyName", "smr"),
-        ("FileDescription", "Arbor"),
+        ("FileDescription", "Satchel"),
         ("FileVersion", version),
-        ("InternalName", "arbor"),
+        ("InternalName", "satchel"),
         ("LegalCopyright", "MIT License"),
-        ("OriginalFilename", "arbor.exe"),
-        ("ProductName", "Arbor"),
+        ("OriginalFilename", "satchel.exe"),
+        ("ProductName", "Satchel"),
         ("ProductVersion", version),
     ]
     .iter()

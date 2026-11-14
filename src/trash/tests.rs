@@ -2,7 +2,7 @@ use super::*;
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-trash-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-trash-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -127,7 +127,7 @@ fn no_usable_trash_offers_a_permanent_delete_and_never_deletes() {
     std::fs::write(d.join("sub/a"), "x").unwrap();
     chmod(&d, 0o555);
     let r = trash_with(&d.join("sub/a"), None, &d, uid());
-    assert!(matches!(&r, Err(TrashError::NoTrash(w)) if w.contains("has no trash Arbor can use")), "{r:?}");
+    assert!(matches!(&r, Err(TrashError::NoTrash(w)) if w.contains("has no trash Satchel can use")), "{r:?}");
     assert!(d.join("sub/a").exists(), "left where it was");
     // Its folder can't be changed either: an error, no offer.
     chmod(&d.join("sub"), 0o555);
@@ -156,7 +156,7 @@ fn the_top_of_another_disk_is_found_by_device() {
         eprintln!("skipped: /dev/shm is on the temp folder's disk");
         return;
     }
-    let d = shm.join(format!("arbor-top-{}", std::process::id()));
+    let d = shm.join(format!("satchel-top-{}", std::process::id()));
     std::fs::create_dir_all(d.join("x/y")).unwrap();
     assert_eq!(mount_top(&d.join("x/y"), s.dev()), shm);
     assert_eq!(mount_top(&std::env::temp_dir(), t.dev()).metadata().unwrap().dev(), t.dev());
@@ -225,7 +225,7 @@ fn windows_verdicts_never_call_a_delete_a_recycle() {
 
 /// Windows: an item goes to the shell only when the registry says the volume's Recycle Bin
 /// keeps files and is big enough for it; anything turned off, too big or unknown is left for
-/// Arbor's own question.
+/// Satchel's own question.
 #[test]
 fn windows_recycles_only_what_the_bin_would_keep() {
     let ok = BinSettings { volume_key: true, nuke: Some(0), max_mb: Some(100), ..Default::default() };
@@ -268,7 +268,7 @@ fn windows_recycles_only_what_the_bin_would_keep() {
 /// The size walk adds up files, doesn't follow links, and stops when told.
 #[test]
 fn the_size_walk_adds_up_files_and_stops_when_told() {
-    let d = std::env::temp_dir().join(format!("arbor-trash-size-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-trash-size-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("t/sub")).unwrap();
     std::fs::write(d.join("t/a"), [0u8; 1000]).unwrap();
@@ -286,7 +286,7 @@ fn the_size_walk_adds_up_files_and_stops_when_told() {
 }
 
 /// On CI's Windows runner: with the Recycle Bin for C: limited to 1 MB in HKCU, a 2 MB file
-/// comes back as needing Arbor's question and is still there; a small one still goes. The
+/// comes back as needing Satchel's question and is still there; a small one still goes. The
 /// registry is put back afterwards.
 #[cfg(windows)]
 #[test]
@@ -299,7 +299,7 @@ fn windows_a_file_too_big_for_the_bin_is_left_for_the_question() {
         return;
     }
     let _one = CI_BIN.lock().unwrap_or_else(|e| e.into_inner());
-    let d = std::env::temp_dir().join(format!("arbor-recycle-big-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-recycle-big-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     let abs = std::path::absolute(&d).unwrap();
@@ -354,7 +354,7 @@ fn windows_recycles_locally_and_refuses_a_network_path() {
         return;
     }
     let _one = CI_BIN.lock().unwrap_or_else(|e| e.into_inner());
-    let d = std::env::temp_dir().join(format!("arbor-recycle-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-recycle-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     let local = d.join("local.txt");
@@ -386,7 +386,7 @@ static CI_BIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 #[ignore = "moves a scratch file to the real Trash"]
 fn trashes_a_file() {
-    let p = std::env::temp_dir().join(format!("arbor-trash-test-{}.txt", std::process::id()));
+    let p = std::env::temp_dir().join(format!("satchel-trash-test-{}.txt", std::process::id()));
     std::fs::write(&p, "x").unwrap();
     let t = std::time::Instant::now();
     let r = super::trash(&p, &|| false);

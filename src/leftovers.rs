@@ -13,7 +13,7 @@
 //!    Rune runs it before ending the process however the quit came, macOS Quit included
 //!    (`rune::fast_exit`).
 //! 3. The next launch reads the record on the startup thread ([`look`]) and offers only what's
-//!    still as Arbor made it; the first window says it, with a button that shows the item, and
+//!    still as Satchel made it; the first window says it, with a button that shows the item, and
 //!    only once that frame has been presented (or the user typed or started an operation) is
 //!    what was read removed from the record ([`forget`]).
 //!
@@ -32,7 +32,7 @@ use crate::persist;
 pub const QUIT_WAIT: Duration = Duration::from_secs(2);
 
 /// Why an item is in the record when the cleanup didn't get to it.
-pub const UNFINISHED: &str = "Arbor quit before it could remove it";
+pub const UNFINISHED: &str = "Satchel quit before it could remove it";
 
 /// Something an operation made and left, its mark as it made it (`ops::still_made`), and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,7 +146,7 @@ fn decode_path(s: &str) -> Option<PathBuf> {
 }
 
 /// What the startup read found in the record: everything in it (to forget once said), and
-/// what to say, the items still as Arbor made them.
+/// what to say, the items still as Satchel made them.
 #[derive(Clone, Debug)]
 pub struct Seen {
     pub file: PathBuf,
@@ -155,7 +155,7 @@ pub struct Seen {
 }
 
 /// The record at `file`, left in place until the first window has shown what it says
-/// ([`forget`]): a crash before then keeps it for the next launch. Only items still as Arbor
+/// ([`forget`]): a crash before then keeps it for the next launch. Only items still as Satchel
 /// made them are offered (not gone, not replaced since). Disk I/O: the startup thread's.
 pub fn look(file: &Path) -> Option<Seen> {
     let read = read(file);
@@ -167,7 +167,7 @@ pub fn look(file: &Path) -> Option<Seen> {
 }
 
 /// The record's entries `seen` read, removed once said (on a thread of its own: never the UI
-/// thread); anything another Arbor added since stays.
+/// thread); anything another Satchel added since stays.
 pub fn forget(seen: Seen) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let _ = persist::locked(&seen.file, || {
@@ -199,7 +199,7 @@ pub fn note(left: &[Leftover]) -> Option<String> {
     let name = first.path.file_name().map_or_else(|| first.path.display().to_string(), |n| n.to_string_lossy().into_owned());
     let dir = first.path.parent().map_or_else(String::new, crate::fs::pretty);
     let more = if left.len() > 1 { format!(" (and {} more)", left.len() - 1) } else { String::new() };
-    Some(format!("Arbor quit during a file operation and left “{name}” partly done in {dir}: {}{more}", first.why))
+    Some(format!("Satchel quit during a file operation and left “{name}” partly done in {dir}: {}{more}", first.why))
 }
 
 /// One change to a record: entries added (replacing any for the same path) and paths dropped.
@@ -297,7 +297,7 @@ pub fn quitting(run: crate::ops::Running, file: PathBuf, wait: Duration) {
     provisional.extend(unfinished(&p));
     let deadline = std::time::Instant::now() + wait;
     let (done, done_rx) = std::sync::mpsc::channel();
-    let thread = std::thread::Builder::new().name("arbor-quit".into()).spawn(move || {
+    let thread = std::thread::Builder::new().name("satchel-quit".into()).spawn(move || {
         if !provisional.is_empty() {
             apply(Change { file: file.clone(), add: provisional.clone(), drop: Vec::new() });
         }
@@ -326,7 +326,7 @@ pub fn quitting(run: crate::ops::Running, file: PathBuf, wait: Duration) {
 }
 
 /// Waits for the quit thread, if one started, to write the record: at most until its deadline
-/// and [`WRITE_MARGIN`] more, so Arbor exits in that time even when the disk doesn't answer
+/// and [`WRITE_MARGIN`] more, so Satchel exits in that time even when the disk doesn't answer
 /// (what wasn't written then is lost). Called from `main`'s `last`, Rune's step before it ends
 /// the process (`rune::fast_exit`), on every platform and macOS Quit too: no window is on screen
 /// by then.
@@ -345,7 +345,7 @@ mod tests {
     /// a line break or bytes that aren't UTF-8 were left out of the record).
     #[test]
     fn any_path_round_trips_through_the_record() {
-        let d = std::env::temp_dir().join(format!("arbor-leftovers-names-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-leftovers-names-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let mut names: Vec<std::ffi::OsString> =

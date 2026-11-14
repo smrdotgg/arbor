@@ -1,7 +1,7 @@
 name: Cold start (Windows)
 
 # Cold-start probes built from the `dist` profile on a Windows runner and measured there:
-# this commit's Arbor (ARBOR_TIMING_FILE), the main branch's arbor.exe (the latest successful
+# this commit's Satchel (SATCHEL_TIMING_FILE), the main branch's satchel.exe (the latest successful
 # CI run's Windows package) as the baseline, rune-hello (one text view; as rune-hello-warm.exe
 # it also calls `rune::warm_gpu` first), win32-hello (bare Win32 + GDI) and gpu_probe (Rune's GPU
 # path phase by phase). All zipped as the artifact coldstart-probes-3-windows, which runs as-is
@@ -51,24 +51,24 @@ jobs:
           key: coldstart-${{ hashFiles('RUNE_REV') }}
 
       - name: Build the probes (dist profile)
-        run: cargo build --profile dist --locked --bin arbor --example rune_hello --example win32_hello --example gpu_probe
+        run: cargo build --profile dist --locked --bin satchel --example rune_hello --example win32_hello --example gpu_probe
 
-      # The baseline: arbor.exe from main's latest successful CI run (its Windows package).
-      - name: Main's arbor.exe
+      # The baseline: satchel.exe from main's latest successful CI run (its Windows package).
+      - name: Main's satchel.exe
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main --status success --limit 1 --json databaseId,headSha -q '.[0] | "\(.databaseId) \(.headSha)"')
           echo "main: run ${run% *}, commit ${run#* }"
-          gh run download "${run% *}" --repo "$GITHUB_REPOSITORY" -n arbor-Windows -D main-pkg
-          mkdir -p main && unzip -q -o main-pkg/*.zip -d main && find main -name arbor.exe
+          gh run download "${run% *}" --repo "$GITHUB_REPOSITORY" -n satchel-Windows -D main-pkg
+          mkdir -p main && unzip -q -o main-pkg/*.zip -d main && find main -name satchel.exe
 
       - name: Zip
         shell: pwsh
         run: |
           New-Item -ItemType Directory probes | Out-Null
-          Copy-Item target/dist/arbor.exe probes/arbor.exe
-          Copy-Item (Get-ChildItem main -Recurse -Filter arbor.exe | Select-Object -First 1).FullName probes/arbor-main.exe
+          Copy-Item target/dist/satchel.exe probes/satchel.exe
+          Copy-Item (Get-ChildItem main -Recurse -Filter satchel.exe | Select-Object -First 1).FullName probes/satchel-main.exe
           Copy-Item target/dist/examples/rune_hello.exe probes/rune-hello.exe
           Copy-Item target/dist/examples/rune_hello.exe probes/rune-hello-warm.exe
           Copy-Item target/dist/examples/win32_hello.exe probes/win32-hello.exe
@@ -89,33 +89,33 @@ jobs:
       - name: A/B, main against this commit
         continue-on-error: true
         shell: pwsh
-        run: ./scripts/coldstart-ab.ps1 -Runs 15 probes/arbor-main.exe probes/arbor.exe
+        run: ./scripts/coldstart-ab.ps1 -Runs 15 probes/satchel-main.exe probes/satchel.exe
 
-      # Whether making the GPU beside Rune's CPU-drawn first frame slows that frame (what Arbor
+      # Whether making the GPU beside Rune's CPU-drawn first frame slows that frame (what Satchel
       # did on Windows with `warm_gpu` before this commit).
       - name: A/B, rune-hello without and with warm_gpu
         continue-on-error: true
         shell: pwsh
         run: ./scripts/coldstart-ab.ps1 -Runs 15 probes/rune-hello.exe probes/rune-hello-warm.exe probes/win32-hello.exe
 
-      # What happens after the first frame: Arbor kept open 3 s, then its launch marks (the
+      # What happens after the first frame: Satchel kept open 3 s, then its launch marks (the
       # window shown, the first frame's renderer, the GPU made and taking over).
       - name: Hand-over to the GPU
         continue-on-error: true
         shell: pwsh
         run: |
           $log = Join-Path $env:RUNNER_TEMP 'handover.txt'
-          $env:ARBOR_TIMING_FILE = $log
-          $env:ARBOR_EXIT_AFTER_MS = '3000'
+          $env:SATCHEL_TIMING_FILE = $log
+          $env:SATCHEL_EXIT_AFTER_MS = '3000'
           foreach ($i in 1..5) {
-            $p = Start-Process -FilePath probes/arbor.exe -WorkingDirectory $HOME -PassThru
+            $p = Start-Process -FilePath probes/satchel.exe -WorkingDirectory $HOME -PassThru
             if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch { } }
             Start-Sleep -Milliseconds 300
           }
-          Get-Content $log | Where-Object { $_ -like 'arbor-timing first-frame*' -or $_ -like 'arbor-timing launch-marks*' -or $_ -match '^arbor ' }
+          Get-Content $log | Where-Object { $_ -like 'satchel-timing first-frame*' -or $_ -like 'satchel-timing launch-marks*' -or $_ -match '^satchel ' }
 
       # Rune's GPU path, then the same with the DX12 adapters listed through wgpu first and held
-      # (Arbor's workaround before this commit), alternating, three times each.
+      # (Satchel's workaround before this commit), alternating, three times each.
       - name: gpu_probe rune vs rune-held
         continue-on-error: true
         shell: pwsh

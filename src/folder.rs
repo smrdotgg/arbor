@@ -1613,7 +1613,7 @@ mod tests {
     /// nor what's gone.
     #[test]
     fn a_read_finds_the_selection_by_identity() {
-        let d = std::env::temp_dir().join(format!("arbor-find-named-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-find-named-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for n in ["a", "b", "c", "e"] {

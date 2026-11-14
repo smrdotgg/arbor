@@ -8,7 +8,7 @@
 //!   Folders are walked without following links (Unix: through open folder descriptors,
 //!   `dirfd.rs`; a link is stored as a link) and never into another disk (`mounts::Fence`), which
 //!   is left out and said. A cancelled or failed archive's temporary file is removed only while
-//!   it's still the file Arbor made (by identity).
+//!   it's still the file Satchel made (by identity).
 //! - **Extract Here** makes a folder named after the archive (or after the one folder it holds)
 //!   beside it, under a free name, and writes into it (`archive::out`). Cancelled or failed, it
 //!   removes exactly what it made, each item only while it's still what it made
@@ -427,7 +427,7 @@ impl Worker<'_> {
     /// or why not (what it made removed again).
     fn extract_one(&mut self, archive: &Path, notes: &mut Vec<String>) -> Result<(PathBuf, Print), String> {
         let name = name_of(archive);
-        let fmt = Format::of(&name).ok_or("it isn't an archive Arbor can extract (.zip, .tar, .tar.gz)")?;
+        let fmt = Format::of(&name).ok_or("it isn't an archive Satchel can extract (.zip, .tar, .tar.gz)")?;
         let parent = archive.parent().ok_or("it has no folder")?.to_path_buf();
         let file = File::open(archive).map_err(|e| e.to_string())?;
         let len = file.metadata().map_err(|e| e.to_string())?.len();
@@ -700,7 +700,7 @@ fn make_temp(dir: &Path, name: &str) -> io::Result<(PathBuf, File)> {
     let mut last = None;
     for _ in 0..TRIES {
         let n = N.fetch_add(1, Relaxed);
-        let p = dir.join(format!(".{name}.arbor-{}-{n}.part", std::process::id()));
+        let p = dir.join(format!(".{name}.satchel-{}-{n}.part", std::process::id()));
         let mut o = std::fs::OpenOptions::new();
         o.read(true).write(true).create_new(true);
         #[cfg(unix)]
@@ -749,7 +749,7 @@ fn remove_temp(p: &Progress, temp: &Path, id: Option<noclobber::FileId>, mark: O
             }
             Some(format!("kept “{}”: {why}", name_of(temp)))
         } else {
-            Some(format!("kept “{}”: it changed after Arbor made it", name_of(temp)))
+            Some(format!("kept “{}”: it changed after Satchel made it", name_of(temp)))
         }
     })();
     if let Ok(mut c) = p.created.lock() {

@@ -1,4 +1,4 @@
-# Agent guidelines for Arbor
+# Agent guidelines for Satchel
 
 **Read [`NORTHSTAR.md`](NORTHSTAR.md) before any change.** It decides every trade-off. If a change
 conflicts with it, don't make the change. Raise the conflict with the owner instead.
@@ -14,7 +14,7 @@ A change is done only when:
 - nothing destructive happens without undo or an explicit "can't be undone" confirmation
 
 **Use Rune as it is.** Never edit `vendor/rune` or patch Rune. If a feature has to be built in a
-limited way because Rune lacks something, build the best workaround inside Arbor and add an entry
+limited way because Rune lacks something, build the best workaround inside Satchel and add an entry
 to [`RUNE-GAPS.md`](RUNE-GAPS.md).
 
 **On the owner's Mac over ssh:** builds and headless tests only. Never run `osascript`, System

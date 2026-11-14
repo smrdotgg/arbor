@@ -1,5 +1,5 @@
 //! The Linux package's `install.sh` and `uninstall.sh`, run for real against a throwaway home
-//! (with a stand-in for the `arbor` binary), as a user would run them from the tarball.
+//! (with a stand-in for the `satchel` binary), as a user would run them from the tarball.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,23 +7,23 @@ use std::process::Command;
 use crate::handler::{BACKUP_FILE, Backup};
 
 /// A package folder as the tarball unpacks it: the scripts, the desktop file, icons, and an
-/// `arbor` that records `--restore-folder-default` (when `with_arbor`).
-fn package(root: &Path, with_arbor: bool) -> PathBuf {
-    let pkg = root.join("arbor-pkg");
+/// `satchel` that records `--restore-folder-default` (when `with_satchel`).
+fn package(root: &Path, with_satchel: bool) -> PathBuf {
+    let pkg = root.join("satchel-pkg");
     std::fs::create_dir_all(pkg.join("icons")).unwrap();
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/linux");
-    for f in ["install.sh", "uninstall.sh", "arbor.desktop"] {
+    for f in ["install.sh", "uninstall.sh", "satchel.desktop"] {
         std::fs::copy(src.join(f), pkg.join(f)).unwrap();
     }
     for n in [16, 24, 32, 48, 64, 128, 256, 512] {
-        std::fs::write(pkg.join(format!("icons/arbor-{n}.png")), "png").unwrap();
+        std::fs::write(pkg.join(format!("icons/satchel-{n}.png")), "png").unwrap();
     }
-    std::fs::write(pkg.join("icons/arbor.svg"), "<svg/>").unwrap();
-    if with_arbor {
+    std::fs::write(pkg.join("icons/satchel.svg"), "<svg/>").unwrap();
+    if with_satchel {
         let stub = "#!/bin/sh\nif [ \"$1\" = --restore-folder-default ]; then echo restored-by \"$0\" >> \"$HOME/restore.log\"; fi\n";
-        std::fs::write(pkg.join("arbor"), stub).unwrap();
+        std::fs::write(pkg.join("satchel"), stub).unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(pkg.join("arbor"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(pkg.join("satchel"), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     pkg
 }
@@ -35,7 +35,7 @@ fn run(pkg: &Path, script: &str, home: &Path) -> (bool, String) {
 }
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-pkg-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-pkg-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -53,8 +53,8 @@ fn install_writes_any_path_into_the_desktop_file_correctly() {
         std::fs::create_dir_all(&home).unwrap();
         let (ok, out) = run(&pkg, "install.sh", &home);
         assert!(ok, "{name}: {out}");
-        let desktop = std::fs::read_to_string(home.join(".local/share/applications/arbor.desktop")).unwrap();
-        let exe = home.join(".local/bin/arbor").display().to_string();
+        let desktop = std::fs::read_to_string(home.join(".local/share/applications/satchel.desktop")).unwrap();
+        let exe = home.join(".local/bin/satchel").display().to_string();
         let exec = desktop.lines().find(|l| l.starts_with("Exec=")).unwrap();
         let try_exec = desktop.lines().find(|l| l.starts_with("TryExec=")).unwrap();
         let want = match name {
@@ -68,7 +68,7 @@ fn install_writes_any_path_into_the_desktop_file_correctly() {
         assert_eq!(try_exec, format!("TryExec={}", exe.replace('\\', "\\\\")), "{name}");
         assert!(desktop.contains("\nMimeType=inode/directory;\n"), "{name}: every other line as it was");
         if Command::new("desktop-file-validate").arg("--help").output().is_ok() {
-            let v = Command::new("desktop-file-validate").arg(home.join(".local/share/applications/arbor.desktop")).output().unwrap();
+            let v = Command::new("desktop-file-validate").arg(home.join(".local/share/applications/satchel.desktop")).output().unwrap();
             let said = String::from_utf8_lossy(&v.stdout).to_string() + &String::from_utf8_lossy(&v.stderr);
             assert!(v.status.success() && !said.contains("error"), "{name}: {said}");
         }
@@ -76,15 +76,15 @@ fn install_writes_any_path_into_the_desktop_file_correctly() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Arbor made the default (activation file, folder default, backup), as Make leaves them.
+/// Satchel made the default (activation file, folder default, backup), as Make leaves them.
 fn made_default(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let service = home.join(".local/share/dbus-1/services/org.freedesktop.FileManager1.service");
     std::fs::create_dir_all(service.parent().unwrap()).unwrap();
-    std::fs::write(&service, crate::handler::linux::service_text(&home.join(".local/bin/arbor"))).unwrap();
+    std::fs::write(&service, crate::handler::linux::service_text(&home.join(".local/bin/satchel"))).unwrap();
     let mimeapps = home.join(".config/mimeapps.list");
     std::fs::create_dir_all(mimeapps.parent().unwrap()).unwrap();
-    std::fs::write(&mimeapps, "[Added Associations]\ninode/directory=arbor.desktop;\n\n[Default Applications]\ninode/directory=arbor.desktop\ntext/plain=gedit.desktop\n").unwrap();
-    let backup = home.join(".config/arbor").join(BACKUP_FILE);
+    std::fs::write(&mimeapps, "[Added Associations]\ninode/directory=satchel.desktop;\n\n[Default Applications]\ninode/directory=satchel.desktop\ntext/plain=gedit.desktop\n").unwrap();
+    let backup = home.join(".config/satchel").join(BACKUP_FILE);
     let mut b = Backup::default();
     b.put("mimeapps.list inode/directory", Some(b"old.desktop;fallback.desktop;"));
     b.put("dbus-1/services/org.freedesktop.FileManager1.service", None);
@@ -93,8 +93,8 @@ fn made_default(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
 }
 
 /// The review's case: with the installed binary gone, uninstall used to skip Restore and leave
-/// Arbor's activation file, so "Show in folder" failed to start anything. Now the Arbor beside
-/// the script restores; with none at all, the script takes back what Arbor wrote itself.
+/// Satchel's activation file, so "Show in folder" failed to start anything. Now the Satchel beside
+/// the script restores; with none at all, the script takes back what Satchel wrote itself.
 #[test]
 fn uninstall_never_strands_the_folder_default() {
     let root = tmp("uninstall");
@@ -103,33 +103,33 @@ fn uninstall_never_strands_the_folder_default() {
     let home = root.join("home1");
     std::fs::create_dir_all(&home).unwrap();
     assert!(run(&pkg, "install.sh", &home).0);
-    std::fs::remove_file(home.join(".local/bin/arbor")).unwrap();
+    std::fs::remove_file(home.join(".local/bin/satchel")).unwrap();
     let (ok, out) = run(&pkg, "uninstall.sh", &home);
     assert!(ok, "{out}");
     let log = std::fs::read_to_string(home.join("restore.log")).unwrap_or_default();
-    assert!(log.contains(&*pkg.join("arbor").display().to_string()), "the package's Arbor restored: {log:?} {out}");
+    assert!(log.contains(&*pkg.join("satchel").display().to_string()), "the package's Satchel restored: {log:?} {out}");
     // Neither: the script puts it back from the backup.
     let _ = std::fs::remove_dir_all(&root);
     let root = tmp("uninstall-bare");
     let pkg = package(&root, false);
     let home = root.join("home2");
     std::fs::create_dir_all(&home).unwrap();
-    std::fs::copy(Path::new("/bin/true"), pkg.join("arbor")).unwrap();
+    std::fs::copy(Path::new("/bin/true"), pkg.join("satchel")).unwrap();
     assert!(run(&pkg, "install.sh", &home).0);
-    std::fs::remove_file(pkg.join("arbor")).unwrap();
-    std::fs::remove_file(home.join(".local/bin/arbor")).unwrap();
+    std::fs::remove_file(pkg.join("satchel")).unwrap();
+    std::fs::remove_file(home.join(".local/bin/satchel")).unwrap();
     let (service, mimeapps, backup) = made_default(&home);
     let (ok, out) = run(&pkg, "uninstall.sh", &home);
     assert!(ok, "{out}");
-    assert!(!service.exists(), "Arbor's activation file is gone: {out}");
+    assert!(!service.exists(), "Satchel's activation file is gone: {out}");
     assert_eq!(
         std::fs::read_to_string(&mimeapps).unwrap(),
-        "[Added Associations]\ninode/directory=arbor.desktop;\n\n[Default Applications]\ninode/directory=old.desktop;fallback.desktop;\ntext/plain=gedit.desktop\n",
+        "[Added Associations]\ninode/directory=satchel.desktop;\n\n[Default Applications]\ninode/directory=old.desktop;fallback.desktop;\ntext/plain=gedit.desktop\n",
         "the old default is back, only in its section: {out}"
     );
     assert!(!backup.exists());
     assert!(
-        out.contains("Removed Arbor's D-Bus activation file") && out.contains("Folders open in old.desktop;fallback.desktop; again"),
+        out.contains("Removed Satchel's D-Bus activation file") && out.contains("Folders open in old.desktop;fallback.desktop; again"),
         "{out}"
     );
     // Someone else's activation file stays.
@@ -138,24 +138,24 @@ fn uninstall_never_strands_the_folder_default() {
     let (service, _, _) = made_default(&home);
     std::fs::write(&service, "[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=/usr/bin/nautilus\n").unwrap();
     assert!(run(&pkg, "uninstall.sh", &home).0);
-    assert!(service.exists(), "not Arbor's: left alone");
+    assert!(service.exists(), "not Satchel's: left alone");
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// A package without any `arbor`, installed into a fresh home whose binary is gone too: only
+/// A package without any `satchel`, installed into a fresh home whose binary is gone too: only
 /// the script can put things back.
 fn bare(root: &Path, name: &str) -> (PathBuf, PathBuf) {
     let pkg = package(root, false);
     let home = root.join(name);
     std::fs::create_dir_all(&home).unwrap();
-    std::fs::copy(Path::new("/bin/true"), pkg.join("arbor")).unwrap();
+    std::fs::copy(Path::new("/bin/true"), pkg.join("satchel")).unwrap();
     assert!(run(&pkg, "install.sh", &home).0);
-    std::fs::remove_file(pkg.join("arbor")).unwrap();
-    std::fs::remove_file(home.join(".local/bin/arbor")).unwrap();
+    std::fs::remove_file(pkg.join("satchel")).unwrap();
+    std::fs::remove_file(home.join(".local/bin/satchel")).unwrap();
     (pkg, home)
 }
 
-/// The review's case: with no Arbor to ask, a FileManager1 activation file another file
+/// The review's case: with no Satchel to ask, a FileManager1 activation file another file
 /// manager had (which the backup saved) used to be deleted instead of put back, and the backup
 /// with it; an empty backup was taken for "nothing to restore" and discarded. Now both saved
 /// values go back, and a damaged backup stops the script before anything changes, and stays.
@@ -225,7 +225,7 @@ fn fallback_uninstall_restores_both_values_and_refuses_a_damaged_backup() {
         assert_eq!(std::fs::read_to_string(&service).unwrap(), svc, "{damaged:?}: activation file as it was");
         assert_eq!(std::fs::read_to_string(&mimeapps).unwrap(), mime, "{damaged:?}: folder default as it was");
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), *damaged, "{damaged:?}: the backup stays");
-        assert!(home.join(".local/share/applications/arbor.desktop").exists(), "{damaged:?}: nothing removed");
+        assert!(home.join(".local/share/applications/satchel.desktop").exists(), "{damaged:?}: nothing removed");
     }
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -236,10 +236,10 @@ fn hex(b: &[u8]) -> String {
 
 /// The review's case: the script's UTF-8 check took overlong encodings (`E0 80 80`),
 /// surrogates (`ED A0 80`) and code points past U+10FFFF (`F4 BF BF BF`), wrote them into
-/// mimeapps.list and deleted the backup, where Arbor's Restore refuses them. Each edge of each
-/// lead byte's range, against Arbor's own reader.
+/// mimeapps.list and deleted the backup, where Satchel's Restore refuses them. Each edge of each
+/// lead byte's range, against Satchel's own reader.
 #[test]
-fn the_scripts_utf8_check_agrees_with_arbor_at_every_edge() {
+fn the_scripts_utf8_check_agrees_with_satchel_at_every_edge() {
     let root = tmp("utf8-edges");
     let pkg = root.join("pkg");
     std::fs::create_dir_all(&pkg).unwrap();
@@ -294,20 +294,20 @@ fn the_scripts_utf8_check_agrees_with_arbor_at_every_edge() {
         b.put(svc_key, None);
         b.write(&backup).unwrap();
         let text = std::fs::read_to_string(&backup).unwrap();
-        let arbor = Backup::decode_for_tests(&text).is_ok_and(|b| crate::handler::linux::saved_default(&b, &backup).is_ok());
-        assert_eq!(arbor, std::str::from_utf8(seq).is_ok_and(|t| !t.chars().any(char::is_control)), "{seq:02x?}: Arbor's reader");
+        let satchel = Backup::decode_for_tests(&text).is_ok_and(|b| crate::handler::linux::saved_default(&b, &backup).is_ok());
+        assert_eq!(satchel, std::str::from_utf8(seq).is_ok_and(|t| !t.chars().any(char::is_control)), "{seq:02x?}: Satchel's reader");
         let (ok, out) = run(&pkg, "uninstall.sh", &home);
-        assert_eq!(ok, arbor, "{seq:02x?}: {out}");
+        assert_eq!(ok, satchel, "{seq:02x?}: {out}");
     }
     let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Any backup, valid or damaged in the ways a file can be (a value that isn't one line of
 /// text, a record cut short, a name twice, another app's activation file with any bytes in it,
-/// NULs too): `uninstall.sh` accepts exactly what Arbor's Restore accepts, and then puts back
+/// NULs too): `uninstall.sh` accepts exactly what Satchel's Restore accepts, and then puts back
 /// exactly what it records, byte for byte.
 #[test]
-fn the_scripts_backup_reader_agrees_with_arbor() {
+fn the_scripts_backup_reader_agrees_with_satchel() {
     let root = tmp("backup-agree");
     let pkg = root.join("pkg");
     std::fs::create_dir_all(&pkg).unwrap();
@@ -341,12 +341,12 @@ fn the_scripts_backup_reader_agrees_with_arbor() {
             _ => {}
         }
         std::fs::write(&backup, &text).unwrap();
-        let arbor = Backup::decode_for_tests(&text)
+        let satchel = Backup::decode_for_tests(&text)
             .ok()
             .filter(|b| b.get(mime_key).is_some() && b.get(svc_key).is_some())
             .is_some_and(|b| crate::handler::linux::saved_default(&b, &backup).is_ok());
         let (ok, out) = run(&pkg, "uninstall.sh", &home);
-        assert_eq!(ok, arbor, "{text:?}: {out}");
+        assert_eq!(ok, satchel, "{text:?}: {out}");
         if !ok {
             assert!(out.contains("damaged"), "{out}");
             assert_eq!(std::fs::read_to_string(&backup).unwrap(), text, "the backup stays");

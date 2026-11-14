@@ -1,5 +1,5 @@
 //! Cold-start probes' clock: how long since the OS created this process, and the line each
-//! probe appends to `ARBOR_TIMING_FILE`. Shared by Arbor (`timing.rs`) and the bare probes in
+//! probe appends to `SATCHEL_TIMING_FILE`. Shared by Satchel (`timing.rs`) and the bare probes in
 //! `examples/` (`win32_hello`, `rune_hello`), which include this file by path, so it uses
 //! nothing else from the crate.
 //!

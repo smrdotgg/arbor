@@ -19,7 +19,7 @@
 //!
 //! **Past an edge.** Dragged above or below the list, it scrolls, a step on each pointer move,
 //! further the further out the pointer is. Rune sends no events while the pointer holds still,
-//! and Arbor never runs a timer (NORTHSTAR: no polling), so a still pointer doesn't scroll
+//! and Satchel never runs a timer (NORTHSTAR: no polling), so a still pointer doesn't scroll
 //! (RUNE-GAPS.md). The wheel scrolling the list under a held rectangle moves it with the
 //! content too (the rows' layout report on each scrolled frame), selecting what scrolls in.
 

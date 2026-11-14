@@ -297,7 +297,7 @@ mod tests {
     use rune::{Key, KeyEvent, Mods};
 
     fn tmp(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-complete-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-complete-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -608,7 +608,7 @@ mod tests {
     /// removed since doesn't stay in the field.
     #[test]
     fn a_late_answer_while_cycling_applies_when_it_lands() {
-        let d = std::env::temp_dir().join(format!("arbor-complete-late-cycle-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-complete-late-cycle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         for n in ["Photo", "Picture", "Plan"] {
             std::fs::create_dir_all(d.join(n)).unwrap();

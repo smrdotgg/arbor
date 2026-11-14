@@ -1,12 +1,12 @@
 //! Deleting permanently: an item and, for a folder, everything in it, never following a link (a
 //! link is removed, not what it points to) and never crossing into another mounted disk. Only
-//! `ops` calls it, for "Delete Permanently…", after Arbor's one dialog has said it can't be
+//! `ops` calls it, for "Delete Permanently…", after Satchel's one dialog has said it can't be
 //! undone.
 //!
 //! - **Unix:** each folder is opened relative to its parent's handle with `O_NOFOLLOW`, and its
 //!   entries are removed with `unlinkat` relative to it, so a folder swapped for a link while the
 //!   delete runs is refused, never followed. File modes don't matter to a delete (only the
-//!   folder's), and Arbor doesn't change any: what can't be removed is reported.
+//!   folder's), and Satchel doesn't change any: what can't be removed is reported.
 //! - **Mounts:** a folder on another device than the item (a disk, a FUSE or network mount), or
 //!   a mount point on the same one (a bind mount: Linux reads `/proc/self/mountinfo` once per
 //!   operation, [`Mounts`](crate::mounts::Mounts)), is never entered or removed: the delete stops there and says another
@@ -354,7 +354,7 @@ mod tests {
     use std::fs;
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-delete-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-delete-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -421,7 +421,7 @@ mod tests {
             eprintln!("skipped: permissions don't stop root");
             return;
         }
-        let d = std::env::temp_dir().join(format!("arbor-delete-count-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-delete-count-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(d.join("t/locked")).unwrap();
         for i in 0..100 {
@@ -465,7 +465,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_dry_run_removes_nothing_and_stops_at_mounts() {
-        let d = std::env::temp_dir().join(format!("arbor-delete-dry-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-delete-dry-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(d.join("a/b")).unwrap();
         fs::write(d.join("a/b/f"), "x").unwrap();
@@ -479,14 +479,14 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    /// Deletes `ARBOR_DELETE_PROBE` for real, with the system's mount table (or none, with
-    /// `ARBOR_DELETE_PROBE_DEV_ONLY`, so only the device check guards it), and prints what
+    /// Deletes `SATCHEL_DELETE_PROBE` for real, with the system's mount table (or none, with
+    /// `SATCHEL_DELETE_PROBE_DEV_ONLY`, so only the device check guards it), and prints what
     /// happened: for checking against a real mount by hand.
     #[test]
-    #[ignore = "deletes the folder ARBOR_DELETE_PROBE names"]
+    #[ignore = "deletes the folder SATCHEL_DELETE_PROBE names"]
     fn delete_probe() {
-        let Some(p) = std::env::var_os("ARBOR_DELETE_PROBE") else { return };
-        let mounts = if std::env::var_os("ARBOR_DELETE_PROBE_DEV_ONLY").is_some() { Mounts::default() } else { Mounts::read() };
+        let Some(p) = std::env::var_os("SATCHEL_DELETE_PROBE") else { return };
+        let mounts = if std::env::var_os("SATCHEL_DELETE_PROBE_DEV_ONLY").is_some() { Mounts::default() } else { Mounts::read() };
         let mut n = 0;
         let r = remove_tree(
             Path::new(&p),

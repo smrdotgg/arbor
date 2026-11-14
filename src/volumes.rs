@@ -12,7 +12,7 @@
 //! listing, not before it), and again only when asked: opening a sidebar item's context menu,
 //! ⌘R, after an eject, and when the OS says a volume came or went where it can say so without
 //! polling (macOS's NSWorkspace mount notifications, Windows' `WM_DEVICECHANGE` to a hidden
-//! window of Arbor's own; Rune passes on neither, see RUNE-GAPS.md). Linux has no such
+//! window of Satchel's own; Rune passes on neither, see RUNE-GAPS.md). Linux has no such
 //! notification short of watching, so there it's manual.
 //!
 //! **Eject** runs on a worker and says what happened: macOS asks NSWorkspace
@@ -283,7 +283,7 @@ fn mac_list() -> Vec<Volume> {
 
 // ---- Windows ------------------------------------------------------------------------------
 
-/// `GetDriveTypeW`'s answers that Arbor tells apart.
+/// `GetDriveTypeW`'s answers that Satchel tells apart.
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 pub const DRIVE_REMOVABLE: u32 = 2;
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
@@ -622,7 +622,7 @@ fn mac_watch(refresh: Refresh) {
             r();
         }
     }
-    const NAME: &std::ffi::CStr = c"ArborVolumeWatcher";
+    const NAME: &std::ffi::CStr = c"SatchelVolumeWatcher";
     let Some(class) = AnyClass::get(NAME).or_else(|| {
         let mut b = ClassBuilder::new(NAME, NSObject::class())?;
         // SAFETY: the function matches the selector (an object in, void out).
@@ -674,8 +674,8 @@ fn win_watch(refresh: Refresh) {
     }
     // A hidden top-level window (message-only windows don't get the broadcast), on a thread of
     // its own that sleeps in GetMessage: no polling.
-    let _ = std::thread::Builder::new().name("arbor-devices".into()).spawn(|| {
-        let class: Vec<u16> = "ArborDeviceWatcher\0".encode_utf16().collect();
+    let _ = std::thread::Builder::new().name("satchel-devices".into()).spawn(|| {
+        let class: Vec<u16> = "SatchelDeviceWatcher\0".encode_utf16().collect();
         // SAFETY: a class and window of this thread's own, with a static window procedure; the
         // loop ends when GetMessage fails or the process exits.
         unsafe {
@@ -840,7 +840,7 @@ systemd-1 /mnt/auto autofs rw 0 0
     }
 
     fn eject_state(name: &str, vols: &[&str]) -> (State, Vec<Volume>) {
-        let d = std::env::temp_dir().join(format!("arbor-eject-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-eject-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let vols: Vec<Volume> = vols
             .iter()
@@ -889,7 +889,7 @@ systemd-1 /mnt/auto autofs rw 0 0
     #[cfg(unix)]
     #[test]
     fn a_volumes_identity_includes_its_file_systems_uuid() {
-        let d = std::env::temp_dir().join(format!("arbor-eject-uuid-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-eject-uuid-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("dev")).unwrap();
         std::fs::create_dir_all(d.join("by-uuid")).unwrap();
@@ -926,7 +926,7 @@ systemd-1 /mnt/auto autofs rw 0 0
     fn eject_waits_for_any_file_operation() {
         let (mut s, vols) = eject_state("busy", &["USB"]);
         std::fs::write(vols[0].path.join("f"), "x").unwrap();
-        let elsewhere = std::env::temp_dir().join(format!("arbor-eject-busy-dest-{}", std::process::id()));
+        let elsewhere = std::env::temp_dir().join(format!("satchel-eject-busy-dest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&elsewhere);
         std::fs::create_dir_all(&elsewhere).unwrap();
         let alias = elsewhere.join("alias");
@@ -962,7 +962,7 @@ systemd-1 /mnt/auto autofs rw 0 0
     #[test]
     fn a_drive_that_unmounts_but_wont_power_off_says_so() {
         use std::os::unix::fs::PermissionsExt;
-        let bin = std::env::temp_dir().join(format!("arbor-eject-udisks-{}", std::process::id()));
+        let bin = std::env::temp_dir().join(format!("satchel-eject-udisks-{}", std::process::id()));
         std::fs::create_dir_all(&bin).unwrap();
         let tool = bin.join("udisksctl");
         std::fs::write(
@@ -1090,7 +1090,7 @@ systemd-1 /mnt/auto autofs rw 0 0
 
     #[test]
     fn programs_are_found_on_the_path() {
-        let d = std::env::temp_dir().join(format!("arbor-vol-path-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-vol-path-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("udisksctl"), "").unwrap();
         let path = std::env::join_paths([Path::new("/nonexistent"), &d]).unwrap();

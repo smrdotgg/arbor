@@ -54,7 +54,7 @@ pub enum Op {
     Trash {
         sources: Vec<PathBuf>,
     },
-    /// Delete permanently, confirmed first in Arbor's one dialog: each item (a folder with
+    /// Delete permanently, confirmed first in Satchel's one dialog: each item (a folder with
     /// everything in it, links not followed) only while it's still the item the user chose,
     /// checked right before it goes ([`Doomed::id`]).
     Delete {
@@ -65,7 +65,7 @@ pub enum Op {
     Rename {
         items: Vec<Renaming>,
     },
-    /// Empty the Trash, confirmed first in Arbor's one dialog: the items its count found
+    /// Empty the Trash, confirmed first in Satchel's one dialog: the items its count found
     /// (each only while it's still that item), or when the count hadn't landed, what's there
     /// when the worker starts (`trash::contents`). Windows empties the shell's Recycle Bin.
     EmptyTrash {
@@ -306,7 +306,7 @@ pub enum What {
     Duplicate,
     NewFolder,
     NewFile,
-    /// Links Arbor made: undone by removing each (only while it's still the link made, with
+    /// Links Satchel made: undone by removing each (only while it's still the link made, with
     /// the same target), redone by making it again ([`Worker::undo_links`]).
     Link,
     Trash,
@@ -349,7 +349,8 @@ pub struct Progress {
     /// right after making it). What quitting mid-copy leaves when cleanup can't finish.
     pub created: Mutex<Vec<(PathBuf, String)>>,
     /// What a failed or cancelled copy's cleanup couldn't remove of what it made: each with its
-    /// mark and why (`unmake`). Items that changed since Arbor made them aren't Arbor's to name.
+    /// mark and why (`unmake`). Items that changed since Satchel made them aren't Satchel's to
+    /// name.
     pub kept: Mutex<Vec<(PathBuf, String, String)>>,
 }
 
@@ -381,7 +382,7 @@ pub struct Outcome {
     /// A permanent delete stopped (cancelled or failed) inside this folder: part of it is gone.
     pub partly: Option<PathBuf>,
     /// What the operation says instead of the usual message (emptying the Recycle Bin, or a
-    /// Trash Arbor isn't allowed to read).
+    /// Trash Satchel isn't allowed to read).
     pub said: Option<String>,
     /// Said after the usual message: an item Put Back gave a free name, say.
     pub notes: Vec<String>,
@@ -395,10 +396,10 @@ pub struct Outcome {
     /// the panes showing them, by any path, read them again.
     pub folders: Vec<(PathBuf, Option<noclobber::DirId>)>,
     /// Where identity is told by ctime alone ([`crate::fs::Ident::by_ctime`]): each identity an
-    /// item had when it was chosen, and the one Arbor's own action gave it, read right after
+    /// item had when it was chosen, and the one Satchel's own action gave it, read right after
     /// (renaming, moving or trashing an item changes its ctime, and its other names' too). Rows
     /// still showing the first take the second ([`reidentified`]), so the next action on them,
-    /// before their folder is read again, doesn't take Arbor's change for a replacement.
+    /// before their folder is read again, doesn't take Satchel's change for a replacement.
     pub reidentified: Vec<(crate::fs::Ident, crate::fs::Ident)>,
     /// New File and New Folder: what they made, as an identity (read right after), so the
     /// rename starts on that item and no other row.
@@ -443,7 +444,7 @@ pub fn undone_note(what: What, redo: bool, results: &[PathBuf]) -> String {
     }
 }
 
-/// `id` as Arbor's own action left it, from an outcome's [`Outcome::reidentified`]; `id` when
+/// `id` as Satchel's own action left it, from an outcome's [`Outcome::reidentified`]; `id` when
 /// it wasn't touched.
 pub fn reidentified(id: crate::fs::Ident, pairs: &[(crate::fs::Ident, crate::fs::Ident)]) -> crate::fs::Ident {
     pairs.iter().find(|(was, _)| *was == id).map_or(id, |&(_, now)| now)
@@ -724,7 +725,7 @@ fn is_gone(e: &io::Error) -> bool {
 /// empty. Whatever another app replaced, edited or put inside meanwhile stays, and so do the
 /// folders holding it. Returns what was left and why, for the status bar.
 ///
-/// Removed permanently, not to the Trash: these are Arbor's own fresh output from an operation
+/// Removed permanently, not to the Trash: these are Satchel's own fresh output from an operation
 /// that didn't finish, never handed to the user (no result, no undo record), and each is
 /// re-checked against its fingerprint right before it goes. Removing them puts the disk back
 /// as it was before the copy, which is what cancel means; the sources are untouched. Trashing
@@ -745,7 +746,7 @@ fn unmake(p: &Progress, made: &[Made]) -> Option<String> {
             .as_ref()
             .is_some_and(|was| if m.dir { now.kind == was.kind && now.id.is_some() && now.id == was.id } else { now == *was });
         if !ours {
-            kept.push((&m.dst, "it changed after Arbor made it".into()));
+            kept.push((&m.dst, "it changed after Satchel made it".into()));
             continue;
         }
         #[cfg(test)]

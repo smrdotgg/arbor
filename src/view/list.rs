@@ -211,7 +211,7 @@ pub(super) fn list(f: &Folder, c: Ctx, active: Option<String>) -> El {
 
 /// While a selection rectangle is being dragged out in pane `c`, its rows (`rows`, the list's
 /// or the grid's) report where they're laid out, so the rectangle follows the wheel
-/// (`State::band_scrolled`). Otherwise they report nothing: a report Arbor ignores still costs
+/// (`State::band_scrolled`). Otherwise they report nothing: a report Satchel ignores still costs
 /// a frame, and one whose handler says `Tx::live_only` left Rune drawing every frame until the
 /// next key in a window with no live values, such as the list view (RUNE-GAPS.md). The press
 /// that starts a rectangle and the release that ends it both commit, so the view adds and
@@ -323,10 +323,10 @@ pub(super) fn open_item(s: &mut State, tx: &mut rune::Tx, id: u64, i: usize, ver
 }
 
 /// Item `i`'s file drags on `e` (its name, its selected row, its grid cell): out to other apps
-/// (macOS, one pane), or Arbor's own inside the window, onto the other pane or the sidebar.
+/// (macOS, one pane), or Satchel's own inside the window, onto the other pane or the sidebar.
 pub(super) fn item_drags(e: El, c: Ctx, i: usize, version: u64) -> El {
     let id = c.id;
-    // Arbor's own drag inside the window: onto the other pane (split) or onto the sidebar
+    // Satchel's own drag inside the window: onto the other pane (split) or onto the sidebar
     // (which adds the folders). On macOS, unsplit, the row drags out to other apps instead
     // and this never runs (a system drag can't land in its own window: RUNE-GAPS.md).
     let split = c.split;
@@ -335,7 +335,7 @@ pub(super) fn item_drags(e: El, c: Ctx, i: usize, version: u64) -> El {
     };
     let inside = move |s: &mut State, d: &mut Drag, tx: &mut rune::Tx| inside_drag(s, d, tx, id, i, version, split);
     match c.split {
-        // The column view's columns are one window: there the drag is Arbor's own, onto
+        // The column view's columns are one window: there the drag is Satchel's own, onto
         // another column, as between split panes (below).
         None if c.narrow => e.on_drag(inside),
         // Out to other apps (macOS: Rune starts no system drag elsewhere, so there the
@@ -367,12 +367,12 @@ pub(super) fn item_drags(e: El, c: Ctx, i: usize, version: u64) -> El {
             }
         }
         // Split: within the window, onto the other pane. A system drag can't land in the
-        // window it came from (RUNE-GAPS.md), so this one is Arbor's own.
+        // window it came from (RUNE-GAPS.md), so this one is Satchel's own.
         Some(_) => e.on_drag(inside),
     }
 }
 
-/// Arbor's own drag of item `i` (of pane `id`'s folder at `version`) inside the window: onto
+/// Satchel's own drag of item `i` (of pane `id`'s folder at `version`) inside the window: onto
 /// the other pane (split), the sidebar, or in the column view a folder row or a column.
 pub(super) fn inside_drag(s: &mut State, d: &mut Drag, tx: &mut rune::Tx, id: u64, i: usize, version: u64, split: Option<Panes>) {
     tx.instant();

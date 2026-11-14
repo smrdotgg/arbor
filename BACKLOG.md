@@ -65,7 +65,7 @@ These come after the Mac QA round's real bugs (and any bad performance spots) ar
   (DECISIONS.md, 2026-11-11):
   - **List** (today's view).
   - **Thumbnails / icons:** a grid with image and document thumbnails, generated on demand for
-    the visible cells only, cancelled on scroll, nothing stored by Arbor (NORTHSTAR's
+    the visible cells only, cancelled on scroll, nothing stored by Satchel (NORTHSTAR's
     view-triggered work rules; reuses the preview decoders and the OS thumbnailers already
     approved in DECISIONS.md).
   - **Tiles:** larger icon plus name and a line of details.

@@ -53,11 +53,11 @@ extern "C" fn open_documents(_: &AnyObject, _: Sel, event: *mut AnyObject, _repl
         std::thread::spawn(move || sink(classify(paths, false), None));
     }));
     if caught.is_err() {
-        eprintln!("arbor: open-documents handler panicked");
+        eprintln!("satchel: open-documents handler panicked");
     }
 }
 
-/// AppKit installs its own open-documents handler while it launches, so Arbor's goes in
+/// AppKit installs its own open-documents handler while it launches, so Satchel's goes in
 /// after it, when AppKit is about to finish launching and before it hands over the event
 /// that launched the app.
 extern "C" fn will_finish_launching(this: &AnyObject, _: Sel, _note: *mut AnyObject) {
@@ -71,9 +71,9 @@ extern "C" fn will_finish_launching(this: &AnyObject, _: Sel, _note: *mut AnyObj
     });
 }
 
-/// Arbor's handler object, made once and kept for the process.
+/// Satchel's handler object, made once and kept for the process.
 fn handler() -> Option<*mut AnyObject> {
-    const NAME: &std::ffi::CStr = c"ArborOpenDocuments";
+    const NAME: &std::ffi::CStr = c"SatchelOpenDocuments";
     let class = AnyClass::get(NAME).or_else(|| {
         let mut b = ClassBuilder::new(NAME, NSObject::class())?;
         // SAFETY: each function matches its selector (objects in, void out).

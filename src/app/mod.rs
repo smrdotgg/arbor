@@ -93,7 +93,7 @@ impl Pane {
 }
 
 pub struct State {
-    /// Which window this is (`window::FIRST` for the one Arbor opens with).
+    /// Which window this is (`window::FIRST` for the one Satchel opens with).
     pub win: u64,
     /// What every window shares: the file-operation slot, undo and redo, the clipboard's
     /// files, the Jump history (`app/shared.rs`).
@@ -214,7 +214,7 @@ pub struct State {
     pub(crate) complete: Option<crate::complete::Completion>,
     pub(crate) completing: Option<String>,
     pub(crate) completer: crate::complete::Loader,
-    /// "Make Arbor the Default for Folders" or its restore, running on a worker (`handler.rs`).
+    /// "Make Satchel the Default for Folders" or its restore, running on a worker (`handler.rs`).
     handler_job: Latest<Result<String, String>>,
     /// Requests from other apps shown so far (`incoming.rs`).
     pub(crate) external_shows: u64,
@@ -299,7 +299,7 @@ pub(crate) enum PathKind {
 }
 
 /// Where the symbolic link at `link` points: the original's path, and whether something is
-/// there. Spelled as written (Arbor's own links are absolute) unless it has `.` or `..` in it:
+/// there. Spelled as written (Satchel's own links are absolute) unless it has `.` or `..` in it:
 /// then those are resolved, on Unix through the folders' real paths, as the system follows a
 /// link (kept in the link's own spelling when that lands in the link's folder), and on Windows
 /// by their spelling, as Windows resolves them. The original itself is kept as it is, a link
@@ -385,7 +385,7 @@ impl State {
                 Err(_) => break,
             }
         }
-        // Without the settings yet: the defaults, in the folder Arbor was started in, until
+        // Without the settings yet: the defaults, in the folder Satchel was started in, until
         // they land (`land_start`).
         let (config, cwd, places, note, custom, leftover, cols) = match start {
             Some(mut s) => {
@@ -923,7 +923,7 @@ impl State {
         }
         if let Some(r) = self.handler_job.take() {
             self.note = Some(r.unwrap_or_else(|e| e));
-            // Linux: the running Arbor serves "Show in folder" requests from now on, or stops.
+            // Linux: the running Satchel serves "Show in folder" requests from now on, or stops.
             #[cfg(all(unix, not(target_os = "macos")))]
             crate::incoming::linux::recheck();
             changed = true;
@@ -1447,12 +1447,12 @@ impl State {
         });
     }
 
-    /// Makes Arbor the default for folders, or puts the old default back, on a worker: it
+    /// Makes Satchel the default for folders, or puts the old default back, on a worker: it
     /// writes files, the registry or LaunchServices. Confirmed in the dialog first.
     pub fn change_default(&mut self, change: crate::handler::Change) {
         self.handler_job.request(change, crate::handler::run);
         self.note = Some(match change {
-            crate::handler::Change::Make => "Making Arbor the default for folders…".into(),
+            crate::handler::Change::Make => "Making Satchel the default for folders…".into(),
             crate::handler::Change::Restore => "Restoring the system default for folders…".into(),
         });
     }

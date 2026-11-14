@@ -6,7 +6,7 @@ use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
 fn folder(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-preview-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-preview-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -793,7 +793,7 @@ fn unreadable_and_platform_only_files_get_a_card() {
     space(&mut s);
     settle(&mut s);
     let Body::Card(c) = &s.preview.as_ref().unwrap().body else { panic!() };
-    // Linux has no thumbnailer Arbor uses, and says so; elsewhere the OS has nothing for an
+    // Linux has no thumbnailer Satchel uses, and says so; elsewhere the OS has nothing for an
     // eight-byte PDF, and the card says it can't preview it.
     if cfg!(any(target_os = "macos", windows)) {
         assert_eq!(c.note.as_deref(), Some(CANT));
@@ -812,8 +812,8 @@ fn unreadable_and_platform_only_files_get_a_card() {
 
 // ---- the OS's thumbnails --------------------------------------------------------------
 
-/// Which files go to the OS's thumbnailer: formats Arbor doesn't decode, by extension, and
-/// anything else whose bytes are neither text nor an image Arbor decodes. Text and Arbor's
+/// Which files go to the OS's thumbnailer: formats Satchel doesn't decode, by extension, and
+/// anything else whose bytes are neither text nor an image Satchel decodes. Text and Satchel's
 /// own image formats never do.
 #[test]
 fn what_goes_to_the_os_thumbnailer() {
@@ -969,12 +969,12 @@ fn it_follows_the_active_pane() {
 }
 
 /// How long a whole WebP decode takes (it can't be stopped once started, so this is the work
-/// that goes on after a cancel), for each `.webp` in `ARBOR_WEBP_DIR`. Median of 5.
-/// `ARBOR_WEBP_DIR=… cargo test --release -- --ignored --nocapture webp_decode_speed`
+/// that goes on after a cancel), for each `.webp` in `SATCHEL_WEBP_DIR`. Median of 5.
+/// `SATCHEL_WEBP_DIR=… cargo test --release -- --ignored --nocapture webp_decode_speed`
 #[test]
-#[ignore = "benchmark: needs ARBOR_WEBP_DIR"]
+#[ignore = "benchmark: needs SATCHEL_WEBP_DIR"]
 fn webp_decode_speed() {
-    let Some(dir) = std::env::var_os("ARBOR_WEBP_DIR") else { return };
+    let Some(dir) = std::env::var_os("SATCHEL_WEBP_DIR") else { return };
     let mut files: Vec<PathBuf> =
         std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "webp")).collect();
     files.sort();

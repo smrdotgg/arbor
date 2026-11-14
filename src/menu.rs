@@ -224,7 +224,7 @@ mod tests {
     }
 
     fn folder(name: &str) -> (std::path::PathBuf, State) {
-        let d = std::env::temp_dir().join(format!("arbor-menu-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-menu-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for f in ["a.txt", "b.txt"] {

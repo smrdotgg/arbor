@@ -20,25 +20,25 @@ use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 use crate::ffi::wide;
 
 /// The pipe for this user's login session (a fast user switch or a remote session gets its
-/// own Arbor).
+/// own Satchel).
 pub fn pipe_name() -> String {
     let mut session = 0u32;
     // SAFETY: a valid out pointer; on failure `session` stays 0.
     unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) };
     let user: String =
         std::env::var("USERNAME").unwrap_or_default().chars().filter(|c| c.is_alphanumeric() || "-_.".contains(*c)).collect();
-    format!(r"\\.\pipe\gg.smr.arbor.{session}.{user}")
+    format!(r"\\.\pipe\gg.smr.satchel.{session}.{user}")
 }
 
-/// How long a second Arbor waits, once connected, for the running one to take its paths
+/// How long a second Satchel waits, once connected, for the running one to take its paths
 /// and say so; then it opens its own window instead.
 pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// What the running Arbor answers once it has read a request.
+/// What the running Satchel answers once it has read a request.
 const ACK: u8 = 1;
 
 /// The paths as the pipe carries them: UTF-16 code units, each path ended by a NUL, and one
-/// more NUL to end the request (so the running Arbor knows it's all there and can answer
+/// more NUL to end the request (so the running Satchel knows it's all there and can answer
 /// on the same pipe). An older client just closes its end.
 pub fn encode(paths: &[PathBuf]) -> Vec<u8> {
     paths
@@ -60,11 +60,11 @@ pub fn decode(bytes: &[u8]) -> Vec<PathBuf> {
     units.split(|&u| u == 0).filter(|p| !p.is_empty()).map(|p| PathBuf::from(OsString::from_wide(p))).collect()
 }
 
-/// Hands `paths` to the Arbor serving `name`: true when it took them (this process then
+/// Hands `paths` to the Satchel serving `name`: true when it took them (this process then
 /// exits). False when none is running (or it couldn't be reached): this one opens its own
 /// window. Lets the running one bring its window to the front, which Windows allows only
 /// with the say-so of the process the user just started.
-/// At startup: the paths on the command line, if any, to a running Arbor. Touches no disk
+/// At startup: the paths on the command line, if any, to a running Satchel. Touches no disk
 /// (the running one sorts folders from files on its pipe's thread); without arguments it
 /// does nothing, so a plain launch costs nothing and opens a window as before.
 pub fn hand_off_args() -> bool {
@@ -100,8 +100,8 @@ pub fn hand_off(name: &str, paths: &[PathBuf]) -> bool {
     false
 }
 
-/// Writes the request on the connected pipe `h` and waits for the running Arbor's answer,
-/// on a thread of its own, for at most `deadline`: a running Arbor that's hung (or stuck on
+/// Writes the request on the connected pipe `h` and waits for the running Satchel's answer,
+/// on a thread of its own, for at most `deadline`: a running Satchel that's hung (or stuck on
 /// an earlier request) never holds this launch up. On time out the thread's blocked call is
 /// cancelled and false comes back (this one opens its own window). Closes `h`.
 fn exchange(h: HANDLE, bytes: Vec<u8>, deadline: std::time::Duration) -> bool {
@@ -156,7 +156,7 @@ pub fn serve(name: String, sink: Sink) {
     // Handles are plain values: the thread owns this one from here.
     let first = first as usize;
     std::thread::Builder::new()
-        .name("arbor-pipe".into())
+        .name("satchel-pipe".into())
         .spawn(move || {
             let mut h = first as HANDLE;
             loop {
@@ -245,12 +245,12 @@ mod tests {
         assert_eq!(decode(&encode(&[PathBuf::new(), PathBuf::from(r"C:\")])), [PathBuf::from(r"C:\")], "an empty path can't end it early");
     }
 
-    /// The review's case: a running Arbor that accepts the connection but never reads (hung,
+    /// The review's case: a running Satchel that accepts the connection but never reads (hung,
     /// or stuck on an earlier request) used to hold a later launch forever. Now it gives
     /// up after the deadline and opens its own window.
     #[test]
-    fn a_stalled_first_arbor_doesnt_hold_a_launch() {
-        let name = format!(r"\\.\pipe\gg.smr.arbor.stalled.{}", std::process::id());
+    fn a_stalled_first_satchel_doesnt_hold_a_launch() {
+        let name = format!(r"\\.\pipe\gg.smr.satchel.stalled.{}", std::process::id());
         let wname = wide(&name);
         let h = make(&wname, true) as usize;
         let (connected, hold) = std::sync::mpsc::channel::<()>();
@@ -266,11 +266,11 @@ mod tests {
         drop(hold);
     }
 
-    /// A second Arbor's hand-off reaches the first: each folder as a request, and the
+    /// A second Satchel's hand-off reaches the first: each folder as a request, and the
     /// server keeps serving after a client.
     #[test]
-    fn a_second_arbor_hands_its_folders_to_the_first() {
-        let name = format!(r"\\.\pipe\gg.smr.arbor.test.{}", std::process::id());
+    fn a_second_satchel_hands_its_folders_to_the_first() {
+        let name = format!(r"\\.\pipe\gg.smr.satchel.test.{}", std::process::id());
         let (tx, rx) = std::sync::mpsc::channel();
         let tx = std::sync::Mutex::new(tx);
         serve(name.clone(), std::sync::Arc::new(move |shows, _| tx.lock().unwrap().send(shows).unwrap()));

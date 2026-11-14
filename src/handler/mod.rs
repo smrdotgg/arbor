@@ -1,21 +1,21 @@
-//! "Make Arbor the Default for Folders…" and "Restore the System Default for Folders…": the
-//! opt-in that has other apps open folders in Arbor, and the command that undoes it. Neither
-//! ever runs by itself: both go through Arbor's dialog (`confirm.rs`), which says what changes
+//! "Make Satchel the Default for Folders…" and "Restore the System Default for Folders…": the
+//! opt-in that has other apps open folders in Satchel, and the command that undoes it. Neither
+//! ever runs by itself: both go through Satchel's dialog (`confirm.rs`), which says what changes
 //! and how to undo it.
 //!
 //! Before the first change, whatever it replaces is saved in `folder-handler-backup.txt` beside
 //! the settings file (user data: the disk can't regenerate it). Restore puts exactly that back,
-//! but only where the setting is still the one Arbor wrote: anything another app or the user
-//! changed since is left alone and named. Without a backup, Restore still removes what Arbor
-//! wrote. Making Arbor the default again while it already is keeps the first backup.
+//! but only where the setting is still the one Satchel wrote: anything another app or the user
+//! changed since is left alone and named. Without a backup, Restore still removes what Satchel
+//! wrote. Making Satchel the default again while it already is keeps the first backup.
 //!
 //! - **macOS:** LaunchServices' viewer for `public.folder` (`LSSetDefaultRoleHandlerForContentType`),
 //!   from the app bundle only. Restore sets the saved handler back, or Finder.
-//! - **Linux:** `inode/directory=arbor.desktop` in `$XDG_CONFIG_HOME/mimeapps.list` (the
+//! - **Linux:** `inode/directory=satchel.desktop` in `$XDG_CONFIG_HOME/mimeapps.list` (the
 //!   freedesktop.org file `xdg-mime` and `gio` write), and a D-Bus activation file for
 //!   `org.freedesktop.FileManager1`, so "Show in folder" from browsers and other apps starts
-//!   Arbor when it isn't running (`incoming.rs` serves it).
-//! - **Windows:** an "Open in Arbor" verb as the default for folders and drives, and Win+E,
+//!   Satchel when it isn't running (`incoming.rs` serves it).
+//! - **Windows:** an "Open in Satchel" verb as the default for folders and drives, and Win+E,
 //!   under `HKEY_CURRENT_USER` only (no administrator rights): see [`windows::plan`].
 //!
 //! It all runs on a worker (`State::change_default`): files, the registry and LaunchServices
@@ -33,8 +33,8 @@ pub enum Change {
 /// Beside the settings file.
 pub const BACKUP_FILE: &str = "folder-handler-backup.txt";
 
-/// Restore, when nothing was Arbor's.
-const NOT_DEFAULT: &str = "Arbor isn't the default for folders, so there was nothing to restore";
+/// Restore, when nothing was Satchel's.
+const NOT_DEFAULT: &str = "Satchel isn't the default for folders, so there was nothing to restore";
 
 /// Runs `change` for this platform. The message is for the status bar.
 pub fn run(change: Change) -> Result<String, String> {
@@ -52,7 +52,7 @@ fn platform_run(change: Change, backup: &Path) -> Result<String, String> {
 
 #[cfg(windows)]
 fn platform_run(change: Change, backup: &Path) -> Result<String, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("Can't tell where Arbor is: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("Can't tell where Satchel is: {e}"))?;
     let r = windows::run(change, &mut windows::Hkcu, windows::CLASSES, &exe.to_string_lossy(), backup);
     windows::notify_shell();
     r
@@ -72,7 +72,7 @@ pub(crate) struct Backup {
 }
 
 const BACKUP_HEADER: &str =
-    "# What \"Make Arbor the Default for Folders\" replaced. \"Restore the System Default for Folders\" puts it back. Keep this file.";
+    "# What \"Make Satchel the Default for Folders\" replaced. \"Restore the System Default for Folders\" puts it back. Keep this file.";
 
 impl Backup {
     /// `None` when nothing was recorded under `key`; `Some(None)` when it was recorded as absent.
@@ -102,14 +102,14 @@ impl Backup {
     fn decode(s: &str) -> Result<Backup, String> {
         // An empty or truncated file isn't a backup with nothing in it: it's damaged.
         if s.lines().next() != Some(BACKUP_HEADER) {
-            return Err("it isn't a backup Arbor wrote (its first line is missing or changed)".into());
+            return Err("it isn't a backup Satchel wrote (its first line is missing or changed)".into());
         }
         let mut b = Backup::default();
         for (n, line) in s.lines().enumerate() {
             if line.starts_with('#') || line.trim().is_empty() {
                 continue;
             }
-            let bad = || format!("line {} isn't what Arbor wrote", n + 1);
+            let bad = || format!("line {} isn't what Satchel wrote", n + 1);
             let (hex, key) = line.split_once('\t').ok_or_else(bad)?;
             // A name never holds a line break (`put`); a lone CR is damage.
             if key.contains('\r') {
@@ -161,7 +161,7 @@ impl Backup {
             && let Some(k) = keys.iter().find(|k| b.get(k).is_none())
         {
             return Err(format!(
-                "{} isn't complete (it has no “{k}”), so nothing was changed. Put back a good copy, or delete it to have Restore take back only what Arbor wrote",
+                "{} isn't complete (it has no “{k}”), so nothing was changed. Put back a good copy, or delete it to have Restore take back only what Satchel wrote",
                 crate::fs::pretty(path)
             ));
         }
@@ -182,7 +182,7 @@ fn remove_backup(path: &Path) -> Result<(), String> {
     }
 }
 
-/// "; x and y were left as they are" for settings changed since Arbor wrote them.
+/// "; x and y were left as they are" for settings changed since Satchel wrote them.
 fn kept_note(kept: &[String]) -> String {
     match kept {
         [] => String::new(),

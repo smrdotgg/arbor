@@ -1,9 +1,9 @@
-//! Unix: SIGTERM, SIGINT and SIGHUP quit Arbor the way ⌘Q does (a logout, `kill`, Ctrl+C in a
+//! Unix: SIGTERM, SIGINT and SIGHUP quit Satchel the way ⌘Q does (a logout, `kill`, Ctrl+C in a
 //! terminal, the terminal closing), so a running operation is cancelled and what it left is
 //! recorded (`leftovers.rs`), and the user-data writers get their moment.
 //!
 //! The handler does only what's async-signal-safe: it writes the signal's number to a pipe
-//! (non-blocking, so it can't block; errno kept). A thread of its own (`arbor-signals`) sleeps
+//! (non-blocking, so it can't block; errno kept). A thread of its own (`satchel-signals`) sleeps
 //! reading that pipe (no polling) and runs the quit on the UI thread's terms
 //! (`window::quit_app`: Rune's quit, every window's quit hook, then `main`'s `last`). After the
 //! first signal the three go back to their default action, so a second one ends the process at
@@ -55,13 +55,13 @@ unsafe fn errno_location() -> *mut libc::c_int {
     unsafe { libc::__errno() }
 }
 
-/// From now on the three signals call `quit` (with the signal's number) on the `arbor-signals`
+/// From now on the three signals call `quit` (with the signal's number) on the `satchel-signals`
 /// thread, the first one only. Once per process; a failure leaves the default actions.
 pub fn forward(quit: fn(libc::c_int)) {
     let mut fds = [0 as libc::c_int; 2];
     // SAFETY: `fds` has room for the two descriptors.
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        eprintln!("arbor: no pipe for termination signals: {}", std::io::Error::last_os_error());
+        eprintln!("satchel: no pipe for termination signals: {}", std::io::Error::last_os_error());
         return;
     }
     let [read, write] = fds;
@@ -79,7 +79,7 @@ pub fn forward(quit: fn(libc::c_int)) {
         }
         return;
     }
-    let spawned = std::thread::Builder::new().name("arbor-signals".into()).spawn(move || {
+    let spawned = std::thread::Builder::new().name("satchel-signals".into()).spawn(move || {
         let mut byte = 0u8;
         loop {
             // SAFETY: one byte into `byte`, from the read end this thread owns.
@@ -100,7 +100,7 @@ pub fn forward(quit: fn(libc::c_int)) {
         quit(libc::c_int::from(byte));
     });
     if let Err(e) = spawned {
-        eprintln!("arbor: no thread for termination signals: {e}");
+        eprintln!("satchel: no thread for termination signals: {e}");
         return;
     }
     for sig in SIGNALS {

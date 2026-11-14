@@ -3,7 +3,7 @@ use crate::archive::tests::{Raw, noise, tar_entry};
 use std::fs;
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-arc-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-arc-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
     d
@@ -176,7 +176,7 @@ fn extract_is_undone_by_trashing_the_folder_only_while_unchanged() {
     assert!(d.join("src/sub/new.txt").exists());
 }
 
-/// A ZIP at `path` made by Arbor's writer with whatever names it's given.
+/// A ZIP at `path` made by Satchel's writer with whatever names it's given.
 fn zip_at(path: &Path, add: impl FnOnce(&mut crate::archive::zip::Writer)) {
     let mut w = crate::archive::zip::Writer::new(fs::File::create_new(path).unwrap(), 6);
     add(&mut w);
@@ -195,7 +195,7 @@ fn zip_slip_is_refused_and_nothing_is_written_anywhere() {
     let d = tmp("slip");
     let scratch = d.join("scratch");
     fs::create_dir(&scratch).unwrap();
-    let abs = std::env::temp_dir().join(format!("arbor-slip-abs-{}", std::process::id()));
+    let abs = std::env::temp_dir().join(format!("satchel-slip-abs-{}", std::process::id()));
     let abs_name = abs.to_string_lossy().replace('\\', "/");
     type Add<'a> = Box<dyn Fn(&mut crate::archive::zip::Writer) + 'a>;
     let cases: Vec<(&str, Add)> = vec![
@@ -664,7 +664,7 @@ fn python() -> Option<&'static str> {
 }
 
 #[test]
-fn other_tools_read_arbors_zips() {
+fn other_tools_read_satchels_zips() {
     let d = tmp("interop-out");
     let src = sample(&d);
     let o = compress(std::slice::from_ref(&src));
@@ -679,7 +679,7 @@ fn other_tools_read_arbors_zips() {
         let listed = String::from_utf8(out.stdout).unwrap();
         assert!(listed.contains("src/sub/deeper/ünïcödé ✓.txt") && listed.contains("src/empty/"), "{listed}");
     } else {
-        eprintln!("no Python: skipped reading Arbor's ZIP with zipfile");
+        eprintln!("no Python: skipped reading Satchel's ZIP with zipfile");
     }
     match std::process::Command::new("unzip").arg("-tq").arg(&zip).output() {
         Ok(out) => {
@@ -690,7 +690,7 @@ fn other_tools_read_arbors_zips() {
 }
 
 #[test]
-fn arbor_reads_other_tools_archives() {
+fn satchel_reads_other_tools_archives() {
     let Some(py) = python() else {
         eprintln!("no Python: skipped extracting zipfile's and tarfile's archives");
         return;
@@ -748,13 +748,13 @@ with tarfile.open(os.path.join(d, "py.tar.gz"), "w:gz", format=tarfile.PAX_FORMA
 }
 
 /// A file over 4 GB (sparse where the disk allows) through Compress and Extract: ZIP64 sizes in
-/// its headers. Slow and needs 5 GB free, so not in every run: `ARBOR_BIG_DIR=/some/dir cargo
+/// its headers. Slow and needs 5 GB free, so not in every run: `SATCHEL_BIG_DIR=/some/dir cargo
 /// test --release big_file -- --ignored`.
 #[test]
 #[ignore]
 fn a_file_over_4_gb_goes_through_zip64() {
-    let base = std::env::var_os("ARBOR_BIG_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
-    let d = base.join(format!("arbor-arc-big-{}", std::process::id()));
+    let base = std::env::var_os("SATCHEL_BIG_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+    let d = base.join(format!("satchel-arc-big-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
     let big = d.join("big.img");
@@ -788,14 +788,14 @@ fn a_file_over_4_gb_goes_through_zip64() {
 }
 
 /// Compress and Extract throughput on a folder of your choice (BENCH.md has this box's
-/// numbers for a 1 GB folder of mixed files): `ARBOR_BENCH_TREE=/path/to/folder cargo test
+/// numbers for a 1 GB folder of mixed files): `SATCHEL_BENCH_TREE=/path/to/folder cargo test
 /// --release archive_throughput -- --ignored --nocapture`. The archive and the extracted copy
 /// go beside the folder and are removed after.
 #[test]
 #[ignore]
 fn archive_throughput() {
-    let Some(src) = std::env::var_os("ARBOR_BENCH_TREE").map(PathBuf::from) else {
-        eprintln!("set ARBOR_BENCH_TREE");
+    let Some(src) = std::env::var_os("SATCHEL_BENCH_TREE").map(PathBuf::from) else {
+        eprintln!("set SATCHEL_BENCH_TREE");
         return;
     };
     let dir = src.parent().unwrap().to_path_buf();

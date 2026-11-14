@@ -13,7 +13,7 @@
 //!                      compiling the WGSL (RUNE_DISABLE_DXBC),
 //!                      then configuring the surface and presenting one cleared frame.
 //! gpu_probe rune-held  The same after listing the DX12 adapters through wgpu and holding them,
-//!                      as Arbor did before Rune picked from DXGI's list (wgpu's listing makes a
+//!                      as Satchel did before Rune picked from DXGI's list (wgpu's listing makes a
 //!                      D3D12 device on every adapter): what that workaround would cost now.
 //! gpu_probe dx12-fxc   wgpu DX12 with FXC (Rune's setting): the instance, listing the adapters
 //!                      (twice: wgpu makes a device on each to list it), then on every adapter a
@@ -24,7 +24,7 @@
 //! ```
 //!
 //! `cargo build --profile dist --example gpu_probe`; BENCH.md has what it found. Windows and
-//! Linux (Arbor depends on wgpu directly only there).
+//! Linux (Satchel depends on wgpu directly only there).
 
 #![cfg_attr(target_os = "macos", allow(dead_code, unused_imports))]
 
@@ -235,7 +235,7 @@ mod probe {
         println!("mode {mode}");
         match mode.as_str() {
             "rune" => rune_path(),
-            // Arbor's old workaround (src/gpu.rs before Rune's DXGI pick): the DX12 adapters
+            // Satchel's old workaround (src/gpu.rs before Rune's DXGI pick): the DX12 adapters
             // listed first and held, so Rune's own listings got the live D3D12 devices back.
             "rune-held" => {
                 let inst = instance(wgpu::Backends::DX12, None);

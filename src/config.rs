@@ -1,15 +1,15 @@
 //! The settings file: preferences and keybindings in one TOML file (NORTHSTAR: "Settings and
 //! keybindings in one config file"). It's user data, so storing it is allowed.
 //!
-//! - macOS `~/Library/Application Support/Arbor/config.toml`, Windows `%APPDATA%\Arbor\config.toml`,
-//!   elsewhere `$XDG_CONFIG_HOME/arbor/config.toml` (default `~/.config/arbor/config.toml`).
+//! - macOS `~/Library/Application Support/Satchel/config.toml`, Windows `%APPDATA%\Satchel\config.toml`,
+//!   elsewhere `$XDG_CONFIG_HOME/satchel/config.toml` (default `~/.config/satchel/config.toml`).
 //!   `RUNE_DIRS_ROOT` moves it under `<root>/config/` for tests (Rune's `dirs`).
 //! - Read once at startup, on the thread that reads the first folder (`app::read_first_folder`),
 //!   so it overlaps the platform's launch; the window waits for it only briefly
 //!   (`app::FIRST_PAINT_WAIT`) and applies it when it lands. Nothing watches it: "Reload
 //!   Settings" reads it again, on a worker. Only a regular file up to [`MAX_BYTES`] is read,
 //!   without ever blocking on the open (`read_text`).
-//! - Errors never stop Arbor: each is reported with its line, everything valid applies, and the
+//! - Errors never stop Satchel: each is reported with its line, everything valid applies, and the
 //!   rest keeps its default. A line that doesn't parse as TOML is skipped and the rest re-read.
 //! - Keybindings: `[keys]` maps a command id to its chords, which replace the defaults (`[]`
 //!   unbinds; a list whose every chord is a typo keeps the defaults). A chord bound to two
@@ -27,7 +27,7 @@ use toml_edit::{Document, Item, TableLike};
 use crate::commands::{self, Cmd, Keymap};
 use crate::fs::{self, Sort, SortKey};
 
-/// What the settings file sets, beyond keys. Defaults are what Arbor does without one.
+/// What the settings file sets, beyond keys. Defaults are what Satchel does without one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     /// Show hidden files when a window opens.
@@ -82,7 +82,7 @@ impl Default for Config {
     }
 }
 
-const FOLDER: &str = if cfg!(any(target_os = "macos", windows)) { "Arbor" } else { "arbor" };
+const FOLDER: &str = if cfg!(any(target_os = "macos", windows)) { "Satchel" } else { "satchel" };
 
 /// Where the settings file lives (it may not exist).
 pub fn path() -> Option<PathBuf> {
@@ -152,7 +152,7 @@ impl Config {
     }
 }
 
-/// The largest settings file Arbor reads. The template is about 6 KB, and one binding every
+/// The largest settings file Satchel reads. The template is about 6 KB, and one binding every
 /// command many times over is still far under this; a bigger file is a mistake, and reading
 /// and parsing it would hold up startup or Reload.
 pub const MAX_BYTES: u64 = 1 << 20;
@@ -428,7 +428,7 @@ fn line_of(text: &str, byte: usize) -> usize {
 /// keys, all commented out, so it changes nothing until a line is uncommented.
 pub fn template() -> String {
     let s = String::from(
-        "# Arbor settings. Lines starting with # are comments: remove the # to use a line.\n\
+        "# Satchel settings. Lines starting with # are comments: remove the # to use a line.\n\
          # Changes apply when you run \"Reload Settings\" from the command palette, or at the next start.\n\
          \n\
          [general]\n\
@@ -440,11 +440,11 @@ pub fn template() -> String {
          # Reverse it. Without this line, size and the dates sort largest and newest first.\n\
          # sort_descending = false\n\
          # Keep folders above files, whatever the sort. \"Folders First\" in the command palette\n\
-         # turns it off or on in a window until Arbor quits.\n\
+         # turns it off or on in a window until Satchel quits.\n\
          # folders_first = true\n\
          \n\
          # The folder to open when none is given on the command line. Empty: the current folder,\n\
-         # or your home folder when Arbor is started from the desktop.\n\
+         # or your home folder when Satchel is started from the desktop.\n\
          # start_folder = \"~\"\n\
          \n\
          # Sidebar places, replacing the automatic list. Empty: the automatic list.\n\
@@ -627,7 +627,7 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-cfg-io-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-cfg-io-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn missing_or_empty_file_gives_defaults() {
-        let dir = std::env::temp_dir().join(format!("arbor-cfg-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("satchel-cfg-{}", std::process::id()));
         let c = Config::read(&dir.join("nope.toml"));
         assert!(c.errors.is_empty());
         assert_eq!(c.settings, Settings::default());
@@ -802,7 +802,7 @@ mod tests {
             println!("{name}, {} bytes: {:.1} µs", text.len(), t.elapsed().as_secs_f64() * 1e6 / n as f64);
         }
         let t = std::time::Instant::now();
-        let _ = Config::read(Path::new("/nonexistent/arbor/config.toml"));
+        let _ = Config::read(Path::new("/nonexistent/satchel/config.toml"));
         println!("no file: {:.1} µs", t.elapsed().as_secs_f64() * 1e6);
     }
 
@@ -973,6 +973,6 @@ mod tests {
     #[test]
     fn path_follows_the_platform() {
         let p = path().unwrap();
-        assert!(p.ends_with(if cfg!(any(target_os = "macos", windows)) { "Arbor/config.toml" } else { "arbor/config.toml" }));
+        assert!(p.ends_with(if cfg!(any(target_os = "macos", windows)) { "Satchel/config.toml" } else { "satchel/config.toml" }));
     }
 }

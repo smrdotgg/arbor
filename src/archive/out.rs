@@ -3,7 +3,7 @@
 //! `O_NOFOLLOW` (`dirfd.rs`), and files are created in it with `O_CREAT | O_EXCL | O_NOFOLLOW`:
 //! a link in the way, whoever made it, is refused, never followed. A name the archive has twice
 //! (or twice to a disk that ignores case) gets a free one ("name 2.txt"). On Windows the same by
-//! path: `CREATE_NEW` fails on anything at the name, links included, and Arbor makes no links
+//! path: `CREATE_NEW` fails on anything at the name, links included, and Satchel makes no links
 //! there.
 //!
 //! Everything made is recorded ([`Out::made`]) as the handle that made it knows it, for the
@@ -368,7 +368,7 @@ mod imp {
             Err(Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, format!("every free name for “{name}” was taken"))))
         }
 
-        /// Arbor makes no links on Windows (`plan` leaves them out); never called there.
+        /// Satchel makes no links on Windows (`plan` leaves them out); never called there.
         pub fn link(&mut self, _rel: &[String], _target: &str, _mtime: Option<SystemTime>) -> Result<bool, Error> {
             Err(Error::Unsupported("links aren't made on Windows".into()))
         }

@@ -971,7 +971,7 @@ mod tests {
     /// d/{a/{b/{c/{deep.txt}, x.txt}, x.txt, y.txt}, other/{o.txt}, top.txt}: two `x.txt`s in
     /// two columns.
     fn tree(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-cols-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-cols-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("a/b/c")).unwrap();
         std::fs::create_dir_all(d.join("other")).unwrap();

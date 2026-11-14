@@ -110,7 +110,7 @@ fn a_file_uri_never_hides_a_separator_a_nul_or_a_fragment() {
 }
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-incoming-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-incoming-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("sub")).unwrap();
     std::fs::write(d.join("a.txt"), "a").unwrap();
@@ -210,13 +210,13 @@ fn a_window_in_use_keeps_its_tab() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// The review's case: Make, in the running Arbor, starts serving the name at once (it used
-/// to wait for the next launch, so the next request started a second Arbor), and Restore
-/// lets it go (the second Arbor used to keep it, taking requests after Restore). On a
+/// The review's case: Make, in the running Satchel, starts serving the name at once (it used
+/// to wait for the next launch, so the next request started a second Satchel), and Restore
+/// lets it go (the second Satchel used to keep it, taking requests after Restore). On a
 /// private bus; skipped where there's no `dbus-daemon`.
 #[cfg(all(unix, not(target_os = "macos")))]
 #[test]
-fn the_name_follows_make_and_restore_in_the_running_arbor() {
+fn the_name_follows_make_and_restore_in_the_running_satchel() {
     use std::io::BufRead;
     use std::sync::atomic::{AtomicBool, Ordering};
     let Ok(mut daemon) = std::process::Command::new("dbus-daemon")
@@ -265,7 +265,7 @@ fn the_name_follows_make_and_restore_in_the_running_arbor() {
             }
             false
         };
-        assert!(wait_for(false).await, "not Arbor's: not served");
+        assert!(wait_for(false).await, "not Satchel's: not served");
         OURS.store(true, Ordering::SeqCst); // Make wrote the activation file
         tx.send(()).unwrap();
         assert!(wait_for(true).await, "served at once after Make");

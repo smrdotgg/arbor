@@ -1,6 +1,6 @@
 # Benchmarks
 
-Arbor against the speed budgets in [`NORTHSTAR.md`](NORTHSTAR.md). Newest first. To reproduce:
+Satchel against the speed budgets in [`NORTHSTAR.md`](NORTHSTAR.md). Newest first. To reproduce:
 
 ```sh
 scripts/bench.sh 11 10                         # 11 cold starts, 10 rounds each (opens windows: leave the machine alone)
@@ -15,14 +15,14 @@ scripts/bench.sh 1 12 --jump 5 --pace 120 --gap 1000   # the same, paced as a pe
 scripts/bench.sh 1 10 --window 4               # plus 4 cold starts opening a new window on the 10k folder 10 times each
 scripts/bench.sh 11 10 --all-columns           # the same with every list column shown (Extension, Date Created, Permissions)
 scripts/bench.sh 1 2 --idle 3                  # 3 starts left idle in each view, and 3 with two windows: CPU over 5 s, fails above 0.05 s
-cargo test --release -- --ignored --nocapture search_speed   # walk speed by thread count (vendor/, or ARBOR_SEARCH_TREE)
+cargo test --release -- --ignored --nocapture search_speed   # walk speed by thread count (vendor/, or SATCHEL_SEARCH_TREE)
 xvfb-run -a scripts/bench.sh 11 10             # Linux without a display
 cargo test --release -- --ignored --nocapture list_10k   # read + sort only, no window
 ```
 
 Each run cold-starts the release build on a fresh 10,000-entry folder (250 folders, 9,750 files),
-then 10 times leaves it, comes back and presses ↓, then quits (`ARBOR_BENCH`, see
-`src/timing.rs`). The first run is reported on its own (below). A run counts only if Arbor exits
+then 10 times leaves it, comes back and presses ↓, then quits (`SATCHEL_BENCH`, see
+`src/timing.rs`). The first run is reported on its own (below). A run counts only if Satchel exits
 cleanly and logs its first frame and exactly 10 listings and 10 key presses; otherwise the bench
 says INVALID and exits non-zero.
 
@@ -48,7 +48,7 @@ alternating launches after a warm-up):
 | | this branch (CI run 43431394415) | 119.0 ms (min 114.5) | 66.1 | | **41.7** / 4.9 | GPU (`gpu_drew_at` 51.0) |
 
 Windows: the window is on screen with its CPU-drawn first frame 32.6 ms after `main` (≈ 42 ms
-from process creation), 5.6× sooner than before; Arbor is ~17 ms over a bare Rune window, about
+from process creation), 5.6× sooner than before; Satchel is ~17 ms over a bare Rune window, about
 its first frame's `update`. Linux on real hardware loses 18 ms (not lavapipe's 130): the
 renderer is ready before the first frame (`gpu_drew_at` 51 < window 66), and the extra time is
 the first frame's `update`, 7.7 → 41.7 ms.
@@ -60,12 +60,12 @@ outlines (Classic rasterised on the CPU, mostly cached across launches by Rune);
 fallback lookup 7.3 ms (`text.fallback.*`: old Rune did its font discovery before `setup`, now
 on the first glyph Inter lacks; the folder marker `▸` is one, but swapping it alone saved
 ~1 ms, as the lookup still ran); text shaping 9.5 ms for 81 texts (overlapping the lookup).
-Arbor's own share is small: 40 more rows cost ~4 ms (23 → 27 ms). The shader isn't compiled
+Satchel's own share is small: 40 more rows cost ~4 ms (23 → 27 ms). The shader isn't compiled
 inside the frame. On the Windows laptop the same `launch-marks` totals will say how the 17.7 ms
 splits (not in this run's results).
 
 The new Rune draws a Windows window's first frame on the CPU and shows it before the GPU exists
-(#689), picks the adapter from DXGI's list (#625) and loads FXC only to compile (#631). Arbor
+(#689), picks the adapter from DXGI's list (#625) and loads FXC only to compile (#631). Satchel
 now starts no GPU work on Windows (`src/gpu.rs`); Linux keeps `warm_gpu`.
 
 **GitHub's Windows runner** ("Cold start (Windows)" run 43425593497, bd9260e; 4 vCPU EPYC 7763,
@@ -91,7 +91,7 @@ creation: the window is on screen with its content then; the frame report the to
 at comes ~25 ms later, after the window's activation), then the GPU: its thread starts at ~72,
 device ~96 (160 cold), ready ~120, its first frame ~140, and the hand-over at ~800 (WARP draws
 slowly; the CPU frames stay live meanwhile). `warm_gpu` beside the CPU frame costs rune-hello
-7 ms on this VM, so Arbor doesn't call it on Windows. `gpu_probe rune`: Rune's instance 6 ms,
+7 ms on this VM, so Satchel doesn't call it on Windows. `gpu_probe rune`: Rune's instance 6 ms,
 `try_new` (DXGI pick and device) 14 ms (85 cold), the precompiled renderer 25 ms; with the old
 adapter hold, 13 + 0.2 + 2 ms: the same on a runner with one adapter, and on a two-GPU laptop it
 would wake the second GPU for nothing. The owner's laptop: coldstart-probes-3-windows (below).
@@ -105,7 +105,7 @@ launches in a 2-entry folder, spawn → first frame):
 | this branch | **225.0 ms** | 32.6 | 33.0 | 199.2 | 23.1 ms |
 | rune-hello | 225.0 ms | | | | |
 
-**A regression on Linux, all Rune's** (rune-hello matches Arbor): renderers off macOS now start
+**A regression on Linux, all Rune's** (rune-hello matches Satchel): renderers off macOS now start
 with the larger Windfoil uber shader, which Linux compiles from WGSL at every launch
 (`gpu_probe rune`: `Renderer::new` 50 → 161 ms, three alternations); the window waits for it
 (`gpu.begin` 36 → `renderer.begin` 202 ms). The first `update` grew by 20 ms, 7.5 of them a
@@ -115,11 +115,11 @@ worst case, not measured on hardware. The 10k bench (`bench 7 10`, alternating t
 108–112 → 241–243 ms; listing visible 42–44 → 42–43 ms; key → frame 6.6–6.8 → 7.2 ms. Idle
 (`bench 1 2 --idle 3`): 0.00–0.01 s per 5 s in every view, both windows.
 
-The options inside Arbor, measured the same way (review of 4ff226a; RUNE-GAPS.md): Rune's
+The options inside Satchel, measured the same way (review of 4ff226a; RUNE-GAPS.md): Rune's
 Classic shader on the same device 47 ms against Windfoil's 162 (`gpu_probe rune`, now with
 `rune_renderer_classic`), but nothing lets an app choose it; naga's WGSL → SPIR-V 5.2 ms of the
 162 (3.7 for Classic); Mesa's shader cache fresh, warm or disabled 161–165 ms; `warm_gpu` saves
-8 ms (rune-hello 227.0 → 219.0 ms, Arbor 226.4 ms, 15 alternating launches each); the CPU-first
+8 ms (rune-hello 227.0 → 219.0 ms, Satchel 226.4 ms, 15 alternating launches each); the CPU-first
 window is Windows-only.
 
 ## 2026-11-13, cold start on the owner's laptop, round 3: the adapter hold (`perf/fast-start` 4dcc24d)
@@ -134,7 +134,7 @@ session, process creation → first frame:
 | 2nd–7th | 376–420 ms, **median ≈ 411 ms** | 8.6–10.6 | 21–25 | 251–268 (≈ 255) | 328–368 (≈ 330) | 328–376 (≈ 365) | ≈ 383 | ≈ 15 | ≈ 3 |
 
 So: **1,280 ms (alpha.4/.5) → 655 ms (LF checkout + `warm_gpu`) → 411 ms (adapter hold)**.
-Where the 411 ms goes now: before `main` ~10 ms; Arbor's listing of the DX12 adapters (a D3D12
+Where the 411 ms goes now: before `main` ~10 ms; Satchel's listing of the DX12 adapters (a D3D12
 device on the NVIDIA, the AMD and Microsoft's software adapter) until ~255 ms; Rune's own DX12
 check and pick, now getting those devices back, its device and renderer until ~330 ms; the window
 (created at `setup` + a few ms, waiting on the GPU) ~365 ms; ~18 ms until the first frame starts
@@ -176,7 +176,7 @@ What it says: the line-ending fix took ~620 ms off (FXC 933 ms → DXBC 3 ms, co
 the driver builds its own copy). What's left is Rune listing the adapters twice: listing makes a
 D3D12 device on every adapter (254 ms), Rune's check drops them, and its pick lists again
 (`try_new` 293 ms against 51 ms for the device). A D3D12 device is a singleton per adapter and
-process ("list again, the first list still held": 2 ms), so Arbor now lists once itself and holds
+process ("list again, the first list still held": 2 ms), so Satchel now lists once itself and holds
 the list until the first frame (`src/gpu.rs`): Rune's listings get the live devices back. On the
 runner (`gpu_probe rune-held`, three alternations) Rune's instance step went 22 → 1 ms and
 `try_new` 6.5 → 2 ms after a 13 ms listing; on this laptop it took 655 → 411 ms (round 3,
@@ -188,7 +188,7 @@ above). Vulkan wouldn't help: its instance alone is
 **The owner's laptop** (AMD Radeon integrated + NVIDIA GeForce RTX 3070 Laptop GPU, the NVIDIA
 driving the primary display; coldstart-probe-1, a620e33, v0.1.0-alpha.4's startup), process
 creation → first frame, medians after the first launch: win32-hello 28.3 ms, rune-hello
-1,104 ms, **Arbor 1,090 ms**. Arbor's splits: before `main` 8.4 ms, `init` at 6.4 ms (0.4 ms
+1,104 ms, **Satchel 1,090 ms**. Satchel's splits: before `main` 8.4 ms, `init` at 6.4 ms (0.4 ms
 long), `setup` at 17.6 ms, **native window at 1,061.6 ms**, first frame `update` 13.2 ms,
 `encode` 3.9 ms. Rune drew with DX12 on the NVIDIA. So ~1,040 ms is Rune's window, adapter,
 device, renderer and surface.
@@ -196,7 +196,7 @@ device, renderer and surface.
 **Why, mostly:** every Windows build so far checked Rune out with CRLF line endings (Git for
 Windows' and the GitHub runner's `core.autocrlf true`; Rune has no `.gitattributes`). Rune loads
 its precompiled DXBC uber shader only when the WGSL it embeds hashes as committed, so it never
-did: every launch compiled the shader with FXC (the released arbor.exe embeds the WGSL with
+did: every launch compiled the shader with FXC (the released satchel.exe embeds the WGSL with
 CRLF). Fixed: CI checks out with `core.autocrlf false`, and `build.rs` refuses a Windows build
 from a CRLF Rune checkout (RUNE-GAPS.md).
 
@@ -215,7 +215,7 @@ Windows runner (WARP, software; cold run, then again):
 Plain wgpu DX12 (FXC): instance 7 ms, listing the adapters 12–14 ms (0.6–0.9 ms again), device
 1 ms, renderer 15–22 ms with the DXBC and 585–589 ms compiling. Vulkan: no adapter on the runner.
 
-Arbor, process creation → first frame, 15 alternating launches on the runner:
+Satchel, process creation → first frame, 15 alternating launches on the runner:
 
 | Build | Total | Before `main` | `setup` at | GPU ready (`gpu_drew_at`) | Window at | `update` | `encode` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -223,7 +223,7 @@ Arbor, process creation → first frame, 15 alternating launches on the runner:
 | **aca448c** (LF checkout + `warm_gpu`) | **110.4 ms** | 10.2 | 31.9 | 55–58 | 73.3 | 13.0 | 13.5 |
 
 rune-hello (LF, no warm-up): 329 ms → its device starts at 94 ms, window 115 ms, first draw
-130 ms. On the runner what's left for Arbor is: before `main` 10 ms, Rune's event loop and fonts
+130 ms. On the runner what's left for Satchel is: before `main` 10 ms, Rune's event loop and fonts
 to `setup` 32 ms, the warm-up thread's GPU (55 ms on WARP) and the window (73 ms), then a first
 frame whose `update` is 13 ms on Windows against 3 ms on Linux for the same folder size (Rune's
 DirectWrite text path on its first use, most likely) and whose `encode` is software rasterising.
@@ -235,13 +235,13 @@ The budget is now under 30 ms on Windows and Linux; the owner's v0.1.0-alpha.4 t
 second on a Windows gaming laptop. **Not met on either platform yet**; most of what's left is in
 Rune (RUNE-GAPS.md, "Cold start on Windows and Linux").
 
-New measurement: `ARBOR_TIMING_FILE=<path>` (a release build on Windows has no console) with
-`ARBOR_EXIT_AFTER_FIRST_FRAME=1`, a total from the process's creation (`GetProcessTimes`, so the
+New measurement: `SATCHEL_TIMING_FILE=<path>` (a release build on Windows has no console) with
+`SATCHEL_EXIT_AFTER_FIRST_FRAME=1`, a total from the process's creation (`GetProcessTimes`, so the
 loader counts) and finer splits; two probes to compare against, `examples/win32_hello.rs` (bare
-Win32 + GDI, the floor) and `examples/rune_hello.rs` (one Rune text view, Arbor's features and
+Win32 + GDI, the floor) and `examples/rune_hello.rs` (one Rune text view, Satchel's features and
 `dist` profile). The pre-release `coldstart-probe-1` has all three, MSVC `dist` builds of
 a620e33 (v0.1.0-alpha.4's startup); `scripts/coldstart-probe.ps1` runs them (for the owner's
-laptop: `irm https://raw.githubusercontent.com/smrdotgg/arbor/coldstart-probe-1/scripts/coldstart-probe.ps1 | iex`),
+laptop: `irm https://raw.githubusercontent.com/smrdotgg/satchel/coldstart-probe-1/scripts/coldstart-probe.ps1 | iex`),
 and `scripts/coldstart-ab.ps1` compares builds. The "Cold start (Windows)" workflow runs both on
 every push to a `perf/` branch.
 
@@ -253,9 +253,9 @@ the launches after the first (the first of a new exe is Windows Defender's scan,
 | --- | --- | --- |
 | win32-hello | 32.5 ms | 32.7 ms |
 | rune-hello | 889 ms | 886 ms |
-| arbor | 678 ms | 683 ms |
+| satchel | 678 ms | 683 ms |
 
-Where Arbor's time goes there (a620e33, medians): process creation → `main` 11.7 ms (loading the
+Where Satchel's time goes there (a620e33, medians): process creation → `main` 11.7 ms (loading the
 24 MB exe and its 32 imported DLLs; win32-hello imports 12); `main` → Rune runs `init` 3.8 ms
 (event loop); `init` 0.4 ms; → Rune runs `setup` 29 ms (Rune's font discovery, about 25 ms);
 → native window created ~610 ms (window, GPU adapter probing, device, renderer, surface: WARP);
@@ -304,7 +304,7 @@ window: hundreds of ms, the likely cause of the owner's second. Waiting on the o
 
 Compress and Extract Here of a 1 GB folder of mixed files (21,620 files: 300 MB of Rust source
 in 1,500 files, 200 MB of it in 20,000 small files, 300 MB of photos stored as they are, 200 MB
-of incompressible binaries under unknown names; `ARBOR_BENCH_TREE=… cargo test --release
+of incompressible binaries under unknown names; `SATCHEL_BENCH_TREE=… cargo test --release
 archive_throughput -- --ignored --nocapture`), release build on tabot-dev (Xeon 8375C, 4 vCPU,
 NVMe), folder and archive in the page cache. The load average was 6–11 from other work, so
 wall-clock times swung 2–3× between identical runs; CPU time on the worker's thread is the
@@ -406,8 +406,8 @@ register its handle.
 
 `bench 2 10 --window 4 --idle 1` (⌘N on the 10k folder to the new window's first frame showing
 it, 40 windows): **90.7 ms median, 111.9 ms p95: over the 50 ms listing budget here**, with the
-listing in the window's first frame 40 of 40 times. The time is the native window, not Arbor:
-`ARBOR_TIMING`'s `window-up` line splits it, and over 10 windows each ⌘N's handler took
+listing in the window's first frame 40 of 40 times. The time is the native window, not Satchel:
+`SATCHEL_TIMING`'s `window-up` line splits it, and over 10 windows each ⌘N's handler took
 0.08–0.40 ms (`made_ms`; it was 8.2 ms while it waited a frame for the read, which a 10k folder
 misses, so it no longer waits), Rune ran the window's `setup` 13–22 ms after ⌘N, and the first
 frame (with the list built, `update_ms` 10–19) came at 78–156 ms. A window on a folder of two
@@ -465,7 +465,7 @@ other builds (load average 4–7), so every number below is noisier than usual.
 | Listing visible (10k, nav → frame) | 50.7, 52.4 ms | 53.1, 48.9 ms |
 | Key → frame (synthetic ↓) | 8.4, 8.5 ms | 8.7, 8.6 ms |
 
-`frame_cost` (Arbor's own work per key, no GPU), the two test binaries alternating: medians
+`frame_cost` (Satchel's own work per key, no GPU), the two test binaries alternating: medians
 1.944, 1.968, 1.948 ms before and 1.980, 1.956, 1.949 ms after. No difference beyond noise.
 The release binary: 40,091,344 bytes before, 40,190,136 after (+0.25%).
 
@@ -484,8 +484,8 @@ moved listings on screen, to the key's. After review (the numbers before it were
 | Columns: ↓ and ↑ onto a folder, read (key → frame) | 100 ×3 | 8.0, 8.0, 8.3 ms | 12.9, 12.3, 12.8 ms | 50 ms (under) |
 
 Three passes after rebasing on 9e4f168 (load 2–3). The list's ↓ was 8.5, 8.3 and 8.9 ms in the
-same passes: lavapipe's encode is 4–6 ms of every frame here, and Arbor's own update for ← and
-→ is 2.2 and 4.1 ms (`ARBOR_TIMING`). `--idle`: list, icons, tiles and columns each 0.00 s of
+same passes: lavapipe's encode is 4–6 ms of every frame here, and Satchel's own update for ← and
+→ is 2.2 and 4.1 ms (`SATCHEL_TIMING`). `--idle`: list, icons, tiles and columns each 0.00 s of
 CPU in 5 s. Tiles paging
 is in line with the icon view's (milestone 16: 6.2 ms on a quiet machine, when the list's ↓ was
 6.2 too).
@@ -501,7 +501,7 @@ is in line with the icon view's (milestone 16: 6.2 ms on a quiet machine, when t
 
 After the second review, on the Mac (MacBook Pro, M4 Pro; headless over ssh, CPU only, no
 GPU: `cargo test --release -- --ignored --nocapture --test-threads=1 column_cost frame_cost`),
-which keeps Arbor's own cost apart from tabot-dev's lavapipe and its load (16 at times):
+which keeps Satchel's own cost apart from tabot-dev's lavapipe and its load (16 at times):
 
 | Measure (median, p95) | 1k entries | 10k | 30k |
 | --- | --- | --- | --- |
@@ -517,7 +517,7 @@ its minimums are as flat (← about 2 ms, → about 3.5 ms at every size, at loa
 What changed: each column is one element, keyed by its number, whether it's the active column
 or another, and a listing moves between a column and the folder with its rows and their
 version, so Rune doesn't build a new list or key its 10k rows (it did both on every move, 0.5 ms
-per 1,000 entries), and Arbor neither copies, sorts nor filters them again. The bench also lets
+per 1,000 entries), and Satchel neither copies, sorts nor filters them again. The bench also lets
 a column's read land, in a frame of its own, before the next key: otherwise → paid for drawing
 the 10k folder read by the ↑ before it for the first time (12.9 ms of update instead of 4.1).
 The bench's folder is the columns' sidebar place: under the disk's root, `/tmp` (60,594 entries
@@ -557,7 +557,7 @@ Page Down and ↓):
 | 1,000 photos: As Icons → first thumbnail | 4 | 52.7 ms | 56.3 ms |
 | 1,000 photos: As Icons → the screen's 30 thumbnails | 4 | 364.9 ms | 394.7 ms |
 
-Over budget here, and why it doesn't carry over: with `ARBOR_TIMING`, the keys while thumbnails
+Over budget here, and why it doesn't carry over: with `SATCHEL_TIMING`, the keys while thumbnails
 decode split into about 5 ms of update and 6 ms of encode. The encode is lavapipe rasterising the
 frame and uploading the new thumbnails in software; the update is the view and layout competing
 for this machine's 4 vCPUs with two decoding threads and lavapipe's own. The workers now run
@@ -594,7 +594,7 @@ spread is wide:
 | Key → frame (synthetic ↓) | 19.6, 17.4, 14.5 ms | 12.1, 16.9, 16.3 ms |
 | Tab switch to 10k (key → frame) | 93.0, 99.0, 100.2 ms | 100.2, 99.3, 102.0 ms |
 
-`frame_cost` (Arbor's own work per key, no GPU), the two test binaries alternating: medians
+`frame_cost` (Satchel's own work per key, no GPU), the two test binaries alternating: medians
 1.816, 1.830, 1.844, 1.901 ms before and 1.861, 1.833, 1.866, 1.867 ms after (one pass of
 each ran at 3.0 ms while the load spiked, and is left out). No difference beyond noise.
 
@@ -619,7 +619,7 @@ passes each (load average 0.6–2.8):
 | Preview 12 MP JPEG (Space → frame) | 111.2, 113.3, 110.7 ms | 111.3, 110.3, 112.9 ms |
 | Key → frame, preview open | 4.9, 5.1, 5.1 ms | 5.3, 5.1, 5.4 ms |
 
-`frame_cost` (Arbor's own work per key, no GPU), the two test binaries alternating: medians
+`frame_cost` (Satchel's own work per key, no GPU), the two test binaries alternating: medians
 1.789, 1.833, 1.825 ms before and 1.817, 1.812, 1.813 ms after. No difference beyond noise.
 
 The stripped `dist` binary: 26,915,384 bytes before, 26,914,488 after (−0.003%).
@@ -633,7 +633,7 @@ scroll container and the Locations rows; on every key, `sync_info` (a `None` che
 Info is closed) and a drag handler on each row built. Open With and Get Info cost nothing until
 opened.
 
-### Arbor's own work per key, without the GPU (`frame_cost`, tabot-dev)
+### Satchel's own work per key, without the GPU (`frame_cost`, tabot-dev)
 
 Both test binaries kept and alternated (`test-base` from 820f79c, `test-new` this commit,
 `--ignored --nocapture frame_cost`), five passes each. The machine was busy (load average
@@ -669,7 +669,7 @@ Get Info on `/usr` (118,628 items, 3.0 GB, one file system) under Xvfb: the coun
 ("7,041 items · 414 MB so far…" 120 ms after ⌘I) and had finished by the second shot 8 s later on the busy machine,
 matching `find /usr -xdev | wc -l` and `du -sb --apparent-size /usr` exactly.
 
-## 2026-11-09, milestone 11 (accessibility, go-to completion, redo, one Arbor on Windows)
+## 2026-11-09, milestone 11 (accessibility, go-to completion, redo, one Satchel on Windows)
 
 What could cost time on every key: the roles, states and names the view now gives assistive
 technology (a role and a selected flag per row, `a11y_hidden` on decoration, a few dozen short
@@ -678,7 +678,7 @@ its active descendant (one string a frame). Rune builds the accessibility tree o
 client asks (`nothing_is_built_until_a_client_asks`), so none of the tree is built here.
 Completion and redo cost nothing until used.
 
-### Arbor's own work per key, without the GPU (`frame_cost`, tabot-dev)
+### Satchel's own work per key, without the GPU (`frame_cost`, tabot-dev)
 
 `cargo test --release -- --ignored --nocapture frame_cost`: a headless runtime on a
 10,000-entry folder, 1,200 keys (↓, and ↑ now and then), each timed from the key to the
@@ -691,7 +691,7 @@ runs each:
 | 41fed24 | 1.736, 1.768, 1.739 | 1.880, 1.886, 1.908 |
 | this | 1.784, 1.790, 1.780, 1.808, 1.814, 1.813, 1.787 | 1.881, 2.194, 1.950, 1.884, 1.897, 1.916, 1.881 |
 
-About 0.04–0.05 ms more a key (2–3% of Arbor's own work, 0.6% of the 8 ms budget). Taking the
+About 0.04–0.05 ms more a key (2–3% of Satchel's own work, 0.6% of the 8 ms budget). Taking the
 rows' accessibility attributes out recovered about 0.02 ms of it (1.773–1.798 ms), and the list's
 focus and key handler nothing measurable; the rest is the chrome's labels and Rune's handling of
 the extra properties. Rune can't build labels lazily (RUNE-GAPS.md), so this is what being
@@ -712,12 +712,12 @@ difference between builds:
 
 No change shows through the noise at the median; the headless numbers above are the
 measurement. Cold start does no new work (Windows' single-instance check runs only with a
-folder on the command line, and costs one failed pipe open when no Arbor is running).
+folder on the command line, and costs one failed pipe open when no Satchel is running).
 
 ## 2026-11-09, milestone 10 (packages, the folder default, requests from other apps)
 
 What could cost start-up time: on Linux a thread started in `main` that reads one file (whether
-Arbor's D-Bus activation file is there) and ends; on macOS an Apple-event handler installed when
+Satchel's D-Bus activation file is there) and ends; on macOS an Apple-event handler installed when
 AppKit finishes launching; `rune::set_app_id`. The previous commit (c04e467) and this one,
 alternated, `xvfb-run target/release/examples/bench 11 10 --bin …`, two passes each:
 
@@ -729,7 +729,7 @@ alternated, `xvfb-run target/release/examples/bench 11 10 --bin …`, two passes
 | Listing visible (10k, nav → frame) | 40.0 / 45.7 ms | 39.8 / 44.5 ms | 39.7 / 46.0 ms | 40.8 / 45.2 ms |
 | Key → frame (synthetic ↓) | 6.2 / 6.8 ms | 6.2 / 6.9 ms | 6.2 / 6.7 ms | 6.2 / 6.8 ms |
 
-No change beyond noise. When Arbor is started by D-Bus activation, the bus thread takes the name
+No change beyond noise. When Satchel is started by D-Bus activation, the bus thread takes the name
 before the window opens, so the request lands with the first listings (the activating call
 returned in 7 ms under Xvfb).
 
@@ -745,14 +745,14 @@ Spawn → first frame submitted, back-to-back, 20 launches after a warm-up, disp
 | App | Median / p95 |
 | --- | --- |
 | Bare AppKit + Metal (NSWindow, CAMetalLayer, one clear pass) | 125.5 / 126.8 ms |
-| Bare Rune (one empty element; Arbor's prewarm, chrome and inactive open) | 126.4 / 131.8 ms |
-| **Arbor** (10k folder, 110df34) | **132.6 / 147.5 ms** |
+| Bare Rune (one empty element; Satchel's prewarm, chrome and inactive open) | 126.4 / 131.8 ms |
+| **Satchel** (10k folder, 110df34) | **132.6 / 147.5 ms** |
 
-NORTHSTAR's macOS budget is "within 25 ms of a bare native window": Arbor is **+7 ms**, so it's
+NORTHSTAR's macOS budget is "within 25 ms of a bare native window": Satchel is **+7 ms**, so it's
 **met**. macOS itself takes ~87 ms before `applicationDidFinishLaunching` and ~32 ms more to make
-and show a window, even bare. Rune adds ~1 ms; Arbor ~6 ms, nearly all its first view build
+and show a window, even bare. Rune adds ~1 ms; Satchel ~6 ms, nearly all its first view build
 (`update_ms` 5.3). A second of idle between launches adds ~45 ms to every app alike (AppKit
-175, Rune 168, Arbor 168 ms), so never compare a paced pass with a back-to-back one.
+175, Rune 168, Satchel 168 ms), so never compare a paced pass with a back-to-back one.
 
 An earlier 145.5 ms run that evening was noise, not a regression: four commits alternated (bench
 `11 1`, four passes each) gave pass medians spread 7 ms within each build and means of 138.3
@@ -775,7 +775,7 @@ the preview ~17 ms later). At human typing pace the cooled numbers are the real 
 
 On the Mac, 45% of a Jump frame with a fresh query was Rune's head truncation, which shapes each
 long path about 8 times (RUNE-GAPS.md): keys took 6.3–8.6 ms of `update_ms` hot and 14–19 ms
-cooled, against 1.1–1.7 ms for short paths. Arbor now cuts paths to whole trailing folders that
+cooled, against 1.1–1.7 ms for short paths. Satchel now cuts paths to whole trailing folders that
 fit before Rune sees them. On tabot-dev (Xvfb; CPU-bound `update_ms`, 12 rounds × 2 keys, fresh
 query each round, 5,000 folders all ~100+ characters, alternating, 2 runs each):
 
@@ -847,8 +847,8 @@ after the selection moves.
 The review measured 15–16 ms a key typing in Batch Rename over 10,000 items here: update 5.3 ms,
 encode 10.9 ms. `encode_ms` is Rune's CPU time from the end of the update to submission
 (uploads, prepare, draw); under lavapipe it includes rasterizing in software what the frame
-changes, so it follows how much of the window a key changes, not Arbor's work. Taken apart with
-the same driver (`ARBOR_BENCH=12 ARBOR_BENCH_RENAME=1`, 12 rounds, the three typing keys of
+changes, so it follows how much of the window a key changes, not Satchel's work. Taken apart with
+the same driver (`SATCHEL_BENCH=12 SATCHEL_BENCH_RENAME=1`, 12 rounds, the three typing keys of
 each), one change at a time, load 2–3:
 
 | Build | Encode, typing keys (median) |
@@ -888,8 +888,8 @@ Busy: load average 5.3–6.4 (other agents on its 4 cores). Order: before, after
 
 Cold start read 4–7 ms slower after in both passes, so it was checked twice more. Six more
 alternations (11 cold starts each, load 3.5–4.0): after 148.4, 149.0, 145.1 ms; before 140.7,
-143.0, 145.1 ms (median). Then `ARBOR_TIMING`'s own breakdown, six alternating pairs on a 10,000-
-file folder: `main` → first frame 146.2 ms after against 146.7 ms before (medians), with Arbor's
+143.0, 145.1 ms (median). Then `SATCHEL_TIMING`'s own breakdown, six alternating pairs on a 10,000-
+file folder: `main` → first frame 146.2 ms after against 146.7 ms before (medians), with Satchel's
 own share the same in both (`init_ms` 0.1–1.2 ms, first view build `update_ms` 8.9–9.5 ms; the
 rest is Rune and the window before `init`). Nothing in this milestone runs in that window beyond
 the keymap's 16 µs, so the bench's gap is taken as the machine's load, not a regression; to be
@@ -980,7 +980,7 @@ No regression beyond noise: the second six passes are 0.5 ms apart on average, a
 between the twelve passes' means is well inside either build's own spread (7 ms before, 3 ms
 after). Nothing of regex-lite or the dialog runs at startup.
 
-The previews over 10,000 names land a frame or two after the key, here. `ARBOR_TIMING` splits
+The previews over 10,000 names land a frame or two after the key, here. `SATCHEL_TIMING` splits
 them: a key typed in the dialog takes 4–5 ms of update (the view with its visible preview rows;
 the handler itself is under 0.1 ms plus the wait below), and lavapipe's encoding of the frame is
 0.2 ms, or 12–24 ms on frames whose preview rows change (new glyphs, drawn on the CPU). Up to
@@ -1024,7 +1024,7 @@ stop a decode partway, so a WebP you've moved on from still decodes to the end o
 thread (one at a time; a newer request replaces any waiting one; the result is dropped). The
 65,535-pixel side cap and the bitstream checks stay.
 
-`ARBOR_WEBP_DIR=… cargo test --release -- --ignored --nocapture webp_decode_speed` on 4000 × 3000
+`SATCHEL_WEBP_DIR=… cargo test --release -- --ignored --nocapture webp_decode_speed` on 4000 × 3000
 images made with Pillow 10.2 (libwebp), median of 5 whole decodes, which is the work that goes on
 after a cancel. Two passes on a busy tabot-dev (load average 4–5: other agents compiling on its 4
 cores) and one on a quiet one (load 1.0). Peak RSS: the whole preview path (decode, then shrink to
@@ -1146,7 +1146,7 @@ Load average 1.5–2.3. Order: before, after, after, before. Warm cache (no root
 | **Key → frame while results stream** | — | **9.1 / 14.9, 9.3 / 14.2 ms** (330 and 336 keys) |
 
 No regression in cold start, listing or keys. Keys while results stream are over the 8 ms
-budget on lavapipe. Split with `ARBOR_TIMING`: the update (Arbor's work: taking the batch,
+budget on lavapipe. Split with `SATCHEL_TIMING`: the update (Satchel's work: taking the batch,
 the view, layout) is 2–3 ms against about 1.6 ms for a ↓ without a search, and the rest is
 lavapipe encoding the frame on the CPU (6–9 ms), on a 4-core machine whose cores the four
 walking threads are also using. On a real GPU encoding is under a millisecond (0.7 ms for a
@@ -1215,7 +1215,7 @@ more alternating pairs of 21 cold starts once the machine was quieter (load 1.6)
 6.4–6.7 ms for both. No regression.
 
 Jump on lavapipe is over the 8 ms key budget, and it's the drawing: with the machine idle,
-`ARBOR_TIMING` splits a key typed in Jump into about 2.2 ms of update (the handler ranking 5,000
+`SATCHEL_TIMING` splits a key typed in Jump into about 2.2 ms of update (the handler ranking 5,000
 folders, about 1 ms, plus the view, layout and paint) and about 8 ms of lavapipe encoding the
 frame, against 1.6 and 4.9 ms for a ↓ without the box. The extra encoding is the overlay card
 (its large soft shadow, drawn on the CPU here); the command palette's card costs the same. On a
@@ -1365,7 +1365,7 @@ No change beyond noise: on the Mac `State::new` starts 65–80 ms after `main`, 
 10k folder is read (about 18 ms), so the wait never runs and the listing always makes the first
 frame. Cold start still misses its 100 ms budget, for the reasons below (Rune's launch path).
 
-With a 2 s artificial first read (`ARBOR_TIMING=1 ARBOR_SLOW_FIRST_READ_MS=2000`, Linux): first
+With a 2 s artificial first read (`SATCHEL_TIMING=1 SATCHEL_SLOW_FIRST_READ_MS=2000`, Linux): first
 frame at 119.6 ms (`init_ms` 8.1, the bounded wait) and the listing at 2012 ms. Before, the
 window waited the full 2 s. A FIFO as the settings file no longer holds up the window either
 (120 ms first frame).
@@ -1411,7 +1411,7 @@ No change beyond noise. What the new code costs, measured directly
 | Rank every command for a query | 24 µs | each palette frame, only while it's open |
 | Read the settings file: none / the template / every command bound | 23 / 26 / 161 µs | once, on the startup thread, alongside the platform's launch |
 
-Opening the palette in a real window (`ARBOR_TIMING=1`, XTest key under Xvfb): 9.7 ms to the
+Opening the palette in a real window (`SATCHEL_TIMING=1`, XTest key under Xvfb): 9.7 ms to the
 frame the first time (2.6 ms building the view, 7.0 ms encoding on the CPU renderer), 7.4 ms
 after (1.2 ms view). Only the rows in view are built. On lavapipe, encoding dominates every
 frame (a plain ↓ is 6.4 ms), so this says little about a real GPU; the Mac should be measured
@@ -1449,20 +1449,20 @@ Xvfb with Mesa lavapipe (software Vulkan). **Not representative**: drawing runs 
 
 ### Why cold start fails
 
-On the Mac, `ARBOR_TIMING=1` splits the 139 ms:
+On the Mac, `SATCHEL_TIMING=1` splits the 139 ms:
 
 | Part | Time | Whose |
 | --- | --- | --- |
 | spawn → `main` (exec, dyld) | ~15 ms | OS |
 | `main` → `State::new` starts | 65–80 ms | Rune event loop and AppKit launch (GPU prewarm runs alongside) |
-| `State::new` | 0.2 ms | Arbor (the folder was already read on a thread started in `main`) |
-| window, Metal surface, first frame | ~40 ms | Rune; Arbor's view build is 2–4 ms of it (`update_ms`) |
+| `State::new` | 0.2 ms | Satchel (the folder was already read on a thread started in `main`) |
+| window, Metal surface, first frame | ~40 ms | Rune; Satchel's view build is 2–4 ms of it (`update_ms`) |
 
-A one-entry folder takes as long as the 10k one, and Arbor's own work in the path is about 3 ms.
+A one-entry folder takes as long as the 10k one, and Satchel's own work in the path is about 3 ms.
 Before this milestone the 10k folder was read synchronously in `State::new` (20 ms, after AppKit's
 launch). It's now read on a thread started at the top of `main`, alongside `rune::prewarm_gpu()`,
 which saved about 20 ms on big folders. The rest is Rune's launch path and can't be fixed in
-Arbor. Logged in RUNE-GAPS.md with a suggested Rune change. Launched as a bare binary over ssh;
+Satchel. Logged in RUNE-GAPS.md with a suggested Rune change. Launched as a bare binary over ssh;
 a `.app` bundle launched from Finder may differ.
 
 ### Notes
@@ -1473,5 +1473,5 @@ a `.app` bundle launched from Finder may differ.
   (NORTHSTAR milestone 3) will need a faster read. On macOS, `getattrlistbulk` returns names,
   types, sizes and dates for a whole folder in a few calls instead of 10,000 `lstat`s.
 - **Key → frame** is synthetic: it starts when the handler is called, so it leaves out the OS
-  input queue. With `ARBOR_TIMING=1`, real key presses are timed from the OS event's own
+  input queue. With `SATCHEL_TIMING=1`, real key presses are timed from the OS event's own
   timestamp (macOS) for anyone who wants to check by hand.

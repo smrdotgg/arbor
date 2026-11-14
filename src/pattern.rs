@@ -1,4 +1,4 @@
-//! Glob patterns, for Select by Pattern (names) and `jump.exclude` (paths). No regex: Arbor
+//! Glob patterns, for Select by Pattern (names) and `jump.exclude` (paths). No regex: Satchel
 //! adds no crate for it, and globs cover what selecting files needs.
 //!
 //! - `*` any run of characters, `?` one character, `[abc]`, `[a-z]` and `[!abc]` (or `[^abc]`)

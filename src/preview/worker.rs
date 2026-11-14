@@ -35,7 +35,7 @@ impl Worker {
         let shared =
             Arc::new(Shared { slots: Mutex::new(Slots { waker, ..Slots::default() }), wake: Condvar::new(), bell: Arc::default() });
         let s = shared.clone();
-        std::thread::Builder::new().name("arbor-preview".into()).spawn(move || s.run()).expect("can't start the preview thread");
+        std::thread::Builder::new().name("satchel-preview".into()).spawn(move || s.run()).expect("can't start the preview thread");
         Worker { shared }
     }
 

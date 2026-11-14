@@ -61,7 +61,7 @@ pub struct Tiles {
 
 enum Asked {
     Waiting(Arc<AtomicBool>),
-    /// Decoded to nothing (not an image Arbor reads, too large, no OS thumbnail): its type icon
+    /// Decoded to nothing (not an image Satchel reads, too large, no OS thumbnail): its type icon
     /// stays, and it isn't asked again while it's on screen.
     Nothing,
 }
@@ -99,7 +99,7 @@ pub(crate) struct Job {
     grid: u64,
     name: OsString,
     pub path: PathBuf,
-    /// Through the OS's thumbnailer rather than Arbor's decoders.
+    /// Through the OS's thumbnailer rather than Satchel's decoders.
     os: bool,
     fit: u32,
     stop: Arc<AtomicBool>,
@@ -204,7 +204,7 @@ impl Pool {
         for (n, bell) in shared.bells.iter().enumerate() {
             let (s, bell) = (shared.clone(), bell.clone());
             std::thread::Builder::new()
-                .name(format!("arbor-thumb-{n}"))
+                .name(format!("satchel-thumb-{n}"))
                 .spawn(move || {
                     // Below the window's priority (CPU and disk), as the search's walkers: a
                     // busy machine slows the thumbnails, not the keys.
@@ -236,10 +236,10 @@ impl Pool {
     }
 }
 
-/// Image formats Arbor's own decoders read (found by their bytes when decoded).
+/// Image formats Satchel's own decoders read (found by their bytes when decoded).
 const OWN: [&str; 7] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "jfif"];
 
-/// Whether `e` gets a thumbnail here: an image Arbor decodes, or on macOS and Windows anything
+/// Whether `e` gets a thumbnail here: an image Satchel decodes, or on macOS and Windows anything
 /// the OS's thumbnailer knows (documents, video, other image formats). By name; nothing read.
 pub(crate) fn wants(e: &Entry) -> Option<bool> {
     if e.is_dir || e.size == 0 {

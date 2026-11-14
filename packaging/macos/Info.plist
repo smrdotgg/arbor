@@ -1,22 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Arbor.app's Info.plist. scripts/package.sh fills in @VERSION@ from Cargo.toml. -->
+<!-- Satchel.app's Info.plist. scripts/package.sh fills in @VERSION@ from Cargo.toml. -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Arbor</string>
+	<string>Satchel</string>
 	<key>CFBundleExecutable</key>
-	<string>arbor</string>
+	<string>satchel</string>
 	<key>CFBundleIconFile</key>
-	<string>Arbor</string>
+	<string>Satchel</string>
 	<key>CFBundleIdentifier</key>
-	<string>gg.smr.arbor</string>
+	<string>gg.smr.satchel</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Arbor</string>
+	<string>Satchel</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -33,8 +33,8 @@
 	<string>MIT License</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
-	<!-- Folders: "Open With → Arbor" in Finder, and what "Make Arbor the Default for Folders"
-	     needs. Rank Alternate: installing Arbor never makes it the default by itself. -->
+	<!-- Folders: "Open With → Satchel" in Finder, and what "Make Satchel the Default for Folders"
+	     needs. Rank Alternate: installing Satchel never makes it the default by itself. -->
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

@@ -160,34 +160,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbor"
-version = "0.1.0"
-dependencies = [
- "block2 0.6.2",
- "crc32fast",
- "flate2",
- "gif",
- "image",
- "image-webp",
- "jpeg-decoder",
- "libc",
- "objc2 0.6.5",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-foundation 0.3.2",
- "objc2-quick-look-thumbnailing",
- "png",
- "regex-lite",
- "rune",
- "serde_json",
- "tokio",
- "toml_edit",
- "wgpu",
- "windows-sys 0.59.0",
- "zbus 6.1.0",
-]
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2627,6 +2599,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "satchel"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "crc32fast",
+ "flate2",
+ "gif",
+ "image",
+ "image-webp",
+ "jpeg-decoder",
+ "libc",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quick-look-thumbnailing",
+ "png",
+ "regex-lite",
+ "rune",
+ "serde_json",
+ "tokio",
+ "toml_edit",
+ "wgpu",
+ "windows-sys 0.59.0",
+ "zbus 6.1.0",
 ]
 
 [[package]]

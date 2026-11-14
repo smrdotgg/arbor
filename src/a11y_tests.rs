@@ -1,4 +1,4 @@
-//! What Arbor exposes to assistive technology (screen readers, Voice Control, automation):
+//! What Satchel exposes to assistive technology (screen readers, Voice Control, automation):
 //! the AccessKit tree Rune builds from the view, read from a headless runtime running the real
 //! view, keys and handlers. Each test prints an outline of the part it checks (role, key,
 //! name, states, ...; no bounds), which is the snapshot it compares.
@@ -26,7 +26,7 @@ fn init() -> State {
 }
 
 fn folder(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-a11y-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-a11y-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("Photos")).unwrap();
     std::fs::write(d.join("notes.txt"), "hello").unwrap();
@@ -40,7 +40,7 @@ fn runtime(d: &Path) -> Runtime<State> {
     let spec = AppSpec::<State> {
         poll: Some(|s, _, tx| s.poll(tx)),
         on_key: Some(|s, ev, tx| s.on_key(ev, tx)),
-        ..AppSpec::new("Arbor", (980.0, 620.0), init, crate::view::view)
+        ..AppSpec::new("Satchel", (980.0, 620.0), init, crate::view::view)
     };
     let mut rt = App::new(spec).headless_runtime((980.0, 620.0), Env::new(false, 1.0));
     rt.frame(0.0);
@@ -207,7 +207,7 @@ fn results_and_errors_are_announced() {
     let mut rt = runtime(&d);
     let mut link = AccessibilityLink::new();
     link.activate();
-    assert!(link.service(&mut rt, "Arbor").is_some_and(|u| u.tree.is_some()), "the whole tree on activation");
+    assert!(link.service(&mut rt, "Satchel").is_some_and(|u| u.tree.is_some()), "the whole tree on activation");
     // Trash notes.txt: "Moved 1 item to the Trash".
     rt.update(|s, _| {
         let i = s.cur().visible.iter().position(|&e| s.cur().entries[e as usize].name == "notes.txt").unwrap();
@@ -221,7 +221,7 @@ fn results_and_errors_are_announced() {
     assert_eq!(note["role"], "status");
     assert!(note["name"].as_str().is_some_and(|n| n.starts_with("Moved 1 item to the")), "{note}");
     assert!(states(note).contains(&"live-polite"));
-    let update = link.service(&mut rt, "Arbor").expect("the change is sent");
+    let update = link.service(&mut rt, "Satchel").expect("the change is sent");
     assert!(
         update.nodes.iter().any(|(_, n)| n.author_id() == Some("note") && n.live() == Some(rune::accesskit::Live::Polite)),
         "the note is in the update"
@@ -247,7 +247,7 @@ fn results_and_errors_are_announced() {
 }
 
 /// Until an assistive client asks, nothing is built: Rune builds the tree only on activation,
-/// and Arbor never forces it. A link nobody activated gets nothing, frame after frame.
+/// and Satchel never forces it. A link nobody activated gets nothing, frame after frame.
 #[test]
 fn nothing_is_built_until_a_client_asks() {
     let d = folder("lazy");
@@ -255,13 +255,13 @@ fn nothing_is_built_until_a_client_asks() {
     let mut link = AccessibilityLink::new();
     for _ in 0..3 {
         key(&mut rt, Key::Down, false);
-        assert!(link.service(&mut rt, "Arbor").is_none());
+        assert!(link.service(&mut rt, "Satchel").is_none());
     }
     link.activate();
-    assert!(link.service(&mut rt, "Arbor").is_some());
+    assert!(link.service(&mut rt, "Satchel").is_some());
     // Idle afterwards: nothing to send.
     rt.frame(0.0);
-    assert!(link.service(&mut rt, "Arbor").is_none(), "an idle frame sends nothing");
+    assert!(link.service(&mut rt, "Satchel").is_none(), "an idle frame sends nothing");
 }
 
 fn focused_key(tree: &Value) -> Option<String> {
@@ -695,7 +695,7 @@ fn shift_and_the_wheel_scroll_the_text_preview_sideways() {
 
 /// A folder of `n` files `f00`…, for drag-select.
 fn many(name: &str, n: usize) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-band-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-band-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     for i in 0..n {
@@ -1061,7 +1061,7 @@ fn a_rectangle_in_the_grid_selects_cells() {
 
 /// A folder of `n` "images" decoded by the test stand-in (`tiles::hook`).
 fn images(name: &str, n: usize) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-tiles-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-tiles-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     for i in 0..n {
@@ -1360,7 +1360,7 @@ fn an_idle_window_draws_nothing() {
 
 /// d/{Docs/{Work/{notes.md, plan.txt}, readme.txt}, Photos/, top.txt}.
 fn nested(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-a11y-cols-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-a11y-cols-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("Docs/Work")).unwrap();
     std::fs::create_dir_all(d.join("Photos")).unwrap();
@@ -2018,7 +2018,7 @@ fn every_drop_refuses_a_replaced_destination() {
 
 /// In the column view (one pane), a file dragged from one column onto a folder row in another
 /// moves into it, and one let go over another column's background moves into that column's
-/// folder: Arbor's own drag inside the window, as between split panes (the system's drag can't
+/// folder: Satchel's own drag inside the window, as between split panes (the system's drag can't
 /// land in the window it came from), checked like any drop.
 #[test]
 fn a_drag_between_columns_moves_the_file() {
@@ -2203,7 +2203,7 @@ fn two_idle_windows_draw_nothing() {
     let spec = AppSpec::<State> {
         poll: Some(|s, _, tx| s.poll(tx)),
         on_key: Some(|s, ev, tx| s.on_key(ev, tx)),
-        ..AppSpec::new("Arbor", (980.0, 620.0), init, crate::view::view)
+        ..AppSpec::new("Satchel", (980.0, 620.0), init, crate::view::view)
     };
     let mut b = App::new(spec).init(move || second).headless_runtime((980.0, 620.0), Env::new(false, 1.0));
     b.frame(0.0);
@@ -2264,7 +2264,7 @@ fn two_idle_windows_draw_nothing() {
 
 /// The list's header: a column header per shown column (a search's results add Folder), the
 /// edge before each a splitter whose value is its width (dragged to resize it), and a column
-/// shown from the palette joins them; the header's menu (Arbor's own on Linux) checks the
+/// shown from the palette joins them; the header's menu (Satchel's own on Linux) checks the
 /// shown columns and Folders First. The status bar says the selection's size and the free space.
 #[test]
 fn the_header_columns_menu_and_status_tree() {
@@ -2349,7 +2349,7 @@ fn the_header_columns_menu_and_status_tree() {
 }
 
 /// The header's menu from the keyboard: "Column Options…" (the palette) opens it just under the
-/// header, where the arrows and Enter work it like any menu (Arbor's own menu, where Rune has no
+/// header, where the arrows and Enter work it like any menu (Satchel's own menu, where Rune has no
 /// native one; elsewhere the system's, which the keyboard works the same way).
 #[test]
 fn column_options_opens_the_header_menu_from_the_keyboard() {

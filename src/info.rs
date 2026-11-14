@@ -665,7 +665,7 @@ impl State {
             let (out, stop, waker) = (shared.clone(), stop.clone(), self.waker.clone());
             WALKS.fetch_add(1, Relaxed);
             std::thread::Builder::new()
-                .name("arbor-info".into())
+                .name("satchel-info".into())
                 .spawn(move || {
                     let wake = || {
                         if let Some(w) = &waker {
@@ -708,7 +708,7 @@ mod tests {
     use crate::app::tests::{settle_all, state_in};
 
     fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-info-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-info-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

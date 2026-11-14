@@ -1,22 +1,22 @@
-//! Folders other apps ask Arbor to show, whether it's running or they launch it.
+//! Folders other apps ask Satchel to show, whether it's running or they launch it.
 //!
-//! - **Windows and Linux** pass a folder on the command line (`arbor.exe "%1"`, the
+//! - **Windows and Linux** pass a folder on the command line (`satchel.exe "%1"`, the
 //!   `.desktop` file's `%F`), which the first window opens (`app::start_dir`).
-//! - **Windows**: a second `arbor.exe <folder>` hands its folders to the running Arbor over a
+//! - **Windows**: a second `satchel.exe <folder>` hands its folders to the running Satchel over a
 //!   named pipe and exits before opening a window ([`windows`]); the running one opens each in
 //!   a new tab. A thread waits on the pipe (blocking, never polling).
 //! - **macOS** sends an "open documents" Apple event instead, to the running app or the one it
-//!   launched for it ("Open With → Arbor", `open -a Arbor dir`, Arbor as the default for
-//!   folders). Rune passes on only "open URL" events (RUNE-GAPS.md), so Arbor installs its own
+//!   launched for it ("Open With → Satchel", `open -a Satchel dir`, Satchel as the default for
+//!   folders). Rune passes on only "open URL" events (RUNE-GAPS.md), so Satchel installs its own
 //!   handler, when AppKit says it's about to finish launching ([`mac`]).
-//! - **Linux** also serves `org.freedesktop.FileManager1` on the session bus while Arbor is the
+//! - **Linux** also serves `org.freedesktop.FileManager1` on the session bus while Satchel is the
 //!   default for folders ([`linux`]), so "Show in folder" from browsers and other apps opens a
-//!   tab in the running Arbor, or the bus starts one through the activation file
-//!   `handler::linux` writes. It's served only while that file is Arbor's: opting out stops it.
+//!   tab in the running Satchel, or the bus starts one through the activation file
+//!   `handler::linux` writes. It's served only while that file is Satchel's: opting out stops it.
 //!
 //! A request becomes a tab ([`State::show_external`]): a folder opens in a new tab of the
 //! active pane, and items open in their folder, selected. The first one replaces the tab the
-//! window opened with while nobody has used it yet, so launching Arbor for a folder shows just
+//! window opened with while nobody has used it yet, so launching Satchel for a folder shows just
 //! that folder. No polling: the bus thread waits on its socket, and AppKit calls the handler.
 
 use std::ffi::OsString;
@@ -107,13 +107,13 @@ pub type Sink = std::sync::Arc<dyn Fn(Vec<Show>, Option<String>) + Send + Sync>;
 
 /// Starts listening for requests to the running app (see the module docs). On Windows a thread
 /// blocked on the pipe, a handler on macOS, and on Linux a thread that checks one file and ends
-/// unless Arbor is the default for folders.
+/// unless Satchel is the default for folders.
 pub fn listen() {
     let sink: Sink = std::sync::Arc::new(move |shows: Vec<Show>, token: Option<String>| {
         if shows.is_empty() {
             return;
         }
-        // No window open: Arbor is quitting, and the request goes with it.
+        // No window open: Satchel is quitting, and the request goes with it.
         let Some(handle) = crate::window::route(move |s, tx| {
             tx.instant();
             s.show_external(shows, tx);
@@ -179,11 +179,11 @@ pub(crate) mod linux;
 
 // ---- Windows --------------------------------------------------------------------------------
 
-/// One Arbor per user session on Windows: the first serves a named pipe; a later
-/// `arbor.exe <folder>` writes its folders to it and exits, and the first opens each in a tab.
+/// One Satchel per user session on Windows: the first serves a named pipe; a later
+/// `satchel.exe <folder>` writes its folders to it and exits, and the first opens each in a tab.
 /// Both ends block (the server on `ConnectNamedPipe`, which wakes when a client connects):
 /// nothing polls. The pipe takes only local clients, and its default security lets only this
-/// user (and administrators) write to it. Two Arbors started at the same instant may both
+/// user (and administrators) write to it. Two Satchels started at the same instant may both
 /// open windows (the second can't create the pipe, so it just runs on its own).
 #[cfg(windows)]
 pub(crate) mod windows;

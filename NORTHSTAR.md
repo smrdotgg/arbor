@@ -1,8 +1,8 @@
-# Arbor North Star
+# Satchel North Star
 
-> **Arbor: every action, instantly. Everything you need, nothing you didn't ask for.**
+> **Satchel: every action, instantly. Everything you need, nothing you didn't ask for.**
 
-Arbor is the fastest file manager on every computer, and the only one you need. It replaces Finder
+Satchel is the fastest file manager on every computer, and the only one you need. It replaces Finder
 and Explorer with one identical app on macOS, Windows and Linux. Anyone can use it on day one, and
 it has no ceiling for power users.
 
@@ -29,7 +29,7 @@ ceiling.**
 
 ## Hard rules
 
-These define Arbor. Breaking one requires an entry in the [Exceptions log](#exceptions-log) with
+These define Satchel. Breaking one requires an entry in the [Exceptions log](#exceptions-log) with
 the owner's explicit, dated sign-off. Assume no exception will be granted.
 
 ### No caching
@@ -86,7 +86,7 @@ confirmed as permanent before it runs.
 1. **Undoable by default.** Rename, move, copy, new folder and trash go on the undo stack.
 2. **Permanent means a confirmation.** Anything that can't be undone (permanent delete, emptying
    Trash, a volume with no trash) asks first and says plainly that it can't be undone. This is the
-   only kind of dialog Arbor shows.
+   only kind of dialog Satchel shows.
 3. **Undo refuses rather than guesses.** If the disk changed since the operation (the file was
    moved, edited or deleted, or the drive was ejected), undo stops and says why. It never
    overwrites to force itself through. A wrong undo is worse than no undo.
@@ -122,7 +122,7 @@ If plugins ever exist, they run out of process and can't touch the UI thread.
 
 | Status | Features |
 | --- | --- |
-| **Core** (defines Arbor) | Batch rename (regex, numbering, preview before apply) · Tabs · Split / dual pane · Quick preview (on demand, no cache) · Fuzzy jump (frecency) · Recursive search (live walk, no index, streaming) · Select by pattern |
+| **Core** (defines Satchel) | Batch rename (regex, numbering, preview before apply) · Tabs · Split / dual pane · Quick preview (on demand, no cache) · Fuzzy jump (frecency) · Recursive search (live walk, no index, streaming) · Select by pattern |
 | **Later** | Operation queue · Folder sizes · Archive browsing · Open terminal here · Folder compare / sync |
 | **Never, for now** | Tags (they don't exist the same way everywhere) · Plugins |
 

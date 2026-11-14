@@ -310,7 +310,7 @@ fn column_row(f: &Folder, col: &Column, i: usize, c: Ctx) -> El {
     }
 }
 
-/// A row's drags in a column other than the active one: Arbor's own in the window (onto another
+/// A row's drags in a column other than the active one: Satchel's own in the window (onto another
 /// column, a folder row, the sidebar, the other pane), which first makes the column active
 /// with the item selected, then drags as the active column's rows do. Never the system's:
 /// it can't land in the window it came from (RUNE-GAPS.md), and the columns are one window.

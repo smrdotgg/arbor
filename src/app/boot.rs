@@ -91,7 +91,7 @@ impl Booting {
     }
 }
 
-/// `ARBOR_SLOW_FIRST_READ_MS`, read by `timing::init` only when timing is on (otherwise 0 and
+/// `SATCHEL_SLOW_FIRST_READ_MS`, read by `timing::init` only when timing is on (otherwise 0 and
 /// never set): makes the first folder read that much slower, to check that a slow disk doesn't
 /// hold up the window.
 pub static SLOW_FIRST_READ_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -106,7 +106,7 @@ pub(super) fn places_for(s: &Settings) -> Vec<(String, PathBuf)> {
 /// app launch instead of following it.
 pub(super) static BOOT: std::sync::Mutex<Option<Booting>> = std::sync::Mutex::new(None);
 
-/// Starts reading the settings file and the folder Arbor opens in. Call first thing in `main`.
+/// Starts reading the settings file and the folder Satchel opens in. Call first thing in `main`.
 pub fn read_first_folder() {
     let boot = Booting::start();
     if let Ok(mut slot) = BOOT.lock() {

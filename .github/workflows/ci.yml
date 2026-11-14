@@ -76,7 +76,7 @@ jobs:
       # derives them from the test's name), beyond the few dozen every run has.
       - name: Selection model, 5,000 cases
         if: runner.os == 'Linux'
-        run: ARBOR_PROP_CASES=5000 cargo test --release --locked -- selection_matches_a_model
+        run: SATCHEL_PROP_CASES=5000 cargo test --release --locked -- selection_matches_a_model
 
       # The cold-start scripts put back the caller's timing variables (scripts/coldstart-ab.ps1,
       # scripts/coldstart-probe-2.ps1), checked with stand-in exes.
@@ -93,7 +93,7 @@ jobs:
         run: rustup target add x86_64-apple-darwin
 
       # The installable package for this platform (scripts/package.sh), from the stripped `dist`
-      # build: Arbor.app and its zip on macOS, the tarball on Linux, the zip on Windows. Every
+      # build: Satchel.app and its zip on macOS, the tarball on Linux, the zip on Windows. Every
       # run uploads it; a v* tag also publishes it as a GitHub Release (the release job).
       - name: Package
         run: scripts/package.sh
@@ -101,39 +101,39 @@ jobs:
       - name: Check the package (Linux)
         if: runner.os == 'Linux'
         run: |
-          t=$(mktemp -d) && tar -C "$t" -xzf dist/arbor-*-linux-*.tar.gz
-          env -i HOME="$t/home" PATH=/usr/bin:/bin sh "$t"/arbor-*/install.sh
-          test -x "$t/home/.local/bin/arbor"
-          grep -q "^Exec=$t/home/.local/bin/arbor %F$" "$t/home/.local/share/applications/arbor.desktop"
-          grep -q "^MimeType=inode/directory;$" "$t/home/.local/share/applications/arbor.desktop"
-          test -f "$t/home/.local/share/icons/hicolor/256x256/apps/arbor.png"
+          t=$(mktemp -d) && tar -C "$t" -xzf dist/satchel-*-linux-*.tar.gz
+          env -i HOME="$t/home" PATH=/usr/bin:/bin sh "$t"/satchel-*/install.sh
+          test -x "$t/home/.local/bin/satchel"
+          grep -q "^Exec=$t/home/.local/bin/satchel %F$" "$t/home/.local/share/applications/satchel.desktop"
+          grep -q "^MimeType=inode/directory;$" "$t/home/.local/share/applications/satchel.desktop"
+          test -f "$t/home/.local/share/icons/hicolor/256x256/apps/satchel.png"
           # Runs, without a window: nothing to restore in a fresh home.
-          env -i HOME="$t/home" PATH=/usr/bin:/bin "$t/home/.local/bin/arbor" --restore-folder-default
-          env -i HOME="$t/home" PATH=/usr/bin:/bin sh "$t"/arbor-*/uninstall.sh
-          test ! -e "$t/home/.local/bin/arbor"
+          env -i HOME="$t/home" PATH=/usr/bin:/bin "$t/home/.local/bin/satchel" --restore-folder-default
+          env -i HOME="$t/home" PATH=/usr/bin:/bin sh "$t"/satchel-*/uninstall.sh
+          test ! -e "$t/home/.local/bin/satchel"
 
       - name: Check the package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $v = (Get-Item target/dist/arbor.exe).VersionInfo
+          $v = (Get-Item target/dist/satchel.exe).VersionInfo
           $v | Format-List ProductName, FileDescription, FileVersion, ProductVersion, OriginalFilename
-          if ($v.ProductName -ne 'Arbor' -or -not $v.FileVersion) { throw 'arbor.exe has no version information' }
+          if ($v.ProductName -ne 'Satchel' -or -not $v.FileVersion) { throw 'satchel.exe has no version information' }
 
       - name: Check the package (macOS)
         if: runner.os == 'macOS'
         run: |
-          plutil -p dist/Arbor.app/Contents/Info.plist
-          codesign -dv dist/Arbor.app 2>&1 | grep -E "Identifier|Signature"
-          sips -g pixelWidth -g pixelHeight dist/Arbor.app/Contents/Resources/Arbor.icns
-          bin=dist/Arbor.app/Contents/MacOS/arbor
+          plutil -p dist/Satchel.app/Contents/Info.plist
+          codesign -dv dist/Satchel.app 2>&1 | grep -E "Identifier|Signature"
+          sips -g pixelWidth -g pixelHeight dist/Satchel.app/Contents/Resources/Satchel.icns
+          bin=dist/Satchel.app/Contents/MacOS/satchel
           # Both slices, each built for the Info.plist's LSMinimumSystemVersion.
           lipo -archs "$bin" && lipo "$bin" -verify_arch arm64 x86_64
-          min=$(plutil -extract LSMinimumSystemVersion raw dist/Arbor.app/Contents/Info.plist)
+          min=$(plutil -extract LSMinimumSystemVersion raw dist/Satchel.app/Contents/Info.plist)
           for a in arm64 x86_64; do
             vtool -arch "$a" -show-build "$bin" | tee /dev/stderr | grep -Eq "minos $min$"
           done
-          test "$("$bin" --version)" = "arbor $(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+          test "$("$bin" --version)" = "satchel $(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
           # The Intel slice, run under Rosetta (installed first if the runner lacks it).
           arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license || true
           if arch -x86_64 /usr/bin/true 2>/dev/null; then
@@ -141,11 +141,11 @@ jobs:
           else
             echo "::warning::No Rosetta on this runner: the Intel slice was built and checked, not run"
           fi
-          ls dist/Arbor-*-macos-universal.zip
+          ls dist/Satchel-*-macos-universal.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: arbor-${{ runner.os }}
+          name: satchel-${{ runner.os }}
           path: |
             dist/*.zip
             dist/*.tar.gz
@@ -161,7 +161,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: arbor-*
+          pattern: satchel-*
           path: dist
           merge-multiple: true
       - name: Publish
@@ -171,7 +171,7 @@ jobs:
           ls -l dist
           # A tag with a suffix (v0.1.0-alpha.1) is published as a pre-release.
           pre=(); [[ "$GITHUB_REF_NAME" == *-* ]] && pre=(--prerelease)
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Arbor ${GITHUB_REF_NAME#v}" --generate-notes "${pre[@]}"
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Satchel ${GITHUB_REF_NAME#v}" --generate-notes "${pre[@]}"
 
       # Numbers for the owner's decision on full Windows thumbnail generation, which can't be
       # cancelled (src/thumb.rs, UNCANCELLABLE_WINDOWS_THUMBNAILS): how long the shell takes for
@@ -191,4 +191,4 @@ jobs:
             ffmpeg -loglevel error -f lavfi -i testsrc2=duration=10:size=1920x1080:rate=30 -c:v libvpx-vp9 -deadline realtime "$dir/video-1080p-10s.webm"
           fi
           ls -l "$dir"
-          ARBOR_THUMB_DIR="$dir" cargo test --release --locked -- --ignored --nocapture os_thumbnail_speed
+          SATCHEL_THUMB_DIR="$dir" cargo test --release --locked -- --ignored --nocapture os_thumbnail_speed

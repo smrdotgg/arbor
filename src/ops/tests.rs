@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-ops-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-ops-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
     d
@@ -825,7 +825,7 @@ fn split_retry_that_cant_reach_the_rest_keeps_the_record() {
 // ---- cleaning up a failed or cancelled copy ----------------------------------------------
 
 /// A copy (and a move across disks, which copies first) is cancelled after another app
-/// replaced the second file it made. Cleanup removes the first file, which is still Arbor's,
+/// replaced the second file it made. Cleanup removes the first file, which is still Satchel's,
 /// keeps the replacement and the folder holding it, says so, and leaves the source alone.
 #[test]
 fn cancelled_copy_cleanup_keeps_what_another_app_replaced() {
@@ -864,7 +864,7 @@ fn cancelled_copy_cleanup_keeps_what_another_app_replaced() {
         assert_eq!(fs::read_to_string(&left[0]).unwrap(), "OTHER APP DATA");
         let name = left[0].file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
-        let want = format!("src: cancelled; kept “{name}” in “{}”: it changed after Arbor made it", d.join("into").join("src").display());
+        let want = format!("src: cancelled; kept “{name}” in “{}”: it changed after Satchel made it", d.join("into").join("src").display());
         assert_eq!(o.errors[0], want);
         for n in ["a", "b", "c"] {
             assert_eq!(fs::read_to_string(d.join("src").join(n)).unwrap(), n, "the source is untouched");
@@ -872,12 +872,12 @@ fn cancelled_copy_cleanup_keeps_what_another_app_replaced() {
     }
 }
 
-/// Another app moves a file aside and puts its own at the name while Arbor is still
+/// Another app moves a file aside and puts its own at the name while Satchel is still
 /// writing it (a copy stalls as long as its source does), then the copy is cancelled. The
-/// file Arbor made is known by the handle that wrote it, so cleanup leaves the other app's
+/// file Satchel made is known by the handle that wrote it, so cleanup leaves the other app's
 /// file alone and says so. With a move across disks, which copies first, the same.
 #[test]
-fn a_file_replaced_while_it_was_copied_is_never_taken_for_arbors() {
+fn a_file_replaced_while_it_was_copied_is_never_taken_for_satchels() {
     for cross_device in [false, true] {
         let d = tmp(&format!("replaced-mid-copy-{cross_device}"));
         fs::create_dir_all(d.join("src")).unwrap();
@@ -906,7 +906,7 @@ fn a_file_replaced_while_it_was_copied_is_never_taken_for_arbors() {
         let left: Vec<_> = fs::read_dir(d.join("into/src")).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(left.len(), 1, "{left:?}");
         assert_eq!(fs::read_to_string(d.join("into/src").join(&left[0])).unwrap(), "OTHER APP DATA", "never removed");
-        assert!(o.errors[0].contains("it changed after Arbor made it"), "and said: {:?}", o.errors);
+        assert!(o.errors[0].contains("it changed after Satchel made it"), "and said: {:?}", o.errors);
         for n in ["a", "b"] {
             assert_eq!(fs::read_to_string(d.join("src").join(n)).unwrap(), n, "the source is untouched");
         }
@@ -914,12 +914,12 @@ fn a_file_replaced_while_it_was_copied_is_never_taken_for_arbors() {
 }
 
 /// The reviewer's case, for real: the source is a FIFO, so the copy stalls inside the byte
-/// copy until something writes to it. Meanwhile another app moves Arbor's half-written file
-/// aside and puts its own at the name. The copy's record is of the file Arbor wrote, so
+/// copy until something writes to it. Meanwhile another app moves Satchel's half-written file
+/// aside and puts its own at the name. The copy's record is of the file Satchel wrote, so
 /// undo refuses instead of sending the other app's file to the Trash.
 #[cfg(unix)]
 #[test]
-fn a_file_replaced_during_a_stalled_copy_is_never_taken_for_arbors() {
+fn a_file_replaced_during_a_stalled_copy_is_never_taken_for_satchels() {
     use std::io::Write;
     let d = tmp("stalled-copy");
     let into = d.join("into");
@@ -946,9 +946,9 @@ fn a_file_replaced_during_a_stalled_copy_is_never_taken_for_arbors() {
     drop(writer);
     let o = worker.join().unwrap();
     assert_eq!(o.results, std::slice::from_ref(&dst), "{:?}", o.errors);
-    assert_eq!(fs::read_to_string(d.join("aside")).unwrap(), "gate", "what Arbor wrote went where the other app put it");
+    assert_eq!(fs::read_to_string(d.join("aside")).unwrap(), "gate", "what Satchel wrote went where the other app put it");
     let u = run_now(Op::Undo(o.undo.unwrap()));
-    assert!(u.refused.is_some(), "the file at the name isn't the one Arbor made");
+    assert!(u.refused.is_some(), "the file at the name isn't the one Satchel made");
     assert_eq!(fs::read_to_string(&dst).unwrap(), "OTHER APP DATA", "never trashed");
 }
 
@@ -1770,13 +1770,13 @@ fn windows_a_tunnelled_replacement_is_refused() {
 }
 
 /// The review's case, where identity is told by ctime alone (no birth time, no handle):
-/// Arbor's own change was taken for a replacement. Trashing (or deleting) two hard links to one
+/// Satchel's own change was taken for a replacement. Trashing (or deleting) two hard links to one
 /// file trashed the first and refused the second (the first's trash changed their shared
-/// ctime), and the next action on an item Arbor had just renamed, before its folder was read
+/// ctime), and the next action on an item Satchel had just renamed, before its folder was read
 /// again, was refused as "replaced". Another app's change is still refused.
 #[cfg(unix)]
 #[test]
-fn by_ctime_alone_arbors_own_changes_arent_replacements() {
+fn by_ctime_alone_satchels_own_changes_arent_replacements() {
     use super::{Checks, Chosen, reidentified};
     let d = tmp("ctime-own");
     let _p = crate::fs::pretend::without_birth_times(true);
@@ -1813,7 +1813,7 @@ fn by_ctime_alone_arbors_own_changes_arent_replacements() {
         expect: Checks::new(Chosen::Listing, vec![(d.join("g"), Some(row))]),
         op: Box::new(Op::Trash { sources: vec![d.join("g")] }),
     });
-    assert!(o.refused.is_none() && o.errors.is_empty(), "after Arbor's rename: {:?} {:?}", o.refused, o.errors);
+    assert!(o.refused.is_none() && o.errors.is_empty(), "after Satchel's rename: {:?} {:?}", o.refused, o.errors);
     assert!(!d.join("g").exists());
     // Another app's change to it (a chmod changes the ctime) is still refused.
     fs::write(d.join("h"), "x").unwrap();
@@ -1827,7 +1827,7 @@ fn by_ctime_alone_arbors_own_changes_arent_replacements() {
     let _ = fs::remove_dir_all(&d);
 }
 
-/// A file edited after its folder was listed (Arbor doesn't watch folders) is still the item
+/// A file edited after its folder was listed (Satchel doesn't watch folders) is still the item
 /// the user chose: delete, trash, move, rename and Put Back go ahead (identity is the object,
 /// not its contents), and so does Empty Trash. Undo still refuses once it's edited again: its
 /// fingerprint is the contents too.
@@ -2259,7 +2259,7 @@ mod links {
         let _ = fs::remove_dir_all(&d);
     }
 
-    /// Undo refuses, changing nothing, when a link isn't the one Arbor made: replaced by
+    /// Undo refuses, changing nothing, when a link isn't the one Satchel made: replaced by
     /// another link of the same name (elsewhere), by a file, or gone. Redo refuses when its
     /// name has been taken since.
     #[test]
@@ -2312,7 +2312,7 @@ mod links {
 
     /// The reviewer's case: the link copied with `cp -a`, removed, and the copy put back. The
     /// newcomer got the freed inode, and has the same size, modified time and target: the
-    /// fingerprint can't tell it from Arbor's link, but its birth time (or handle) can. Undo
+    /// fingerprint can't tell it from Satchel's link, but its birth time (or handle) can. Undo
     /// refuses and the newcomer stays.
     #[test]
     fn undo_never_removes_a_link_put_back_at_the_same_inode() {
@@ -2379,8 +2379,8 @@ mod links {
     }
 
     /// The reviewer's case, without a shim: a link put at the name at the instant of the
-    /// removal, after every check (another app swapping it then). Arbor's link was moved aside
-    /// before that instant, so what's removed is Arbor's own, and the newcomer stays.
+    /// removal, after every check (another app swapping it then). Satchel's link was moved aside
+    /// before that instant, so what's removed is Satchel's own, and the newcomer stays.
     #[test]
     fn a_link_swapped_in_at_the_instant_of_removal_stays() {
         let d = tmp("links-instant");
@@ -2437,13 +2437,13 @@ mod links {
         }));
         let o = run_hooked(Op::Undo(u), fake_trash, hooks);
         let e = o.errors.first().cloned().unwrap_or_default();
-        assert!(e.contains("couldn't go back to its name") && e.contains("now named “.arbor-"), "{e}");
+        assert!(e.contains("couldn't go back to its name") && e.contains("now named “.satchel-"), "{e}");
         assert_eq!(fs::read_to_string(d.join("a link.txt")).unwrap(), "took the name", "nothing replaced");
         let aside: Vec<PathBuf> = fs::read_dir(&d)
             .unwrap()
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(".arbor-"))
+            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(".satchel-"))
             .collect();
         assert_eq!(aside.len(), 1);
         assert_eq!(fs::read_link(&aside[0]).unwrap(), d.join("other.txt"), "the newcomer, kept whole");
@@ -2505,9 +2505,9 @@ fn windows_links_and_shortcuts() {
     let e = make_link_at(&d.join("taken.lnk"), &link, &mut |_, _| {}).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::AlreadyExists);
     assert_eq!(fs::read_to_string(d.join("taken.lnk")).unwrap(), "mine");
-    assert!(!fs::read_dir(&d).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".arbor-")), "no staging file left");
+    assert!(!fs::read_dir(&d).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".satchel-")), "no staging file left");
     // Its staging file is told of while it exists, and gone when it's in place (what the
-    // leftovers record names if Arbor quits mid-write).
+    // leftovers record names if Satchel quits mid-write).
     let mut told = Vec::new();
     make_link_at(&d.join("again.lnk"), &link, &mut |tmp, there| told.push((tmp.to_path_buf(), there, tmp.exists()))).unwrap();
     assert_eq!(told.len(), 2, "{told:?}");
@@ -2554,7 +2554,7 @@ fn new_file_and_folder_refuse_a_folder_made_again_at_its_freed_inode() {
 }
 
 /// New File's undo: a file put at its name since, even at the freed inode with the same size
-/// and modified time, isn't Arbor's (its birth time or handle says), and isn't trashed; nor is
+/// and modified time, isn't Satchel's (its birth time or handle says), and isn't trashed; nor is
 /// one put there right before the trash.
 #[cfg(unix)]
 #[test]
@@ -2586,7 +2586,7 @@ fn new_file_undo_never_trashes_a_replacement() {
 }
 
 /// Windows (CI): a link put at the name right before the removal (after undo's check) isn't
-/// the one Arbor made, by its file id through the held handle, and stays.
+/// the one Satchel made, by its file id through the held handle, and stays.
 #[cfg(windows)]
 #[test]
 fn windows_undo_leaves_a_replacement_link_alone() {
