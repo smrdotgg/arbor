@@ -947,8 +947,8 @@ _The project was called Arbor until 14 November 2026._
   family (since 2017), whose class 9 goods include plain "software", and a pending application
   (2026-10-08) for the plain word "Satchel" covering computer software in general. Sened and
   Copse, clear in all three registers, were offered instead. Everything named after the project
-  changes with it: the package and binary (`satchel`), the `SATCHEL_*` environment variables and the `satchel-timing` /
-  `satchel-drag` / `satchel:` log lines (and the scripts that read them), thread names, the macOS
+  changes with it: the package and binary (`satchel`), the `SATCHEL_*` environment variables
+  and the `satchel-timing` / `satchel-drag` / `satchel:` log lines (and the scripts that read them), thread names, the macOS
   bundle (`Satchel.app`, `gg.smr.satchel`), the Windows pipe, registry verb and version
   resources, the Linux desktop and app id (`satchel.desktop`, `set_app_id("satchel")`), the
   settings folder (`Satchel`, or `satchel` under XDG), the on-disk temporary names
