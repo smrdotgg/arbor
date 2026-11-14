@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Draws Satchel's icon: a pale tree glyph (a trunk, two branches, three round crowns) on a green
-rounded square. Pure Python (no PIL): every shape is a signed distance, sampled once per pixel
-with analytic anti-aliasing, at each size it's written at, so small sizes stay crisp.
+"""Draws Satchel's icon: a pale satchel glyph (a bag seen from the front: a body, a flap over its
+top with a clasp, and a handle) on a green rounded square. Pure Python (no PIL): every shape is a
+signed distance, sampled once per pixel with analytic anti-aliasing, at each size it's written
+at, so small sizes stay crisp.
 
     python3 scripts/icon.py                 # assets/icon/: satchel.svg, png/satchel-N.png, satchel.ico
     python3 scripts/icon.py --mac DIR       # DIR/icon_*.png for iconutil (scripts/package.sh)
@@ -20,18 +21,17 @@ TOP = (0x3A, 0x9D, 0x6A)
 BOTTOM = (0x1B, 0x5E, 0x3F)
 GLYPH = (0xF6, 0xF2, 0xE6)
 
-# The glyph, in the 1024 square of the full variant: capsules (x0, y0, x1, y1, width) and
-# circles (x, y, radius).
-STROKES = [
-    (512, 840, 512, 400, 92),  # trunk
-    (512, 640, 330, 470, 70),  # left branch
-    (512, 560, 694, 420, 70),  # right branch
-]
-CROWNS = [
-    (512, 300, 132),
-    (300, 430, 104),
-    (724, 380, 104),
-]
+# The glyph, in the 1024 square of the full variant. Boxes are (x0, y0, x1, y1, top corner
+# radius, bottom corner radius). The flap is a little wider than the body, and a groove of the
+# tile's green runs along its lower edge across the body; the clasp is a green ring over the
+# flap's edge, its middle the glyph's colour.
+HANDLE = (332, 196, 692, 430, 104, 104)  # drawn as an outline HANDLE_W wide
+HANDLE_W = 72
+BODY = (222, 380, 802, 836, 80, 92)
+FLAP = (192, 318, 832, 574, 92, 140)
+GROOVE_W = 44
+CLASP = (436, 518, 588, 644, 30, 30)  # drawn as a ring CLASP_W wide
+CLASP_W = 40
 
 
 def tile(variant):
@@ -46,33 +46,51 @@ def glyph_scale(variant):
 
 def sd_round_rect(x, y, inset, r):
     # Distance to a rounded square from inset to 1024 - inset.
-    cx = cy = 512
-    half = 512 - inset
-    qx = abs(x - cx) - (half - r)
-    qy = abs(y - cy) - (half - r)
-    outside = math.hypot(max(qx, 0.0), max(qy, 0.0))
-    inside = min(max(qx, qy), 0.0)
-    return outside + inside - r
+    return sd_box(x, y, (inset, inset, 1024 - inset, 1024 - inset, r, r))
 
 
-def sd_capsule(px, py, x0, y0, x1, y1, w):
-    dx, dy = x1 - x0, y1 - y0
-    t = ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)
-    t = 0.0 if t < 0 else 1.0 if t > 1 else t
-    return math.hypot(px - (x0 + t * dx), py - (y0 + t * dy)) - w / 2
+def sd_box(px, py, box):
+    """Distance to a box (x0, y0, x1, y1, top radius, bottom radius); negative inside."""
+    x0, y0, x1, y1, rt, rb = box
+    r = rt if py < (y0 + y1) / 2 else rb
+    qx = abs(px - (x0 + x1) / 2) - ((x1 - x0) / 2 - r)
+    qy = abs(py - (y0 + y1) / 2) - ((y1 - y0) / 2 - r)
+    return math.hypot(max(qx, 0.0), max(qy, 0.0)) + min(max(qx, qy), 0.0) - r
 
 
-def shapes(variant, boost):
-    """The glyph's shapes in 1024 units, scaled for the variant; `boost` thickens strokes at
-    small sizes so they don't vanish."""
+def shapes(variant, boost, solid_clasp=False):
+    """The glyph's boxes and line widths in 1024 units, scaled for the variant; `boost` thickens
+    the handle, the groove and the clasp at small sizes so they don't vanish, and `solid_clasp`
+    fills the clasp's ring in (at 16 px its middle would be a blur)."""
     k = glyph_scale(variant)
 
-    def at(v):
-        return 512 + (v - 512) * k
+    def box(b):
+        x0, y0, x1, y1, rt, rb = b
+        return (512 + (x0 - 512) * k, 512 + (y0 - 512) * k, 512 + (x1 - 512) * k, 512 + (y1 - 512) * k, rt * k, rb * k)
 
-    strokes = [(at(a), at(b), at(c), at(d), w * k * boost) for a, b, c, d, w in STROKES]
-    crowns = [(at(x), at(y), r * k) for x, y, r in CROWNS]
-    return strokes, crowns
+    return {
+        "handle": box(HANDLE),
+        "body": box(BODY),
+        "flap": box(FLAP),
+        "clasp": box(CLASP),
+        "handle_w": HANDLE_W * k * boost,
+        "groove_w": GROOVE_W * k * boost,
+        "clasp_w": CLASP_W * k * boost,
+        "solid_clasp": solid_clasp,
+    }
+
+
+def sd_glyph(x, y, g):
+    """Distance to the whole glyph: handle, flap and body together, less the groove below the
+    flap (on the body only, and not under the clasp) and the clasp's ring."""
+    flap = sd_box(x, y, g["flap"])
+    body = sd_box(x, y, g["body"])
+    clasp = sd_box(x, y, g["clasp"])
+    handle = abs(sd_box(x, y, g["handle"])) - g["handle_w"] / 2
+    d = min(handle, flap, body)
+    groove = max(-flap, flap - g["groove_w"], body, -(clasp - g["clasp_w"] / 2))
+    ring = (clasp if g["solid_clasp"] else abs(clasp)) - g["clasp_w"] / 2
+    return max(d, -groove, -ring)
 
 
 def render(size, variant):
@@ -80,7 +98,7 @@ def render(size, variant):
     inset, radius = tile(variant)
     unit = 1024 / size  # 1024 units per image, so a pixel is this many units
     boost = 1.0 if size >= 64 else 1.0 + (64 - size) / 64 * 0.45
-    strokes, crowns = shapes(variant, boost)
+    g = shapes(variant, boost, solid_clasp=size < 24)
     rows = []
     for j in range(size):
         y = (j + 0.5) * unit
@@ -95,12 +113,8 @@ def render(size, variant):
             if a_tile == 0.0:
                 row += b"\0\0\0\0"
                 continue
-            d = min(
-                min(sd_capsule(x, y, *s) for s in strokes),
-                min(math.hypot(x - cx, y - cy) - r for cx, cy, r in crowns),
-            )
-            g = min(max(0.5 - d / unit, 0.0), 1.0)
-            rgb = [round(bg[c] + (GLYPH[c] - bg[c]) * g) for c in range(3)]
+            a = min(max(0.5 - sd_glyph(x, y, g) / unit, 0.0), 1.0)
+            rgb = [round(bg[c] + (GLYPH[c] - bg[c]) * a) for c in range(3)]
             row += bytes(rgb + [round(255 * a_tile)])
         rows.append(bytes(row))
     return rows
@@ -128,24 +142,42 @@ def ico(images):
     return out + entries + data
 
 
+def svg_box(b, **attrs):
+    """A box as an SVG path: a rounded rectangle with its own top and bottom corner radii."""
+    x0, y0, x1, y1, rt, rb = b
+    d = (
+        f"M{x0 + rt:g},{y0:g} H{x1 - rt:g} A{rt:g},{rt:g} 0 0 1 {x1:g},{y0 + rt:g} "
+        f"V{y1 - rb:g} A{rb:g},{rb:g} 0 0 1 {x1 - rb:g},{y1:g} H{x0 + rb:g} "
+        f"A{rb:g},{rb:g} 0 0 1 {x0:g},{y1 - rb:g} V{y0 + rt:g} A{rt:g},{rt:g} 0 0 1 {x0 + rt:g},{y0:g} Z"
+    )
+    extra = "".join(f' {k.replace("_", "-")}="{v}"' for k, v in attrs.items())
+    return f'<path d="{d}"{extra}/>'
+
+
 def svg(variant="full"):
     inset, radius = tile(variant)
-    strokes, crowns = shapes(variant, 1.0)
+    g = shapes(variant, 1.0)
     side = 1024 - 2 * inset
+    glyph = f"#{GLYPH[0]:02x}{GLYPH[1]:02x}{GLYPH[2]:02x}"
+    # The groove and the clasp's ring are painted in the tile's gradient (in user space, so it
+    # lines up with the tile's): the flap's outline, twice the groove wide and clipped to the
+    # body, is covered on its inner half by the flap itself.
     lines = [
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">',
         "  <!-- Generated by scripts/icon.py; edit the geometry there. -->",
-        '  <defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">'
+        f'  <defs><linearGradient id="bg" gradientUnits="userSpaceOnUse" x1="0" y1="{inset}" x2="0" y2="{1024 - inset}">'
         f'<stop offset="0" stop-color="#{TOP[0]:02x}{TOP[1]:02x}{TOP[2]:02x}"/>'
-        f'<stop offset="1" stop-color="#{BOTTOM[0]:02x}{BOTTOM[1]:02x}{BOTTOM[2]:02x}"/></linearGradient></defs>',
+        f'<stop offset="1" stop-color="#{BOTTOM[0]:02x}{BOTTOM[1]:02x}{BOTTOM[2]:02x}"/></linearGradient>',
+        f'  <clipPath id="body">{svg_box(g["body"])}</clipPath></defs>',
         f'  <rect x="{inset}" y="{inset}" width="{side}" height="{side}" rx="{radius}" fill="url(#bg)"/>',
-        f'  <g fill="#{GLYPH[0]:02x}{GLYPH[1]:02x}{GLYPH[2]:02x}" stroke="#{GLYPH[0]:02x}{GLYPH[1]:02x}{GLYPH[2]:02x}" stroke-linecap="round">',
+        "  " + svg_box(g["handle"], fill="none", stroke=glyph, stroke_width=f'{g["handle_w"]:g}'),
+        "  " + svg_box(g["body"], fill=glyph),
+        "  " + svg_box(g["flap"], fill="none", stroke="url(#bg)", stroke_width=f'{2 * g["groove_w"]:g}', clip_path="url(#body)"),
+        "  " + svg_box(g["flap"], fill=glyph),
+        "  " + svg_box(g["clasp"], fill=glyph, stroke="url(#bg)", stroke_width=f'{g["clasp_w"]:g}'),
+        "</svg>",
+        "",
     ]
-    for x0, y0, x1, y1, w in strokes:
-        lines.append(f'    <line x1="{x0:g}" y1="{y0:g}" x2="{x1:g}" y2="{y1:g}" stroke-width="{w:g}"/>')
-    for cx, cy, r in crowns:
-        lines.append(f'    <circle cx="{cx:g}" cy="{cy:g}" r="{r:g}" stroke="none"/>')
-    lines += ["  </g>", "</svg>", ""]
     return "\n".join(lines)
 
 

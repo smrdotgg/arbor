@@ -166,7 +166,7 @@ macOS 11 (`MACOSX_DEPLOYMENT_TARGET`, matching the Info.plist's `LSMinimumSystem
 window. CI checks both slices and their minimum version, and, best effort when its runner has
 (or can install) Rosetta, runs the Intel slice's `--version` under it; without Rosetta it
 warns and the slice is only checked, not run. The icon is drawn by
-`scripts/icon.py` (an original tree glyph; pure Python) into `assets/icon/`, and
+`scripts/icon.py` (an original satchel glyph; pure Python) into `assets/icon/`, and
 `scripts/package.sh --icns` turns it into `Satchel.icns` on a Mac. On Windows, `build.rs` writes
 the icon and version information into a resource file the linker takes (no resource compiler,
 no extra crate). Release builds on Windows are windowed programs, so no console opens with them.

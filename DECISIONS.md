@@ -1299,8 +1299,9 @@ _The project was called Arbor until 14 November 2026._
 - **2026-11-09 · The icon** is an original tree glyph (trunk, two branches, three round crowns)
   on a green rounded square, drawn by `scripts/icon.py` with signed distances (no PIL), in
   Apple's icon grid for macOS. The Mac package is Apple silicon only (CI's runner); a universal
-  build is later. Undo: edit `STROKES`/`CROWNS` in the script and rerun it (and
-  `scripts/package.sh --icns` on a Mac).
+  build is later. Undo: edit the geometry in the script and rerun it (and
+  `scripts/package.sh --icns` on a Mac). Since 2026-11-14 the glyph is a satchel (the rename,
+  above).
 - **2026-11-09 · The dialog's action button is the accent colour, not red, for the folder-default
   commands**: red stays for what can't be undone. Undo: `confirm_view` in `src/view.rs`.
 - **2026-11-09 · `satchel --restore-folder-default`** restores without a window, for uninstall
