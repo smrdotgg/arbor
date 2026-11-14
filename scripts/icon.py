@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Draws Arbor's icon: a pale tree glyph (a trunk, two branches, three round crowns) on a green
+"""Draws Satchel's icon: a pale tree glyph (a trunk, two branches, three round crowns) on a green
 rounded square. Pure Python (no PIL): every shape is a signed distance, sampled once per pixel
 with analytic anti-aliasing, at each size it's written at, so small sizes stay crisp.
 
-    python3 scripts/icon.py                 # assets/icon/: arbor.svg, png/arbor-N.png, arbor.ico
+    python3 scripts/icon.py                 # assets/icon/: satchel.svg, png/satchel-N.png, satchel.ico
     python3 scripts/icon.py --mac DIR       # DIR/icon_*.png for iconutil (scripts/package.sh)
 
 The geometry is in a 1024-unit square. `full` fills the square (Windows, Linux); `mac` sits in
@@ -167,13 +167,13 @@ def main():
         return
     if len(sys.argv) != 1:
         sys.exit(__doc__)
-    write(os.path.join(root, "arbor.svg"), svg().encode())
+    write(os.path.join(root, "satchel.svg"), svg().encode())
     pngs = {}
     for n in (16, 24, 32, 48, 64, 128, 256, 512):
         pngs[n] = png(n, render(n, "full"))
-        write(os.path.join(root, "png", f"arbor-{n}.png"), pngs[n])
-    write(os.path.join(root, "arbor.ico"), ico([(n, pngs[n]) for n in (16, 24, 32, 48, 64, 128, 256)]))
-    write(os.path.join(root, "arbor-mac-1024.png"), png(1024, render(1024, "mac")))
+        write(os.path.join(root, "png", f"satchel-{n}.png"), pngs[n])
+    write(os.path.join(root, "satchel.ico"), ico([(n, pngs[n]) for n in (16, 24, 32, 48, 64, 128, 256)]))
+    write(os.path.join(root, "satchel-mac-1024.png"), png(1024, render(1024, "mac")))
 
 
 if __name__ == "__main__":

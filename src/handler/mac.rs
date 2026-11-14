@@ -1,7 +1,7 @@
 use super::{Backup, Change, remove_backup};
 use std::path::Path;
 
-pub const BUNDLE_ID: &str = "gg.smr.arbor";
+pub const BUNDLE_ID: &str = "gg.smr.satchel";
 pub const FINDER: &str = "com.apple.finder";
 pub const FOLDER_TYPE: &str = "public.folder";
 const BEFORE: &str = "public.folder viewer";
@@ -22,7 +22,7 @@ pub fn run(change: Change, ls: &mut dyn Handlers, bundle: Option<&str>, backup: 
     match change {
         Change::Make => {
             if bundle != Some(BUNDLE_ID) {
-                return Err("Only Arbor.app can be the default for folders: macOS asks the app bundle (this Arbor runs as a bare program). Open Arbor.app and run it there".into());
+                return Err("Only Satchel.app can be the default for folders: macOS asks the app bundle (this Satchel runs as a bare program). Open Satchel.app and run it there".into());
             }
             // The backup is on the disk before LaunchServices is changed.
             if Backup::require(Backup::read(backup)?, &[BEFORE.into()], backup)?.is_none() {
@@ -31,7 +31,7 @@ pub fn run(change: Change, ls: &mut dyn Handlers, bundle: Option<&str>, backup: 
                 b.write(backup)?;
             }
             ls.set(BUNDLE_ID)?;
-            Ok("Arbor is now the default for folders that apps open. Finder still opens the desktop, the Dock's folders and \"Show in Finder\" from other apps. Restore the System Default for Folders undoes it.".into())
+            Ok("Satchel is now the default for folders that apps open. Finder still opens the desktop, the Dock's folders and \"Show in Finder\" from other apps. Restore the System Default for Folders undoes it.".into())
         }
         Change::Restore => {
             let b = Backup::require(Backup::read(backup)?, &[BEFORE.into()], backup)?.unwrap_or_default();
@@ -53,7 +53,7 @@ pub fn run(change: Change, ls: &mut dyn Handlers, bundle: Option<&str>, backup: 
             if now.as_deref().is_some_and(|c| !c.eq_ignore_ascii_case(BUNDLE_ID)) {
                 remove_backup(backup)?;
                 return Ok(format!(
-                    "Arbor isn't the default for folders ({} is, set since), so nothing was changed",
+                    "Satchel isn't the default for folders ({} is, set since), so nothing was changed",
                     now.unwrap_or_default()
                 ));
             }

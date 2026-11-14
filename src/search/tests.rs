@@ -5,7 +5,7 @@ use crate::app::State;
 use crate::app::tests::{settle_all, state_in};
 
 fn tree(name: &str, files: &[&str]) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-search-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-search-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     for f in files {
@@ -169,7 +169,7 @@ fn unreadable_folders_are_skipped_and_counted() {
 
 #[test]
 fn an_unreadable_root_says_so() {
-    let d = std::env::temp_dir().join(format!("arbor-search-missing-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-search-missing-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     let (found, out) = walk_all(&d, "x", false, false, MAX_RESULTS);
     assert!(found.is_empty() && out.error.is_some());
@@ -640,13 +640,13 @@ fn a_split_or_new_tab_from_a_search_shows_the_folder() {
 }
 
 /// Time to the first result and to the end, by thread count, over `vendor/` (about 550 MB) or
-/// `ARBOR_SEARCH_TREE`. Warm cache (no root here to drop it), median of 7.
+/// `SATCHEL_SEARCH_TREE`. Warm cache (no root here to drop it), median of 7.
 /// `cargo test --release -- --ignored --nocapture search_speed`
 #[test]
 #[ignore = "benchmark: walks a large tree"]
 fn search_speed() {
     let root =
-        std::env::var_os("ARBOR_SEARCH_TREE").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor"), PathBuf::from);
+        std::env::var_os("SATCHEL_SEARCH_TREE").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor"), PathBuf::from);
     for query in ["mod.rs", "zzqx-none"] {
         for threads in [1, 2, 4] {
             let pool = Pool::new(threads);
@@ -943,7 +943,7 @@ pub(crate) fn replace(p: &Path) {
     }
 }
 
-/// The review's case: results of a folder read while Arbor renamed that folder arrive with the
+/// The review's case: results of a folder read while Satchel renamed that folder arrive with the
 /// old path; something is then made at the old path. Trashing that row must not trash the
 /// newcomer: each action on results checks the item is still the one the walk found.
 #[test]
@@ -1026,7 +1026,7 @@ fn every_action_on_a_result_whose_inode_was_reused_refuses() {
     });
 }
 
-/// A result edited after the walk found it (Arbor doesn't watch folders) is still the item the
+/// A result edited after the walk found it (Satchel doesn't watch folders) is still the item the
 /// search found: trash, cut and paste, F6, the inline rename, Batch Rename and Delete
 /// Permanently all go ahead, and a drag carries it.
 #[test]
@@ -1180,7 +1180,7 @@ fn every_action_refuses(name: &str, replace: fn(&Path)) {
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "SOMEONE ELSE'S FILE");
 }
 
-/// Results of a folder read while Arbor renamed it arrive after the rename, under the old path:
+/// Results of a folder read while Satchel renamed it arrive after the rename, under the old path:
 /// they're found by identity where the rename put them. A newcomer made at the old path
 /// afterwards is its own result, never mistaken for the moved one.
 #[test]

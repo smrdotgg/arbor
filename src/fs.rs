@@ -72,7 +72,7 @@ impl Entry {
 ///
 /// It's the object, not its contents: device and inode (Windows: creation time and whether
 /// it's a folder), type and birth time. Size and times of change aren't part of it, so a file
-/// edited after its folder was listed (Arbor doesn't watch folders) is still the item the user
+/// edited after its folder was listed (Satchel doesn't watch folders) is still the item the user
 /// chose. Whether an item is *unchanged* is another question, with its own type: undo, redo,
 /// batch rename and a cancelled copy's cleanup compare `ops::Print` (identity, type, size,
 /// mtime) and refuse on any edit.
@@ -192,7 +192,8 @@ impl Ident {
     }
 
     /// Whether it tells an item from a replacement by its ctime alone (no birth time, no
-    /// handle), so Arbor's own rename, move or trash of it (or of another name for it) changes it.
+    /// handle), so Satchel's own rename, move or trash of it (or of another name for it) changes
+    /// it.
     pub(crate) fn by_ctime(&self) -> bool {
         self.changed.is_some() && self.handle.is_none()
     }
@@ -439,7 +440,7 @@ fn reuse_inode_once(p: &Path, content: &str) -> Option<(Ident, bool)> {
 /// shown; says so when not (APFS and tmpfs don't).
 #[cfg(all(test, unix))]
 pub(crate) fn inode_reuse_shows(test: &str) -> bool {
-    let d = std::env::temp_dir().join(format!("arbor-reuse-probe-{test}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-reuse-probe-{test}-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&d);
     let p = d.join("probe");
     let shows = std::fs::write(&p, "probe").is_ok() && (0..5).any(|_| reuse_inode_once(&p, "again").is_some_and(|(_, r)| r));
@@ -1150,7 +1151,7 @@ const OPENERS: [(&str, &[&str]); 2] = [("xdg-open", &[]), ("gio", &["open", "--"
 pub const NO_OPENER: &str = "neither xdg-open nor gio is installed (xdg-utils or GLib provides one)";
 
 /// The openers on `path_var` (PATH's value), in [`OPENERS`]' order: an executable file in an
-/// absolute folder of it (a relative one, `.` say, would run whatever is where Arbor started).
+/// absolute folder of it (a relative one, `.` say, would run whatever is where Satchel started).
 #[cfg(all(unix, not(target_os = "macos")))]
 fn openers(path_var: Option<&std::ffi::OsStr>) -> Vec<(PathBuf, &'static [&'static str])> {
     use std::os::unix::fs::PermissionsExt;
@@ -1246,7 +1247,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn an_item_renamed_onto_a_freed_name_keeps_its_identity() {
-        let d = std::env::temp_dir().join(format!("arbor-tunnel-rename-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-tunnel-rename-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for n in ["a", "b"] {
@@ -1280,7 +1281,7 @@ mod tests {
     #[test]
     fn linux_opens_with_xdg_open_then_gio() {
         use std::os::unix::fs::PermissionsExt;
-        let d = std::env::temp_dir().join(format!("arbor-openers-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-openers-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let (a, b, none) = (d.join("a"), d.join("b"), d.join("none"));
         for x in [&a, &b, &none] {
@@ -1342,7 +1343,7 @@ mod tests {
     #[test]
     #[ignore = "benchmark: makes 10,000 files"]
     fn list_10k() {
-        let d = std::env::temp_dir().join(format!("arbor-list-10k-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-list-10k-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for i in 0..10_000 {
@@ -1410,7 +1411,7 @@ mod tests {
     #[test]
     fn windows_listing_with_file_ids_agrees_with_std() {
         use std::os::windows::fs::OpenOptionsExt;
-        let d = std::env::temp_dir().join(format!("arbor-win-dir-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-win-dir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("folder")).unwrap();
         std::fs::write(d.join("file.txt"), "12345").unwrap();
@@ -1516,7 +1517,7 @@ mod tests {
     /// item's own mode (a link's is the link's) and its birth time where the disk keeps one.
     #[test]
     fn the_listing_reads_creation_time_and_permissions() {
-        let d = std::env::temp_dir().join(format!("arbor-fs-extra-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-fs-extra-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("sub")).unwrap();
         std::fs::write(d.join("f.txt"), "x").unwrap();

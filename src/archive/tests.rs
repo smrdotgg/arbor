@@ -11,7 +11,7 @@ thread_local! {
 }
 
 pub(crate) fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-archive-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-archive-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
     d
@@ -187,7 +187,7 @@ fn bombs_are_refused_by_size() {
     assert!(plan("b.zip", &[file("a", 300 << 30)], Linux).is_ok());
     // Past the absolute cap; sizes that would overflow add up to it.
     let why = refused(plan("b.zip", &[file("a", limits::TOTAL + 1)], Linux));
-    assert!(why.contains("more than Arbor extracts"), "{why}");
+    assert!(why.contains("more than Satchel extracts"), "{why}");
     assert!(plan("b.zip", &[file("a", u64::MAX), file("b", u64::MAX)], Linux).is_err());
     // Too deep.
     let deep = "d/".repeat(limits::DEPTH + 1) + "f";
@@ -324,7 +324,7 @@ fn zip64_for_many_entries() {
     assert_eq!(l.entries[69_999].name, "d69999/");
 }
 
-/// A ZIP written byte by byte, for archives Arbor's writer would never make.
+/// A ZIP written byte by byte, for archives Satchel's writer would never make.
 pub(crate) struct Raw {
     data: Vec<u8>,
     cd: Vec<u8>,
@@ -439,7 +439,7 @@ fn zip_damage_is_an_error() {
 }
 
 #[test]
-fn zip_features_arbor_cant_read_are_named() {
+fn zip_features_satchel_cant_read_are_named() {
     let d = tmp("zip-unsup");
     let mut r = Raw::new();
     r.entry("secret.txt", 1, 0, 0, 3, 3, b"abc", None);

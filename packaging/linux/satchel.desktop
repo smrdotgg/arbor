@@ -1,14 +1,14 @@
 [Desktop Entry]
 Type=Application
-Name=Arbor
+Name=Satchel
 GenericName=File Manager
 Comment=Browse and manage files, fast
-Exec=arbor %F
-TryExec=arbor
-Icon=arbor
+Exec=satchel %F
+TryExec=satchel
+Icon=satchel
 Terminal=false
 StartupNotify=true
-StartupWMClass=arbor
+StartupWMClass=satchel
 Categories=System;FileTools;FileManager;Utility;
 Keywords=files;folders;file manager;explorer;finder;
 MimeType=inode/directory;

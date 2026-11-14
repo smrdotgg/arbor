@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Builds Arbor's package for the platform it runs on, into dist/:
+# Builds Satchel's package for the platform it runs on, into dist/:
 #
-#   macOS    dist/Arbor.app (ad-hoc signed) and dist/Arbor-<version>-macos-universal.zip: one
+#   macOS    dist/Satchel.app (ad-hoc signed) and dist/Satchel-<version>-macos-universal.zip: one
 #            binary with an Apple silicon and an Intel slice (lipo), both for macOS 11 or later
-#   Linux    dist/arbor-<version>-linux-<arch>.tar.gz: the binary, arbor.desktop, icons,
+#   Linux    dist/satchel-<version>-linux-<arch>.tar.gz: the binary, satchel.desktop, icons,
 #            install.sh and uninstall.sh (installs into ~/.local, no root)
-#   Windows  dist/arbor-<version>-windows-<arch>.zip: arbor.exe (icon and version info built
+#   Windows  dist/satchel-<version>-windows-<arch>.zip: satchel.exe (icon and version info built
 #            in by build.rs), README and LICENSE
 #
 #   scripts/package.sh                 # builds the `dist` profile first (stripped, LTO)
@@ -17,7 +17,7 @@
 #   rustup target add x86_64-apple-darwin    # on Apple silicon (aarch64-apple-darwin on Intel)
 # This Mac's slice is the usual build (target/$PROFILE); the other one is built with --target.
 #
-# The macOS icon (assets/icon/Arbor.icns) is committed; `scripts/package.sh --icns` makes it
+# The macOS icon (assets/icon/Satchel.icns) is committed; `scripts/package.sh --icns` makes it
 # again from scripts/icon.py with iconutil (macOS only).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -28,11 +28,11 @@ arch=$(uname -m)
 case "$arch" in arm64 | aarch64) arch=arm64 ;; x86_64 | amd64) arch=x86_64 ;; esac
 
 if [ "${1:-}" = --icns ]; then
-	set=$(mktemp -d)/Arbor.iconset
+	set=$(mktemp -d)/Satchel.iconset
 	python3 scripts/icon.py --mac "$set"
-	iconutil -c icns "$set" -o assets/icon/Arbor.icns
+	iconutil -c icns "$set" -o assets/icon/Satchel.icns
 	rm -rf "$(dirname "$set")"
-	echo "assets/icon/Arbor.icns"
+	echo "assets/icon/Satchel.icns"
 	exit 0
 fi
 
@@ -63,41 +63,41 @@ mkdir -p "$out"
 
 case "$(uname -s)" in
 Darwin)
-	app=$out/Arbor.app
+	app=$out/Satchel.app
 	mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 	if [ -n "$other" ]; then
-		lipo -create "target/$profile/arbor" "target/$other/$profile/arbor" -output "$app/Contents/MacOS/arbor"
-		lipo "$app/Contents/MacOS/arbor" -verify_arch arm64 x86_64
+		lipo -create "target/$profile/satchel" "target/$other/$profile/satchel" -output "$app/Contents/MacOS/satchel"
+		lipo "$app/Contents/MacOS/satchel" -verify_arch arm64 x86_64
 		arch=universal
 	else
-		cp "target/$profile/arbor" "$app/Contents/MacOS/arbor"
+		cp "target/$profile/satchel" "$app/Contents/MacOS/satchel"
 	fi
 	sed "s/@VERSION@/$version/g" packaging/macos/Info.plist >"$app/Contents/Info.plist"
 	printf 'APPL????' >"$app/Contents/PkgInfo"
-	cp assets/icon/Arbor.icns "$app/Contents/Resources/Arbor.icns"
+	cp assets/icon/Satchel.icns "$app/Contents/Resources/Satchel.icns"
 	plutil -lint "$app/Contents/Info.plist"
 	# Ad-hoc: no Apple Developer ID, so no notarization (see the README's Install section).
 	codesign --force --sign - --timestamp=none "$app"
 	codesign --verify --strict "$app"
-	ditto -c -k --sequesterRsrc --keepParent "$app" "$out/Arbor-$version-macos-$arch.zip"
+	ditto -c -k --sequesterRsrc --keepParent "$app" "$out/Satchel-$version-macos-$arch.zip"
 	;;
 Linux)
-	name=arbor-$version-linux-$arch
+	name=satchel-$version-linux-$arch
 	stage=$out/$name
 	mkdir -p "$stage/icons"
-	cp "target/$profile/arbor" "$stage/arbor"
-	cp packaging/linux/arbor.desktop packaging/linux/install.sh packaging/linux/uninstall.sh "$stage/"
-	chmod 755 "$stage/arbor" "$stage/install.sh" "$stage/uninstall.sh"
-	cp assets/icon/png/arbor-*.png assets/icon/arbor.svg "$stage/icons/"
+	cp "target/$profile/satchel" "$stage/satchel"
+	cp packaging/linux/satchel.desktop packaging/linux/install.sh packaging/linux/uninstall.sh "$stage/"
+	chmod 755 "$stage/satchel" "$stage/install.sh" "$stage/uninstall.sh"
+	cp assets/icon/png/satchel-*.png assets/icon/satchel.svg "$stage/icons/"
 	cp README.md LICENSE "$stage/"
 	tar -C "$out" -czf "$out/$name.tar.gz" "$name"
 	rm -rf "$stage"
 	;;
 MINGW* | MSYS* | CYGWIN* | Windows_NT)
-	name=arbor-$version-windows-$arch
+	name=satchel-$version-windows-$arch
 	stage=$out/$name
 	mkdir -p "$stage"
-	cp "target/$profile/arbor.exe" "$stage/arbor.exe"
+	cp "target/$profile/satchel.exe" "$stage/satchel.exe"
 	cp README.md LICENSE "$stage/"
 	if command -v 7z >/dev/null 2>&1; then
 		(cd "$out" && 7z a -tzip -bd "$name.zip" "$name" >/dev/null)

@@ -1,5 +1,5 @@
 [package]
-name = "arbor"
+name = "satchel"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -37,7 +37,7 @@ image-webp = { version = "0.2", default-features = false }
 regex-lite = "0.1"
 
 # Compress and Extract Here (src/archive/): deflate and the CRC for ZIP and gzip. Both are already
-# in the lock file through png, with these features; Arbor's own ZIP and tar code is on top
+# in the lock file through png, with these features; Satchel's own ZIP and tar code is on top
 # (no zip crate: DECISIONS.md, 2026-11-11).
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 crc32fast = { version = "1", default-features = false, features = ["std"] }
@@ -64,7 +64,7 @@ libc = "0.2"
 wgpu = { version = "30", default-features = false }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-# org.freedesktop.FileManager1 on the session bus, served only while Arbor is the default for
+# org.freedesktop.FileManager1 on the session bus, served only while Satchel is the default for
 # folders (src/incoming/linux.rs). The same zbus and Tokio Rune's `dbus` feature already builds, so no
 # new crates: one current-thread runtime on the bus thread, told by a Tokio channel (`sync`, which
 # zbus builds already) when Make or Restore changes whether it should serve.
@@ -95,7 +95,7 @@ objc2-quick-look-thumbnailing = { version = "0.3", default-features = false, fea
 [target.'cfg(windows)'.dependencies]
 # Win32_Graphics_Gdi: reading the shell thumbnail's bitmap (src/thumb.rs). Win32_System_Registry:
 # the Recycle Bin's settings, checked before a trash (src/trash/win.rs). Pipes, IO, Security,
-# RemoteDesktop (the session id) and WindowsAndMessaging (AllowSetForegroundWindow): one Arbor
+# RemoteDesktop (the session id) and WindowsAndMessaging (AllowSetForegroundWindow): one Satchel
 # per session, a second handing its folders to the first (src/incoming/windows.rs). Ioctl,
 # LibraryLoader and Diagnostics_Debug: ejecting a drive and hearing drives come and go
 # (src/volumes.rs).
@@ -119,8 +119,8 @@ windows-sys = { version = "0.59", features = [
 
 # Rune builds these crates as published plus a patch of its own (vendor/rune/vendor/*.patch; Rune's
 # Cargo.toml and AGENTS.md, "Layout"), and a dependency's [patch] doesn't apply to the workspace
-# that uses it, so Arbor patches them too, from the same Rune checkout (RUNE_REV; CI clones it into
-# vendor/rune). Without them Arbor builds with the published crates and loses what the patches do:
+# that uses it, so Satchel patches them too, from the same Rune checkout (RUNE_REV; CI clones it
+# into vendor/rune). Without them Satchel builds with the published crates and loses what the patches do:
 # wgpu-hal: on Windows the window's adapter picked from DXGI's list with no D3D12 device made on the
 # others, and FXC loaded only on a first compile; winit: no TaskbarList COM call when a window is
 # made; parley_engine: UAX #9 L1 and cheaper shaping; accesskit_windows: headings and landmarks.

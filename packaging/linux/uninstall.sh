@@ -1,10 +1,10 @@
 #!/bin/sh
-# Removes what install.sh installed. If Arbor is the default for folders, it first puts the old
-# default back (what "Restore the System Default for Folders…" does), with the installed Arbor,
+# Removes what install.sh installed. If Satchel is the default for folders, it first puts the old
+# default back (what "Restore the System Default for Folders…" does), with the installed Satchel,
 # or the one beside this script when that's gone; with neither, it puts back the D-Bus
-# activation file and folder default the backup Arbor saved recorded, itself (a damaged backup
+# activation file and folder default the backup Satchel saved recorded, itself (a damaged backup
 # stops it before anything changes, and stays). Your settings and Jump history
-# (~/.config/arbor) stay.
+# (~/.config/satchel) stay.
 #
 #   ./uninstall.sh
 #   PREFIX=/some/dir ./uninstall.sh
@@ -21,10 +21,10 @@ config=${XDG_CONFIG_HOME:-$HOME/.config}
 user_data=${XDG_DATA_HOME:-$HOME/.local/share}
 
 restorer=
-if [ -x "$bin/arbor" ]; then
-	restorer=$bin/arbor
-elif [ -x "$here/arbor" ]; then
-	restorer=$here/arbor
+if [ -x "$bin/satchel" ]; then
+	restorer=$bin/satchel
+elif [ -x "$here/satchel" ]; then
+	restorer=$here/satchel
 fi
 
 if [ -n "$restorer" ]; then
@@ -33,14 +33,14 @@ if [ -n "$restorer" ]; then
 		exit 1
 	}
 else
-	# No Arbor to ask. What Arbor's Restore does, by hand, from the backup Arbor saved: its
+	# No Satchel to ask. What Satchel's Restore does, by hand, from the backup Satchel saved: its
 	# activation file goes back to what was there (or goes, if nothing was), and the folder
 	# default it wrote goes back to what the backup recorded. A backup that's damaged stops it
 	# here, before anything changes; the backup goes only once everything is back.
 	service=$user_data/dbus-1/services/org.freedesktop.FileManager1.service
 	mimeapps=$config/mimeapps.list
-	backup=$config/arbor/folder-handler-backup.txt
-	header='# What "Make Arbor the Default for Folders" replaced. "Restore the System Default for Folders" puts it back. Keep this file.'
+	backup=$config/satchel/folder-handler-backup.txt
+	header='# What "Make Satchel the Default for Folders" replaced. "Restore the System Default for Folders" puts it back. Keep this file.'
 	mime_key='mimeapps.list inode/directory'
 	service_key='dbus-1/services/org.freedesktop.FileManager1.service'
 	# The value the backup records under a name, decoded from hex ("-" is "there was none":
@@ -63,9 +63,9 @@ else
 		for k in "$mime_key" "$service_key"; do
 			awk -F '\t' -v k="$k" '$2 == k { found = 1 } END { exit !found }' "$backup" 2>/dev/null || damaged=1
 		done
-		# Every record whole, as Arbor writes them: "<hex or ->\t<name>", the hex of whole
+		# Every record whole, as Satchel writes them: "<hex or ->\t<name>", the hex of whole
 		# bytes (none for an empty value), and no name twice. The folder default must be one
-		# line of text (UTF-8, no control characters), as Arbor's Restore requires: a line
+		# line of text (UTF-8, no control characters), as Satchel's Restore requires: a line
 		# break in it would add lines of its own to mimeapps.list.
 		LC_ALL=C awk -F '\t' -v mime="$mime_key" '
 			# Well-formed UTF-8 as Unicode defines it: no overlong forms (C0, C1, E0 80-9F,
@@ -98,26 +98,26 @@ else
 			seen[$2]++ { bad = 1 }
 			END { exit bad }' "$backup" 2>/dev/null || damaged=1
 		if [ -n "$damaged" ]; then
-			echo "The backup of your folder default ($backup) is damaged, so nothing was changed. Put the folder default back by hand (or reinstall Arbor and run Restore the System Default for Folders), then run this again." >&2
+			echo "The backup of your folder default ($backup) is damaged, so nothing was changed. Put the folder default back by hand (or reinstall Satchel and run Restore the System Default for Folders), then run this again." >&2
 			exit 1
 		fi
 		has_backup=1
 	fi
-	if [ -f "$service" ] && head -n 1 "$service" | grep -q '^# Written by Arbor'; then
-		if [ -n "$has_backup" ] && saved "$service_key" >"$service.arbor-uninstall"; then
-			mv -f "$service.arbor-uninstall" "$service"
-			echo "Put back the D-Bus activation file that was there before Arbor ($service)."
+	if [ -f "$service" ] && head -n 1 "$service" | grep -q '^# Written by Satchel'; then
+		if [ -n "$has_backup" ] && saved "$service_key" >"$service.satchel-uninstall"; then
+			mv -f "$service.satchel-uninstall" "$service"
+			echo "Put back the D-Bus activation file that was there before Satchel ($service)."
 		else
-			rm -f "$service.arbor-uninstall" "$service"
-			echo "Removed Arbor's D-Bus activation file ($service)."
+			rm -f "$service.satchel-uninstall" "$service"
+			echo "Removed Satchel's D-Bus activation file ($service)."
 		fi
 		if command -v dbus-send >/dev/null 2>&1; then
 			dbus-send --session --type=method_call --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ReloadConfig 2>/dev/null || true
 		fi
 	elif [ -f "$service" ]; then
-		echo "Left $service alone: it isn't Arbor's (it changed since Arbor wrote it)."
+		echo "Left $service alone: it isn't Satchel's (it changed since Satchel wrote it)."
 	fi
-	if [ -f "$mimeapps" ] && grep -q '^inode/directory=arbor\.desktop' "$mimeapps"; then
+	if [ -f "$mimeapps" ] && grep -q '^inode/directory=satchel\.desktop' "$mimeapps"; then
 		# What was there before, if anything was (an empty value is a value, put back as it was).
 		before= had=
 		if [ -n "$has_backup" ] && before=$(saved "$mime_key"); then
@@ -125,29 +125,29 @@ else
 		fi
 		HAD=$had BEFORE=$before awk '
 			/^[ \t]*\[/ { inside = ($0 ~ /^[ \t]*\[Default Applications\][ \t]*$/) }
-			inside && /^inode\/directory=arbor\.desktop/ {
+			inside && /^inode\/directory=satchel\.desktop/ {
 				if (ENVIRON["HAD"] != "") print "inode/directory=" ENVIRON["BEFORE"]
 				next
 			}
 			{ print }
-		' "$mimeapps" >"$mimeapps.arbor-uninstall"
-		mv -f "$mimeapps.arbor-uninstall" "$mimeapps"
+		' "$mimeapps" >"$mimeapps.satchel-uninstall"
+		mv -f "$mimeapps.satchel-uninstall" "$mimeapps"
 		if [ -n "$had" ]; then
 			echo "Folders open in $before again (put back in $mimeapps)."
 		else
-			echo "Removed Arbor as the folder default from $mimeapps; the desktop's own file manager opens folders again."
+			echo "Removed Satchel as the folder default from $mimeapps; the desktop's own file manager opens folders again."
 		fi
 	fi
 	# Everything is back (a failure above stops the script with the backup kept).
 	rm -f "$backup"
 fi
 
-rm -f "$bin/arbor" "$data/applications/arbor.desktop"
+rm -f "$bin/satchel" "$data/applications/satchel.desktop"
 for n in 16 24 32 48 64 128 256 512; do
-	rm -f "$data/icons/hicolor/${n}x${n}/apps/arbor.png"
+	rm -f "$data/icons/hicolor/${n}x${n}/apps/satchel.png"
 done
-rm -f "$data/icons/hicolor/scalable/apps/arbor.svg"
+rm -f "$data/icons/hicolor/scalable/apps/satchel.svg"
 if command -v update-desktop-database >/dev/null 2>&1; then
 	update-desktop-database -q "$data/applications" || true
 fi
-echo "Removed Arbor. Your settings are still in $config/arbor."
+echo "Removed Satchel. Your settings are still in $config/satchel."

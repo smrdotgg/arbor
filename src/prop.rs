@@ -1,8 +1,8 @@
 //! Seeded randomized ("property") tests: a tiny PRNG and a runner, without a crate.
 //!
 //! Each property runs a fixed number of cases from a fixed seed, so CI is deterministic. A
-//! failing case names its seed; `ARBOR_PROP_SEED=<seed>` reruns from it, and
-//! `ARBOR_PROP_CASES=<n>` runs more cases (to hunt locally). A bug a property finds is kept as a
+//! failing case names its seed; `SATCHEL_PROP_SEED=<seed>` reruns from it, and
+//! `SATCHEL_PROP_CASES=<n>` runs more cases (to hunt locally). A bug a property finds is kept as a
 //! plain regression test with the input it found.
 
 use std::time::Duration;
@@ -152,20 +152,20 @@ fn env_u64(name: &str) -> Option<u64> {
 }
 
 /// Runs `case` `n` times, each with an `Rng` seeded from `name` and the case number (or from
-/// `ARBOR_PROP_SEED`). A failure says which seed, so it can be rerun alone.
+/// `SATCHEL_PROP_SEED`). A failure says which seed, so it can be rerun alone.
 pub fn check(name: &str, n: usize, mut case: impl FnMut(&mut Rng)) {
     let base = name.bytes().fold(0xA5A5_5A5A_DEAD_BEEFu64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01B3));
-    let (seeds, n): (Vec<u64>, usize) = match env_u64("ARBOR_PROP_SEED") {
+    let (seeds, n): (Vec<u64>, usize) = match env_u64("SATCHEL_PROP_SEED") {
         Some(s) => (vec![s], 1),
         None => {
-            let n = env_u64("ARBOR_PROP_CASES").map_or(n, |m| m as usize);
+            let n = env_u64("SATCHEL_PROP_CASES").map_or(n, |m| m as usize);
             ((0..n as u64).map(|i| base.wrapping_add(i.wrapping_mul(0x9E37_79B9_7F4A_7C15))).collect(), n)
         }
     };
     for &seed in seeds.iter().take(n) {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| case(&mut Rng::new(seed))));
         if let Err(e) = r {
-            eprintln!("property {name} failed with ARBOR_PROP_SEED={seed}");
+            eprintln!("property {name} failed with SATCHEL_PROP_SEED={seed}");
             std::panic::resume_unwind(e);
         }
     }

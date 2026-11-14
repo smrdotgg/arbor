@@ -27,7 +27,7 @@ impl FileManager {
         self.deliver(&uris, &startup_id, true);
     }
 
-    /// Arbor has no properties window: the items are shown selected in their folder.
+    /// Satchel has no properties window: the items are shown selected in their folder.
     fn show_item_properties(&self, uris: Vec<String>, startup_id: String) {
         self.deliver(&uris, &startup_id, true);
     }
@@ -46,12 +46,12 @@ pub async fn connect(builder: zbus::connection::Builder<'static>, sink: Sink, cl
 /// Tells the bus thread to look at the activation file again.
 static RECHECK: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>> = std::sync::OnceLock::new();
 
-/// Whether the activation file is Arbor's, so Arbor should serve the name.
+/// Whether the activation file is Satchel's, so Satchel should serve the name.
 fn ours() -> bool {
     data_home().map(|d| service_file(&d)).is_some_and(|f| std::fs::read_to_string(f).is_ok_and(|t| is_ours(&t)))
 }
 
-/// On its own thread: serves the name while the activation file is Arbor's (from startup,
+/// On its own thread: serves the name while the activation file is Satchel's (from startup,
 /// or once Make writes it) and lets it go when Restore removes it, waiting on the bus's
 /// socket and on [`recheck`] (no polling).
 pub(super) fn spawn(sink: Sink) {
@@ -59,13 +59,13 @@ pub(super) fn spawn(sink: Sink) {
     if RECHECK.set(tx).is_err() {
         return;
     }
-    let _ = std::thread::Builder::new().name("arbor-dbus".into()).spawn(move || {
+    let _ = std::thread::Builder::new().name("satchel-dbus".into()).spawn(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
         rt.block_on(follow(zbus::connection::Builder::session, sink, ours, rx));
     });
 }
 
-/// "Make Arbor the Default for Folders" or its restore finished: serve the name, or let it
+/// "Make Satchel the Default for Folders" or its restore finished: serve the name, or let it
 /// go, as the activation file now says. Does nothing before [`spawn`] (tests, headless).
 pub fn recheck() {
     if let Some(tx) = RECHECK.get() {

@@ -101,7 +101,7 @@ pub fn parse(text: &str) -> Result<Vec<PathBuf>, String> {
 pub fn serialize(paths: &[PathBuf]) -> Option<String> {
     let home = fs::home();
     let mut s = String::from(
-        "# Arbor's sidebar favorites, in order. Arbor rewrites this file when you add, remove or move\n\
+        "# Satchel's sidebar favorites, in order. Satchel rewrites this file when you add, remove or move\n\
          # a favorite. Delete it to go back to the default list.\n\
          favorites = [\n",
     );
@@ -152,7 +152,7 @@ pub fn named(paths: Vec<PathBuf>) -> Vec<(String, PathBuf)> {
 // ---- the writer ---------------------------------------------------------------------------
 
 /// One change to the favorites, as an operation, so the writer can apply it to what's in the
-/// file now: another Arbor may have changed it since this one read it.
+/// file now: another Satchel may have changed it since this one read it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
     /// These folders, before `before` (at the end when it's `None` or gone); those already
@@ -202,7 +202,7 @@ enum Msg {
 
 /// The one thread that writes `sidebar.toml`. Each batch of edits holds the file's lock, reads
 /// it, applies the edits to what it holds, writes it (a temporary file renamed over it) and
-/// sends the result back, so two Arbor windows never lose each other's changes.
+/// sends the result back, so two Satchel windows never lose each other's changes.
 pub struct Writer {
     tx: Sender<Msg>,
     errors: Receiver<String>,
@@ -217,7 +217,7 @@ impl Writer {
         let (mut failures, errors) = persist::Failures::new(waker.clone());
         persist::at_exit(&tx, Msg::Flush);
         std::thread::Builder::new()
-            .name("arbor-sidebar".into())
+            .name("satchel-sidebar".into())
             .spawn(move || {
                 while let Ok(first) = rx.recv() {
                     // Everything queued is written at once; flushes answer after.
@@ -473,7 +473,7 @@ impl State {
             self.alert = self.note.clone();
             changed = true;
         }
-        // What the writer wrote, with any other Arbor's changes: shown once it has every edit
+        // What the writer wrote, with any other Satchel's changes: shown once it has every edit
         // any window made (an answer to an older edit is dropped: a newer list is on its way),
         // in every window (here unless a favorite is being dragged), and new favorites get
         // their one look.
@@ -738,7 +738,7 @@ mod tests {
     use std::time::Duration;
 
     fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-sidebar-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-sidebar-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -853,7 +853,7 @@ mod tests {
         parse(&std::fs::read_to_string(file).unwrap()).unwrap()
     }
 
-    /// Two Arbor windows that read the sidebar before either changed it: each one's edit lands
+    /// Two Satchel windows that read the sidebar before either changed it: each one's edit lands
     /// in the file, and each shows the other's once its own is written.
     #[test]
     fn two_windows_never_lose_each_others_favorites() {
@@ -877,7 +877,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Two windows of one Arbor share one writer and one revision: the writer's answer to the
+    /// Two windows of one Satchel share one writer and one revision: the writer's answer to the
     /// first window's older edit never puts back a list without the second window's newer
     /// favorite (review: each window had its own writer, and that answer erased the newer
     /// favorite from both windows while the file kept it).

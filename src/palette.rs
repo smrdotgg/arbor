@@ -5,7 +5,7 @@
 //! there's nothing to keep in sync. Only the rows in view are built.
 //!
 //! Commands that can't run right now (Rename with nothing selected) are shown dimmed rather than
-//! hidden: people use the palette to find out what Arbor can do and which key does it, and a
+//! hidden: people use the palette to find out what Satchel can do and which key does it, and a
 //! command that vanishes reads as one that doesn't exist. Choosing one says why it can't run.
 //! The cursor starts on the best match that can run.
 
@@ -213,7 +213,7 @@ mod tests {
     /// revealed; the same query again reveals nothing.
     #[test]
     fn a_new_query_reveals_the_cursor() {
-        let d = std::env::temp_dir().join(format!("arbor-palette-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-palette-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let mut s = crate::app::tests::state_in(&d);
         let mut tx = Tx::default();

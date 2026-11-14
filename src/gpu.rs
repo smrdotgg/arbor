@@ -11,7 +11,7 @@
 //!   with no visible change (Rune #689). Starting the GPU here would compete with that first
 //!   frame for the CPU and the loader lock (a D3D12 driver's DLLs), which is what Rune's order
 //!   avoids. Rune also picks the adapter from DXGI's list without making a device on the others
-//!   (#625, through the wgpu-hal patch in Cargo.toml), so the adapter list Arbor used to hold
+//!   (#625, through the wgpu-hal patch in Cargo.toml), so the adapter list Satchel used to hold
 //!   here would now only wake every GPU for nothing (DECISIONS.md, 2026-11-13).
 
 /// Starts getting the GPU ready, where that helps (above).

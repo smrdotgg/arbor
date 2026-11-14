@@ -193,12 +193,12 @@ impl State {
             Trash | Delete => when(busy, busy_why).or(when(nothing, "Select an item first")),
             EmptyTrash => when(busy, busy_why),
             PutBack => when(cfg!(target_os = "macos"), "macOS has no public way for apps to put items back: use Put Back in Finder")
-                .or(when(cfg!(windows), "Restore items from the Recycle Bin in Explorer: Windows doesn't let Arbor list it"))
+                .or(when(cfg!(windows), "Restore items from the Recycle Bin in Explorer: Windows doesn't let Satchel list it"))
                 .or(when(busy, busy_why))
                 .or(when(searching, "Leave the search first (Esc)"))
                 .or(when(!crate::trash::contents::can_put_back_in(&f.cwd), "Put Back works on items in the Trash: Go to Trash first"))
                 .or(when(nothing, "Select an item first")),
-            GoTrash => when(self.trash_place.is_none(), "The Recycle Bin is a shell folder Arbor can't show: open it in Explorer"),
+            GoTrash => when(self.trash_place.is_none(), "The Recycle Bin is a shell folder Satchel can't show: open it in Explorer"),
             // A duplicate goes beside its original, so all of them must be in one folder.
             Duplicate => when(busy, busy_why).or(when(nothing, "Select an item first")).or(when(
                 searching && f.target_paths().iter().map(|p| p.parent()).collect::<std::collections::HashSet<_>>().len() > 1,

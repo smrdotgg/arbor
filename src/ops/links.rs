@@ -8,7 +8,7 @@
 //!
 //! On Windows a symbolic link needs Developer Mode or an administrator (`std`'s link calls ask
 //! `CreateSymbolicLinkW` with `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE`); without either, or
-//! on a drive with no links (FAT), Arbor makes a shell shortcut (`.lnk`) instead and says so
+//! on a drive with no links (FAT), Satchel makes a shell shortcut (`.lnk`) instead and says so
 //! ([`shortcut_fallback`]).
 
 use super::*;
@@ -22,10 +22,10 @@ pub const MAKING_LINKS: &str = "Making Links";
 /// New File's name, before a free variant ("untitled 2.txt").
 pub const UNTITLED_FILE: &str = "untitled.txt";
 
-/// Whether a failed shortcut instead of a symbolic link is Arbor's answer here.
+/// Whether a failed shortcut instead of a symbolic link is Satchel's answer here.
 const SHORTCUTS: bool = cfg!(windows);
 
-/// A link Arbor made: what undo checks before removing it, and what redo makes again.
+/// A link Satchel made: what undo checks before removing it, and what redo makes again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Link {
     /// What it points at: the item's absolute path.
@@ -215,7 +215,7 @@ impl Worker<'_> {
         Err("couldn't make a link: every free name was taken first".into())
     }
 
-    /// Undoes links Arbor made (removing each only while it's still the link made: identity,
+    /// Undoes links Satchel made (removing each only while it's still the link made: identity,
     /// time, size and target), or redoes them (making each again where nothing has taken its
     /// name). All checked first, nothing changed unless all pass, as [`Worker::undo`] does.
     /// Removed, not trashed: a link holds no data, and redo makes it again exactly.
@@ -299,12 +299,12 @@ impl Worker<'_> {
         }
     }
 
-    /// Whether a link step can go: to remove it, it must still be exactly the link Arbor made
+    /// Whether a link step can go: to remove it, it must still be exactly the link Satchel made
     /// (fingerprint, and a symbolic link's target); to make it again, its name must be free and
     /// its folder there.
     fn check_link(&self, making: bool, step: &Step) -> Result<(), String> {
         let name = format!("“{}”", name_of(&step.at));
-        let Some(link) = &step.link else { return Err(format!("{name} isn't a link Arbor made")) };
+        let Some(link) = &step.link else { return Err(format!("{name} isn't a link Satchel made")) };
         if making {
             return match step.at.symlink_metadata() {
                 Ok(_) => Err(format!("{name} is already taken, so the link can't be made again")),
@@ -327,7 +327,7 @@ impl Worker<'_> {
         Ok(())
     }
 
-    /// Removes a link Arbor made (the link itself; never what it points at), only while it's
+    /// Removes a link Satchel made (the link itself; never what it points at), only while it's
     /// still that object with that target, checked again as it's removed ([`remove_if_still`]):
     /// a link put at its name since the check, even at the same inode with the same times and
     /// target, or at the instant of removal, is left alone.
@@ -388,7 +388,7 @@ fn made_step(at: &Path, link: Link) -> io::Result<Step> {
 /// in between. Instead the entry is first moved aside, with the no-replace rename, to a fresh
 /// hidden name in the same folder that nothing else knows (`noclobber::temp_sibling`), and the
 /// entry there is checked and removed. Whatever was at `at` at the instant of the move is what's
-/// checked; one put at `at` after it is never touched. One that isn't Arbor's link goes back to
+/// checked; one put at `at` after it is never touched. One that isn't Satchel's link goes back to
 /// `at` (no-replace again); if something has taken `at` meanwhile, it stays at the temporary
 /// name and the error says where ([`LeftAside`]).
 ///
@@ -418,7 +418,7 @@ fn remove_if_still(at: &Path, want: crate::fs::Ident, link: &Link, _: &Print, ho
             hook(Removal::BeforeUnlink, at);
             dirfd::unlink_at(&dir, &aside_name)
         }
-        // Not Arbor's link (or it couldn't be read): back where it was, never over anything.
+        // Not Satchel's link (or it couldn't be read): back where it was, never over anything.
         verdict => match noclobber::rename(&aside, at) {
             Ok(()) => Err(verdict.err().unwrap_or_else(|| io::Error::other(Replaced))),
             Err(e) => Err(io::Error::other(LeftAside { at: aside, why: e.to_string() })),

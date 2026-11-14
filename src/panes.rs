@@ -369,7 +369,7 @@ mod tests {
     use crate::commands::Cmd;
 
     fn folder(name: &str, files: &[&str]) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-panes-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-panes-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for f in files {

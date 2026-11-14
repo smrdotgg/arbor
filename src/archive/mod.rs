@@ -14,7 +14,7 @@
 //! created relative to an open folder with `O_NOFOLLOW` and `O_EXCL`, so nothing the archive
 //! made (or anyone else put there) is ever followed or overwritten; links are made last.
 //!
-//! No crate: the ZIP subset Arbor needs (stored and deflate, ZIP64, UTF-8 names, data
+//! No crate: the ZIP subset Satchel needs (stored and deflate, ZIP64, UTF-8 names, data
 //! descriptors on read) and a tar reader are small, over `flate2` and `crc32fast`, which the
 //! lock file already has through `png` (DECISIONS.md, 2026-11-11).
 
@@ -99,7 +99,7 @@ pub enum Error {
     Corrupt(String),
     /// Refused for safety: an entry would land outside the folder, or a bomb.
     Refused(String),
-    /// A feature Arbor doesn't read (encryption, another compression method).
+    /// A feature Satchel doesn't read (encryption, another compression method).
     Unsupported(String),
     Io(io::Error),
 }
@@ -135,7 +135,7 @@ pub enum Kind {
     Dir,
     /// A symbolic link, and its target as stored.
     Link(String),
-    /// Something Arbor doesn't make (a hard link, a device, a FIFO): left out, with this note.
+    /// Something Satchel doesn't make (a hard link, a device, a FIFO): left out, with this note.
     Skip(&'static str),
 }
 
@@ -341,7 +341,7 @@ pub fn check_size(total: u64) -> Result<(), Error> {
     use crate::fs::fmt_size;
     if total > limits::TOTAL {
         return Err(Error::Refused(format!(
-            "it's too large to extract: it would unpack to {}, more than Arbor extracts ({})",
+            "it's too large to extract: it would unpack to {}, more than Satchel extracts ({})",
             fmt_size(total),
             fmt_size(limits::TOTAL)
         )));
@@ -356,7 +356,7 @@ pub fn room(total: u64, free: u64) -> Result<(), String> {
     let spare = limits::SPARE.max(free / limits::SPARE_PART);
     if total > free.saturating_sub(spare) {
         return Err(format!(
-            "it's too large to extract: it unpacks to {}, and {} is free on the disk (Arbor leaves at least {} free)",
+            "it's too large to extract: it unpacks to {}, and {} is free on the disk (Satchel leaves at least {} free)",
             fmt_size(total),
             fmt_size(free),
             fmt_size(spare)
@@ -411,7 +411,7 @@ pub fn link_target(depth: usize, target: &str) -> Result<(), String> {
     for part in target.split(['/', '\\']) {
         match part {
             "" | "." => {}
-            ".." if down => return Err(format!("goes down and back up (“{}”), which Arbor doesn't follow", shown())),
+            ".." if down => return Err(format!("goes down and back up (“{}”), which Satchel doesn't follow", shown())),
             ".." => up += 1,
             _ => down = true,
         }

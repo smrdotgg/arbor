@@ -2,7 +2,7 @@ use super::*;
 use std::time::{Duration, Instant};
 
 fn folder(name: &str, files: usize) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-app-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-app-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     for i in 0..files {
@@ -525,7 +525,7 @@ fn rename_and_new_folder_run_on_the_worker() {
     assert_eq!(s.unavailable(Cmd::NewFolder), Some(BUSY));
 }
 
-/// A file edited after its folder was listed (Arbor doesn't watch folders): Delete Permanently,
+/// A file edited after its folder was listed (Satchel doesn't watch folders): Delete Permanently,
 /// which checks each item against its identity from the listing, still deletes it, and Trash
 /// and the inline rename still go ahead.
 #[test]
@@ -754,13 +754,13 @@ fn a_row_listed_without_an_identity_is_never_moved_or_removed() {
 /// every row still showing the old one, under any name (the item renamed, other hard links to
 /// it); other rows keep theirs.
 #[test]
-fn rows_take_the_identities_arbors_change_gave_them() {
+fn rows_take_the_identities_satchels_change_gave_them() {
     let d = folder("reidentify", 3);
     let mut s = state_in(&d);
     settle_all(&mut s);
     let id = |s: &State, n: &str| s.cur().entries.iter().find(|e| e.name == n).unwrap().id.unwrap();
     let (a, b, c) = (id(&s, "f0"), id(&s, "f1"), id(&s, "f2"));
-    // (Any identity will do as "what Arbor made of it".)
+    // (Any identity will do as "what Satchel made of it".)
     s.cur_mut().reidentify(&[(a, c)]);
     assert_eq!((id(&s, "f0"), id(&s, "f1"), id(&s, "f2")), (c, b, c));
     let _ = std::fs::remove_dir_all(&d);
@@ -1188,7 +1188,7 @@ fn the_next_launch_shows_the_leftovers_then_forgets_them() {
     std::fs::write(
         &file,
         format!(
-            "{}\t{}\tArbor quit before it could remove it\n{}\tf:1:2:3:4\tgone\n",
+            "{}\t{}\tSatchel quit before it could remove it\n{}\tf:1:2:3:4\tgone\n",
             d.join("into/payload").display(),
             crate::ops::mark_of(&d.join("into/payload")).expect("a mark"),
             d.join("nowhere").display()
@@ -1210,8 +1210,8 @@ fn the_next_launch_shows_the_leftovers_then_forgets_them() {
     // The next shows it.
     let mut s = launch();
     let note = s.note.clone().expect("said");
-    assert!(note.starts_with("Arbor quit during a file operation and left “payload” partly done in"), "{note}");
-    assert!(note.ends_with("Arbor quit before it could remove it"), "{note}");
+    assert!(note.starts_with("Satchel quit during a file operation and left “payload” partly done in"), "{note}");
+    assert!(note.ends_with("Satchel quit before it could remove it"), "{note}");
     assert!(file.exists(), "kept until its frame is on screen");
     s.first_frame_shown();
     let until = Instant::now() + Duration::from_secs(5);
@@ -1586,7 +1586,7 @@ fn a_big_reload_hands_its_selection_over_without_copying_names() {
 /// would act on is exactly the model, its totals are theirs, and an action on a row showing a
 /// label is refused.
 ///
-/// `ARBOR_PROP_CASES` runs more (CI runs 5,000 from the same fixed seeds).
+/// `SATCHEL_PROP_CASES` runs more (CI runs 5,000 from the same fixed seeds).
 #[test]
 fn the_selection_matches_a_model_whatever_happens() {
     use std::collections::{BTreeMap, BTreeSet};

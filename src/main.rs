@@ -1,4 +1,4 @@
-//! Arbor: a small, fast file manager.
+//! Satchel: a small, fast file manager.
 //!
 //! Fast by being simple: one folder read per navigation (on a worker, so a slow disk never
 //! blocks the window), only the visible rows are built, and nothing animates or caches.
@@ -71,13 +71,13 @@ mod window;
 use rune::App;
 
 fn main() {
-    // `arbor --version`: what's installed, without a window (CI runs the Mac package's Intel
+    // `satchel --version`: what's installed, without a window (CI runs the Mac package's Intel
     // slice this way, under Rosetta).
     if std::env::args_os().nth(1).is_some_and(|a| a == "--version") {
-        println!("arbor {}", env!("CARGO_PKG_VERSION"));
+        println!("satchel {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    // For uninstallers: put back the folder default Arbor replaced, without opening a window.
+    // For uninstallers: put back the folder default Satchel replaced, without opening a window.
     if std::env::args_os().nth(1).is_some_and(|a| a == "--restore-folder-default") {
         match handler::run(handler::Change::Restore) {
             Ok(m) => println!("{m}"),
@@ -88,13 +88,14 @@ fn main() {
         }
         return;
     }
-    // ARBOR_TIMING / ARBOR_BENCH, read once. Off, Rune gets the plain callbacks and no frame hook.
+    // SATCHEL_TIMING / SATCHEL_BENCH, read once. Off, Rune gets the plain callbacks and no frame
+    // hook.
     let timed = timing::init();
     // Whether Rune will render offscreen (snapshots, scripts, traces) instead of opening a
     // window, from the arguments, before `run`: `headless_run()` only answers once `run` has
     // started one, too late for what follows.
     let windowed = !rune::is_headless();
-    // Windows: `arbor.exe <folder>` with an Arbor already running hands it the folder (a new
+    // Windows: `satchel.exe <folder>` with a Satchel already running hands it the folder (a new
     // tab there) and exits before any window.
     #[cfg(windows)]
     if !timing::benching() && windowed && incoming::windows::hand_off_args() {
@@ -108,8 +109,8 @@ fn main() {
         gpu::start();
     }
     app::read_first_folder();
-    // Linux: the window's app id (Wayland) and WM_CLASS (X11), matching arbor.desktop.
-    rune::set_app_id("arbor");
+    // Linux: the window's app id (Wayland) and WM_CLASS (X11), matching satchel.desktop.
+    rune::set_app_id("satchel");
     // Every window has the same callbacks (`window.rs`); the first is timed when timing is on.
     let mut spec = window::spec();
     if timed {
@@ -134,7 +135,7 @@ fn main() {
     if timing::benching() {
         app = app.open_inactive(); // the bench never takes focus from what the user is doing
     } else if windowed {
-        // Folders other apps ask for while Arbor runs (or that launched it): the window
+        // Folders other apps ask for while Satchel runs (or that launched it): the window
         // focused last opens them. (Volumes coming and going are watched from the first
         // frame on screen: `window::configure`.)
         incoming::listen();
@@ -153,7 +154,7 @@ fn main() {
     last();
 }
 
-/// What Arbor does once no window is on screen and before the process ends: a file operation
+/// What Satchel does once no window is on screen and before the process ends: a file operation
 /// the last window's close cut short gets its bounded cleanup, and what it left is recorded
 /// (`leftovers.rs`); the user-data writers get their last moment. Once.
 fn last() {

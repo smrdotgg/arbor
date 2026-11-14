@@ -1,9 +1,9 @@
-//! ZIP, the subset Arbor reads and writes: stored and deflate entries, ZIP64 (over 4 GB or
+//! ZIP, the subset Satchel reads and writes: stored and deflate entries, ZIP64 (over 4 GB or
 //! 65,535 entries), UTF-8 names, Unix modes and links, and the extended timestamp. Reading
 //! goes by the central directory, so entries with data descriptors (sizes after the data) read
 //! too; encrypted entries and other compression methods are refused by name. Writing streams
 //! each file and then writes its sizes into the header it left room for (the archive is a
-//! temporary file of Arbor's own), so no data descriptors are written.
+//! temporary file of Satchel's own), so no data descriptors are written.
 //!
 //! Against bombs: entries may not overlap (one compressed stream counted many times is how the
 //! big non-recursive bombs work), each entry's output is cut off at the size the directory
@@ -100,7 +100,7 @@ pub fn list(f: &File, len: u64, stop: &dyn Fn() -> bool) -> Result<Listing, Erro
     let end_pos = len - tail + at as u64;
     let e = &buf[at..];
     if u16_at(e, 4) != 0 || u16_at(e, 6) != 0 {
-        return Err(Error::Unsupported("it's split across several files, which Arbor can't extract".into()));
+        return Err(Error::Unsupported("it's split across several files, which Satchel can't extract".into()));
     }
     let (mut count, mut cd_size, mut cd_start) = (u64::from(u16_at(e, 10)), u64::from(u32_at(e, 12)), u64::from(u32_at(e, 16)));
     let mut shift = 0u64;
@@ -211,10 +211,10 @@ pub fn list(f: &File, len: u64, stop: &dyn Fn() -> bool) -> Result<Listing, Erro
         };
         let shown = || name.chars().take(80).collect::<String>();
         if flags & 1 != 0 {
-            return Err(Error::Unsupported(format!("“{}” is encrypted, and Arbor can't extract encrypted archives", shown())));
+            return Err(Error::Unsupported(format!("“{}” is encrypted, and Satchel can't extract encrypted archives", shown())));
         }
         if method != 0 && method != 8 {
-            return Err(Error::Unsupported(format!("“{}” uses {}, which Arbor can't extract", shown(), method_name(method))));
+            return Err(Error::Unsupported(format!("“{}” uses {}, which Satchel can't extract", shown(), method_name(method))));
         }
         if method == 0 && csize != size {
             return Err(corrupt("a stored entry's sizes don't match"));
@@ -520,7 +520,7 @@ impl Writer {
         }
         c.zip64 = size >= ZIP64_FROM;
         // A sample first: a big file that doesn't compress (encrypted, already compressed under
-        // a name Arbor doesn't know) is stored without deflating it all to find out.
+        // a name Satchel doesn't know) is stored without deflating it all to find out.
         let deflate = deflate && {
             let mut sample = Vec::with_capacity(SAMPLE as usize);
             (&mut *src).take(SAMPLE).read_to_end(&mut sample)?;

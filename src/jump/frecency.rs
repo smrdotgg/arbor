@@ -188,7 +188,7 @@ impl Frecency {
 
     /// The aggregate of a log's text, and how many lines it had. A last line without its
     /// newline was cut short (a crash mid-write), so it's left out; so is any line that
-    /// doesn't parse, or isn't UTF-8 (Arbor writes only UTF-8: anything else is damage, and
+    /// doesn't parse, or isn't UTF-8 (Satchel writes only UTF-8: anything else is damage, and
     /// reading it as U+FFFD would make up a folder that was never visited).
     pub fn from_log(text: &str) -> (Frecency, usize) {
         Frecency::from_reader(text.as_bytes()).unwrap_or_default()
@@ -232,7 +232,7 @@ impl Frecency {
 
     /// The folders matching `query`, best first, at most `limit`. Every word of the query must
     /// appear in the path in order (case doesn't matter); the last word should be in the last
-    /// folder name, as zoxide has it ("proj arb" finds `~/projects/arbor`). A path whose last
+    /// folder name, as zoxide has it ("proj sat" finds `~/projects/satchel`). A path whose last
     /// word only matches a parent still shows, far down. Score: frecency × how well it matched
     /// (the last word starting or being the folder's name counts most).
     #[cfg(test)]

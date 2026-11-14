@@ -9,15 +9,15 @@
 //! `--all-columns` shows every list column in every run (a `columns.toml` in its settings
 //! folder): Extension, Date Created and Permissions too, as many as fit the window.
 //!
-//! Makes a folder of 10,000 entries in the temp dir, then cold-starts Arbor on it RUNS times
-//! (default 10) with `ARBOR_BENCH=ROUNDS` (default 10): each run logs its first frame, then
+//! Makes a folder of 10,000 entries in the temp dir, then cold-starts Satchel on it RUNS times
+//! (default 10) with `SATCHEL_BENCH=ROUNDS` (default 10): each run logs its first frame, then
 //! ROUNDS times leaves the folder, comes back (a fresh 10k listing) and presses ↓, then quits.
 //! Prints the median and p95 of each measure against its budget. The first run is reported on its
 //! own and left out of the cold-start numbers: on macOS the first exec of a newly built binary
 //! spends hundreds of milliseconds before `main` (the system checks its signature), which a user
 //! pays once per install or update.
 //!
-//! "Cold start" is from just before this process spawns Arbor to Arbor's first frame being
+//! "Cold start" is from just before this process spawns Satchel to Satchel's first frame being
 //! submitted, so it includes exec, dynamic linking, window and GPU setup and reading the
 //! folder. The folder's metadata is in the OS cache after the first run (a true cold cache
 //! needs root to drop it). The window waits only a bounded time for the folder, so each run
@@ -26,23 +26,23 @@
 //! All times end when the frame is submitted to the GPU: a proxy for pixels on screen, which
 //! come at least one refresh later.
 //!
-//! A run counts only if Arbor exits successfully and logs its first frame and exactly ROUNDS
+//! A run counts only if Satchel exits successfully and logs its first frame and exactly ROUNDS
 //! listings and ROUNDS key presses. Otherwise the run is reported INVALID, and the bench exits
 //! non-zero after printing what it has.
 //!
-//! `--tabs N` adds N more cold starts with `ARBOR_BENCH_TABS=1`: each opens a second tab on the
+//! `--tabs N` adds N more cold starts with `SATCHEL_BENCH_TABS=1`: each opens a second tab on the
 //! parent folder, then ROUNDS times shows the first tab again (a fresh read of the 10k folder,
 //! timed from the key to the frame showing it) and goes back to the second. Such a run counts
 //! only with exactly ROUNDS tab switches to the 10k folder logged.
 //!
-//! `--preview N` adds N more cold starts with `ARBOR_BENCH_PREVIEW=1` in a folder holding a
+//! `--preview N` adds N more cold starts with `SATCHEL_BENCH_PREVIEW=1` in a folder holding a
 //! 300 KB text file (the preview shows its first 256 KB) and a 12 MP JPEG (4000 × 3000). Each
 //! round previews the text and then the photo, each timed from Space to the frame showing it,
 //! and moves the selection while the preview is open, once while the photo is still decoding
 //! (see `src/timing.rs`). Such a run counts only with exactly 8 keys, one text preview and
 //! one photo preview logged per round.
 //!
-//! `--jump N` adds N more cold starts with `ARBOR_BENCH_JUMP=1` and a Jump history of
+//! `--jump N` adds N more cold starts with `SATCHEL_BENCH_JUMP=1` and a Jump history of
 //! [`JUMP_FOLDERS`] folders under the home folder, of realistic and varied depth (2 to 9
 //! levels, short names and long ones such as iCloud's), so many rows are too long to show whole:
 //! each round opens Jump to Folder (timed from the key to the frame showing the ranked folders;
@@ -50,7 +50,7 @@
 //! types two letters, a different pair each round (each key timed, ranking all of them again),
 //! and closes it. Such a run counts only with exactly ROUNDS opens (one cold) and 4 keys a round.
 //!
-//! `--search N` adds N more cold starts with `ARBOR_BENCH_SEARCH=1` in a tree of
+//! `--search N` adds N more cold starts with `SATCHEL_BENCH_SEARCH=1` in a tree of
 //! [`SEARCH_FILES`] files in [`SEARCH_DIRS`] folders: each round opens Search in This Folder,
 //! types `1` (about half the names match, so results stream for many frames), presses ↓ once a
 //! frame while the walk streams, and leaves when it's done. It reports the key to the first
@@ -58,13 +58,13 @@
 //! ↓ pressed while results streamed in. Such a run counts only with exactly ROUNDS first
 //! results and ROUNDS finished walks logged.
 //!
-//! `--rename N` adds N more cold starts with `ARBOR_BENCH_RENAME=1` in the 10k folder: each
+//! `--rename N` adds N more cold starts with `SATCHEL_BENCH_RENAME=1` in the 10k folder: each
 //! round selects all 10,000 entries, opens Batch Rename, types `e` (plain text: every name
 //! loses its e's), turns on regex and types `$` (`e$`), each timed from the key to the frame
 //! showing the whole preview for it (worked out on a worker at this size), and closes it. Such
 //! a run counts only with exactly ROUNDS plain and 2 × ROUNDS regex previews of 10,000 items.
 //!
-//! `--grid N` adds N cold starts with `ARBOR_BENCH_GRID=1` in the 10k folder (icons only: few
+//! `--grid N` adds N cold starts with `SATCHEL_BENCH_GRID=1` in the 10k folder (icons only: few
 //! of its names are real images) and N in a folder of [`GRID_IMAGES`] photo-like JPEGs
 //! (1600 × 1200): each switches to the icon view (As Icons; in the image folder it waits for the
 //! screen's thumbnails, timed from the key to the first and to the last), then ROUNDS times
@@ -72,11 +72,11 @@
 //! run counts only with 2 × ROUNDS keys after As Icons, and in the image folder a first
 //! thumbnail and a screenful.
 //!
-//! `--tiles N` adds N cold starts with `ARBOR_BENCH_GRID=3` in the 10k folder: As Tiles, then
+//! `--tiles N` adds N cold starts with `SATCHEL_BENCH_GRID=3` in the 10k folder: As Tiles, then
 //! ROUNDS times Page Down and ↓, each timed. Such a run counts only with 2 × ROUNDS keys after
 //! As Tiles.
 //!
-//! `--columns N` adds N cold starts with `ARBOR_BENCH_COLUMNS=1` in a folder of 10,000 files
+//! `--columns N` adds N cold starts with `SATCHEL_BENCH_COLUMNS=1` in a folder of 10,000 files
 //! (no folders, which sort first: → would select one and read it): As Columns, then ROUNDS
 //! times ← (to the parent: the 10k folder becomes the column on its right), ↓ (onto the next
 //! folder there, read for the column on the right), ↑ (back onto the 10k folder, read again)
@@ -87,19 +87,19 @@
 //! disk's root, through a temp folder of any size). Such a run counts only with 4 × ROUNDS keys
 //! after As Columns, 2 × ROUNDS of them reading.
 //!
-//! `--window N` adds N cold starts with `ARBOR_BENCH_WINDOW=1` in the 10k folder: each round
+//! `--window N` adds N cold starts with `SATCHEL_BENCH_WINDOW=1` in the 10k folder: each round
 //! opens a new window on it (⌘N), timed from the step to the new window's first frame showing
 //! the 10,000 entries, and closes it. Such a run counts only with exactly ROUNDS of them.
 //!
 //! `--idle N` (default 1; 0 skips it) checks NORTHSTAR's "idle means idle": N starts in a folder
-//! of a few JPEGs, PNGs and text files with each of `ARBOR_BENCH_IDLE=list`, `=icons`, `=tiles`
+//! of a few JPEGs, PNGs and text files with each of `SATCHEL_BENCH_IDLE=list`, `=icons`, `=tiles`
 //! and `=columns`, and N with `=list` and a second window open
-//! (`ARBOR_BENCH_IDLE_WINDOWS=2`; see `src/timing.rs`). Once a run says it's idle, the bench lets it settle for [`IDLE_SETTLE`],
-//! measures the CPU time Arbor uses over [`IDLE_WINDOW`] (from outside: `/proc` on Linux, `ps`
+//! (`SATCHEL_BENCH_IDLE_WINDOWS=2`; see `src/timing.rs`). Once a run says it's idle, the bench lets it settle for [`IDLE_SETTLE`],
+//! measures the CPU time Satchel uses over [`IDLE_WINDOW`] (from outside: `/proc` on Linux, `ps`
 //! on macOS, `GetProcessTimes` on Windows) and kills it. More than [`IDLE_MAX_CPU`] fails the
 //! bench (exit status 1): an idle window draws nothing, so it should be zero.
 //!
-//! `--pace MS` spaces every step of every run at least MS apart (`ARBOR_BENCH_PACE_MS`), as a
+//! `--pace MS` spaces every step of every run at least MS apart (`SATCHEL_BENCH_PACE_MS`), as a
 //! person types (120 is brisk typing): the CPU cools between keys, as it does for a real user,
 //! which back-to-back steps hide (on the M4 Pro, 4–5× for Jump keys and regex previews).
 //! `--gap MS` waits MS between cold starts (the default starts each as soon as the last exits;
@@ -135,7 +135,7 @@ const IDLE_MAX_CPU: f64 = 0.05;
 
 fn main() {
     let mut nums = Vec::new();
-    let mut bin = PathBuf::from(format!("target/release/arbor{}", std::env::consts::EXE_SUFFIX));
+    let mut bin = PathBuf::from(format!("target/release/satchel{}", std::env::consts::EXE_SUFFIX));
     let mut keep = false;
     let mut tab_runs = 0;
     let mut preview_runs = 0;
@@ -179,12 +179,12 @@ fn main() {
     PACE.set(pace).expect("once");
     GAP.set(gap).expect("once");
 
-    let root = std::env::temp_dir().join(format!("arbor-bench-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("satchel-bench-{}", std::process::id()));
     let big = root.join("big");
     make_folder(&big);
     if all_columns {
         for dirs in ["dirs", "dirs-jump", "dirs-columns", "dirs-idle"] {
-            let cfg = root.join(dirs).join("config").join(if cfg!(any(target_os = "macos", windows)) { "Arbor" } else { "arbor" });
+            let cfg = root.join(dirs).join("config").join(if cfg!(any(target_os = "macos", windows)) { "Satchel" } else { "satchel" });
             std::fs::create_dir_all(&cfg).expect("the settings folder");
             let all = "shown = [\"kind\", \"extension\", \"size\", \"modified\", \"created\", \"permissions\"]\n";
             std::fs::write(cfg.join("columns.toml"), all).expect("columns.toml");
@@ -382,7 +382,8 @@ fn main() {
         }
         // Its own settings: the bench's folder as the sidebar's one place (a literal string,
         // so a Windows path needs no escaping).
-        let dir = root.join("dirs-columns").join("config").join(if cfg!(any(target_os = "macos", windows)) { "Arbor" } else { "arbor" });
+        let dir =
+            root.join("dirs-columns").join("config").join(if cfg!(any(target_os = "macos", windows)) { "Satchel" } else { "satchel" });
         std::fs::create_dir_all(&dir).expect("settings folder");
         std::fs::write(dir.join("config.toml"), format!("[general]\nplaces = ['{}']\n", root.display())).expect("settings");
     }
@@ -532,7 +533,7 @@ fn main() {
     }
 }
 
-/// One `--idle` run: starts Arbor in `dir` with `ARBOR_BENCH_IDLE=view` (`list, 2 windows`:
+/// One `--idle` run: starts Satchel in `dir` with `SATCHEL_BENCH_IDLE=view` (`list, 2 windows`:
 /// the list, with a second window open), waits for it to say it's idle, lets it settle, and
 /// returns the CPU seconds it used over [`IDLE_WINDOW`].
 fn idle_once(bin: &Path, dir: &Path, view: &str) -> Result<f64, String> {
@@ -542,28 +543,28 @@ fn idle_once(bin: &Path, dir: &Path, view: &str) -> Result<f64, String> {
     };
     let mut cmd = Command::new(bin);
     for var in [
-        "ARBOR_BENCH_TABS",
-        "ARBOR_BENCH_PREVIEW",
-        "ARBOR_BENCH_JUMP",
-        "ARBOR_BENCH_SEARCH",
-        "ARBOR_BENCH_RENAME",
-        "ARBOR_BENCH_GRID",
-        "ARBOR_BENCH_WINDOW",
-        "ARBOR_BENCH_PACE_MS",
-        "ARBOR_TIMING",
+        "SATCHEL_BENCH_TABS",
+        "SATCHEL_BENCH_PREVIEW",
+        "SATCHEL_BENCH_JUMP",
+        "SATCHEL_BENCH_SEARCH",
+        "SATCHEL_BENCH_RENAME",
+        "SATCHEL_BENCH_GRID",
+        "SATCHEL_BENCH_WINDOW",
+        "SATCHEL_BENCH_PACE_MS",
+        "SATCHEL_TIMING",
     ] {
         cmd.env_remove(var);
     }
     if two {
-        cmd.env("ARBOR_BENCH_IDLE_WINDOWS", "2");
+        cmd.env("SATCHEL_BENCH_IDLE_WINDOWS", "2");
     } else {
-        cmd.env_remove("ARBOR_BENCH_IDLE_WINDOWS");
+        cmd.env_remove("SATCHEL_BENCH_IDLE_WINDOWS");
     }
     let mut child = cmd
         .arg(dir)
         .env("RUNE_DIRS_ROOT", dir.parent().unwrap_or(dir).join("dirs-idle"))
-        .env("ARBOR_BENCH", "1")
-        .env("ARBOR_BENCH_IDLE", view)
+        .env("SATCHEL_BENCH", "1")
+        .env("SATCHEL_BENCH_IDLE", view)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -582,7 +583,7 @@ fn idle_once(bin: &Path, dir: &Path, view: &str) -> Result<f64, String> {
     let mut lines = Vec::new();
     let measured = loop {
         match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(line) if line.starts_with("arbor-timing idle-ready") => {
+            Ok(line) if line.starts_with("satchel-timing idle-ready") => {
                 std::thread::sleep(IDLE_SETTLE);
                 let before = cpu_secs(&child);
                 std::thread::sleep(IDLE_WINDOW);
@@ -594,7 +595,7 @@ fn idle_once(bin: &Path, dir: &Path, view: &str) -> Result<f64, String> {
             Ok(line) => lines.push(line),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {
                 if let Ok(Some(status)) = child.try_wait() {
-                    break Err(format!("arbor exited with {status} before it was idle:\n{}", lines.join("\n")));
+                    break Err(format!("satchel exited with {status} before it was idle:\n{}", lines.join("\n")));
                 }
             }
             Err(_) => {
@@ -733,14 +734,14 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
     });
     cmd.env("RUNE_DIRS_ROOT", dirs);
     for (var, on) in [
-        ("ARBOR_BENCH_TABS", mode == Mode::Tabs),
-        ("ARBOR_BENCH_PREVIEW", mode == Mode::Preview),
-        ("ARBOR_BENCH_JUMP", mode == Mode::Jump),
-        ("ARBOR_BENCH_SEARCH", mode == Mode::Search),
-        ("ARBOR_BENCH_RENAME", mode == Mode::Rename),
-        ("ARBOR_BENCH_GRID", matches!(mode, Mode::Grid | Mode::GridImages | Mode::Tiles)),
-        ("ARBOR_BENCH_COLUMNS", mode == Mode::Columns),
-        ("ARBOR_BENCH_WINDOW", mode == Mode::Window),
+        ("SATCHEL_BENCH_TABS", mode == Mode::Tabs),
+        ("SATCHEL_BENCH_PREVIEW", mode == Mode::Preview),
+        ("SATCHEL_BENCH_JUMP", mode == Mode::Jump),
+        ("SATCHEL_BENCH_SEARCH", mode == Mode::Search),
+        ("SATCHEL_BENCH_RENAME", mode == Mode::Rename),
+        ("SATCHEL_BENCH_GRID", matches!(mode, Mode::Grid | Mode::GridImages | Mode::Tiles)),
+        ("SATCHEL_BENCH_COLUMNS", mode == Mode::Columns),
+        ("SATCHEL_BENCH_WINDOW", mode == Mode::Window),
     ] {
         if on && mode == Mode::GridImages {
             cmd.env(var, "2");
@@ -753,13 +754,13 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
         }
     }
     match PACE.get().copied().unwrap_or(0) {
-        0 => cmd.env_remove("ARBOR_BENCH_PACE_MS"),
-        ms => cmd.env("ARBOR_BENCH_PACE_MS", ms.to_string()),
+        0 => cmd.env_remove("SATCHEL_BENCH_PACE_MS"),
+        ms => cmd.env("SATCHEL_BENCH_PACE_MS", ms.to_string()),
     };
     let mut child = cmd
         .arg(dir)
-        .env("ARBOR_BENCH", rounds.to_string())
-        .env_remove("ARBOR_TIMING")
+        .env("SATCHEL_BENCH", rounds.to_string())
+        .env_remove("SATCHEL_TIMING")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -775,7 +776,7 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
                 // Where it was stuck, before it goes.
                 let mut sampled = String::new();
                 if cfg!(target_os = "macos") {
-                    let file = std::env::temp_dir().join(format!("arbor-bench-stuck-{}.txt", child.id()));
+                    let file = std::env::temp_dir().join(format!("satchel-bench-stuck-{}.txt", child.id()));
                     let ok = Command::new("sample")
                         .args([&child.id().to_string(), "1", "-mayDie", "-file"])
                         .arg(&file)
@@ -799,7 +800,7 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
     };
     let lines = reader.join().map_err(|_| "reader panicked")?;
     if !status.success() {
-        return Err(format!("arbor exited with {status}:\n{}", lines.join("\n")));
+        return Err(format!("satchel exited with {status}:\n{}", lines.join("\n")));
     }
     let spawn_us = spawned.duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_micros() as f64;
     let mut run = Run {
@@ -836,7 +837,7 @@ fn run_once(bin: &Path, dir: &Path, rounds: u32, mode: Mode) -> Result<Run, Stri
     let mut keys = 0;
     let mut streaming = false;
     for line in &lines {
-        let Some(rest) = line.strip_prefix("arbor-timing ") else { continue };
+        let Some(rest) = line.strip_prefix("satchel-timing ") else { continue };
         let field = |k: &str| rest.split_whitespace().find_map(|f| f.strip_prefix(k)?.strip_prefix('=')?.parse::<f64>().ok());
         match rest.split_whitespace().next() {
             Some("first-frame") => {
@@ -1166,7 +1167,7 @@ fn make_preview_folder(dir: &Path) {
 /// a month; ranks under `MAX_AGE`, so none age out), at `root`'s settings folder. The folders
 /// needn't exist: Jump never looks.
 fn make_jump_history(root: &Path, _under: &Path) {
-    let dir = root.join("config").join(if cfg!(any(target_os = "macos", windows)) { "Arbor" } else { "arbor" });
+    let dir = root.join("config").join(if cfg!(any(target_os = "macos", windows)) { "Satchel" } else { "satchel" });
     std::fs::create_dir_all(&dir).expect("settings folder");
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     // Folders as people have them: under the home folder, 2 to 9 levels deep, short names and
@@ -1177,7 +1178,7 @@ fn make_jump_history(root: &Path, _under: &Path) {
     let words = [
         "Documents",
         "projects",
-        "arbor",
+        "satchel",
         "src",
         "Library",
         "Mobile Documents",

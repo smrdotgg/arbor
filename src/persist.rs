@@ -4,7 +4,7 @@
 //! - [`replace`]: a file is rewritten through a temporary file beside it ([`temp_beside`])
 //!   renamed over it, so a crash never leaves half a file. `Durable` also flushes it to the
 //!   disk first, for a backup that must be there before what it records changes.
-//! - [`locked`]: a read-then-write of a file holds its lock file, so two Arbor processes never
+//! - [`locked`]: a read-then-write of a file holds its lock file, so two Satchel processes never
 //!   interleave theirs.
 //! - [`Failures`]: a writer thread says the first failure of a run in the status bar, once,
 //!   until a write works again.
@@ -64,7 +64,7 @@ pub fn replace(p: &Path, data: &[u8], how: Durability) -> io::Result<()> {
 }
 
 /// Runs `f` holding `p`'s lock file (`p` with the extension `.lock`, made if needed, as is its
-/// folder), so two Arbor processes never interleave a read-then-write of `p`: one waits for
+/// folder), so two Satchel processes never interleave a read-then-write of `p`: one waits for
 /// the other. The lock is the operating system's (`flock`, `LockFileEx`), released when the
 /// file closes, even if the process dies.
 pub fn locked<T>(p: &Path, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
@@ -149,7 +149,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-persist-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-persist-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("arbor-handler-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("satchel-handler-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -39,13 +39,13 @@ fn linux_dirs(d: &Path, installed: bool) -> linux::Dirs {
     let data_home = d.join("data");
     if installed {
         std::fs::create_dir_all(data_home.join("applications")).unwrap();
-        std::fs::write(data_home.join("applications/arbor.desktop"), "[Desktop Entry]\n").unwrap();
+        std::fs::write(data_home.join("applications/satchel.desktop"), "[Desktop Entry]\n").unwrap();
     }
     linux::Dirs {
         config_home: d.join("config"),
         data_home,
         data_dirs: vec![d.join("system")],
-        exe: PathBuf::from("/home/me/.local/bin/arbor"),
+        exe: PathBuf::from("/home/me/.local/bin/satchel"),
         desktops: vec!["gnome".into()],
         reload_bus: false,
     }
@@ -55,20 +55,20 @@ fn linux_dirs(d: &Path, installed: bool) -> linux::Dirs {
 fn mimeapps_edits_keep_every_other_line() {
     let text = "[Added Associations]\ninode/directory=x.desktop;\n\n[Default Applications]\ntext/plain=gedit.desktop\ninode/directory = org.gnome.Nautilus.desktop\n# note\n";
     assert_eq!(linux::default_app(text, "inode/directory").as_deref(), Some("org.gnome.Nautilus.desktop"));
-    let set = linux::set_default_app(text, "inode/directory", Some("arbor.desktop"));
+    let set = linux::set_default_app(text, "inode/directory", Some("satchel.desktop"));
     assert_eq!(
         set,
-        "[Added Associations]\ninode/directory=x.desktop;\n\n[Default Applications]\ninode/directory=arbor.desktop\ntext/plain=gedit.desktop\n# note\n"
+        "[Added Associations]\ninode/directory=x.desktop;\n\n[Default Applications]\ninode/directory=satchel.desktop\ntext/plain=gedit.desktop\n# note\n"
     );
     let removed = linux::set_default_app(&set, "inode/directory", None);
     assert_eq!(removed, "[Added Associations]\ninode/directory=x.desktop;\n\n[Default Applications]\ntext/plain=gedit.desktop\n# note\n");
     assert_eq!(
-        linux::set_default_app("", "inode/directory", Some("arbor.desktop")),
-        "[Default Applications]\ninode/directory=arbor.desktop\n"
+        linux::set_default_app("", "inode/directory", Some("satchel.desktop")),
+        "[Default Applications]\ninode/directory=satchel.desktop\n"
     );
     assert_eq!(
-        linux::set_default_app("[Other]\na=b", "inode/directory", Some("arbor.desktop")),
-        "[Other]\na=b\n\n[Default Applications]\ninode/directory=arbor.desktop\n"
+        linux::set_default_app("[Other]\na=b", "inode/directory", Some("satchel.desktop")),
+        "[Other]\na=b\n\n[Default Applications]\ninode/directory=satchel.desktop\n"
     );
 }
 
@@ -76,7 +76,7 @@ fn mimeapps_edits_keep_every_other_line() {
 fn linux_make_and_restore_put_back_exactly_what_was_there() {
     let d = tmp("linux-roundtrip");
     let dirs = linux_dirs(&d, true);
-    let backup = d.join("arbor").join(BACKUP_FILE);
+    let backup = d.join("satchel").join(BACKUP_FILE);
     let mimeapps = dirs.config_home.join("mimeapps.list");
     let service = linux::service_file(&dirs.data_home);
     let before = "[Default Applications]\ninode/directory=org.gnome.Nautilus.desktop\ntext/plain=gedit.desktop\n";
@@ -85,11 +85,14 @@ fn linux_make_and_restore_put_back_exactly_what_was_there() {
     std::fs::create_dir_all(service.parent().unwrap()).unwrap();
     std::fs::write(&service, "[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=/usr/bin/other\n").unwrap();
     let msg = linux::run(Change::Make, &dirs, &backup).unwrap();
-    assert!(msg.starts_with("Arbor is now the default for folders"), "{msg}");
-    assert_eq!(linux::default_app(&std::fs::read_to_string(&mimeapps).unwrap(), linux::MIME).as_deref(), Some("arbor.desktop"));
+    assert!(msg.starts_with("Satchel is now the default for folders"), "{msg}");
+    assert_eq!(linux::default_app(&std::fs::read_to_string(&mimeapps).unwrap(), linux::MIME).as_deref(), Some("satchel.desktop"));
     let s = std::fs::read_to_string(&service).unwrap();
-    assert!(linux::is_ours(&s) && s.contains("Exec=/home/me/.local/bin/arbor\n") && s.contains("Name=org.freedesktop.FileManager1"), "{s}");
-    // Again: the first backup stays (it isn't overwritten with Arbor's own settings).
+    assert!(
+        linux::is_ours(&s) && s.contains("Exec=/home/me/.local/bin/satchel\n") && s.contains("Name=org.freedesktop.FileManager1"),
+        "{s}"
+    );
+    // Again: the first backup stays (it isn't overwritten with Satchel's own settings).
     linux::run(Change::Make, &dirs, &backup).unwrap();
     let msg = linux::run(Change::Restore, &dirs, &backup).unwrap();
     assert_eq!(msg, "Folders open in org.gnome.Nautilus.desktop again");
@@ -100,17 +103,17 @@ fn linux_make_and_restore_put_back_exactly_what_was_there() {
 }
 
 #[test]
-fn linux_restore_with_nothing_before_removes_what_arbor_wrote() {
+fn linux_restore_with_nothing_before_removes_what_satchel_wrote() {
     let d = tmp("linux-fresh");
     let dirs = linux_dirs(&d, true);
-    let backup = d.join("arbor").join(BACKUP_FILE);
+    let backup = d.join("satchel").join(BACKUP_FILE);
     linux::run(Change::Make, &dirs, &backup).unwrap();
     let msg = linux::run(Change::Restore, &dirs, &backup).unwrap();
     assert_eq!(msg, "Folders open in the desktop's own file manager again");
     let text = std::fs::read_to_string(dirs.config_home.join("mimeapps.list")).unwrap();
     assert_eq!(linux::default_app(&text, linux::MIME), None, "{text}");
     assert!(!linux::service_file(&dirs.data_home).exists());
-    // Without a backup at all, Restore still takes back what Arbor wrote.
+    // Without a backup at all, Restore still takes back what Satchel wrote.
     linux::run(Change::Make, &dirs, &backup).unwrap();
     std::fs::remove_file(&backup).unwrap();
     linux::run(Change::Restore, &dirs, &backup).unwrap();
@@ -123,9 +126,9 @@ fn linux_restore_with_nothing_before_removes_what_arbor_wrote() {
 fn linux_restore_leaves_settings_changed_since_and_make_needs_the_desktop_file() {
     let d = tmp("linux-changed");
     let dirs = linux_dirs(&d, false);
-    let backup = d.join("arbor").join(BACKUP_FILE);
+    let backup = d.join("satchel").join(BACKUP_FILE);
     let e = linux::run(Change::Make, &dirs, &backup).unwrap_err();
-    assert!(e.starts_with("Install Arbor first"), "{e}");
+    assert!(e.starts_with("Install Satchel first"), "{e}");
     assert!(!backup.exists() && !dirs.config_home.join("mimeapps.list").exists(), "nothing changed");
     let dirs = linux_dirs(&d, true);
     linux::run(Change::Make, &dirs, &backup).unwrap();
@@ -178,8 +181,8 @@ fn linux_make_puts_the_folder_default_back_when_a_write_fails() {
 
 #[test]
 fn the_service_files_exec_is_quoted_for_the_bus() {
-    let s = linux::service_text(Path::new("/opt/my apps/arbor"));
-    assert!(s.contains("Exec=\"/opt/my apps/arbor\"\n"), "{s}");
+    let s = linux::service_text(Path::new("/opt/my apps/satchel"));
+    assert!(s.contains("Exec=\"/opt/my apps/satchel\"\n"), "{s}");
 }
 
 // ---- Windows ----
@@ -234,7 +237,7 @@ impl windows::Store for Reg {
     }
 }
 
-const EXE: &str = r"C:\Users\me\AppData\Local\Arbor\arbor.exe";
+const EXE: &str = r"C:\Users\me\AppData\Local\Satchel\satchel.exe";
 
 /// A registry whose `n`th write (from 1) fails, as a full or locked hive would.
 struct Failing {
@@ -266,7 +269,7 @@ impl windows::Store for Failing {
 }
 
 /// The review's blocker: a backup that can't be saved used to be found out only after the
-/// registry had changed, leaving Arbor the default with nothing to restore from. Now the
+/// registry had changed, leaving Satchel the default with nothing to restore from. Now the
 /// whole snapshot is saved first, and a failure there changes nothing.
 #[test]
 fn windows_make_saves_the_backup_before_touching_the_registry() {
@@ -305,14 +308,14 @@ fn windows_make_puts_everything_back_when_a_write_fails_midway() {
         assert!(!backup.exists(), "write {fail_at}: the backup made for it is gone");
         let _ = std::fs::remove_dir_all(&d);
     }
-    // Arbor already the default, and a second Make failing: the first backup stays.
+    // Satchel already the default, and a second Make failing: the first backup stays.
     let d = tmp("win-midway-again");
     let backup = d.join(BACKUP_FILE);
     let mut reg = Reg::default();
     windows::run(Change::Make, &mut reg, root, EXE, &backup).unwrap();
     let first = std::fs::read_to_string(&backup).unwrap();
     let mut failing = Failing { reg, writes: 0, fail_at: 3 };
-    windows::run(Change::Make, &mut failing, root, r"D:\Arbor\arbor.exe", &backup).unwrap_err();
+    windows::run(Change::Make, &mut failing, root, r"D:\Satchel\satchel.exe", &backup).unwrap_err();
     assert!(
         std::fs::read_to_string(&backup).unwrap().starts_with(&first[..first.find("wrote").unwrap()]),
         "the first backup's record stays"
@@ -320,9 +323,9 @@ fn windows_make_puts_everything_back_when_a_write_fails_midway() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Make again (from another `arbor.exe`) failing halfway puts back the state just before
-/// that attempt (the first Make's values, still working), not the state before Arbor; the
-/// backup on disk is the first one again, and Restore still puts back what Arbor replaced.
+/// Make again (from another `satchel.exe`) failing halfway puts back the state just before
+/// that attempt (the first Make's values, still working), not the state before Satchel; the
+/// backup on disk is the first one again, and Restore still puts back what Satchel replaced.
 #[test]
 fn windows_a_failed_make_again_leaves_the_first_make_in_place() {
     use windows::Store;
@@ -336,13 +339,13 @@ fn windows_a_failed_make_again_leaves_the_first_make_in_place() {
         windows::run(Change::Make, &mut reg, root, EXE, &backup).unwrap();
         let (made, first) = (reg.clone(), std::fs::read_to_string(&backup).unwrap());
         let mut failing = Failing { reg, writes: 0, fail_at };
-        let e = windows::run(Change::Make, &mut failing, root, r"D:\Arbor\arbor.exe", &backup).unwrap_err();
+        let e = windows::run(Change::Make, &mut failing, root, r"D:\Satchel\satchel.exe", &backup).unwrap_err();
         assert!(e.ends_with("so nothing was changed"), "write {fail_at}: {e}");
         assert_eq!(failing.reg, made, "write {fail_at}: the first Make's values, as they were");
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), first, "write {fail_at}: the first backup, as it was");
         let mut reg = failing.reg;
         windows::run(Change::Restore, &mut reg, root, EXE, &backup).unwrap();
-        assert_eq!(reg, start, "write {fail_at}: Restore still puts back what Arbor replaced");
+        assert_eq!(reg, start, "write {fail_at}: Restore still puts back what Satchel replaced");
         let _ = std::fs::remove_dir_all(&d);
     }
 }
@@ -398,15 +401,15 @@ fn windows_plan_is_the_minimal_hkcu_set() {
     assert_eq!(
         lines,
         [
-            r"Software\Classes\Directory\shell\arbor\[] = Open in Arbor",
-            r"Software\Classes\Directory\shell\arbor\[Icon] = C:\Users\me\AppData\Local\Arbor\arbor.exe,0",
-            r#"Software\Classes\Directory\shell\arbor\command\[] = "C:\Users\me\AppData\Local\Arbor\arbor.exe" "%1""#,
-            r"Software\Classes\Drive\shell\arbor\[] = Open in Arbor",
-            r"Software\Classes\Drive\shell\arbor\[Icon] = C:\Users\me\AppData\Local\Arbor\arbor.exe,0",
-            r#"Software\Classes\Drive\shell\arbor\command\[] = "C:\Users\me\AppData\Local\Arbor\arbor.exe" "%1""#,
-            r#"Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow\command\[] = "C:\Users\me\AppData\Local\Arbor\arbor.exe""#,
-            r"Software\Classes\Directory\shell\[] = arbor",
-            r"Software\Classes\Drive\shell\[] = arbor",
+            r"Software\Classes\Directory\shell\satchel\[] = Open in Satchel",
+            r"Software\Classes\Directory\shell\satchel\[Icon] = C:\Users\me\AppData\Local\Satchel\satchel.exe,0",
+            r#"Software\Classes\Directory\shell\satchel\command\[] = "C:\Users\me\AppData\Local\Satchel\satchel.exe" "%1""#,
+            r"Software\Classes\Drive\shell\satchel\[] = Open in Satchel",
+            r"Software\Classes\Drive\shell\satchel\[Icon] = C:\Users\me\AppData\Local\Satchel\satchel.exe,0",
+            r#"Software\Classes\Drive\shell\satchel\command\[] = "C:\Users\me\AppData\Local\Satchel\satchel.exe" "%1""#,
+            r#"Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow\command\[] = "C:\Users\me\AppData\Local\Satchel\satchel.exe""#,
+            r"Software\Classes\Directory\shell\[] = satchel",
+            r"Software\Classes\Drive\shell\[] = satchel",
             r"Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow\command\[DelegateExecute] = ",
         ],
         "the commands first, then what makes them the default"
@@ -429,14 +432,14 @@ fn windows_make_and_restore_put_back_exactly_what_was_there() {
     let start = reg.clone();
     let plan = windows::plan(root, EXE);
     let b = windows::make(&mut reg, &plan, root, None).unwrap();
-    assert_eq!(reg.text(r"Software\Classes\Directory\shell", "").as_deref(), Some("arbor"));
-    assert_eq!(reg.text(r"Software\Classes\Drive\shell\arbor\command", "").as_deref(), Some(&*format!("\"{EXE}\" \"%1\"")));
+    assert_eq!(reg.text(r"Software\Classes\Directory\shell", "").as_deref(), Some("satchel"));
+    assert_eq!(reg.text(r"Software\Classes\Drive\shell\satchel\command", "").as_deref(), Some(&*format!("\"{EXE}\" \"%1\"")));
     // Made twice: the first backup is kept.
     let b = windows::make(&mut reg, &plan, root, Some(b)).unwrap();
     let (changed, kept) = windows::restore(&mut reg, &plan, root, Some(&b)).unwrap();
     assert!(kept.is_empty() && changed == plan.len(), "{kept:?}");
     assert_eq!(reg, start, "everything as it was, the expandable string's type too");
-    assert_eq!(windows::restore(&mut reg, &plan, root, None).unwrap(), (0, Vec::new()), "nothing of Arbor's left");
+    assert_eq!(windows::restore(&mut reg, &plan, root, None).unwrap(), (0, Vec::new()), "nothing of Satchel's left");
 }
 
 /// A recorded value shorter than its type (4 bytes) was taken for "there was none", so Restore
@@ -471,22 +474,22 @@ fn windows_restore_without_a_backup_and_after_changes() {
     let (_, kept) = windows::restore(&mut reg, &plan, root, Some(&b)).unwrap();
     assert_eq!(kept, [r"HKCU\Software\Classes\Drive\shell\(Default)"]);
     assert_eq!(reg.text(r"Software\Classes\Drive\shell", "").as_deref(), Some("other"));
-    assert!(!reg.exists(r"Software\Classes\Directory"), "keys Arbor made are gone: {reg:?}");
+    assert!(!reg.exists(r"Software\Classes\Directory"), "keys Satchel made are gone: {reg:?}");
     assert!(!reg.exists(r"Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}"));
-    assert!(!reg.exists(r"Software\Classes\Drive\shell\arbor"));
-    // With no backup at all, what Arbor wrote goes.
+    assert!(!reg.exists(r"Software\Classes\Drive\shell\satchel"));
+    // With no backup at all, what Satchel wrote goes.
     let mut reg = Reg::default();
     reg.create(root);
     let start = reg.clone();
     windows::make(&mut reg, &plan, root, None).unwrap();
     assert_eq!(windows::restore(&mut reg, &plan, root, None).unwrap(), (plan.len(), Vec::new()));
     assert_eq!(reg, start);
-    // An Arbor that moved since is still recognised: what it wrote is in the backup.
+    // A Satchel that moved since is still recognised: what it wrote is in the backup.
     let mut reg = Reg::default();
     reg.create(root);
     let start = reg.clone();
     let b = windows::make(&mut reg, &plan, root, None).unwrap();
-    let moved = windows::plan(root, r"D:\Arbor\arbor.exe");
+    let moved = windows::plan(root, r"D:\Satchel\satchel.exe");
     assert!(windows::restore(&mut reg, &moved, root, Some(&b)).unwrap().1.is_empty());
     assert_eq!(reg, start);
 }
@@ -496,21 +499,21 @@ fn windows_restore_without_a_backup_and_after_changes() {
 #[test]
 fn windows_round_trip_in_the_real_registry_under_a_test_key() {
     use windows::Store;
-    let root = format!(r"Software\ArborTest-{}", std::process::id());
+    let root = format!(r"Software\SatchelTest-{}", std::process::id());
     let mut reg = windows::Hkcu;
     reg.set(&format!(r"{root}\Directory\shell"), "", windows::REG_SZ, &windows::utf16z("before")).unwrap();
     let plan = windows::plan(&root, EXE);
     let b = windows::make(&mut reg, &plan, &root, None).unwrap();
     let read = |k: &str, n: &str| reg.get(k, n).and_then(|(kind, d)| windows::text(kind, &d));
-    assert_eq!(read(&format!(r"{root}\Directory\shell"), "").as_deref(), Some("arbor"));
-    assert_eq!(read(&format!(r"{root}\Drive\shell\arbor\command"), "").as_deref(), Some(&*format!("\"{EXE}\" \"%1\"")));
+    assert_eq!(read(&format!(r"{root}\Directory\shell"), "").as_deref(), Some("satchel"));
+    assert_eq!(read(&format!(r"{root}\Drive\shell\satchel\command"), "").as_deref(), Some(&*format!("\"{EXE}\" \"%1\"")));
     assert_eq!(read(&format!(r"{root}\CLSID\{}\shell\opennewwindow\command", windows::WIN_E), "DelegateExecute").as_deref(), Some(""));
     let (_, kept) = windows::restore(&mut reg, &plan, &root, Some(&b)).unwrap();
     assert!(kept.is_empty(), "{kept:?}");
     let read = |k: &str, n: &str| reg.get(k, n).and_then(|(kind, d)| windows::text(kind, &d));
     assert_eq!(read(&format!(r"{root}\Directory\shell"), "").as_deref(), Some("before"));
     assert!(!reg.exists(&format!(r"{root}\Drive")) && !reg.exists(&format!(r"{root}\CLSID")));
-    assert!(!reg.exists(&format!(r"{root}\Directory\shell\arbor")));
+    assert!(!reg.exists(&format!(r"{root}\Directory\shell\satchel")));
     reg.delete_value(&format!(r"{root}\Directory\shell"), "").unwrap();
     for k in [format!(r"{root}\Directory\shell"), format!(r"{root}\Directory"), root.clone()] {
         reg.delete_key_if_empty(&k).unwrap();
@@ -542,7 +545,7 @@ fn mac_make_needs_the_bundle_and_restore_puts_back_the_old_viewer() {
     let backup = d.join(BACKUP_FILE);
     let mut ls = FakeLs(Some("com.cocoatech.PathFinder".into()), true);
     let e = mac::run(Change::Make, &mut ls, None, &backup).unwrap_err();
-    assert!(e.starts_with("Only Arbor.app can be the default for folders"), "{e}");
+    assert!(e.starts_with("Only Satchel.app can be the default for folders"), "{e}");
     assert_eq!(ls.0.as_deref(), Some("com.cocoatech.PathFinder"), "nothing changed");
     mac::run(Change::Make, &mut ls, Some(mac::BUNDLE_ID), &backup).unwrap();
     assert_eq!(ls.0.as_deref(), Some(mac::BUNDLE_ID));
@@ -621,7 +624,7 @@ fn any_backup_text_decodes_to_what_encode_writes_or_an_error() {
     });
 }
 
-/// Every backup Arbor writes reads back the same.
+/// Every backup Satchel writes reads back the same.
 #[test]
 fn any_backup_round_trips() {
     crate::prop::check("backup_round_trip", 500, |r| {
@@ -629,7 +632,7 @@ fn any_backup_round_trips() {
         for _ in 0..r.len(6) {
             let key = loop {
                 let k = r.string(12).replace(['\n', '\r'], "");
-                // A name is never blank or a comment (Arbor's are fixed words).
+                // A name is never blank or a comment (Satchel's are fixed words).
                 if !k.trim().is_empty() && !k.starts_with('#') {
                     break k;
                 }
@@ -675,7 +678,7 @@ fn any_mimeapps_text_takes_the_folder_default_and_keeps_the_rest() {
     ];
     crate::prop::check("mimeapps_edit", 3000, |r| {
         let text = if r.one_in(4) { r.string(60) } else { r.from(BITS, 30) };
-        let v = r.pick(&["arbor.desktop", "old.desktop;fallback.desktop;"]).to_string();
+        let v = r.pick(&["satchel.desktop", "old.desktop;fallback.desktop;"]).to_string();
         let set = linux::set_default_app(&text, linux::MIME, Some(&v));
         assert_eq!(linux::default_app(&set, linux::MIME).as_deref(), Some(v.as_str()), "{text:?} → {set:?}");
         let gone = linux::set_default_app(&set, linux::MIME, None);
@@ -699,7 +702,7 @@ fn any_mimeapps_text_takes_the_folder_default_and_keeps_the_rest() {
 fn linux_never_rewrites_a_file_it_cant_read_exactly() {
     let d = tmp("linux-bytes");
     let dirs = linux_dirs(&d, true);
-    let backup = d.join("arbor").join(BACKUP_FILE);
+    let backup = d.join("satchel").join(BACKUP_FILE);
     let mimeapps = dirs.config_home.join("mimeapps.list");
     std::fs::create_dir_all(&dirs.config_home).unwrap();
     let latin1 = b"# caf\xe9\n[Default Applications]\ninode/directory=old.desktop\n";
@@ -726,7 +729,7 @@ fn linux_never_rewrites_a_file_it_cant_read_exactly() {
 fn linux_restore_refuses_a_folder_default_with_a_line_break() {
     let d = tmp("linux-inject");
     let dirs = linux_dirs(&d, true);
-    let backup = d.join("arbor").join(BACKUP_FILE);
+    let backup = d.join("satchel").join(BACKUP_FILE);
     let mimeapps = dirs.config_home.join("mimeapps.list");
     std::fs::create_dir_all(&dirs.config_home).unwrap();
     std::fs::write(&mimeapps, "[Default Applications]\ninode/directory=old.desktop\n").unwrap();

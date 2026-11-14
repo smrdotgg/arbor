@@ -1,4 +1,4 @@
-//! What every window of one Arbor shares. All windows run on the one UI thread, each with its
+//! What every window of one Satchel shares. All windows run on the one UI thread, each with its
 //! own `State` (panes, tabs, selection, history of folders, overlays); these are the things
 //! there is only one of:
 //!
@@ -72,7 +72,7 @@ pub struct Shared {
     pub(crate) side_writer: RefCell<Option<crate::sidebar::Writer>>,
     pub(crate) side_rev: std::cell::Cell<u64>,
     /// The list's columns, for every window (`listcols.rs`), whether the user changed them
-    /// since Arbor started (columns read late at startup then don't replace them), where
+    /// since Satchel started (columns read late at startup then don't replace them), where
     /// they're kept, and the one thread writing them, from the first change on.
     pub(crate) cols: std::cell::Cell<crate::listcols::ListCols>,
     pub(crate) cols_set: std::cell::Cell<bool>,

@@ -363,7 +363,7 @@ pub(super) fn menu_view(m: &crate::menu::Menu, size: Option<[f32; 2]>, l: Look) 
     card
 }
 
-/// Arbor's one dialog: before something that can't be undone (`confirm.rs`). A title, what it
+/// Satchel's one dialog: before something that can't be undone (`confirm.rs`). A title, what it
 /// does ("… This can't be undone."), Cancel and the destructive button; the focused one has a
 /// ring, and Cancel has the focus when it opens. Modal: a click outside cancels. With nothing
 /// to confirm it has no destructive button: Close, and "Open Privacy Settings" when offered.

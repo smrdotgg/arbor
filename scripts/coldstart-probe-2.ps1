@@ -1,26 +1,30 @@
-# Arbor's cold-start probes, round 2 (Windows): where Rune's GPU setup spends its time on this
+# Satchel's cold-start probes, round 2 (Windows): where Rune's GPU setup spends its time on this
 # machine. Downloads coldstart-probes-2-windows.zip into a new folder in %TEMP% and:
 #   1. runs gpu_probe.exe (a console program) in each mode, twice (cold, then again): Rune's own
 #      window path phase by phase, then plain wgpu on DX12 and on Vulkan, per GPU adapter;
 #   2. launches arbor-base.exe (coldstart-probe-1's: v0.1.0-alpha.4's startup), arbor.exe (this
 #      round's fixes) and rune-hello.exe in turn, 5 times each after one untimed launch, and
-#      prints the median from process creation to the first frame, with Arbor's splits.
+#      prints the median from process creation to the first frame, with Satchel's splits.
 # Nothing is installed; no admin needed; Windows PowerShell 5.1 and PowerShell 7 alike:
 #
-#   irm https://raw.githubusercontent.com/smrdotgg/arbor/coldstart-probe-2/scripts/coldstart-probe-2.ps1 | iex
+#   irm https://raw.githubusercontent.com/smrdotgg/satchel/coldstart-probe-2/scripts/coldstart-probe-2.ps1 | iex
 #
-# ARBOR_PROBE_ZIP=<url or local path> and ARBOR_PROBE_RUNS=<n> override the zip and the count.
+# SATCHEL_PROBE_ZIP=<url or local path> and SATCHEL_PROBE_RUNS=<n> override the zip and the count.
+#
+# The zip was published before the project was renamed from Arbor (14 November 2026): its exes are
+# named arbor*.exe, read ARBOR_TIMING_FILE and ARBOR_EXIT_AFTER_FIRST_FRAME and write
+# `arbor-timing` lines, so those names stay as they were here.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$url = 'https://github.com/smrdotgg/arbor/releases/download/coldstart-probe-2/coldstart-probes-2-windows.zip'
-if ($env:ARBOR_PROBE_ZIP) { $url = $env:ARBOR_PROBE_ZIP }
+$url = 'https://github.com/smrdotgg/satchel/releases/download/coldstart-probe-2/coldstart-probes-2-windows.zip'
+if ($env:SATCHEL_PROBE_ZIP) { $url = $env:SATCHEL_PROBE_ZIP }
 $runs = 5
-if ($env:ARBOR_PROBE_RUNS) { $runs = [int]$env:ARBOR_PROBE_RUNS }
+if ($env:SATCHEL_PROBE_RUNS) { $runs = [int]$env:SATCHEL_PROBE_RUNS }
 
-$dir = Join-Path $env:TEMP ('arbor-coldstart2-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+$dir = Join-Path $env:TEMP ('satchel-coldstart2-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Path $dir | Out-Null
 $zip = Join-Path $dir 'probes.zip'
 if (Test-Path -LiteralPath $url) { Copy-Item -LiteralPath $url $zip } else { Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing }

@@ -185,7 +185,7 @@ impl<'a> Worker<'a> {
     /// [`Worker::run`], first checking that a copy's or move's destination is still the folder
     /// with identity `dest_id`.
     pub(super) fn run_into(&mut self, op: Op, dest_id: Option<(super::DestId, &'static str)>) -> Outcome {
-        // Through the identity checks of the items (a paste of what Arbor cut, rows dragged).
+        // Through the identity checks of the items (a paste of what Satchel cut, rows dragged).
         let inner = match &op {
             Op::Checked { op, .. } => op.as_ref(),
             op => op,
@@ -507,13 +507,13 @@ impl<'a> Worker<'a> {
         })
     }
 
-    /// After Arbor renamed, moved, trashed or deleted `src` (now at `at`, when it's still
-    /// somewhere it can be read), where identity is told by ctime alone: what Arbor's change
+    /// After Satchel renamed, moved, trashed or deleted `src` (now at `at`, when it's still
+    /// somewhere it can be read), where identity is told by ctime alone: what Satchel's change
     /// made of it, read right away where it went or through another name for it (a hard link)
     /// this operation still has to act on, goes to those other names' expected identities and
     /// to the outcome ([`Outcome::reidentified`]). Without it a second hard link was refused
-    /// as "replaced", and so was the next action on an item Arbor had just renamed. Where
-    /// identity has a birth time or a handle, Arbor's change doesn't touch it: nothing to do.
+    /// as "replaced", and so was the next action on an item Satchel had just renamed. Where
+    /// identity has a birth time or a handle, Satchel's change doesn't touch it: nothing to do.
     pub(super) fn acted(&mut self, src: &Path, at: Option<&Path>, out: &mut Outcome) {
         let Some(before) = self.seen.get(src).copied().filter(crate::fs::Ident::by_ctime) else { return };
         let others: Vec<PathBuf> =

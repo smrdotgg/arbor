@@ -563,7 +563,7 @@ pub(crate) mod tests {
     }
 
     fn folder(name: &str, files: &[&str]) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-batch-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-batch-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for f in files {
@@ -865,7 +865,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "benchmark"]
     fn batch_speed() {
-        let d = std::env::temp_dir().join(format!("arbor-batch-speed-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-batch-speed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for i in 0..10_000 {

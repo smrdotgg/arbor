@@ -3,7 +3,7 @@
 //!
 //! **A trash never silently becomes a permanent delete** (NORTHSTAR Safety #2). When an item's
 //! disk has no trash that will take it, [`trash`] leaves it alone and says so
-//! ([`TrashError::NoTrash`]); the UI then asks, in Arbor's one dialog, whether to delete it
+//! ([`TrashError::NoTrash`]); the UI then asks, in Satchel's one dialog, whether to delete it
 //! permanently (`confirm.rs`).
 //!
 //! - **macOS:** `NSFileManager.trashItemAtURL`, which fails rather than deleting on a volume
@@ -184,7 +184,7 @@ fn trash_with(path: &Path, home: Option<&Path>, top: &Path, uid: u32) -> Result<
         return Err(TrashError::Failed(format!("“{}” can't be changed (read-only, or no permission)", dir.display())));
     }
     let why = why.map_or_else(String::new, |w| format!(" ({w})"));
-    Err(TrashError::NoTrash(format!("“{}” has no trash Arbor can use{why}", top.display())))
+    Err(TrashError::NoTrash(format!("“{}” has no trash Satchel can use{why}", top.display())))
 }
 
 /// How a try at one trash folder failed.
@@ -294,7 +294,7 @@ pub fn forget(trashed: &Path) {
     let _ = std::fs::remove_file(root.join("info").join(info));
 }
 
-/// macOS keeps no record beside the item, and Windows trash can't be undone from Arbor.
+/// macOS keeps no record beside the item, and Windows trash can't be undone from Satchel.
 #[cfg(not(all(unix, not(target_os = "macos"))))]
 pub fn forget(_trashed: &Path) {}
 
@@ -346,7 +346,7 @@ pub fn precheck(root: &str, kind: u32) -> Option<String> {
         drive::FIXED | drive::REMOVABLE | drive::REMOTE => Some(format!("{place} is a network location, which has no {BIN}")),
         drive::CDROM => Some(format!("{place} is a disc, which has no {BIN}")),
         drive::RAMDISK => Some(format!("{place} is a RAM disk, which has no {BIN}")),
-        _ => Some(format!("Arbor can't tell whether {place} has a {BIN}")),
+        _ => Some(format!("Satchel can't tell whether {place} has a {BIN}")),
     }
 }
 
@@ -384,7 +384,7 @@ pub fn bin_verdict(s: &BinSettings, size: Option<u64>, place: &str, removable: b
         return Err(if removable {
             format!("{place} is a removable drive, and Windows keeps no {BIN} on it")
         } else {
-            format!("Windows has no {BIN} settings for {place}, so Arbor can't be sure it would keep it")
+            format!("Windows has no {BIN} settings for {place}, so Satchel can't be sure it would keep it")
         });
     }
     match s.nuke.or(s.global_nuke) {
@@ -402,7 +402,7 @@ pub fn bin_verdict(s: &BinSettings, size: Option<u64>, place: &str, removable: b
         (Some(m), None) | (None, Some(m)) => m,
         (None, None) => return Err(format!("Windows doesn't say how big the {BIN} on {place} is")),
     };
-    let Some(size) = size else { return Err(format!("Arbor couldn't read all of it to check that it fits in the {BIN}")) };
+    let Some(size) = size else { return Err(format!("Satchel couldn't read all of it to check that it fits in the {BIN}")) };
     if size > max {
         return Err(format!(
             "it's bigger ({}) than the {BIN} on {place} can hold ({})",
@@ -413,7 +413,7 @@ pub fn bin_verdict(s: &BinSettings, size: Option<u64>, place: &str, removable: b
     Ok(())
 }
 
-/// What the shell's per-item answers add up to (see [`recycle`]): `refused` when Arbor stopped
+/// What the shell's per-item answers add up to (see [`recycle`]): `refused` when Satchel stopped
 /// the delete before it began because the shell wasn't going to recycle the item; `performed`
 /// what `PerformOperations` returned; `deleted` what `PostDeleteItem` reported (its HRESULT,
 /// and whether the item landed in the Recycle Bin), `None` if it never came.
@@ -433,13 +433,13 @@ pub fn verdict(refused: bool, performed: i32, deleted: Option<(i32, bool)>, plac
     }
 }
 
-/// The Recycle Bin. Windows doesn't say where the item went (Arbor can't undo it; restore it
+/// The Recycle Bin. Windows doesn't say where the item went (Satchel can't undo it; restore it
 /// from the Recycle Bin), so this returns `None` on success.
 ///
 /// Before the shell is asked, on this worker: the registry's settings for the item's volume and
 /// the item's size (a walk that never follows links, junctions or mounted volumes, and stops
 /// when `stop` says), so an item the bin wouldn't keep (turned off, too big, unknown) is never
-/// handed to a delete that might be permanent. It's left for Arbor's own question instead.
+/// handed to a delete that might be permanent. It's left for Satchel's own question instead.
 #[cfg(windows)]
 pub fn trash(path: &Path, stop: &dyn Fn() -> bool) -> Result<Option<PathBuf>, TrashError> {
     let abs = std::path::absolute(path).map_err(|e| TrashError::Failed(e.to_string()))?;
@@ -508,7 +508,7 @@ fn tree_size(p: &Path, stop: &dyn Fn() -> bool) -> Size {
 ///
 /// `SHFileOperationW` with `FOF_WANTNUKEWARNING` isn't enough: with `FOF_NOCONFIRMATION`
 /// it deletes from some drives (WinFsp and Cryptomator volumes, for one) for good without the
-/// warning, and its warning is Windows' own dialog, not Arbor's.
+/// warning, and its warning is Windows' own dialog, not Satchel's.
 #[cfg(windows)]
 fn recycle(abs: &Path, root: &str) -> Result<Option<PathBuf>, TrashError> {
     let r = win::recycle(abs)?;

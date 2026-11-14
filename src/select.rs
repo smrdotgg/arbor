@@ -328,7 +328,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn folder(name: &str, files: &[&str]) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-select-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-select-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for f in files {

@@ -10,7 +10,7 @@ pub enum Format {
     Gif,
     Webp,
     Bmp,
-    /// The OS's thumbnail of a file Arbor doesn't decode itself (its size is the thumbnail's).
+    /// The OS's thumbnail of a file Satchel doesn't decode itself (its size is the thumbnail's).
     Thumbnail,
 }
 
@@ -27,7 +27,7 @@ impl Format {
     }
 }
 
-/// An image format Arbor decodes, by its first bytes (not its name).
+/// An image format Satchel decodes, by its first bytes (not its name).
 pub fn sniff_image(b: &[u8]) -> Option<Format> {
     if b.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some(Format::Png)

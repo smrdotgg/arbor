@@ -1,7 +1,7 @@
 //! The list view's columns after the name: which are shown and how wide, for every window, the
 //! list and a search's results alike. It's user data (NORTHSTAR: "User data is not a cache"),
 //! kept in `columns.toml` beside the settings file, not in `config.toml`, which people edit by
-//! hand and Arbor never rewrites.
+//! hand and Satchel never rewrites.
 //!
 //! - **Columns:** Kind, Size and Date Modified are shown to start with; Extension, Date Created
 //!   and Permissions can be. Every one of them comes from what the listing reads anyway (one
@@ -353,7 +353,7 @@ pub fn load(path: Option<&Path>) -> Loaded {
     }
 }
 
-/// The columns in `text`: `shown = ["kind", …]` and a `[width]` table. Names Arbor doesn't
+/// The columns in `text`: `shown = ["kind", …]` and a `[width]` table. Names Satchel doesn't
 /// know (from a newer version) are left out; widths are kept within their limits. A missing
 /// `shown` or width is the default.
 pub fn parse(text: &str) -> Result<ListCols, String> {
@@ -391,7 +391,7 @@ pub fn parse(text: &str) -> Result<ListCols, String> {
 pub fn serialize(cols: &ListCols) -> String {
     let shown: Vec<String> = Field::ALL.into_iter().filter(|&f| cols.shown(f)).map(|f| format!("\"{}\"", f.id())).collect();
     let mut s = String::from(
-        "# Arbor's list columns: which are shown, and how wide they are (points). Arbor rewrites this\n\
+        "# Satchel's list columns: which are shown, and how wide they are (points). Satchel rewrites this\n\
          # file when you show, hide or resize a column. Delete it to go back to the defaults.\n",
     );
     s.push_str(&format!("shown = [{}]\n\n[width]\n", shown.join(", ")));
@@ -422,7 +422,7 @@ impl Writer {
         let (mut failures, errors) = persist::Failures::new(waker);
         persist::at_exit(&tx, Msg::Flush);
         std::thread::Builder::new()
-            .name("arbor-columns".into())
+            .name("satchel-columns".into())
             .spawn(move || {
                 while let Ok(first) = rx.recv() {
                     let (mut last, mut replies) = (None, Vec::new());
@@ -605,7 +605,7 @@ mod tests {
     }
 
     fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-listcols-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-listcols-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d.join(FILE)

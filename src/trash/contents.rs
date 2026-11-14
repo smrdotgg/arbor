@@ -1,13 +1,13 @@
 //! What's in the Trash: emptying it (NORTHSTAR Safety #2: it can't be undone, so it asks
-//! first, in Arbor's one dialog), and putting items back where they came from.
+//! first, in Satchel's one dialog), and putting items back where they came from.
 //!
 //! - **Which trashes.** Linux: the home trash (`$XDG_DATA_HOME/Trash`) and, on every local disk
 //!   mounted now ([`crate::mounts::local_points`]), the two the freedesktop.org spec names and
-//!   Arbor's own trash uses: `$top/.Trash/$uid` (only if `.Trash` is a sticky folder, not a link)
+//!   Satchel's own trash uses: `$top/.Trash/$uid` (only if `.Trash` is a sticky folder, not a link)
 //!   and `$top/.Trash-$uid`, each a real folder of this user's. macOS: `~/.Trash`, and
 //!   `.Trashes/$uid` on each local volume under `/Volumes`. Windows: the shell's Recycle Bin on
 //!   every drive (`SHQueryRecycleBinW`, `SHEmptyRecycleBinW`): Windows keeps no folder of it
-//!   Arbor could list.
+//!   Satchel could list.
 //! - **Counting** ([`Counting`]): when the dialog opens, a thread of its own lists the items
 //!   (each with its identity), then adds up their sizes; the dialog shows at once and says the
 //!   count when it lands. Closing the dialog stops it. Nothing is kept.
@@ -28,7 +28,7 @@
 //!   trash that passes the same checks ([`original`]); from a disk's trash only to a place on
 //!   that disk, reached through real folders on it, never a link out of it. macOS has no
 //!   public API for Finder's Put Back (Finder keeps the original location to itself), and
-//!   Windows doesn't let Arbor list the Recycle Bin, so neither offers it.
+//!   Windows doesn't let Satchel list the Recycle Bin, so neither offers it.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -140,7 +140,7 @@ pub struct Item {
 /// Why the Trash couldn't all be read.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Problem {
-    /// macOS refused (`EPERM`) to read this trash folder: Arbor needs Full Disk Access.
+    /// macOS refused (`EPERM`) to read this trash folder: Satchel needs Full Disk Access.
     NeedsAccess(PathBuf),
     /// Anything else, in words.
     Unreadable(String),
@@ -155,8 +155,8 @@ impl Problem {
     }
 }
 
-/// What macOS needs before Arbor can read `~/.Trash`.
-pub const NEEDS_ACCESS: &str = "Arbor needs Full Disk Access to see what's in the Trash: open System Settings → Privacy & Security → Full Disk Access, turn on Arbor (or the app you started it from), then quit and reopen Arbor";
+/// What macOS needs before Satchel can read `~/.Trash`.
+pub const NEEDS_ACCESS: &str = "Satchel needs Full Disk Access to see what's in the Trash: open System Settings → Privacy & Security → Full Disk Access, turn on Satchel (or the app you started it from), then quit and reopen Satchel";
 
 /// The trash folder the sidebar's "Trash" opens: Linux's home trash `files/`, macOS's
 /// `~/.Trash`; Windows has none (the Recycle Bin is a shell folder). A path only, no disk I/O.
@@ -172,7 +172,7 @@ pub fn place() -> Option<PathBuf> {
 /// Emptying uses the shell's Recycle Bin (Windows, outside tests) rather than listing folders.
 pub const SHELL: bool = cfg!(all(windows, not(test)));
 
-/// The trash folders Arbor knows about (on the worker: it looks at each disk's top folder).
+/// The trash folders Satchel knows about (on the worker: it looks at each disk's top folder).
 /// Tests get [`FIXTURE`] instead, so no test ever touches the user's own Trash.
 pub fn bins() -> Vec<Bin> {
     #[cfg(test)]
@@ -280,7 +280,7 @@ pub fn open(bin: &Bin) -> Result<Option<Opened>, Problem> {
     let missing = |e: &io::Error| e.kind() == io::ErrorKind::NotFound;
     let not_real = |at: &Path| {
         Problem::Unreadable(format!(
-            "“{}” isn't a folder of yours (a link, or someone else's), so Arbor won't empty that Trash",
+            "“{}” isn't a folder of yours (a link, or someone else's), so Satchel won't empty that Trash",
             crate::fs::pretty(at)
         ))
     };
@@ -344,13 +344,13 @@ pub fn reopen(pin: &Pin) -> Result<Opened, String> {
     }
 }
 
-/// Why folder `dir` couldn't be read: on macOS a refusal (`EPERM`, `EACCES`) means Arbor
+/// Why folder `dir` couldn't be read: on macOS a refusal (`EPERM`, `EACCES`) means Satchel
 /// needs Full Disk Access.
 pub fn problem_of(dir: &Path, e: &io::Error, mac: bool) -> Problem {
     if mac && e.kind() == io::ErrorKind::PermissionDenied {
         Problem::NeedsAccess(dir.to_path_buf())
     } else {
-        Problem::Unreadable(format!("Arbor couldn't read “{}” ({e})", crate::fs::pretty(dir)))
+        Problem::Unreadable(format!("Satchel couldn't read “{}” ({e})", crate::fs::pretty(dir)))
     }
 }
 
@@ -549,7 +549,7 @@ impl Counting {
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
         let halt = stop.clone();
-        let _ = std::thread::Builder::new().name("arbor-trash-count".into()).spawn(move || {
+        let _ = std::thread::Builder::new().name("satchel-trash-count".into()).spawn(move || {
             let wake = || {
                 if let Some(w) = &waker {
                     w();
@@ -579,7 +579,7 @@ impl Counting {
         Counting { rx, stop, got: Summary::default() }
     }
 
-    /// A count that found `items` and `problem` (tests: a Trash Arbor can't read anywhere).
+    /// A count that found `items` and `problem` (tests: a Trash Satchel can't read anywhere).
     #[cfg(test)]
     pub fn found(items: Vec<Item>, problem: Option<Problem>) -> Counting {
         let (tx, rx) = channel();
@@ -620,7 +620,7 @@ impl Drop for Counting {
 pub struct Words {
     pub title: String,
     pub body: String,
-    /// The destructive button's label; `None` when there's nothing Arbor can empty (the Trash
+    /// The destructive button's label; `None` when there's nothing Satchel can empty (the Trash
     /// is empty, or it can't be read), so the dialog only informs and has no such button.
     pub action: Option<&'static str>,
     /// macOS refused to read a trash: the dialog offers "Open Privacy Settings".
@@ -631,7 +631,7 @@ pub struct Words {
 }
 
 /// The dialog's words for what the count found. Before it lands: counting, and no destructive
-/// button (only a count says what the button would delete). Nothing to empty (an empty Trash, or one Arbor can't read): no destructive button. Some
+/// button (only a count says what the button would delete). Nothing to empty (an empty Trash, or one Satchel can't read): no destructive button. Some
 /// trashes unreadable and others not: the count is of what can be emptied, the body names the
 /// trash that can't be read, and only the readable ones are emptied.
 pub fn ask_words(got: Option<&Summary>) -> Words {
@@ -654,17 +654,17 @@ pub fn ask_words(got: Option<&Summary>) -> Words {
             counting: true,
         },
         (Some(0), None) => inform("Nothing to Empty".into(), format!("The {BIN} is already empty.")),
-        (Some(0), Some(p)) => inform(format!("Arbor Can't Read the {BIN}"), format!("{}.", p.say())),
+        (Some(0), Some(p)) => inform(format!("Satchel Can't Read the {BIN}"), format!("{}.", p.say())),
         (Some(n), Some(p)) => {
             let unread = match p {
                 Problem::NeedsAccess(dir) => format!(
-                    "“{}” can't be read, so what's in it stays: Arbor needs Full Disk Access (System Settings → Privacy & Security → Full Disk Access) to empty it.",
+                    "“{}” can't be read, so what's in it stays: Satchel needs Full Disk Access (System Settings → Privacy & Security → Full Disk Access) to empty it.",
                     crate::fs::pretty(dir)
                 ),
                 Problem::Unreadable(why) => format!("{why}, so what's in it stays."),
             };
             let what = if n == 1 { "The 1 item".to_string() } else { format!("The {}", items_word(n)) };
-            ask(format!("{what} Arbor can read in the {BIN}{size} will be deleted permanently. This can't be undone. {unread}"))
+            ask(format!("{what} Satchel can read in the {BIN}{size} will be deleted permanently. This can't be undone. {unread}"))
         }
         (Some(1), None) => ask(format!("The item in the {BIN}{size} will be deleted permanently. This can't be undone.")),
         (Some(n), None) => ask(format!("The {} in the {BIN}{size} will be deleted permanently. This can't be undone.", items_word(n))),
@@ -689,9 +689,9 @@ pub fn shell_totals() -> Option<(u64, u64)> {
     (hr >= 0).then(|| (info.i64NumItems.max(0) as u64, info.i64Size.max(0) as u64))
 }
 
-/// Empties the Recycle Bin of every drive, after Arbor's own dialog asked:
-/// `SHERB_NOCONFIRMATION` (Arbor asked already), `SHERB_NOPROGRESSUI` (Arbor's status bar shows
-/// it, and the shell's window would be a second dialog), `SHERB_NOSOUND` (Arbor makes no sounds).
+/// Empties the Recycle Bin of every drive, after Satchel's own dialog asked:
+/// `SHERB_NOCONFIRMATION` (Satchel asked already), `SHERB_NOPROGRESSUI` (Satchel's status bar shows
+/// it, and the shell's window would be a second dialog), `SHERB_NOSOUND` (Satchel makes no sounds).
 /// What's left is counted again afterwards, so the result says what really happened.
 #[cfg(windows)]
 pub fn shell_empty() -> Result<String, String> {
@@ -789,10 +789,10 @@ pub fn parse_info(text: &str, top: Option<&Path>) -> Result<PathBuf, String> {
         }
     }
     let raw = found.ok_or("its record in the Trash doesn't say where it came from")?;
-    let bytes = url_decode(raw).ok_or("its record in the Trash names a path Arbor won't trust")?;
+    let bytes = url_decode(raw).ok_or("its record in the Trash names a path Satchel won't trust")?;
     let path = PathBuf::from(os_from_bytes(bytes));
     if path.as_os_str().is_empty() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        return Err("its record in the Trash names a path Arbor won't trust".into());
+        return Err("its record in the Trash names a path Satchel won't trust".into());
     }
     if path.is_absolute() {
         return Ok(path);
@@ -831,7 +831,7 @@ impl Origin {
 /// folder, an absolute one must be inside it, and the folders on the way must be real folders
 /// on the same disk, not links out of it (each opened without following one).
 pub fn original(trashed: &Path, home: Option<&Path>) -> Result<Origin, String> {
-    let t = trashed.parent().and_then(|f| trash_of(f, home)).ok_or("it isn't in a Trash Arbor knows")?;
+    let t = trashed.parent().and_then(|f| trash_of(f, home)).ok_or("it isn't in a Trash Satchel knows")?;
     let name = trashed.file_name().ok_or("it has no name")?;
     let mut rec = name.to_os_string();
     rec.push(".trashinfo");
@@ -849,14 +849,14 @@ pub fn original(trashed: &Path, home: Option<&Path>) -> Result<Origin, String> {
         };
         let o = match open(&bin) {
             Ok(Some(o)) => o,
-            Ok(None) => return Err("it isn't in a Trash Arbor knows".into()),
+            Ok(None) => return Err("it isn't in a Trash Satchel knows".into()),
             Err(p) => return Err(p.say()),
         };
         // The item really is in the folder that was checked.
         let here = crate::ffi::cstr(name).map_err(|e| e.to_string())?;
         let item = crate::dirfd::ident_at(&o.files, &here).map_err(|e| format!("it couldn't be read ({e})"))?;
         if crate::fs::ident_at(trashed) != Some(item) {
-            return Err("it isn't in the Trash folder Arbor checked".into());
+            return Err("it isn't in the Trash folder Satchel checked".into());
         }
         let info = o.info.ok_or("it has no record in the Trash saying where it came from")?;
         let rec = crate::ffi::cstr(&rec).map_err(|e| e.to_string())?;
@@ -981,7 +981,7 @@ mod tests {
     use std::fs;
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-contents-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-contents-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -1036,7 +1036,7 @@ mod tests {
         });
     }
 
-    /// What Arbor's own trash writes reads back as the same place, for any name (Linux).
+    /// What Satchel's own trash writes reads back as the same place, for any name (Linux).
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn any_path_round_trips_through_a_record() {
@@ -1069,7 +1069,7 @@ mod tests {
         assert!(parse_info(&format!("[Trash Info]\nPath={root}a%2Cb\n"), None).is_ok());
     }
 
-    /// Two `Path=` lines in the group: Arbor took the first, where another tool may take the
+    /// Two `Path=` lines in the group: Satchel took the first, where another tool may take the
     /// last and put the item back somewhere else. It's damage, refused.
     #[test]
     fn a_record_naming_two_places_is_refused() {
@@ -1182,12 +1182,12 @@ mod tests {
             format!("The 3 items in the {BIN} (2.0 KB) will be deleted permanently. This can't be undone.")
         );
         assert!(say(got(Some(1), Some((10, false)), None)).starts_with(&format!("The item in the {BIN} (at least")));
-        let partly = say(got(Some(2), None, Some(Problem::Unreadable("Arbor couldn't read “/x” (denied)".into()))));
-        assert!(partly.contains("The 2 items Arbor can read") && partly.contains("This can't be undone."), "{partly}");
+        let partly = say(got(Some(2), None, Some(Problem::Unreadable("Satchel couldn't read “/x” (denied)".into()))));
+        assert!(partly.contains("The 2 items Satchel can read") && partly.contains("This can't be undone."), "{partly}");
         assert!(partly.contains("“/x”"), "names the trash it can't read: {partly}");
     }
 
-    /// Nothing to empty (an empty Trash, or one Arbor can't read): the dialog informs and has no
+    /// Nothing to empty (an empty Trash, or one Satchel can't read): the dialog informs and has no
     /// destructive button. Where macOS refused, it explains Full Disk Access and offers the
     /// settings; where only some trashes refused, it counts what can be emptied, names the
     /// trash it can't read, still says it can't be undone, and keeps the button.
@@ -1200,14 +1200,14 @@ mod tests {
         let refused = ask_words(Some(&got(Some(0), Some(Problem::NeedsAccess(home.clone())))));
         assert_eq!((refused.body, refused.action, refused.settings), (format!("{NEEDS_ACCESS}."), None, true));
         assert!(!refused.title.ends_with('?'), "it asks nothing: {}", refused.title);
-        let unreadable = ask_words(Some(&got(Some(0), Some(Problem::Unreadable("Arbor couldn't read “/x” (denied)".into())))));
+        let unreadable = ask_words(Some(&got(Some(0), Some(Problem::Unreadable("Satchel couldn't read “/x” (denied)".into())))));
         assert_eq!((unreadable.action, unreadable.settings), (None, false));
         let partly =
             ask_words(Some(&Summary { items: None, count: Some(4), bytes: Some((2048, true)), problem: Some(Problem::NeedsAccess(home)) }));
         assert!(partly.action.is_some() && partly.settings);
         assert!(
             partly.body.starts_with(&format!(
-                "The 4 items Arbor can read in the {BIN} (2.0 KB) will be deleted permanently. This can't be undone."
+                "The 4 items Satchel can read in the {BIN} (2.0 KB) will be deleted permanently. This can't be undone."
             )),
             "{}",
             partly.body
@@ -1220,7 +1220,7 @@ mod tests {
     /// "… can't be read, so what's in it stays" is true of everything in it.
     #[test]
     fn a_trash_whose_listing_fails_partway_is_left_out_whole() {
-        let d = std::env::temp_dir().join(format!("arbor-trash-partway-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-trash-partway-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let (good, bad) = (d.join("good/.Trash-1000"), d.join("bad/.Trash-1000"));
         for (root, names) in [(&good, &["a", "b"][..]), (&bad, &["x", "y", "z"][..])] {
@@ -1239,7 +1239,7 @@ mod tests {
         assert_eq!(names, ["a", "b"], "nothing from the trash whose listing failed");
         let p = problem.expect("the failure is the problem");
         let words = ask_words(Some(&Summary { items: None, count: Some(2), bytes: None, problem: Some(p) }));
-        assert!(words.body.contains("The 2 items Arbor can read") && words.body.contains("so what's in it stays"), "{}", words.body);
+        assert!(words.body.contains("The 2 items Satchel can read") && words.body.contains("so what's in it stays"), "{}", words.body);
         assert!(words.body.contains("bad"), "names the trash left out: {}", words.body);
         let _ = fs::remove_dir_all(&d);
     }

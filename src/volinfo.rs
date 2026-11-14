@@ -2,7 +2,7 @@
 //! `GetDiskFreeSpaceExW`) can't be interrupted, and on a hung network volume it never returns,
 //! so it must never hold a thread that listings need.
 //!
-//! - **At most [`THREADS`] threads** (`arbor-volume`, below the window's priority, as the
+//! - **At most [`THREADS`] threads** (`satchel-volume`, below the window's priority, as the
 //!   search walkers are), started by queries and ending when nothing waits: nothing idles. A
 //!   stuck query holds its thread (a blocked call can't be killed, and uses no CPU); listings
 //!   (Rune's pool) never wait on them.
@@ -136,7 +136,7 @@ pub fn ask(inbox: &Arc<Inbox>, device: Option<u64>, path: PathBuf) -> Started {
     q.running.insert(device, vec![waiter]);
     q.threads += 1;
     drop(q);
-    if std::thread::Builder::new().name("arbor-volume".into()).spawn(move || run(device, path)).is_err() {
+    if std::thread::Builder::new().name("satchel-volume".into()).spawn(move || run(device, path)).is_err() {
         let mut q = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
         q.threads -= 1;
         q.running.remove(&device);
@@ -210,7 +210,7 @@ mod tests {
     const FAKE: u64 = u64::MAX - 1_000;
 
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-volinfo-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-volinfo-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

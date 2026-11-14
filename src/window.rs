@@ -1,4 +1,4 @@
-//! Arbor's windows: how each is made (the same callbacks for every window), the registry other
+//! Satchel's windows: how each is made (the same callbacks for every window), the registry other
 //! threads reach them through, and opening another one (⌘N, "Open in New Window").
 //!
 //! Every window is a real OS window in the one process and event loop, with its own `State`
@@ -15,7 +15,7 @@ use rune::{WindowOptions, WindowSpec};
 
 use crate::app::State;
 
-/// The window Arbor opens with. Windows opened later count up from 1.
+/// The window Satchel opens with. Windows opened later count up from 1.
 pub const FIRST: u64 = 0;
 
 /// The next window's id.
@@ -123,7 +123,7 @@ pub fn spec() -> AppSpec<State> {
         setup: Some(|s, waker| s.setup(waker)),
         poll: Some(|s, _, tx| s.poll(tx)),
         on_key: Some(|s, ev, tx| s.on_key(ev, tx)),
-        ..AppSpec::new("Arbor", (980.0, 620.0), State::new, crate::view::view)
+        ..AppSpec::new("Satchel", (980.0, 620.0), State::new, crate::view::view)
     }
 }
 
@@ -216,7 +216,7 @@ pub fn open(state: State, from: u64) {
                 options.physical_size = Some(p.content_size);
             }
         }
-        // Timed (`ARBOR_TIMING`, the bench): when its folder shows.
+        // Timed (`SATCHEL_TIMING`, the bench): when its folder shows.
         let timed = crate::timing::on();
         let mut spec = spec();
         if timed {
@@ -229,7 +229,7 @@ pub fn open(state: State, from: u64) {
             app = app.on_frame_encoded(crate::timing::window_frame);
         }
         register(id, app.handle());
-        rune::open_window(WindowSpec::from_app(format!("arbor-{id}"), app).options(options));
+        rune::open_window(WindowSpec::from_app(format!("satchel-{id}"), app).options(options));
     }
 }
 
@@ -256,7 +256,7 @@ pub(crate) mod tests {
     use crate::commands::Cmd;
 
     fn folder(name: &str, dirs: &[&str]) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-windows-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-windows-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for sub in dirs {
@@ -771,13 +771,13 @@ pub(crate) mod tests {
         let writers: Vec<String> =
             crate::leftovers::WRITES.lock().unwrap().iter().filter(|(f, _)| *f == file).map(|(_, t)| t.clone()).collect();
         assert!(!writers.is_empty());
-        assert!(writers.iter().all(|t| t == "arbor-quit"), "{writers:?}");
+        assert!(writers.iter().all(|t| t == "satchel-quit"), "{writers:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The record names only what the copy confirmed it made, as it made it: a file another
-    /// app put in its place afterwards is never offered as Arbor's leftover (review: the
-    /// planned destination was recorded, and a user's own file then named as left by Arbor).
+    /// app put in its place afterwards is never offered as Satchel's leftover (review: the
+    /// planned destination was recorded, and a user's own file then named as left by Satchel).
     #[test]
     fn a_leftover_replaced_since_isnt_offered() {
         let d = folder("quit-replaced", &["src", "dst"]);
@@ -799,7 +799,7 @@ pub(crate) mod tests {
         let got = record(&d, |g| !g.is_empty());
         assert_eq!(got.iter().map(|l| &l.path).collect::<Vec<_>>(), [&target], "recorded as made");
         let left = crate::leftovers::take(&d.join("leftovers.txt"));
-        assert!(left.is_empty(), "not offered: it isn't what Arbor made {left:?}");
+        assert!(left.is_empty(), "not offered: it isn't what Satchel made {left:?}");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "the user's own data");
         drop(go);
         let _ = std::fs::remove_dir_all(&d);
@@ -853,7 +853,7 @@ pub(crate) mod tests {
         let got = record(&d, |g| !g.is_empty());
         assert_eq!(got.iter().map(|l| &l.path).collect::<Vec<_>>(), [&target], "{got:?}");
         assert_eq!(got[0].why, crate::leftovers::UNFINISHED);
-        // The next launch offers it: it's still the file Arbor made, though half written.
+        // The next launch offers it: it's still the file Satchel made, though half written.
         let left = crate::leftovers::take(&d.join("leftovers.txt"));
         assert_eq!(left.iter().map(|l| &l.path).collect::<Vec<_>>(), [&target]);
         drop(go);

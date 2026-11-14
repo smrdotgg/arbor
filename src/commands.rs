@@ -41,7 +41,7 @@ macro_rules! commands {
 }
 
 impl Cmd {
-    /// Commands that can't be undone. Running one asks first, in Arbor's one dialog
+    /// Commands that can't be undone. Running one asks first, in Satchel's one dialog
     /// (`confirm.rs`), and only its destructive button runs it.
     pub fn permanent(self) -> bool {
         matches!(self, Cmd::ClearJump | Cmd::Delete | Cmd::EmptyTrash)
@@ -112,7 +112,7 @@ commands! {
     Palette "app.palette" "Command Palette", ["cmd+k", "cmd+shift+p"];
     OpenSettings "app.settings" "Open Settings File", ["cmd+comma"];
     ReloadSettings "app.reload_settings" "Reload Settings", [];
-    MakeDefault "app.make_default" "Make Arbor the Default for Folders…", [];
+    MakeDefault "app.make_default" "Make Satchel the Default for Folders…", [];
     RestoreDefault "app.restore_default" "Restore the System Default for Folders…", [];
     Clear "app.clear" "Clear Filter and Selection", ["escape"];
 
@@ -567,7 +567,7 @@ mod tests {
     }
 
     /// The README's key table is generated from the registry. To refresh it after changing a
-    /// command: `ARBOR_WRITE_README=1 cargo test readme`.
+    /// command: `SATCHEL_WRITE_README=1 cargo test readme`.
     #[test]
     fn readme_key_table_matches_registry() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/README.md");
@@ -577,10 +577,10 @@ mod tests {
         let b = readme.find(end).expect("README has the commands:end marker");
         let table = markdown_table();
         if readme[a..b] != table {
-            if std::env::var_os("ARBOR_WRITE_README").is_some() {
+            if std::env::var_os("SATCHEL_WRITE_README").is_some() {
                 std::fs::write(path, format!("{}{table}{}", &readme[..a], &readme[b..])).unwrap();
             } else {
-                panic!("README's key table is out of date: run `ARBOR_WRITE_README=1 cargo test readme`");
+                panic!("README's key table is out of date: run `SATCHEL_WRITE_README=1 cargo test readme`");
             }
         }
     }

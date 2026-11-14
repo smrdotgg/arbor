@@ -1,4 +1,4 @@
-//! The one kind of dialog Arbor shows (NORTHSTAR Safety #2): before anything that can't be
+//! The one kind of dialog Satchel shows (NORTHSTAR Safety #2): before anything that can't be
 //! undone, it asks, and says plainly that it can't be undone. It also asks before the two
 //! commands that change how the system opens folders (`handler.rs`), saying what changes and
 //! which command undoes it.
@@ -17,7 +17,7 @@
 //! ran the command a moment ago, pressed twice) or pressed out of habit then can't destroy
 //! anything. Esc, or a click outside, cancels. Nothing animates.
 //!
-//! When there's nothing to confirm (Empty Trash with an empty Trash, or one Arbor can't read),
+//! When there's nothing to confirm (Empty Trash with an empty Trash, or one Satchel can't read),
 //! the same dialog only informs: it has no destructive button ([`Ask::action`] is `None`),
 //! Cancel reads "Close", and where macOS refused to read the Trash it offers "Open Privacy
 //! Settings" ([`Ask::settings`]), which opens Full Disk Access's pane.
@@ -87,7 +87,7 @@ impl Ask {
                 a.say(crate::trash::contents::ask_words(s.trash_count.as_ref().map(|c| &c.got)));
                 return a;
             }
-            Cmd::MakeDefault => ("Make Arbor the Default for Folders?".into(), MAKE_DEFAULT.into(), "Make Default"),
+            Cmd::MakeDefault => ("Make Satchel the Default for Folders?".into(), MAKE_DEFAULT.into(), "Make Default"),
             Cmd::RestoreDefault => ("Restore the System Default for Folders?".into(), RESTORE_DEFAULT.into(), "Restore"),
             // Not permanent: never asked (see `Cmd::permanent`).
             _ => (format!("{}?", cmd.title().trim_end_matches('…')), "This can't be undone.".to_string(), "Continue"),
@@ -171,22 +171,22 @@ impl Ask {
     }
 }
 
-/// What "Make Arbor the Default for Folders" changes on this platform, and how to undo it.
+/// What "Make Satchel the Default for Folders" changes on this platform, and how to undo it.
 const MAKE_DEFAULT: &str = if cfg!(target_os = "macos") {
-    "Folders that other apps open (Open With, `open`, a download's folder) will open in Arbor. Finder still opens the desktop, the Dock's folders and \"Show in Finder\" from other apps: macOS doesn't let another app take those. To undo it, run \"Restore the System Default for Folders\"."
+    "Folders that other apps open (Open With, `open`, a download's folder) will open in Satchel. Finder still opens the desktop, the Dock's folders and \"Show in Finder\" from other apps: macOS doesn't let another app take those. To undo it, run \"Restore the System Default for Folders\"."
 } else if cfg!(windows) {
-    "Opening a folder or a drive (in Explorer, on the desktop, from other apps) and Win+E will open Arbor instead of Explorer. Only your account's settings change (a few keys under HKEY_CURRENT_USER), and what they held is saved. To undo it, run \"Restore the System Default for Folders\"."
+    "Opening a folder or a drive (in Explorer, on the desktop, from other apps) and Win+E will open Satchel instead of Explorer. Only your account's settings change (a few keys under HKEY_CURRENT_USER), and what they held is saved. To undo it, run \"Restore the System Default for Folders\"."
 } else {
-    "Folders that other apps open, and \"Show in folder\" in browsers and other apps, will open in Arbor. It sets your folder default in ~/.config/mimeapps.list and adds a D-Bus file, saving what was there. To undo it, run \"Restore the System Default for Folders\"."
+    "Folders that other apps open, and \"Show in folder\" in browsers and other apps, will open in Satchel. It sets your folder default in ~/.config/mimeapps.list and adds a D-Bus file, saving what was there. To undo it, run \"Restore the System Default for Folders\"."
 };
 
 /// What "Restore the System Default for Folders" does.
 const RESTORE_DEFAULT: &str = if cfg!(target_os = "macos") {
-    "Folders will open in the app that opened them before Arbor (Finder unless you'd chosen another). You can make Arbor the default again at any time."
+    "Folders will open in the app that opened them before Satchel (Finder unless you'd chosen another). You can make Satchel the default again at any time."
 } else if cfg!(windows) {
-    "Folders, drives and Win+E will open in Explorer again: your account's settings go back to what they were before Arbor changed them. You can make Arbor the default again at any time."
+    "Folders, drives and Win+E will open in Explorer again: your account's settings go back to what they were before Satchel changed them. You can make Satchel the default again at any time."
 } else {
-    "Folders will open in the file manager you had before Arbor, and \"Show in folder\" will stop opening Arbor. You can make Arbor the default again at any time."
+    "Folders will open in the file manager you had before Satchel, and \"Show in folder\" will stop opening Satchel. You can make Satchel the default again at any time."
 };
 
 /// The first few items' names and how many more: "“a”", "“a” and “b”", "“a”, “b”, “c” and 4 more".
@@ -275,7 +275,7 @@ impl State {
     }
 
     /// "Open Privacy Settings": opens Full Disk Access's pane in System Settings and closes the
-    /// dialog (Arbor must be reopened once access is given, as the dialog says).
+    /// dialog (Satchel must be reopened once access is given, as the dialog says).
     pub fn open_privacy_settings(&mut self, tx: &mut Tx) {
         tx.instant();
         if !self.asking.as_ref().is_some_and(|a| a.settings) {
@@ -331,7 +331,7 @@ mod tests {
     }
 
     fn history_of_one(name: &str) -> State {
-        let d = std::env::temp_dir().join(format!("arbor-confirm-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-confirm-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("a")).unwrap();
         let mut s = state_in(&d);
@@ -409,7 +409,7 @@ mod tests {
         let mut tx = Tx::default();
         s.run(Cmd::MakeDefault, &mut tx);
         let a = s.asking.as_ref().expect("it asks");
-        assert_eq!((a.title.as_str(), a.action, a.focus), ("Make Arbor the Default for Folders?", Some("Make Default"), Button::Cancel));
+        assert_eq!((a.title.as_str(), a.action, a.focus), ("Make Satchel the Default for Folders?", Some("Make Default"), Button::Cancel));
         assert!(
             a.body.contains("To undo it, run \"Restore the System Default for Folders\"") && !a.body.contains("can't be undone"),
             "{}",
@@ -441,7 +441,7 @@ mod tests {
     }
 
     fn folder_of(name: &str, files: &[&str]) -> (std::path::PathBuf, State) {
-        let d = std::env::temp_dir().join(format!("arbor-confirm-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-confirm-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for f in files {

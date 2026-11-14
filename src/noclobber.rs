@@ -1,5 +1,5 @@
 //! Filesystem primitives that never replace an existing item (NORTHSTAR Safety #4). Every move,
-//! rename and copy in Arbor goes through these, so a name taken between a check and the act
+//! rename and copy in Satchel goes through these, so a name taken between a check and the act
 //! fails with `ErrorKind::AlreadyExists` instead of destroying what took it.
 //!
 //! - Moves and renames are atomic "rename unless the target exists": `renameat2` with
@@ -44,7 +44,7 @@ fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// A rename where `to` already finds `from` (another spelling of its name, or another hard
-/// link to it), in two no-replace steps: `from` → `.arbor-<random>-<name>` beside it → `to`.
+/// link to it), in two no-replace steps: `from` → `.satchel-<random>-<name>` beside it → `to`.
 /// Neither step can replace anything. Once `from` has its temporary name, a case-insensitive
 /// disk sees `to` as free; a hard link at `to` (or anything that took `to` in between) still
 /// makes the second step fail. Then the item goes back to `from`, again without replacing; if
@@ -67,7 +67,7 @@ fn via_temp(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
-/// An unused-looking name beside `p` for [`via_temp`]: `.arbor-<64 random bits>-<start of its
+/// An unused-looking name beside `p` for [`via_temp`]: `.satchel-<64 random bits>-<start of its
 /// name>`, kept short so a long name can't push it past the disk's name limit.
 pub(crate) fn temp_sibling(p: &Path) -> io::Result<std::path::PathBuf> {
     use std::hash::BuildHasher;
@@ -75,7 +75,7 @@ pub(crate) fn temp_sibling(p: &Path) -> io::Result<std::path::PathBuf> {
     // `RandomState` is seeded randomly per process; the clock varies it per call.
     let r = std::collections::hash_map::RandomState::new().hash_one((std::process::id(), std::time::SystemTime::now()));
     let start: String = name.to_string_lossy().chars().take(40).collect();
-    Ok(p.with_file_name(format!(".arbor-{r:016x}-{start}")))
+    Ok(p.with_file_name(format!(".satchel-{r:016x}-{start}")))
 }
 
 /// Whether `a` and `b` are the same item on disk (both exist and share an identity).
@@ -139,7 +139,7 @@ fn rename_fallback(from: &Path, to: &Path) -> io::Result<()> {
     if m.is_dir() {
         return Err(io::Error::new(
             ErrorKind::Unsupported,
-            "this disk can't move or rename a folder without risking replacing another one, so Arbor won't",
+            "this disk can't move or rename a folder without risking replacing another one, so Satchel won't",
         ));
     }
     match std::fs::hard_link(from, to) {
@@ -162,7 +162,7 @@ pub fn is_cross_device(e: &io::Error) -> bool {
 }
 
 /// The file a copy made, read from a handle on it rather than by its name, so it's the file
-/// Arbor made even if another app has replaced the name since (a copy can stall for as long as
+/// Satchel made even if another app has replaced the name since (a copy can stall for as long as
 /// its source does). `id` is [`file_id`]'s identity.
 #[derive(Debug)]
 pub struct Made {
@@ -472,7 +472,7 @@ mod tests {
     use std::fs;
 
     fn tmp(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-noclobber-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-noclobber-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -620,7 +620,7 @@ mod tests {
             fs::write(dd.join("a"), "OTHER a").unwrap();
         });
         let e = rename(&d.join("a"), &d.join("b")).unwrap_err();
-        let tmp = names(&d).into_iter().find(|n| n.starts_with(".arbor-")).expect("left under its temporary name");
+        let tmp = names(&d).into_iter().find(|n| n.starts_with(".satchel-")).expect("left under its temporary name");
         assert!(tmp.ends_with("-a"), "{tmp}");
         assert!(e.to_string().contains(&format!("it's now named “{tmp}” in the same folder")), "{e}");
         assert_eq!(fs::read_to_string(d.join(&tmp)).unwrap(), "mine");

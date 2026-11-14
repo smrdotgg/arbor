@@ -114,7 +114,7 @@ impl Worker<'_> {
     /// Renames each `(from, to)` (each in its own folder), never over anything, as one step
     /// that either all happens or is put back. An item whose new name is another item's old one
     /// (a swap, a chain, a case-only change) first steps aside to a temporary name beside it
-    /// (`.arbor-…`, as [`noclobber::rename`]'s case-only renames do); then the others get
+    /// (`.satchel-…`, as [`noclobber::rename`]'s case-only renames do); then the others get
     /// their new names, freeing the old ones; then the ones aside get theirs. A failure or a
     /// cancel midway puts every item back, last step first, again never over anything; what
     /// can't go back (another app took its old name meanwhile, or changed the item since it was

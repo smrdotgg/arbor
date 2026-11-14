@@ -11,7 +11,7 @@
 /// `view.default` from the settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ViewMode {
-    /// Rows with columns (name, kind, size, date): the view Arbor always had.
+    /// Rows with columns (name, kind, size, date): the view Satchel always had.
     #[default]
     List,
     /// A grid of icons (and thumbnails) with names under them.

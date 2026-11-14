@@ -67,7 +67,7 @@ impl State {
     /// was asked for in, even if another pane is active by the time the clipboard answers (or
     /// that folder isn't on screen any more: it's where the user said, and the paste is
     /// undoable), but only while it's still that folder: one put in its place since is refused
-    /// (`ops::start`). A paste of what Arbor itself cut, or ⌥⌘V, moves.
+    /// (`ops::start`). A paste of what Satchel itself cut, or ⌥⌘V, moves.
     fn paste_with(&mut self, req: Option<PasteReq>, content: &ClipboardContent) {
         let (dest, dest_id, move_requested) = match req {
             Some(PasteReq { dest, dest_id, mv, .. }) => (dest, dest_id, mv),
@@ -545,7 +545,7 @@ impl State {
     /// What a file operation changed (`fx`), in this window: renamed and moved items show where
     /// they are now at once (a fresh read or a recheck follows; a search still walking
     /// remembers them for the batches still to come), an inline rename's label goes, rows whose
-    /// identity Arbor's action changed take the new one, and every pane on a changed folder
+    /// identity Satchel's action changed take the new one, and every pane on a changed folder
     /// reads it again, `select`ing what the operation made where it lands.
     pub(crate) fn changed_on_disk(&mut self, fx: &Changed, select: &[PathBuf]) {
         let renamed: Vec<(PathBuf, PathBuf)> = fx.moved.iter().filter(|(a, b)| a.parent() == b.parent()).cloned().collect();
@@ -561,7 +561,7 @@ impl State {
                 let rest: Vec<(PathBuf, PathBuf)> = renamed.iter().filter(|m| !done.contains(m)).cloned().collect();
                 p.f.renamed_paths(&rest);
             }
-            // Rows of items Arbor's action changed the ctime of take what it made of them, where
+            // Rows of items Satchel's action changed the ctime of take what it made of them, where
             // that's identity.
             p.f.reidentify(&fx.reidentified);
         }
@@ -675,7 +675,7 @@ impl State {
         Some(item)
     }
 
-    /// Files dropped on a folder: every drop, from other apps or Arbor's own rows (each of
+    /// Files dropped on a folder: every drop, from other apps or Satchel's own rows (each of
     /// those checked against the identity its listing or the walk saw, `expect`), on any view's
     /// folder row or background, a column, or the other pane. Same disk moves, another disk
     /// copies, as in Finder; ⌥ always copies. The folder goes with the identity it was listed
@@ -705,7 +705,7 @@ impl State {
         let ops::Dest { path: into, id } = dest;
         let Some(id) = id else {
             let name = into.file_name().map_or_else(|| into.display().to_string(), |n| n.to_string_lossy().into_owned());
-            self.note = Some(format!("Nothing was {verb}: “{name}” isn't read yet, so Arbor can't tell it's the folder shown"));
+            self.note = Some(format!("Nothing was {verb}: “{name}” isn't read yet, so Satchel can't tell it's the folder shown"));
             return;
         };
         let op = if mv { Op::Move { sources: files, dest: into } } else { Op::Copy { sources: files, dest: into } };
@@ -716,10 +716,10 @@ impl State {
 
     /// Right-click on row `i` (or on empty space when `None`): a menu of commands, with their
     /// titles and keys from the command table and keymap. Native on macOS and Windows; Rune has
-    /// none on Linux, so there it's Arbor's own, in the window (`menu.rs`, RUNE-GAPS.md), with
+    /// none on Linux, so there it's Satchel's own, in the window (`menu.rs`, RUNE-GAPS.md), with
     /// the same items. On a file, macOS's menu gets an Open With submenu when the apps are
     /// read within a frame (a native menu can't change once it's open); otherwise "Open With…"
-    /// opens Arbor's list.
+    /// opens Satchel's list.
     pub fn context_menu(&mut self, row: Option<usize>, press: PointerPress, tx: &mut Tx) {
         if let Some(i) = row
             && !self.cur().is_selected(i)
@@ -800,7 +800,7 @@ impl State {
         v
     }
 
-    /// Opens `items` as the native menu, or Arbor's own where there's none. `apps`: the Open
+    /// Opens `items` as the native menu, or Satchel's own where there's none. `apps`: the Open
     /// With submenu's apps (native menus only).
     fn show_menu(
         &mut self,
@@ -1049,9 +1049,9 @@ pub(crate) fn drag_left_behind(pressed: Option<usize>) -> bool {
 }
 
 /// Ends a system drag session waiting for a release that already happened, by giving the app
-/// that release again: a left-mouse-up at the pointer, posted to the front of Arbor's own event
+/// that release again: a left-mouse-up at the pointer, posted to the front of Satchel's own event
 /// queue (`-[NSApplication postEvent:atStart:]`; in-process, so no permission and nothing
-/// outside the app). The session's tracking loop takes it as the drop, over Arbor's own window,
+/// outside the app). The session's tracking loop takes it as the drop, over Satchel's own window,
 /// which takes no drops from its own drags, so the session ends Cancelled and the status bar
 /// says how to move files. True when it posted.
 pub(crate) fn release_left_behind_drag() -> bool {
@@ -1121,7 +1121,7 @@ fn left_mouse_up(at: objc2_core_foundation::CGPoint, number: isize) -> *mut objc
     }
 }
 
-/// macOS: the release Arbor would post is a left-mouse-up where asked (made, never posted:
+/// macOS: the release Satchel would post is a left-mouse-up where asked (made, never posted:
 /// this checks the AppKit calls' signatures, which `msg_send!` verifies only as they run).
 #[cfg(all(test, target_os = "macos"))]
 #[test]

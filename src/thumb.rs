@@ -1,4 +1,4 @@
-//! Rich previews from the OS's own thumbnailer, for what Arbor's own decoders don't read: PDF,
+//! Rich previews from the OS's own thumbnailer, for what Satchel's own decoders don't read: PDF,
 //! video (a still frame), audio (its artwork), office and iWork documents, fonts, HEIC, RAW…
 //!
 //! - **macOS:** Quick Look's `QLThumbnailGenerator`, asked for the panel's size in device pixels
@@ -10,10 +10,10 @@
 //!   own thumbnail cache is asked (`SIIGBF_INCACHEONLY`: what Explorer already made; instant or
 //!   nothing). Full generation is behind [`UNCANCELLABLE_WINDOWS_THUMBNAILS`], off until the owner
 //!   decides on a NORTHSTAR exception.
-//! - **Linux:** nothing. Its thumbnailers write their results to a cache, which Arbor doesn't
+//! - **Linux:** nothing. Its thumbnailers write their results to a cache, which Satchel doesn't
 //!   keep (NORTHSTAR: no caching).
 //!
-//! Arbor stores nothing. The OS may keep the thumbnails it makes in its own system cache (the one
+//! Satchel stores nothing. The OS may keep the thumbnails it makes in its own system cache (the one
 //! Finder and Explorer fill); the owner approved that as the OS's business (DECISIONS.md).
 
 use std::path::Path;
@@ -43,7 +43,7 @@ pub enum Thumb {
 pub const UNCANCELLABLE_WINDOWS_THUMBNAILS: bool = false;
 
 /// The OS's thumbnail for `path`, at most `fit` (device pixels). `None` when this OS has no
-/// thumbnailer Arbor uses (Linux). `stop` ends the wait as soon as it's set and `bell` rung.
+/// thumbnailer Satchel uses (Linux). `stop` ends the wait as soon as it's set and `bell` rung.
 #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 pub fn thumbnail(path: &Path, fit: [u32; 2], stop: &AtomicBool, bell: &Arc<Bell>) -> Option<Thumb> {
     if stop.load(Relaxed) {
@@ -580,7 +580,7 @@ mod tests {
     /// A one-page PDF: a blue band and a word.
     #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn pdf() -> Vec<u8> {
-        let content = b"0 0 1 rg 72 480 468 240 re f 0 g BT /F1 64 Tf 72 360 Td (Arbor) Tj ET";
+        let content = b"0 0 1 rg 72 480 468 240 re f 0 g BT /F1 64 Tf 72 360 Td (Satchel) Tj ET";
         let objs = [
             "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
@@ -605,7 +605,7 @@ mod tests {
 
     #[cfg(any(target_os = "macos", windows))]
     fn scratch(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("arbor-thumb-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("satchel-thumb-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -635,7 +635,7 @@ mod tests {
         eprintln!("Quick Look: broken PDF answered in {:.1} ms: {:?}", t.elapsed().as_secs_f64() * 1000.0, std::mem::discriminant(&r));
         assert!(t.elapsed() < OS_LIMIT + Duration::from_secs(2));
         // A file Quick Look has no thumbnail for: nothing, not an icon.
-        let junk = d.join("junk.arborjunk");
+        let junk = d.join("junk.satcheljunk");
         std::fs::write(&junk, [0u8, 1, 2, 3, 255, 254].repeat(100)).unwrap();
         assert_eq!(thumbnail(&junk, [400, 400], &AtomicBool::new(false), &bell), Some(Thumb::Nothing));
     }
@@ -700,7 +700,7 @@ mod tests {
     }
 
     /// How long the OS takes, cache-only and full, for a generated PDF and PNG and every file in
-    /// `ARBOR_THUMB_DIR` (videos, real PDFs). Full generation can't be cancelled on Windows: this
+    /// `SATCHEL_THUMB_DIR` (videos, real PDFs). Full generation can't be cancelled on Windows: this
     /// is the work that would go on after a cancel there.
     /// `cargo test --release -- --ignored --nocapture os_thumbnail_speed`
     #[cfg(any(target_os = "macos", windows))]
@@ -711,7 +711,7 @@ mod tests {
         let mut files = vec![d.join("page.pdf"), d.join("broken.pdf")];
         std::fs::write(&files[0], pdf()).unwrap();
         std::fs::write(&files[1], [b"%PDF-1.4\n".as_slice(), &[b'A'; 200_000]].concat()).unwrap();
-        if let Some(dir) = std::env::var_os("ARBOR_THUMB_DIR") {
+        if let Some(dir) = std::env::var_os("SATCHEL_THUMB_DIR") {
             let mut more: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
             more.sort();
             files.extend(more);

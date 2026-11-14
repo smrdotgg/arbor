@@ -30,11 +30,11 @@ pub(super) struct Step {
     /// An earlier try at this step moved it back across disks (copy, then delete) and the
     /// delete didn't finish.
     pub(super) split: Option<Split>,
-    /// A link Arbor made ([`What::Link`]): what it points at, so undo removes it only while it
+    /// A link Satchel made ([`What::Link`]): what it points at, so undo removes it only while it
     /// still does, and redo makes it again.
     pub(super) link: Option<Link>,
     /// The item's object identity ([`crate::fs::Ident`]: with its birth time or handle) as the
-    /// operation left it, for what undo removes or trashes as Arbor's own (New File, links): a
+    /// operation left it, for what undo removes or trashes as Satchel's own (New File, links): a
     /// replacement that got the freed inode back, with the same size and times (a `cp -a`), still
     /// isn't it. Checked with the fingerprint, and again right before the item goes.
     pub(super) ident: Option<crate::fs::Ident>,
@@ -187,7 +187,7 @@ impl Worker<'_> {
         };
         let Some(back) = step.back.clone() else {
             self.before_act(&step.at);
-            // Right before it goes: still the object Arbor made (one put in its place since the
+            // Right before it goes: still the object Satchel made (one put in its place since the
             // check, even at the same inode, is left alone).
             if let Some(want) = step.ident
                 && crate::fs::ident_at(&step.at) != Some(want)

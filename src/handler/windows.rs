@@ -4,8 +4,8 @@ use std::path::Path;
 /// The current user's classes (`HKEY_CURRENT_USER\Software\Classes`): no administrator
 /// rights, and nothing for other users.
 pub const CLASSES: &str = r"Software\Classes";
-/// The verb Arbor adds.
-pub const VERB: &str = "arbor";
+/// The verb Satchel adds.
+pub const VERB: &str = "satchel";
 /// "This PC"'s class: its `opennewwindow` verb is what Win+E and the taskbar's Explorer
 /// button run.
 pub const WIN_E: &str = "{52205fd8-5dfb-447d-801a-d0b52f2e83e1}";
@@ -20,18 +20,18 @@ pub struct Set {
     pub data: String,
 }
 
-/// What "Make Arbor the Default for Folders" writes, the minimal set Explorer replacements
+/// What "Make Satchel the Default for Folders" writes, the minimal set Explorer replacements
 /// use (Total Commander's and File Pilot's per-user recipes, Files' Win+E key):
 ///
-/// - `Directory\shell` and `Drive\shell` get a new verb, `arbor` ("Open in Arbor", running
-///   `"arbor.exe" "%1"`), and it becomes their default verb. So opening a folder or a drive
-///   anywhere (Explorer, the desktop, another app's ShellExecute) runs Arbor. Explorer's own
+/// - `Directory\shell` and `Drive\shell` get a new verb, `satchel` ("Open in Satchel", running
+///   `"satchel.exe" "%1"`), and it becomes their default verb. So opening a folder or a drive
+///   anywhere (Explorer, the desktop, another app's ShellExecute) runs Satchel. Explorer's own
 ///   `open` verb isn't touched and stays in the context menu.
-/// - Win+E (`CLSID\{52205fd8…}\shell\opennewwindow\command`) runs Arbor, with an empty
+/// - Win+E (`CLSID\{52205fd8…}\shell\opennewwindow\command`) runs Satchel, with an empty
 ///   `DelegateExecute` so the shell runs the command instead of Explorer's handler.
 ///
 /// Not `Folder`: it also covers virtual folders (Control Panel, Recycle Bin, libraries,
-/// phones) that Arbor can't show, which would stop opening at all.
+/// phones) that Satchel can't show, which would stop opening at all.
 ///
 /// In the order it's written: the commands first, then what makes them the default (the
 /// `shell` keys' default verb, and Win+E's `DelegateExecute`), so a write that fails midway
@@ -42,7 +42,7 @@ pub fn plan(root: &str, exe: &str) -> Vec<Set> {
     let classes = ["Directory", "Drive"];
     for class in classes {
         let shell = format!(r"{root}\{class}\shell");
-        v.push(set(format!(r"{shell}\{VERB}"), "", "Open in Arbor".into()));
+        v.push(set(format!(r"{shell}\{VERB}"), "", "Open in Satchel".into()));
         v.push(set(format!(r"{shell}\{VERB}"), "Icon", format!("{exe},0")));
         v.push(set(format!(r"{shell}\{VERB}\command"), "", format!("\"{exe}\" \"%1\"")));
     }
@@ -109,7 +109,7 @@ fn existed_key(k: &str) -> String {
     format!("existed {k}")
 }
 
-/// The backup for writing `plan`: what it replaces (unless `backup` already has it: Arbor
+/// The backup for writing `plan`: what it replaces (unless `backup` already has it: Satchel
 /// was the default already, and the first backup stays) and what it writes. Changes nothing;
 /// saved before [`apply`] runs.
 pub fn snapshot(store: &dyn Store, plan: &[Set], root: &str, backup: Option<Backup>) -> Backup {
@@ -152,8 +152,8 @@ fn required(plan: &[Set], root: &str) -> Vec<String> {
     keys(plan, root).iter().map(|k| existed_key(k)).chain(plan.iter().map(before_key)).collect()
 }
 
-/// Puts back what `backup` recorded, for each value that still holds what Arbor wrote, then
-/// removes the keys Arbor made once they're empty. Without a backup, removes what this plan
+/// Puts back what `backup` recorded, for each value that still holds what Satchel wrote, then
+/// removes the keys Satchel made once they're empty. Without a backup, removes what this plan
 /// writes. Returns the values left alone because they changed since.
 pub fn restore(store: &mut dyn Store, plan: &[Set], root: &str, backup: Option<&Backup>) -> Result<(usize, Vec<String>), String> {
     let empty = Backup::default();
@@ -202,8 +202,8 @@ pub fn run(change: Change, store: &mut dyn Store, root: &str, exe: &str, backup:
             // The whole snapshot is on the disk before the registry changes at all.
             let first = saved.clone();
             // What this attempt replaces, to put back if a write fails: the registry just
-            // before it. When Arbor is the default already (Make again, from another
-            // arbor.exe), that's the first Make's values, not the durable backup's.
+            // before it. When Satchel is the default already (Make again, from another
+            // satchel.exe), that's the first Make's values, not the durable backup's.
             let attempt = snapshot(store, &plan, root, None);
             let b = snapshot(store, &plan, root, saved);
             b.write(backup)?;
@@ -220,14 +220,14 @@ pub fn run(change: Change, store: &mut dyn Store, root: &str, exe: &str, backup:
                                 let _ = f.write(backup);
                             }
                         }
-                        format!("Couldn't make Arbor the default for folders ({e}), so nothing was changed")
+                        format!("Couldn't make Satchel the default for folders ({e}), so nothing was changed")
                     }
                     Err(e2) => format!(
-                        "Couldn't make Arbor the default for folders ({e}), and putting back what was written failed too ({e2}). The backup is kept: run Restore the System Default for Folders once that's fixed"
+                        "Couldn't make Satchel the default for folders ({e}), and putting back what was written failed too ({e2}). The backup is kept: run Restore the System Default for Folders once that's fixed"
                     ),
                 });
             }
-            Ok("Arbor is now the default for folders and drives, and Win+E opens it. Restore the System Default for Folders undoes it."
+            Ok("Satchel is now the default for folders and drives, and Win+E opens it. Restore the System Default for Folders undoes it."
                 .into())
         }
         Change::Restore => {
